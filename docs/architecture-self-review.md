@@ -13,11 +13,12 @@ transitive implementation detail.
 This repository now provides an executable Phase 0 composition root. It creates
 one Cordis `Context`, mounts the neutral `HomeWorldService` before the Home
 Agent, and owns bounded process shutdown. The service is runnable but not yet
-production-complete: official DSH session persistence is composed, while
-household prompt/Skill loading remains open.
+production-complete: official DSH session persistence and bounded household
+prompt context are composed, while governed Skill loading remains open.
 
-The frozen neutral bridge read path is implemented through migration step 6:
-one Zod-first v6.3 contract, catalog/registry/scoped credentials, epoch-aware
+The neutral bridge read path is implemented through migration step 6: one
+Zod-first v6.3 base contract plus the additive v6.4 read-only capability
+semantic kind, catalog/registry/scoped credentials, epoch-aware
 SQLite ingest, canonical identity and authority, world-model indexing, the HA
 adapter, and the neutral agent snapshot. Actions and artifact hosting remain an
 explicit M3 boundary rather than a second runtime hidden in Phase 0.
@@ -55,6 +56,10 @@ apply an artifact or control a device.
 - Bridge architecture guards reject ecosystem vocabulary in the agent layer,
   removed bridge contracts/services, and raw HA payloads in the canonical
   world model.
+- Optional per-instance semantic kinds let HA and an authorized Xiaomi
+  transport classify observations with one closed vocabulary while preserving
+  source schemas and bindings. They grant no equivalence, binding, or action
+  authority; unknown capabilities remain unclassified.
 - Bridge IDs and remote installation IDs are independently bound; a changed
   remote identity fails closed until an explicit rebind.
 - SQLite journals, registry data, world-model files, and WAL/SHM sidecars are

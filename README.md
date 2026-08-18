@@ -71,6 +71,11 @@ review-only `create_home_proposal` tool. Hub-owned evidence and
 Inbox. Device actions, configuration writes, and proposal application remain
 deliberately unavailable.
 
+The v6.4 read path also carries an optional closed `semanticKind` per
+capability so the Agent can group lights, switches, sensors, and other reviewed
+families without importing HA or MIoT vocabulary. The hint preserves its source
+schema/binding and grants no equivalence or action authority.
+
 Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
 When enabled it binds only to `127.0.0.1`, requires authentication on every
 request, and enforces same-origin review POSTs. The launch config retains only a

@@ -1,7 +1,9 @@
-# Neutral bridge contract (v6.3)
+# Neutral bridge contract (v6.4)
 
-This directory is the single source of truth for the frozen v6.3 neutral
-bridge boundary from [`docs/bridge-design.md`](../docs/bridge-design.md). Zod
+This directory is the single source of truth for the v6 neutral bridge
+boundary from [`docs/bridge-design.md`](../docs/bridge-design.md), plus the
+additive v6.4 semantic-kind decision in
+[`docs/capability-semantics.md`](../docs/capability-semantics.md). Zod
 schemas are the runtime contract; exported value types are inferred from those
 schemas where a runtime boundary exists. Ecosystem-native payloads must be
 projected into these shapes before they reach hub or agent-layer code.
@@ -30,7 +32,8 @@ frozen core surfaces:
   event shell. `sync-start` carries both the snapshot boundary and the stable
   `remoteInstanceId`; the pure factory therefore does not have to invent
   remote identity in `BridgeInfo`.
-- `DeviceDescriptor`, `AdapterCapabilityRef`, `StateEvent`,
+- `DeviceDescriptor`, `AdapterCapabilityRef` with an optional closed
+  read-only `semanticKind`, `StateEvent`,
   `SnapshotManifest`, `IngestRecord`, and bounded `HubBridgeDiagnostics`.
 - Closed `CoreReasonCode` and `ControlResult` schemas. Ecosystem-specific
   `adapterCode` values remain bounded diagnostic data and cannot add core

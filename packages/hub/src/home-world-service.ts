@@ -14,6 +14,7 @@ import {
   type BridgeAdapter,
   type BridgeStreamError,
   type BridgeStreamErrorReason,
+  type CapabilitySemanticKind,
   type DeviceDescriptor,
   type StateEvent,
 } from "../../../contracts/bridge-contract.js";
@@ -173,6 +174,7 @@ export interface HomeWorldCapabilitySnapshot {
   readonly hwId: string;
   readonly schema: string;
   readonly schemaVersion: string;
+  readonly semanticKind?: CapabilitySemanticKind;
   readonly bindings: readonly HomeWorldBinding[];
 }
 
@@ -954,6 +956,7 @@ function worldDevices(
         hwId: capability.hwId,
         schema: capability.schema,
         schemaVersion: ref?.schemaVersion ?? "unknown",
+        ...(ref?.semanticKind === undefined ? {} : { semanticKind: ref.semanticKind }),
         bindings: capability.bindings.map((item) => ({ ...item })),
       } satisfies HomeWorldCapabilitySnapshot;
     }) ?? device.descriptor.capabilities.map((ref, index) => ({
@@ -961,6 +964,7 @@ function worldDevices(
       hwId,
       schema: ref.schema,
       schemaVersion: ref.schemaVersion,
+      ...(ref.semanticKind === undefined ? {} : { semanticKind: ref.semanticKind }),
       bindings: [{ bridgeId, nativeId, nativeInstanceId: ref.nativeInstanceId }],
     } satisfies HomeWorldCapabilitySnapshot));
     const bindings = uniqueBindings(capabilities.flatMap((capability) => capability.bindings));

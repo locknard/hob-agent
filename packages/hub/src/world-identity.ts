@@ -252,6 +252,7 @@ export class WorldIdentityManager {
         hwCapabilityId: this.hubId("hwCapability", JSON.stringify([hwId, bindingKey])),
         hwId,
         schema: ref.schema,
+        ...(ref.semanticKind === undefined ? {} : { semanticKind: ref.semanticKind }),
         bindings: [{
           bridgeId,
           nativeId,

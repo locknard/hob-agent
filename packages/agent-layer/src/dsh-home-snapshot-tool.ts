@@ -23,8 +23,17 @@ export interface HomeWorldCapability {
   readonly hwId: string;
   readonly schema: string;
   readonly schemaVersion: string;
+  readonly semanticKind?: HomeWorldCapabilitySemanticKind;
   readonly bindings: HomeWorldBinding[];
 }
+
+const HOME_WORLD_CAPABILITY_SEMANTIC_KINDS = [
+  "light", "switch", "button", "sensor", "binary-sensor",
+  "numeric-control", "choice-control", "text-control", "time-control",
+  "event", "media", "cover", "lock", "presence", "fan", "camera",
+  "vacuum", "climate", "weather", "automation",
+] as const;
+export type HomeWorldCapabilitySemanticKind = typeof HOME_WORLD_CAPABILITY_SEMANTIC_KINDS[number];
 
 export interface HomeWorldState {
   readonly nativeId: string;
@@ -215,6 +224,7 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
                 hwId: { type: "string", required: true },
                 schema: { type: "string", required: true },
                 schemaVersion: { type: "string", required: true },
+                semanticKind: { type: "string", enum: HOME_WORLD_CAPABILITY_SEMANTIC_KINDS },
                 bindings: {
                   type: "array",
                   required: true,
@@ -429,7 +439,22 @@ function normalizeCapability(capability: unknown): HomeWorldCapability | undefin
   if (hwCapabilityId === undefined || hwId === undefined || schema === undefined || schemaVersion === undefined) return undefined;
   const bindings = normalizeBindings(capability.bindings);
   if (bindings.length === 0) return undefined;
-  return { hwCapabilityId, hwId, schema, schemaVersion, bindings };
+  const semanticKind = safeSemanticKind(capability.semanticKind);
+  return {
+    hwCapabilityId,
+    hwId,
+    schema,
+    schemaVersion,
+    ...(semanticKind === undefined ? {} : { semanticKind }),
+    bindings,
+  };
+}
+
+function safeSemanticKind(value: unknown): HomeWorldCapabilitySemanticKind | undefined {
+  return typeof value === "string"
+      && (HOME_WORLD_CAPABILITY_SEMANTIC_KINDS as readonly string[]).includes(value)
+    ? value as HomeWorldCapabilitySemanticKind
+    : undefined;
 }
 
 function normalizeState(

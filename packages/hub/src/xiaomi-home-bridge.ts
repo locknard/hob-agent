@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import {
   BridgeStreamError,
+  capabilitySemanticKindSchema,
   JsonValueSchema,
   type AdapterFactoryContext,
   type AdapterRegistration,
@@ -11,6 +12,7 @@ import {
   type BridgeControl,
   type BridgeEvent,
   type BridgeInfo,
+  type CapabilitySemanticKind,
   type ControlResult,
   type CredentialRequirement,
   type Envelope,
@@ -22,7 +24,7 @@ import {
 export const XIAOMI_HOME_ADAPTER_TYPE = "xiaomi-home";
 export const XIAOMI_HOME_PROPERTY_SCHEMA = "miot.property";
 export const XIAOMI_HOME_PROPERTY_SCHEMA_VERSION = "1.0.0";
-const CORE_VERSION = "6.3.0";
+const CORE_VERSION = "6.4.0";
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const MAX_DEVICES = 2_048;
 const MAX_PROPERTIES_PER_DEVICE = 256;
@@ -56,6 +58,8 @@ export interface XiaomiHomeNativeProperty {
   readonly unit?: string;
   readonly writable?: boolean;
   readonly sourceTs?: string;
+  /** Set only by a transport that resolved the MIoT specification. */
+  readonly semanticKind?: CapabilitySemanticKind;
 }
 
 export interface XiaomiHomeNativeDevice {
@@ -347,6 +351,7 @@ function* snapshotEnvelopes(emission: SnapshotEmission, reason: "initial" | "res
           nativeInstanceId: propertyInstanceId(property),
           schema: XIAOMI_HOME_PROPERTY_SCHEMA,
           schemaVersion: XIAOMI_HOME_PROPERTY_SCHEMA_VERSION,
+          ...(property.semanticKind === undefined ? {} : { semanticKind: property.semanticKind }),
         })),
         identityClaims: [{
           type: "miotDid",
@@ -399,6 +404,10 @@ function validateProperty(property: XiaomiHomeNativeProperty): void {
   }
   boundedString(property.format, 64, "property format");
   if (property.unit !== undefined) boundedString(property.unit, 128, "property unit");
+  if (property.semanticKind !== undefined
+    && !capabilitySemanticKindSchema.safeParse(property.semanticKind).success) {
+    throw new BridgeStreamError("protocol_error", "Xiaomi transport returned an invalid semantic kind");
+  }
 }
 
 function propertyInstanceId(property: Pick<XiaomiHomeNativeProperty, "siid" | "piid">): string {

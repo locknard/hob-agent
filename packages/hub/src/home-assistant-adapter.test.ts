@@ -15,10 +15,23 @@ import {
   HomeAssistantBridgeAdapter,
   createHomeAssistantBridgeAdapter,
   deriveHomeAssistantRemoteInstanceId,
+  homeAssistantSemanticKind,
   toHomeAssistantWebSocketUrl,
   type HomeAssistantAdapterConfig,
   type WebSocketLike,
 } from "./home-assistant-bridge.js";
+
+test("maps only reviewed HA entity domains to neutral read-side semantic kinds", () => {
+  assert.deepEqual([
+    homeAssistantSemanticKind("light.kitchen"),
+    homeAssistantSemanticKind("sensor.temperature"),
+    homeAssistantSemanticKind("binary_sensor.motion"),
+    homeAssistantSemanticKind("switch.socket"),
+    homeAssistantSemanticKind("person.owner"),
+  ], ["light", "sensor", "binary-sensor", "switch", "presence"]);
+  assert.equal(homeAssistantSemanticKind("update.integration"), undefined);
+  assert.equal(homeAssistantSemanticKind("malformed"), undefined);
+});
 
 class FakeSocket implements WebSocketLike {
   readonly sent: Array<Record<string, unknown>> = [];
@@ -139,7 +152,7 @@ test("factory construction is synchronous and does not resolve credentials or to
   assert.deepEqual(scoped.calls, []);
   assert.deepEqual(adapter.info, {
     bridgeId: "bridge-ha",
-    coreVersion: "6.3.0",
+    coreVersion: "6.4.0",
     ecosystem: "home-assistant",
     heartbeatIntervalMs: 60_000,
     extensions: [{ id: "foreignRules", version: "1.0.0" }],
@@ -224,6 +237,7 @@ test("events resolve the scoped token and emit a neutral snapshot in the frozen 
     nativeInstanceId: "entity-stable-1",
     schema: "ha.entity",
     schemaVersion: "1.0.0",
+    semanticKind: "light",
   }]);
 
   const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;

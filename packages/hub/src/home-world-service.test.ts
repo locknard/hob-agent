@@ -66,7 +66,12 @@ function snapshotFor(bridgeId: string, remoteInstanceId: string): Envelope[] {
       device: {
         nativeId: `${bridgeId}-lamp`,
         name: `${bridgeId} lamp`,
-        capabilities: [{ nativeInstanceId: `${bridgeId}-lamp:main`, schema: "synthetic.light", schemaVersion: "1.0.0" }],
+        capabilities: [{
+          nativeInstanceId: `${bridgeId}-lamp:main`,
+          schema: "synthetic.light",
+          schemaVersion: "1.0.0",
+          semanticKind: "light",
+        }],
       },
     }),
     eventEnvelope(`${bridgeId}-epoch`, 3, {
@@ -484,6 +489,7 @@ test("keeps a stable serializable snapshot shape for agent consumers", async () 
   const json = JSON.stringify(ctx.homeWorld.snapshot());
   const parsed = JSON.parse(json) as HomeWorldSnapshot;
   assert.equal(parsed.devices[0]?.states[0]?.attrs.state, "on");
+  assert.equal(parsed.devices[0]?.capabilities[0]?.semanticKind, "light");
   assert.equal(parsed.bridges["bridge-shape"]?.watermark.lastSeq, 4);
   assert.deepEqual(parsed.bridgeWatermarks, [{
     bridgeId: "bridge-shape",

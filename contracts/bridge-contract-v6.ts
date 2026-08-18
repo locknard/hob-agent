@@ -1,2 +1,2 @@
-/** Frozen v6.3 bridge contract entry point. */
+/** Current v6.4 bridge contract entry point. */
 export * from "./bridge-contract.js";

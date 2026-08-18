@@ -148,7 +148,12 @@ test("validates descriptor capabilities, state, and manifest event shapes", () =
   const descriptor = deviceDescriptorSchema.parse({
     nativeId: "light.living_room",
     name: "Living room light",
-    capabilities: [{ nativeInstanceId: "entity-1", schema: "hob.light", schemaVersion: "1.0.0" }],
+    capabilities: [{
+      nativeInstanceId: "entity-1",
+      schema: "hob.light",
+      schemaVersion: "1.0.0",
+      semanticKind: "light",
+    }],
     identityClaims: [
       {
         type: "serial",
@@ -159,6 +164,16 @@ test("validates descriptor capabilities, state, and manifest event shapes", () =
     ],
   });
   assert.equal(descriptor.capabilities[0]?.schema, "hob.light");
+  assert.equal(descriptor.capabilities[0]?.semanticKind, "light");
+  assert.throws(() => deviceDescriptorSchema.parse({
+    nativeId: "unknown-device",
+    capabilities: [{
+      nativeInstanceId: "entity-2",
+      schema: "test.unknown",
+      schemaVersion: "1.0.0",
+      semanticKind: "vendor-magic",
+    }],
+  }));
   assert.throws(() =>
     bridgeEventSchema.parse({
       kind: "sync-complete",

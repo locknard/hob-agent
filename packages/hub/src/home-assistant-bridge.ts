@@ -11,6 +11,7 @@ import {
   type BridgeControl as ContractBridgeControl,
   type BridgeEvent as ContractBridgeEvent,
   type BridgeInfo as ContractBridgeInfo,
+  type CapabilitySemanticKind,
   type ControlResult as ContractControlResult,
   type DeviceDescriptor as ContractDeviceDescriptor,
   type Envelope as ContractEnvelope,
@@ -391,7 +392,7 @@ export const HOME_ASSISTANT_ADAPTER_TYPE = "home-assistant";
 export const HOME_ASSISTANT_ACCESS_TOKEN_ALIAS = "access-token";
 export const HOME_ASSISTANT_ENTITY_SCHEMA = "ha.entity";
 export const HOME_ASSISTANT_ENTITY_SCHEMA_VERSION = "1.0.0";
-export const HOME_ASSISTANT_CORE_VERSION = "6.3.0";
+export const HOME_ASSISTANT_CORE_VERSION = "6.4.0";
 export const HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS = 60_000;
 
 let homeAssistantEpochCounter = 0;
@@ -876,11 +877,15 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
   const devices: ProjectedDevice[] = [];
   for (const [nativeId, bindings] of bindingsByNativeId) {
     bindings.sort((left, right) => left.nativeInstanceId.localeCompare(right.nativeInstanceId));
-    const capabilities = bindings.map((binding) => ({
-      nativeInstanceId: binding.nativeInstanceId,
-      schema: HOME_ASSISTANT_ENTITY_SCHEMA,
-      schemaVersion: HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
-    }));
+    const capabilities = bindings.map((binding) => {
+      const semanticKind = homeAssistantSemanticKind(binding.entityId);
+      return {
+        nativeInstanceId: binding.nativeInstanceId,
+        schema: HOME_ASSISTANT_ENTITY_SCHEMA,
+        schemaVersion: HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
+        ...(semanticKind === undefined ? {} : { semanticKind }),
+      };
+    });
     const states = (statesByNativeId.get(nativeId) ?? []).sort((left, right) =>
       left.nativeInstanceId.localeCompare(right.nativeInstanceId));
     devices.push({
@@ -900,6 +905,40 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
   }
   devices.sort((left, right) => left.descriptor.nativeId.localeCompare(right.descriptor.nativeId));
   return { bindingsByEntityId, devices };
+}
+
+const HOME_ASSISTANT_SEMANTIC_KINDS: Readonly<Record<string, CapabilitySemanticKind>> = Object.freeze({
+  light: "light",
+  switch: "switch",
+  button: "button",
+  sensor: "sensor",
+  binary_sensor: "binary-sensor",
+  number: "numeric-control",
+  input_number: "numeric-control",
+  select: "choice-control",
+  text: "text-control",
+  time: "time-control",
+  input_datetime: "time-control",
+  event: "event",
+  media_player: "media",
+  cover: "cover",
+  lock: "lock",
+  device_tracker: "presence",
+  person: "presence",
+  fan: "fan",
+  camera: "camera",
+  vacuum: "vacuum",
+  climate: "climate",
+  water_heater: "climate",
+  weather: "weather",
+  automation: "automation",
+  script: "automation",
+});
+
+export function homeAssistantSemanticKind(entityId: string): CapabilitySemanticKind | undefined {
+  const separator = entityId.indexOf(".");
+  if (separator <= 0) return undefined;
+  return HOME_ASSISTANT_SEMANTIC_KINDS[entityId.slice(0, separator)];
 }
 
 function projectDeviceIdentityClaims(raw: Record<string, unknown>): readonly ContractIdentityClaim[] {

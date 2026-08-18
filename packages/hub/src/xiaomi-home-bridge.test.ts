@@ -20,8 +20,8 @@ const snapshot = {
     name: "客厅灯",
     online: true,
     properties: [
-      { siid: 2, piid: 1, value: true, format: "bool", unit: "none", writable: true },
-      { siid: 2, piid: 2, value: 37, format: "uint8", unit: "percentage" },
+      { siid: 2, piid: 1, value: true, format: "bool", unit: "none", writable: true, semanticKind: "light" },
+      { siid: 2, piid: 2, value: 37, format: "uint8", unit: "percentage", semanticKind: "light" },
     ],
   }],
 } as const;
@@ -65,8 +65,8 @@ test("projects a bounded MIoT snapshot through the neutral bridge contract", asy
       nativeId: "123456789",
       name: "客厅灯",
       capabilities: [
-        { nativeInstanceId: "service:2/property:1", schema: "miot.property", schemaVersion: "1.0.0" },
-        { nativeInstanceId: "service:2/property:2", schema: "miot.property", schemaVersion: "1.0.0" },
+        { nativeInstanceId: "service:2/property:1", schema: "miot.property", schemaVersion: "1.0.0", semanticKind: "light" },
+        { nativeInstanceId: "service:2/property:2", schema: "miot.property", schemaVersion: "1.0.0", semanticKind: "light" },
       ],
       identityClaims: [{
         type: "miotDid",
@@ -277,4 +277,40 @@ test("keeps Xiaomi transport pluggable and fails closed at the registration boun
   assert.equal(registration.adapterType, "xiaomi-home");
   assert.equal(registration.capabilitySchemas[0]?.schema, "miot.property");
   assert.deepEqual(registration.credentialRequirements, []);
+});
+
+test("rejects a transport semantic kind outside the reviewed neutral vocabulary", async () => {
+  const registration = createXiaomiHomeAdapterRegistration({
+    credentialRequirements: [],
+    create: () => ({
+      connect: async () => ({
+        installationId: "fixture",
+        devices: [{
+          did: "device",
+          properties: [{
+            siid: 2,
+            piid: 1,
+            value: true,
+            format: "bool",
+            semanticKind: "vendor-magic",
+          } as never],
+        }],
+      }),
+      changes: async function* () {},
+      resync: async () => ({ installationId: "fixture", devices: [] }),
+      dispose: async () => {},
+    }),
+  });
+  const adapter = registration.factory({
+    bridgeId: "xiaomi-cn-home",
+    config: { region: "cn", transport: "cloud" },
+    credentials: { resolve: async () => undefined, describe: async () => ({ configured: false }) },
+  });
+
+  await assert.rejects(
+    async () => {
+      for await (const _event of adapter.events(new AbortController().signal)) void _event;
+    },
+    (error: unknown) => error instanceof BridgeStreamError && error.reason === "protocol_error",
+  );
 });

@@ -14,6 +14,7 @@ test("projects accepted world devices with hw ids and controlled provenance bind
         hwId: "hw-1",
         schema: "synthetic.light",
         schemaVersion: "1.0.0",
+        semanticKind: "light",
         bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "native-a:main" }],
       }],
       states: [{
@@ -40,6 +41,7 @@ test("projects accepted world devices with hw ids and controlled provenance bind
       hwId: "hw-1",
       schema: "synthetic.light",
       schemaVersion: "1.0.0",
+      semanticKind: "light",
       bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "native-a:main" }],
     }],
     states: [{

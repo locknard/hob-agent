@@ -1,5 +1,5 @@
 /**
- * Version 6.3 of the neutral bridge contract.
+ * Version 6.4 of the neutral bridge contract.
  *
  * This module is the contract source of truth: runtime schemas are declared
  * first and the exported TypeScript value types are inferred from those
@@ -203,6 +203,31 @@ export type SchemaRegistration<
 export interface EquivalenceMapping {}
 export const equivalenceMappingSchema = z.object({}).strict();
 
+/** Optional read-side classification; never implies equivalence or authority. */
+export const capabilitySemanticKindSchema = z.enum([
+  "light",
+  "switch",
+  "button",
+  "sensor",
+  "binary-sensor",
+  "numeric-control",
+  "choice-control",
+  "text-control",
+  "time-control",
+  "event",
+  "media",
+  "cover",
+  "lock",
+  "presence",
+  "fan",
+  "camera",
+  "vacuum",
+  "climate",
+  "weather",
+  "automation",
+]);
+export type CapabilitySemanticKind = z.infer<typeof capabilitySemanticKindSchema>;
+
 // ---- hub 分配的规范世界身份 ----------------------------------------------
 
 const worldCapabilityBindingSchema = z
@@ -218,6 +243,7 @@ export const worldCapabilitySchema = z
     hwCapabilityId: nonEmptyString,
     hwId: nonEmptyString,
     schema: boundedString(256),
+    semanticKind: capabilitySemanticKindSchema.optional(),
     bindings: z.array(worldCapabilityBindingSchema).min(1),
   })
   .strict();
@@ -231,6 +257,7 @@ export const adapterCapabilityRefSchema = z
     nativeInstanceId: nonEmptyString,
     schema: boundedString(256),
     schemaVersion: boundedString(64),
+    semanticKind: capabilitySemanticKindSchema.optional(),
   })
   .strict();
 export type AdapterCapabilityRef = z.infer<typeof adapterCapabilityRefSchema>;
