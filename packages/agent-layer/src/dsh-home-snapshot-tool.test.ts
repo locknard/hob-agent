@@ -13,6 +13,7 @@ import {
   inject,
   name,
   pageHomeSnapshot,
+  projectHomeSnapshot,
   type HomeSnapshotToolValue,
 } from "./dsh-home-snapshot-tool.js";
 
@@ -76,7 +77,7 @@ function queryFixture(): HomeSnapshotToolValue {
       eventActivity: [{ bridgeId: "bridge-a" }],
       connectionActivity: [{ bridgeId: "bridge-a", state: "ready" }],
     },
-    topology: { spaces: 2, totalDevices: 3, devicesWithSpace: 3, devicesWithoutSpace: 0 },
+    topology: { spaces: 2, totalDevices: 3, devicesWithSingleSpace: 3, devicesWithoutSpace: 0, devicesWithMultipleSpaces: 0 },
   };
 }
 
@@ -127,7 +128,27 @@ test("filters capability bindings and removes unrelated states and spaces", () =
   assert.equal(value.devices.every((device) => device.capabilities.every((item) => item.semanticKind === "light")), true);
   assert.equal(value.devices.every((device) => device.states.length === 1), true);
   assert.equal(value.page.totalMatchedDevices, 2);
-  assert.deepEqual(value.topology, { spaces: 2, totalDevices: 3, devicesWithSpace: 3, devicesWithoutSpace: 0 });
+  assert.deepEqual(value.topology, { spaces: 2, totalDevices: 3, devicesWithSingleSpace: 3, devicesWithoutSpace: 0, devicesWithMultipleSpaces: 0 });
+});
+
+test("reports single, missing, and multiple accepted spaces as exclusive topology counts", () => {
+  const snapshot = structuredClone(queryFixture());
+  const secondSpaceBinding = {
+    ...snapshot.devices[0]!.bindings[0]!,
+    nativeId: "native-a-secondary",
+    nativeInstanceId: "native-a-secondary-instance",
+    hwSpaceId: "hws-b",
+  };
+  snapshot.devices[0]!.bindings.push(secondSpaceBinding);
+  snapshot.devices[0]!.capabilities[0]!.bindings.push(secondSpaceBinding);
+
+  assert.deepEqual(projectHomeSnapshot(snapshot).topology, {
+    spaces: 2,
+    totalDevices: 3,
+    devicesWithSingleSpace: 2,
+    devicesWithoutSpace: 0,
+    devicesWithMultipleSpaces: 1,
+  });
 });
 
 test("fails closed for invalid or oversized snapshot query arguments", () => {
@@ -178,7 +199,7 @@ test("registers get_home_snapshot and returns an empty neutral projection", asyn
     devices: [],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
-    topology: { spaces: 0, totalDevices: 0, devicesWithSpace: 0, devicesWithoutSpace: 0 },
+    topology: { spaces: 0, totalDevices: 0, devicesWithSingleSpace: 0, devicesWithoutSpace: 0, devicesWithMultipleSpaces: 0 },
     page: { limit: 10, returnedDevices: 0, totalMatchedDevices: 0 },
   });
   assert.deepEqual(registered!.output.render({}, value as never), [
@@ -213,7 +234,7 @@ test("invokes a method-backed HomeWorld snapshot with its service receiver", asy
     devices: [],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
-    topology: { spaces: 0, totalDevices: 0, devicesWithSpace: 0, devicesWithoutSpace: 0 },
+    topology: { spaces: 0, totalDevices: 0, devicesWithSingleSpace: 0, devicesWithoutSpace: 0, devicesWithMultipleSpaces: 0 },
     page: { limit: 10, returnedDevices: 0, totalMatchedDevices: 0 },
   });
 });
@@ -345,7 +366,7 @@ test("projects homeWorld into neutral devices, bridge watermarks, and three metr
         { bridgeId: "bridge-b", state: "ready", lastSuccessfulContactAt: "2026-08-18T00:00:10.000Z" },
       ],
     },
-    topology: { spaces: 0, totalDevices: 2, devicesWithSpace: 0, devicesWithoutSpace: 2 },
+    topology: { spaces: 0, totalDevices: 2, devicesWithSingleSpace: 0, devicesWithoutSpace: 2, devicesWithMultipleSpaces: 0 },
     page: { limit: 10, returnedDevices: 2, totalMatchedDevices: 2 },
   });
 });
@@ -460,7 +481,7 @@ test("projects the neutral home-world service snapshot shape without ecosystem k
       eventActivity: [{ bridgeId: "bridge-a", lastEventReceivedAt: "2026-08-18T00:00:01.000Z" }],
       connectionActivity: [{ bridgeId: "bridge-a", state: "ready", lastSuccessfulContactAt: "2026-08-18T00:00:01.000Z" }],
     },
-    topology: { spaces: 0, totalDevices: 1, devicesWithSpace: 0, devicesWithoutSpace: 1 },
+    topology: { spaces: 0, totalDevices: 1, devicesWithSingleSpace: 0, devicesWithoutSpace: 1, devicesWithMultipleSpaces: 0 },
     page: { limit: 10, returnedDevices: 1, totalMatchedDevices: 1 },
   });
 });

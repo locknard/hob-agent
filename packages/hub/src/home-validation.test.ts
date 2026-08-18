@@ -10,7 +10,10 @@ test("projects only aggregate neutral readiness without household identities or 
       bridges: { "secret-bridge-id": {} },
       bridgeWatermarks: [{ bridgeId: "secret-bridge-id", epochId: "secret-epoch", lastSeq: 8 }],
       diagnostics: [{ bridgeId: "secret-bridge-id", connectionState: "ready" }],
-      spaces: [{ hwSpaceId: "secret-space", name: "Private room" }],
+      spaces: [
+        { hwSpaceId: "secret-space", name: "Private room" },
+        { hwSpaceId: "secret-space-2", name: "Other private room" },
+      ],
       devices: [{
         hwId: "secret-device",
         name: "Private lamp",
@@ -20,6 +23,16 @@ test("projects only aggregate neutral readiness without household identities or 
           { hwCapabilityId: "secret-cap-2" },
         ],
         states: [{ attrs: { state: "private-value" } }],
+      }, {
+        hwId: "secret-device-stale-space",
+        bindings: [{ hwSpaceId: "missing-space" }],
+        capabilities: [{ semanticKind: "sensor" }],
+        states: [],
+      }, {
+        hwId: "secret-device-ambiguous",
+        bindings: [{ hwSpaceId: "secret-space" }, { hwSpaceId: "secret-space-2" }],
+        capabilities: [{ semanticKind: "switch" }],
+        states: [],
       }],
     },
   });
@@ -29,13 +42,14 @@ test("projects only aggregate neutral readiness without household identities or 
     configuredBridges: 1,
     representedBridges: 1,
     bridgeStates: { ready: 1 },
-    spaces: 1,
-    devices: 1,
-    devicesWithSpace: 1,
-    devicesWithoutSpace: 0,
-    capabilities: 2,
+    spaces: 2,
+    devices: 3,
+    devicesWithSingleSpace: 1,
+    devicesWithoutSpace: 1,
+    devicesWithMultipleSpaces: 1,
+    capabilities: 4,
     states: 1,
-    semanticKinds: { light: 1, unclassified: 1 },
+    semanticKinds: { light: 1, sensor: 1, switch: 1, unclassified: 1 },
   });
   const serialized = JSON.stringify(report);
   for (const secret of ["secret", "Private", "private-value"]) {

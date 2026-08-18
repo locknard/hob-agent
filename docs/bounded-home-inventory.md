@@ -20,7 +20,10 @@ The Home Product Bundle contributes a second read-only DSH tool,
 - capability and current-state counts.
 
 Each page includes only its referenced neutral spaces plus the aggregate
-topology. It omits current values, capability IDs, adapter schemas, native
+topology. Topology separates devices with one accepted space, no accepted
+space, or multiple accepted spaces; those mutually exclusive counts sum to the
+total and prevent ambiguous bindings from looking complete. It omits current
+values, capability IDs, adapter schemas, native
 device/entity/property/space IDs, URLs, credentials, and bridge errors.
 
 An unfiltered observation must follow the inventory cursor until exhausted

@@ -149,8 +149,9 @@ const OUTPUT_SCHEMA = {
       properties: {
         spaces: { type: "integer", required: true },
         totalDevices: { type: "integer", required: true },
-        devicesWithSpace: { type: "integer", required: true },
+        devicesWithSingleSpace: { type: "integer", required: true },
         devicesWithoutSpace: { type: "integer", required: true },
+        devicesWithMultipleSpaces: { type: "integer", required: true },
       },
     },
     page: {

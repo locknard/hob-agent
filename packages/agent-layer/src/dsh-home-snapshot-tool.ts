@@ -157,8 +157,9 @@ export interface HomeSnapshotToolValue {
   readonly topology: {
     readonly spaces: number;
     readonly totalDevices: number;
-    readonly devicesWithSpace: number;
+    readonly devicesWithSingleSpace: number;
     readonly devicesWithoutSpace: number;
+    readonly devicesWithMultipleSpaces: number;
   };
 }
 
@@ -349,8 +350,9 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
       properties: {
         spaces: { type: "integer", required: true },
         totalDevices: { type: "integer", required: true },
-        devicesWithSpace: { type: "integer", required: true },
+        devicesWithSingleSpace: { type: "integer", required: true },
         devicesWithoutSpace: { type: "integer", required: true },
+        devicesWithMultipleSpaces: { type: "integer", required: true },
       },
     },
     page: {
@@ -600,8 +602,9 @@ export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): Ho
     if (normalized !== undefined) diagnosticsByBridge.set(normalized.bridgeId, normalized);
   }
   const diagnostics = [...diagnosticsByBridge.values()].sort((left, right) => compareStrings(left.bridgeId, right.bridgeId));
-  const devicesWithSpace = devices.filter((device) =>
-    device.bindings.some((binding) => binding.hwSpaceId !== undefined)).length;
+  const deviceSpaceCounts = devices.map((device) =>
+    new Set(device.bindings.flatMap((binding) =>
+      binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId])).size);
 
   return {
     spaces,
@@ -626,8 +629,9 @@ export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): Ho
     topology: {
       spaces: spaces.length,
       totalDevices: devices.length,
-      devicesWithSpace,
-      devicesWithoutSpace: devices.length - devicesWithSpace,
+      devicesWithSingleSpace: deviceSpaceCounts.filter((count) => count === 1).length,
+      devicesWithoutSpace: deviceSpaceCounts.filter((count) => count === 0).length,
+      devicesWithMultipleSpaces: deviceSpaceCounts.filter((count) => count > 1).length,
     },
   };
 }

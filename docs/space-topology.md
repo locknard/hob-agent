@@ -26,9 +26,11 @@ and a Hub-owned neutral space identity to each resulting world binding.
   invents a room from a device name.
 
 The bounded Home Agent snapshot reports aggregate topology coverage: space
-count, total device count, and devices with or without at least one accepted
-space binding. This makes incomplete household mapping explicit without
-revealing additional names or identifiers and without inventing assignments.
+count, total device count, devices with exactly one accepted space, devices
+without an accepted space, and devices with multiple accepted spaces. These
+three device counts are mutually exclusive and sum to the total. This makes
+incomplete or ambiguous household mapping explicit without revealing
+additional names or identifiers and without inventing assignments.
 
 Space names and device names are untrusted household data. A space reference
 does not grant device, action, artifact, approval, or filesystem authority.

@@ -139,6 +139,10 @@ apply an artifact or control a device.
   snapshot exposes a neutral space catalog. HA entity-area overrides and
   device-area inheritance are supported; authorized Xiaomi transports may
   supply room metadata. Equal names across bridges never auto-merge.
+- Aggregate validation and Agent topology now use mutually exclusive
+  single-space, unassigned, and multiple-space device counts. Unknown space
+  references are unassigned and cross-binding ambiguity cannot inflate the
+  apparent household-map coverage.
 - Bridge IDs and remote installation IDs are independently bound; a changed
   remote identity fails closed until an explicit rebind.
 - SQLite journals, registry data, world-model files, proposals, observation

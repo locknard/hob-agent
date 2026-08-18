@@ -23,7 +23,7 @@ interface ValidationSnapshot {
   readonly bridges: Readonly<Record<string, unknown>>;
   readonly bridgeWatermarks: readonly { readonly bridgeId: string }[];
   readonly diagnostics: readonly { readonly bridgeId: string; readonly connectionState: string }[];
-  readonly spaces: readonly unknown[];
+  readonly spaces: readonly { readonly hwSpaceId?: string }[];
   readonly devices: readonly {
     readonly bindings?: readonly { readonly hwSpaceId?: string }[];
     readonly capabilities: readonly { readonly semanticKind?: string }[];
@@ -38,8 +38,9 @@ export interface HomeValidationReport {
   readonly bridgeStates: Readonly<Record<string, number>>;
   readonly spaces: number;
   readonly devices: number;
-  readonly devicesWithSpace: number;
+  readonly devicesWithSingleSpace: number;
   readonly devicesWithoutSpace: number;
+  readonly devicesWithMultipleSpaces: number;
   readonly capabilities: number;
   readonly states: number;
   readonly semanticKinds: Readonly<Record<string, number>>;
@@ -63,8 +64,11 @@ export function projectHomeValidation(input: {
     SEMANTIC_KINDS,
     "unclassified",
   );
-  const devicesWithSpace = input.snapshot.devices.filter((device) =>
-    device.bindings?.some((binding) => binding.hwSpaceId !== undefined) === true).length;
+  const activeSpaceIds = new Set(input.snapshot.spaces.flatMap((space) =>
+    typeof space.hwSpaceId === "string" && space.hwSpaceId.length > 0 ? [space.hwSpaceId] : []));
+  const deviceSpaceCounts = input.snapshot.devices.map((device) =>
+    new Set(device.bindings?.flatMap((binding) =>
+      binding.hwSpaceId !== undefined && activeSpaceIds.has(binding.hwSpaceId) ? [binding.hwSpaceId] : []) ?? []).size);
   const ready = input.configuredBridgeCount > 0
     && bridgeIds.length === input.configuredBridgeCount
     && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready" && watermarks.has(bridgeId));
@@ -75,8 +79,9 @@ export function projectHomeValidation(input: {
     bridgeStates,
     spaces: input.snapshot.spaces.length,
     devices: input.snapshot.devices.length,
-    devicesWithSpace,
-    devicesWithoutSpace: input.snapshot.devices.length - devicesWithSpace,
+    devicesWithSingleSpace: deviceSpaceCounts.filter((count) => count === 1).length,
+    devicesWithoutSpace: deviceSpaceCounts.filter((count) => count === 0).length,
+    devicesWithMultipleSpaces: deviceSpaceCounts.filter((count) => count > 1).length,
     capabilities: capabilities.length,
     states: input.snapshot.devices.reduce((total, device) => total + device.states.length, 0),
     semanticKinds,

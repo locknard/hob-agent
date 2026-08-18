@@ -51,7 +51,7 @@ function fixture(): HomeSnapshotToolValue {
     devices: [device("hw-a", "light"), device("hw-b", "sensor"), device("hw-c", "light")],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
-    topology: { spaces: 1, totalDevices: 3, devicesWithSpace: 3, devicesWithoutSpace: 0 },
+    topology: { spaces: 1, totalDevices: 3, devicesWithSingleSpace: 3, devicesWithoutSpace: 0, devicesWithMultipleSpaces: 0 },
   };
 }
 
