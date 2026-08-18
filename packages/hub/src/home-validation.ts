@@ -25,6 +25,7 @@ interface ValidationSnapshot {
   readonly diagnostics: readonly { readonly bridgeId: string; readonly connectionState: string }[];
   readonly spaces: readonly unknown[];
   readonly devices: readonly {
+    readonly bindings?: readonly { readonly hwSpaceId?: string }[];
     readonly capabilities: readonly { readonly semanticKind?: string }[];
     readonly states: readonly unknown[];
   }[];
@@ -37,6 +38,8 @@ export interface HomeValidationReport {
   readonly bridgeStates: Readonly<Record<string, number>>;
   readonly spaces: number;
   readonly devices: number;
+  readonly devicesWithSpace: number;
+  readonly devicesWithoutSpace: number;
   readonly capabilities: number;
   readonly states: number;
   readonly semanticKinds: Readonly<Record<string, number>>;
@@ -60,6 +63,8 @@ export function projectHomeValidation(input: {
     SEMANTIC_KINDS,
     "unclassified",
   );
+  const devicesWithSpace = input.snapshot.devices.filter((device) =>
+    device.bindings?.some((binding) => binding.hwSpaceId !== undefined) === true).length;
   const ready = input.configuredBridgeCount > 0
     && bridgeIds.length === input.configuredBridgeCount
     && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready" && watermarks.has(bridgeId));
@@ -70,6 +75,8 @@ export function projectHomeValidation(input: {
     bridgeStates,
     spaces: input.snapshot.spaces.length,
     devices: input.snapshot.devices.length,
+    devicesWithSpace,
+    devicesWithoutSpace: input.snapshot.devices.length - devicesWithSpace,
     capabilities: capabilities.length,
     states: input.snapshot.devices.reduce((total, device) => total + device.states.length, 0),
     semanticKinds,

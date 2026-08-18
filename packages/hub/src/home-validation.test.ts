@@ -14,6 +14,7 @@ test("projects only aggregate neutral readiness without household identities or 
       devices: [{
         hwId: "secret-device",
         name: "Private lamp",
+        bindings: [{ hwSpaceId: "secret-space" }],
         capabilities: [
           { hwCapabilityId: "secret-cap-1", semanticKind: "light" },
           { hwCapabilityId: "secret-cap-2" },
@@ -30,6 +31,8 @@ test("projects only aggregate neutral readiness without household identities or 
     bridgeStates: { ready: 1 },
     spaces: 1,
     devices: 1,
+    devicesWithSpace: 1,
+    devicesWithoutSpace: 0,
     capabilities: 2,
     states: 1,
     semanticKinds: { light: 1, unclassified: 1 },

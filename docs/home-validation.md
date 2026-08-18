@@ -14,7 +14,8 @@ report containing only:
 - ready/not-ready status;
 - configured and represented bridge counts;
 - counts by closed bridge connection state;
-- neutral space, device, capability, and current-state counts; and
+- neutral space, device, capability, and current-state counts;
+- device counts with and without an accepted neutral space binding; and
 - counts by closed capability semantic kind.
 
 The report never contains bridge IDs, native IDs, hub IDs, names, state values,

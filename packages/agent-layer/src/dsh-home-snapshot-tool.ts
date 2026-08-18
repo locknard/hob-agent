@@ -154,6 +154,12 @@ export interface HomeSnapshotToolValue {
       readonly lastSuccessfulContactAt?: string;
     }[];
   };
+  readonly topology: {
+    readonly spaces: number;
+    readonly totalDevices: number;
+    readonly devicesWithSpace: number;
+    readonly devicesWithoutSpace: number;
+  };
 }
 
 export interface HomeSnapshotQuery {
@@ -347,6 +353,17 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
         connectionActivity: { type: "array", required: true, items: metricConnectionSchema },
       },
     },
+    topology: {
+      type: "object",
+      required: true,
+      additionalProperties: false,
+      properties: {
+        spaces: { type: "integer", required: true },
+        totalDevices: { type: "integer", required: true },
+        devicesWithSpace: { type: "integer", required: true },
+        devicesWithoutSpace: { type: "integer", required: true },
+      },
+    },
     page: {
       type: "object",
       required: true,
@@ -429,6 +446,7 @@ export function pageHomeSnapshot(
     devices,
     bridgeWatermarks: snapshot.bridgeWatermarks,
     metrics: snapshot.metrics,
+    topology: snapshot.topology,
     page: {
       limit,
       returnedDevices: devices.length,
@@ -546,6 +564,8 @@ export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): Ho
     if (normalized !== undefined) diagnosticsByBridge.set(normalized.bridgeId, normalized);
   }
   const diagnostics = [...diagnosticsByBridge.values()].sort((left, right) => compareStrings(left.bridgeId, right.bridgeId));
+  const devicesWithSpace = devices.filter((device) =>
+    device.bindings.some((binding) => binding.hwSpaceId !== undefined)).length;
 
   return {
     spaces,
@@ -566,6 +586,12 @@ export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): Ho
         state,
         ...(lastSuccessfulContactAt === undefined ? {} : { lastSuccessfulContactAt }),
       })),
+    },
+    topology: {
+      spaces: spaces.length,
+      totalDevices: devices.length,
+      devicesWithSpace,
+      devicesWithoutSpace: devices.length - devicesWithSpace,
     },
   };
 }
