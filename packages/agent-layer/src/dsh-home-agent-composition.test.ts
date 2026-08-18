@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { Context, Service } from "@deepseek-ai/cordis";
+import { assembleContextFor } from "@deepseek-ai/dsh-agent";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
+import { renderContextSnapshot, renderPrompt } from "@deepseek-ai/dsh-system-prompt";
 
 import { mountDshHomeAgent } from "./dsh-home-agent-composition.js";
 
@@ -66,4 +71,34 @@ test("bridges a selected API-key profile into the official DSH credential seam",
 
   await fiber.dispose();
   await ctx.fiber.dispose();
+});
+
+test("loads an explicit household directory into the official DSH prompt seam", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-composition-home-"));
+  try {
+    await writeFile(join(directory, "SOUL.md"), "Prefer understandable changes.");
+    await writeFile(join(directory, "HOME.md"), "Quiet hours start at 22:00.");
+    await writeFile(join(directory, "MEMORY.md"), "The household rejected proposal P1.");
+    const ctx = new Context();
+    await ctx.plugin(StubWorldService);
+    await ctx.plugin(StubProposalService);
+    const fiber = await mountDshHomeAgent(ctx, {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "home-context-test",
+      householdDirectory: directory,
+    });
+    const prompt = ctx.get("systemPrompt");
+    assert.ok(prompt);
+    const assembly = await prompt.assemble(assembleContextFor(ctx.homeAgent.agent));
+
+    assert.match(renderPrompt(assembly), /Prefer understandable changes/);
+    assert.match(renderContextSnapshot(assembly), /Quiet hours start at 22:00/);
+    assert.match(renderContextSnapshot(assembly), /rejected proposal P1/);
+
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

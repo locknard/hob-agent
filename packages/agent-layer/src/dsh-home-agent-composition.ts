@@ -5,6 +5,7 @@ import * as PiAiPlugin from "@deepseek-ai/dsh-llm-pi-ai";
 import type { AuthProfile } from "./auth-profiles.js";
 import { DshHomeAgentService } from "./dsh-home-agent-service.js";
 import { DshProfileCredentialProvider } from "./dsh-profile-credential-provider.js";
+import { loadHouseholdPromptContext } from "./household-prompt-context.js";
 import { providerSetup, type SupportedModelProvider } from "./model-providers.js";
 import type { SecretVault } from "./secret-vault.js";
 
@@ -16,6 +17,7 @@ export interface DshHomeAgentCompositionOptions {
   readonly vault?: SecretVault;
   readonly sessionId?: string;
   readonly sessionPersistencePath?: string;
+  readonly householdDirectory?: string;
   readonly systemPrompt?: string;
 }
 
@@ -27,6 +29,9 @@ class DshHomeAgentComposition extends Service {
 
   protected async [Service.init](): Promise<void> {
     const setup = providerSetup(this.options.provider);
+    const householdContext = this.options.householdDirectory === undefined
+      ? undefined
+      : await loadHouseholdPromptContext(this.options.householdDirectory);
     if ((this.options.profile === undefined) !== (this.options.vault === undefined)) {
       throw new Error("Selected profile and SecretVault must be provided together");
     }
@@ -53,6 +58,7 @@ class DshHomeAgentComposition extends Service {
       ...(this.options.sessionPersistencePath === undefined
         ? {}
         : { sessionPersistencePath: this.options.sessionPersistencePath }),
+      ...(householdContext === undefined ? {} : { householdContext }),
       ...(this.options.systemPrompt === undefined ? {} : { systemPrompt: this.options.systemPrompt }),
     });
   }

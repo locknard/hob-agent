@@ -57,6 +57,8 @@ export DEEPSEEK_API_KEY='...'
 # Optional local review UI (HTTP Basic user is `home`):
 export HOB_INBOX_AUTH_TOKEN='at-least-32-random-characters-kept-local'
 export HOB_INBOX_PORT=8787
+# Optional bounded SOUL.md, HOME.md, and MEMORY.md household context:
+export HOB_HOME_DIR='/absolute/path/to/private-home'
 # or select the matching OPENAI_API_KEY / ANTHROPIC_API_KEY / MOONSHOT_API_KEY / ZAI_API_KEY
 pnpm start
 ```
@@ -73,6 +75,11 @@ Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
 When enabled it binds only to `127.0.0.1`, requires authentication on every
 request, and enforces same-origin review POSTs. The launch config retains only a
 credential verifier, not the raw token.
+
+When `HOB_HOME_DIR` is set, the three household Markdown files are loaded as a
+bounded startup snapshot through DSH's prompt/context registry. They personalize
+the Agent but cannot add tools or bypass Hub policy. See
+[`docs/household-prompt-context.md`](docs/household-prompt-context.md).
 
 `pi-agent-core` is not part of the architecture. `pi-ai` exists only as a
 transitive implementation detail of the official DSH LLM adapter; hob-agent

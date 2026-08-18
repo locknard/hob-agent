@@ -102,11 +102,14 @@ production data path. The provider has no retention or deletion API. Define a
 governed household reset/export policy upstream before offering either action;
 do not mutate DSH tables directly.
 
-### P1 — household prompt and Skills
+### P1 — household Skills
 
-The current prompt is fixed or caller-supplied. `home-template`, household
-memory, and filesystem Skills are not loaded yet. They must enter through the
-DSH prompt/Skill seams without expanding tool authority.
+An explicit household directory can now load bounded `SOUL.md`, `HOME.md`, and
+`MEMORY.md` startup snapshots through the DSH prompt/context registry without
+expanding tool authority. `HEARTBEAT.md`, hot reload, memory writes, and
+filesystem Skills remain deferred. Skills should enter through DSH's provider
+once its filesystem packages share the runtime compatibility family; do not
+create a parallel registry.
 
 ### P2 — bounded probe lifecycle
 

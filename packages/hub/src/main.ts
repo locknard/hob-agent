@@ -51,6 +51,9 @@ export function createHomeHubProcessOptions(
       agent: {
         ...config.agent,
         sessionPersistencePath: config.sessionPath,
+        ...(config.householdDirectory === undefined
+          ? {}
+          : { householdDirectory: config.householdDirectory }),
       },
       ...(config.inboxHttp === undefined ? {} : { inboxHttp: config.inboxHttp }),
       launchEnvironment: config.launchEnvironment,

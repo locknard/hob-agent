@@ -41,6 +41,7 @@ export interface HomeHubLaunchConfig {
   readonly worldModelPath: string;
   readonly proposalPath: string;
   readonly sessionPath: string;
+  readonly householdDirectory?: string;
   readonly bridges: readonly BridgeConfigEntry<unknown>[];
   readonly bridgeCredentialSource: BridgeAwareCredentialSource;
   readonly catalog: BridgeCatalog;
@@ -76,6 +77,7 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
   const credentialEnv = providerSetup(model.provider).credentialEnv;
   const apiKey = requiredValue(environment, credentialEnv).trim();
   const inboxHttp = parseInboxHttp(environment.HOB_INBOX_AUTH_TOKEN, environment.HOB_INBOX_PORT);
+  const householdDirectory = parseHouseholdDirectory(environment.HOB_HOME_DIR);
   const launchEnvironment = createLaunchEnvironmentSnapshot([{
     source: "process",
     values: { [credentialEnv]: apiKey },
@@ -89,6 +91,7 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
     worldModelPath: join(dataDirectory, "world-model.sqlite"),
     proposalPath: join(dataDirectory, "proposals.sqlite"),
     sessionPath: join(dataDirectory, "dsh-sessions.sqlite"),
+    ...(householdDirectory === undefined ? {} : { householdDirectory }),
     bridges: bridges.map(({ bridgeId, adapterType, config }) => ({ bridgeId, adapterType, config })),
     bridgeCredentialSource: createBridgeCredentialSource(environment, refsByBridge),
     catalog: createBuiltinBridgeCatalog(),
@@ -96,6 +99,17 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
     ...(inboxHttp === undefined ? {} : { inboxHttp }),
     launchEnvironment,
   };
+}
+
+function parseHouseholdDirectory(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const directory = value.trim();
+  if (!isAbsolute(directory)
+    || directory === ":memory:"
+    || /(?:^|[\\/])\.env(?:$|[\\/])/i.test(directory)) {
+    throw new Error("Invalid HOB_HOME_DIR; expected an absolute household directory");
+  }
+  return directory;
 }
 
 function parseInboxHttp(

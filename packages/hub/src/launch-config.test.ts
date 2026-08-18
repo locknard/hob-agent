@@ -38,6 +38,7 @@ test("reads neutral bridge entries and selected model credential without putting
   assert.equal(config.sessionPath, "/tmp/hob-agent-launch-test/dsh-sessions.sqlite");
   assert.equal(JSON.stringify(config.bridges).includes("home-assistant-secret"), false);
   assert.deepEqual(config.agent, { provider: "gpt", model: "gpt-5.4" });
+  assert.equal(config.householdDirectory, undefined);
   assert.deepEqual(config.launchEnvironment.get("OPENAI_API_KEY"), {
     value: "openai-secret",
     source: "process",
@@ -47,6 +48,18 @@ test("reads neutral bridge entries and selected model credential without putting
   assert.deepEqual(
     await config.bridgeCredentialSource.resolveForBridge("ha-main", "access-token"),
     { kind: "secret_text", value: "home-assistant-secret" },
+  );
+});
+
+test("accepts only an explicit absolute household context directory", () => {
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_HOME_DIR: "/Users/example/private-home",
+  });
+  assert.equal(config.householdDirectory, "/Users/example/private-home");
+  assert.throws(
+    () => readHomeHubLaunchConfig({ ...BASE_ENV, HOB_HOME_DIR: "home-template" }),
+    /HOB_HOME_DIR/,
   );
 });
 
@@ -165,6 +178,7 @@ test("reads only the explicit launch allowlist before lazy bridge credential res
     "OPENAI_API_KEY",
     "HOB_INBOX_AUTH_TOKEN",
     "HOB_INBOX_PORT",
+    "HOB_HOME_DIR",
   ]);
   await config.bridgeCredentialSource.describeForBridge("ha-main", "access-token");
   assert.equal(reads.at(-1), "HOB_HA_TOKEN");

@@ -55,6 +55,11 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     model: "test-model",
     adapter,
     sessionId: "home-main",
+    householdContext: {
+      soul: "Prefer calm, reversible household suggestions.",
+      home: "The household observes quiet hours after 22:00.",
+      memory: "A prior lighting proposal was rejected.",
+    },
   });
 
   assert.equal(String(ctx.homeAgent.agent.id), "home-main");
@@ -68,6 +73,17 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
 
   assert.equal(adapter.requests.length, 1);
   assert.match(adapter.requests[0]?.system ?? "", /cannot control devices/i);
+  assert.match(adapter.requests[0]?.system ?? "", /calm, reversible household suggestions/i);
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) =>
+      JSON.stringify(message).includes("quiet hours after 22:00")),
+    true,
+  );
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) =>
+      JSON.stringify(message).includes("prior lighting proposal was rejected")),
+    true,
+  );
   assert.equal(
     ctx.homeAgent.agent.session.events.some((event) => event.type === "assistant/message"),
     true,

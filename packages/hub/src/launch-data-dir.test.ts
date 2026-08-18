@@ -41,3 +41,13 @@ test("fails closed for blank or non-absolute data directories", () => {
     /HOB_DATA_DIR/,
   );
 });
+
+test("forwards an explicitly configured household directory only to the Agent composition", () => {
+  const options = createHomeHubProcessOptions({
+    ...ENV,
+    HOB_HOME_DIR: "/tmp/hob-private-home",
+  });
+
+  assert.equal(options.runtime.agent.householdDirectory, "/tmp/hob-private-home");
+  assert.equal(JSON.stringify(options.runtime.homeWorld).includes("hob-private-home"), false);
+});
