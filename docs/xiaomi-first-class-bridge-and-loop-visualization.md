@@ -178,6 +178,9 @@ into model context.
   bounded metadata-only traces through the sole `DshHomeAgentService`.
 - `renderAgentLoopTimeline` renders turns, steps, tools, timing and aggregate
   token usage without prompts, reasoning, arguments, results or home state.
+- Proposal detail resolves its stored DSH root tool-call ID to one exact turn
+  and renders only that turn's steps, tools, timing, and model-token usage. It
+  no longer presents cumulative session cost as the cost of one proposal.
 - No Xiaomi cloud/gateway protocol implementation or Xiaomi-derived source was
   added. That transport slot remains deliberately unfilled pending permission.
 

@@ -1,4 +1,7 @@
-import type { AgentLoopTrace } from "@hob-agent/agent-layer/agent-loop-trace";
+import {
+  sliceAgentLoopTraceForTool,
+  type AgentLoopTrace,
+} from "@hob-agent/agent-layer/agent-loop-trace";
 
 import { renderAgentLoopTimeline } from "./agent-loop-timeline.js";
 
@@ -210,14 +213,14 @@ export class ProposalInboxController {
     if (proposal === undefined) return undefined;
     const trace = this.ports.traces?.traceSnapshot();
     const toolCallId = proposal.provenance.toolCallId ?? proposal.provenance.turnId;
+    const proposalTrace = trace !== undefined
+      && trace.sessionId === proposal.provenance.sessionId
+      && toolCallId !== undefined
+      ? sliceAgentLoopTraceForTool(trace, toolCallId)
+      : undefined;
     return {
       proposal,
-      ...(trace !== undefined
-        && trace.sessionId === proposal.provenance.sessionId
-        && toolCallId !== undefined
-        && trace.tools.some((tool) => tool.id === toolCallId)
-        ? { trace }
-        : {}),
+      ...(proposalTrace === undefined ? {} : { trace: proposalTrace }),
     };
   }
 

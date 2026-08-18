@@ -4,7 +4,11 @@ import test from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 import SessionStore, { SessionId, type SessionEvent } from "@deepseek-ai/dsh-session";
 
-import { AgentLoopTraceService, projectAgentLoopTrace } from "./dsh-agent-loop-trace.js";
+import {
+  AgentLoopTraceService,
+  projectAgentLoopTrace,
+  sliceAgentLoopTraceForTool,
+} from "./dsh-agent-loop-trace.js";
 
 const events = [
   { type: "turn/start", seq: 0, time: 1_000, data: { turn: 1 } },
@@ -84,7 +88,14 @@ test("projects stable DSH turn, step, tool, timing and token metadata", () => {
 
   assert.equal(trace.sessionId, "home-main");
   assert.equal(trace.asOfSeq, 12);
-  assert.deepEqual(trace.turns, [{ turn: 1, status: "completed", startedAt: 1_000, endedAt: 1_080, durationMs: 80 }]);
+  assert.deepEqual(trace.turns, [{
+    turn: 1,
+    status: "completed",
+    startedAt: 1_000,
+    endedAt: 1_080,
+    durationMs: 80,
+    usage: { inputTokens: 12, outputTokens: 4, reasoningTokens: 3 },
+  }]);
   assert.deepEqual(trace.steps, [{ turn: 1, step: 1, status: "completed", startedAt: 1_010, endedAt: 1_070, durationMs: 60 }]);
   assert.deepEqual(trace.tools, [{
     id: "call-1",
@@ -114,6 +125,36 @@ test("projects stable DSH turn, step, tool, timing and token metadata", () => {
     durationMs: 10,
   }]);
   assert.deepEqual(trace.prunes, [{ at: 1_150, shadowedEventCount: 1, shadowedTokenCount: 512 }]);
+});
+
+test("slices a proposal trace to the exact DSH turn containing its tool call", () => {
+  const trace = projectAgentLoopTrace("home-main", [
+    ...events,
+    { type: "turn/start", seq: 13, time: 2_000, data: { turn: 2 } },
+    { type: "step/start", seq: 14, time: 2_010, data: { turn: 2, step: 1 } },
+    {
+      type: "assistant/message",
+      seq: 15,
+      time: 2_020,
+      data: {
+        turn: 2,
+        step: 1,
+        message: { id: "message-3", role: "assistant", source: { kind: "model", provider: "fixture", model: "fixture" }, content: [] },
+        usage: { inputTokens: 30, outputTokens: 6, reasoningTokens: 2 },
+      },
+      surfaceOp: "append",
+    },
+    { type: "step/end", seq: 16, time: 2_030, data: { turn: 2, step: 1 } },
+    { type: "turn/end", seq: 17, time: 2_040, data: { turn: 2, reason: { kind: "completed" } } },
+  ] as unknown as readonly SessionEvent[]);
+
+  const sliced = sliceAgentLoopTraceForTool(trace, "call-1");
+  assert.equal(sliced?.turns.length, 1);
+  assert.equal(sliced?.turns[0]?.turn, 1);
+  assert.deepEqual(sliced?.usage, { inputTokens: 12, outputTokens: 4, reasoningTokens: 3 });
+  assert.equal(sliced?.steps.every((step) => step.turn === 1), true);
+  assert.equal(sliced?.tools.every((tool) => tool.turn === 1), true);
+  assert.equal(sliceAgentLoopTraceForTool(trace, "missing"), undefined);
 });
 
 test("never projects prompts, reasoning text, tool arguments, or tool results", () => {

@@ -8,6 +8,7 @@ export interface AgentLoopTraceTurn {
   readonly startedAt: number;
   readonly endedAt?: number;
   readonly durationMs?: number;
+  readonly usage: AgentLoopTraceUsage;
 }
 
 export interface AgentLoopTraceStep {
@@ -86,7 +87,7 @@ type SafeTraceEvent =
   | { readonly type: "compaction/summary"; readonly seq: number; readonly time: number; readonly id: string; readonly shadowedEventCount: number; readonly shadowedTokenCount: number; readonly usage?: AgentLoopTraceUsage }
   | { readonly type: "compaction/end"; readonly seq: number; readonly time: number; readonly id: string; readonly failed: boolean }
   | { readonly type: "compaction/prune"; readonly seq: number; readonly time: number; readonly shadowedEventCount: number; readonly shadowedTokenCount: number }
-  | { readonly type: "assistant/usage"; readonly seq: number; readonly time: number; readonly inputTokens: number; readonly outputTokens: number; readonly reasoningTokens: number };
+  | { readonly type: "assistant/usage"; readonly seq: number; readonly time: number; readonly turn: number; readonly inputTokens: number; readonly outputTokens: number; readonly reasoningTokens: number };
 
 interface SafeTraceLog {
   readonly events: SafeTraceEvent[];
@@ -146,6 +147,30 @@ export function projectAgentLoopTrace(
   return projectSafeTrace(sessionId, events.map(sanitizeEvent), truncatedBeforeSeq);
 }
 
+/** Narrows a cumulative session trace to the turn that created one proposal tool call. */
+export function sliceAgentLoopTraceForTool(
+  trace: AgentLoopTrace,
+  toolCallId: string,
+): AgentLoopTrace | undefined {
+  const target = trace.tools.find((tool) => tool.id === toolCallId);
+  if (target === undefined) return undefined;
+  const turn = trace.turns.find((item) => item.turn === target.turn);
+  if (turn === undefined) return undefined;
+  const withinTurn = (at: number) => at >= turn.startedAt && at <= (turn.endedAt ?? Number.POSITIVE_INFINITY);
+  return {
+    sessionId: trace.sessionId,
+    asOfSeq: trace.asOfSeq,
+    ...(trace.truncatedBeforeSeq === undefined ? {} : { truncatedBeforeSeq: trace.truncatedBeforeSeq }),
+    turns: [turn],
+    steps: trace.steps.filter((step) => step.turn === target.turn),
+    tools: trace.tools.filter((tool) => tool.turn === target.turn),
+    compactions: trace.compactions.filter((compaction) =>
+      compaction.ownerTurn === target.turn || withinTurn(compaction.startedAt)),
+    prunes: trace.prunes.filter((prune) => withinTurn(prune.at)),
+    usage: { ...turn.usage },
+  };
+}
+
 function projectSafeTrace(
   sessionId: string,
   events: readonly SafeTraceEvent[],
@@ -165,7 +190,12 @@ function projectSafeTrace(
       case "ignored":
         break;
       case "turn/start":
-        turns.set(event.turn, { turn: event.turn, status: "running", startedAt: event.time });
+        turns.set(event.turn, {
+          turn: event.turn,
+          status: "running",
+          startedAt: event.time,
+          usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0 },
+        });
         break;
       case "turn/end": {
         const previous = turns.get(event.turn);
@@ -264,6 +294,19 @@ function projectSafeTrace(
         inputTokens += event.inputTokens;
         outputTokens += event.outputTokens;
         reasoningTokens += event.reasoningTokens;
+        {
+          const turn = turns.get(event.turn);
+          if (turn !== undefined) {
+            turns.set(event.turn, {
+              ...turn,
+              usage: {
+                inputTokens: turn.usage.inputTokens + event.inputTokens,
+                outputTokens: turn.usage.outputTokens + event.outputTokens,
+                reasoningTokens: turn.usage.reasoningTokens + event.reasoningTokens,
+              },
+            });
+          }
+        }
         break;
     }
   }
@@ -315,6 +358,7 @@ function sanitizeEvent(event: SessionEvent): SafeTraceEvent {
         type: "assistant/usage",
         seq: event.seq,
         time: event.time,
+        turn: event.data.turn,
         inputTokens: event.data.usage?.inputTokens ?? 0,
         outputTokens: event.data.usage?.outputTokens ?? 0,
         reasoningTokens: event.data.usage?.reasoningTokens ?? 0,

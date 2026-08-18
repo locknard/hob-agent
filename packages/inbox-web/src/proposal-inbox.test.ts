@@ -79,13 +79,19 @@ test("lists and renders untrusted proposal content without creating an applicati
     traces: {
       traceSnapshot: () => ({
         sessionId: "home-main",
-        asOfSeq: 3,
-        turns: [{ turn: 1, status: "completed", startedAt: 1, endedAt: 4, durationMs: 3 }],
-        steps: [{ turn: 1, step: 1, status: "completed", startedAt: 2, endedAt: 3, durationMs: 1 }],
+        asOfSeq: 6,
+        turns: [
+          { turn: 1, status: "completed", startedAt: 1, endedAt: 4, durationMs: 3, usage: { inputTokens: 10, outputTokens: 5, reasoningTokens: 2 } },
+          { turn: 2, status: "completed", startedAt: 5, endedAt: 8, durationMs: 3, usage: { inputTokens: 40, outputTokens: 8, reasoningTokens: 1 } },
+        ],
+        steps: [
+          { turn: 1, step: 1, status: "completed", startedAt: 2, endedAt: 3, durationMs: 1 },
+          { turn: 2, step: 1, status: "completed", startedAt: 6, endedAt: 7, durationMs: 1 },
+        ],
         tools: [{ id: "call-7", turn: 1, step: 1, name: "create_home_proposal", status: "completed", startedAt: 2, endedAt: 3, durationMs: 1 }],
         compactions: [],
         prunes: [],
-        usage: { inputTokens: 10, outputTokens: 5, reasoningTokens: 2 },
+        usage: { inputTokens: 50, outputTokens: 13, reasoningTokens: 3 },
       }),
     },
   });
@@ -132,6 +138,8 @@ test("lists and renders untrusted proposal content without creating an applicati
 
   const detail = controller.detail("proposal-1");
   assert.equal(detail?.trace?.sessionId, "home-main");
+  assert.deepEqual(detail?.trace?.turns.map((turn) => turn.turn), [1]);
+  assert.deepEqual(detail?.trace?.usage, { inputTokens: 10, outputTokens: 5, reasoningTokens: 2 });
   const detailHtml = renderProposalDetail(detail!);
   assert.match(detailHtml, /606/);
   assert.match(detailHtml, /partial/);

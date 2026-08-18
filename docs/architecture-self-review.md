@@ -94,7 +94,9 @@ apply an artifact or control a device.
 - One-root acceptance coverage now exercises the canonical DSH tool loop from
   observation through trusted Hub evidence binding into the Inbox. The Home
   Agent retains its trace service explicitly so cross-plugin Inbox reads do not
-  bypass Cordis injection ownership.
+  bypass Cordis injection ownership. Proposal detail slices the cumulative DSH
+  session projection to the exact turn containing its stored root tool-call ID,
+  so historical turns and their token cost are not attributed to the proposal.
 - `pnpm validate:home` provides a model-free, aggregate-only readiness cut over
   the production HomeWorld paths before autonomous observation is enabled. It
   emits no household identities, values, URLs, credentials, or raw errors.

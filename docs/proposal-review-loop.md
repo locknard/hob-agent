@@ -93,6 +93,8 @@ and simulator may emit `passed` or `failed`.
 `toolCallId` stores DSH's `rootCallId` for exact trace correlation. Early local
 v1 rows mislabeled that value as `turnId`; readers retain that optional legacy
 field, but new proposals never claim a tool-call identity is a turn number.
+The Inbox resolves that call to its containing DSH turn and displays only the
+turn-local metadata trace and token usage, not cumulative session totals.
 
 ## Evidence and privacy rules
 
