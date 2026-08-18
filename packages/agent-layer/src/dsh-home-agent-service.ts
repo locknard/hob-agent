@@ -7,6 +7,10 @@ import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime from "@deepseek-ai/dsh-tools";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
+import {
+  AgentLoopTraceService,
+  type AgentLoopTrace,
+} from "./dsh-agent-loop-trace.js";
 
 const DEFAULT_SESSION_ID = "home-main";
 const DEFAULT_SYSTEM_PROMPT = [
@@ -42,6 +46,10 @@ export class DshHomeAgentService extends Service {
 
   agent!: Agent;
 
+  traceSnapshot(): AgentLoopTrace | undefined {
+    return this.ctx.agentLoopTrace.snapshot(String(this.agent.id));
+  }
+
   constructor(ctx: Context, private readonly options: DshHomeAgentOptions) {
     super(ctx, "homeAgent");
   }
@@ -49,6 +57,7 @@ export class DshHomeAgentService extends Service {
   protected async [Service.init](): Promise<void> {
     if (!this.ctx.get("llm")) await this.ctx.plugin(LlmRuntime);
     await this.ctx.plugin(SessionStore);
+    await this.ctx.plugin(AgentLoopTraceService);
     await this.ctx.plugin(SystemPrompt, {
       includeHarnessIdentity: false,
       persona: this.options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,

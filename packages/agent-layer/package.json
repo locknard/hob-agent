@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./agent-loop-trace": "./src/dsh-agent-loop-trace.ts",
     "./composition": "./src/dsh-home-agent-composition.ts",
     "./home-agent": "./src/dsh-home-agent-service.ts",
     "./home-snapshot-tool": "./src/dsh-home-snapshot-tool.ts",

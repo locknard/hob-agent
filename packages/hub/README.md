@@ -8,6 +8,16 @@ and adapter lifecycles. The DSH agent consumes only its neutral
 `ctx.homeWorld` snapshot service; ecosystem adapters do not become Cordis
 services.
 
+Home Assistant and Xiaomi Home are peer ecosystem adapters behind the same
+Bridge v6.3 contract. The built-in catalog always includes HA. Xiaomi is added
+only when composition supplies an authorized `XiaomiHomeTransportPlugin`; the
+default launch catalog fails closed instead of routing Xiaomi through HA or
+pretending a fixture transport is production support. The hub-owned Xiaomi
+adapter already defines MIoT property projection, identity, resync and
+lifecycle semantics, while live cloud/gateway connectivity remains outside the
+repository until an appropriately licensed SDK or written authorization is
+available.
+
 `HomeAgentRuntime` owns the single root Cordis context and mounts HomeWorld
 before the DSH Home Agent. `pnpm start` requires the absolute durable
 `HOB_DATA_DIR`, reads `HOB_BRIDGES`, `HOB_MODEL`, the selected provider

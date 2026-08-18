@@ -62,9 +62,15 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     ctx.homeAgent.agent.session.events.some((event) => event.type === "assistant/message"),
     true,
   );
+  const trace = ctx.homeAgent.traceSnapshot();
+  assert.equal(trace?.sessionId, "home-main");
+  assert.equal(trace?.turns[0]?.status, "completed");
+  assert.deepEqual(trace?.usage, { inputTokens: 0, outputTokens: 3, reasoningTokens: 0 });
+  assert.equal(JSON.stringify(trace).includes("home is readable"), false);
 
   await fiber.dispose();
   assert.equal(ctx.homeAgent, undefined);
+  assert.equal(ctx.get("agentLoopTrace"), undefined);
   assert.equal(ctx.get("agents"), undefined);
   assert.equal(ctx.get("tools"), undefined);
   assert.equal(ctx.get("llm"), undefined);

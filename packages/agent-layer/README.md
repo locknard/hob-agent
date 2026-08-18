@@ -11,6 +11,12 @@ and projects deterministic devices, capabilities, states, bridge watermarks,
 and consistency/event/connection summaries. External attributes are bounded and
 JSON-normalized before they reach the model.
 
+`AgentLoopTraceService` is a bounded, read-only projection of DSH's canonical
+`session/event` stream. It exposes turn/step/tool status, timing, and aggregate
+token counts to the local review surface, while omitting prompts, assistant and
+reasoning text, tool arguments/results, and household state. It neither owns a
+loop nor appears in the model's tool/context surface.
+
 `pi-agent-core` is forbidden. Standard API-key providers use the official
 `@deepseek-ai/dsh-llm-pi-ai` adapter beneath the DSH LLM seam. Its internal
 `pi-ai` SDK is transitive implementation detail: this package neither declares
