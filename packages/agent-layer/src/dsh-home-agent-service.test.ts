@@ -96,6 +96,12 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
 
   assert.equal(String(ctx.homeAgent.agent.id), "home-main");
   assert.notEqual(ctx.get("tokenMeter"), undefined);
+  assert.notEqual(ctx.get("toolResultPruner"), undefined);
+  assert.deepEqual((ctx.get("toolResultPruner") as unknown as { config: unknown }).config, {
+    thresholdChars: 8_192,
+    headChars: 4_096,
+    tailChars: 1_024,
+  });
   assert.equal(ctx.get("compaction")?.constructor.name, "HomeCompactionEngine");
   assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), [
     "get_home_inventory",
@@ -179,6 +185,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
 
   await fiber.dispose();
   assert.equal(ctx.get("compaction"), undefined);
+  assert.equal(ctx.get("toolResultPruner"), undefined);
   assert.equal(ctx.get("tokenMeter"), undefined);
   assert.equal(ctx.homeAgent, undefined);
   assert.equal(ctx.get("agentLoopTrace"), undefined);

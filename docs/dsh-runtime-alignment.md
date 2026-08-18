@@ -315,6 +315,7 @@ DSH 当前仍处于 developer preview，源码和 npm 各 package 的发布进�
 `dsh-attachment`、`dsh-brand`、`dsh-code-runtime`、`dsh-credentials`、`dsh-invariants`、
 `dsh-launch-environment`、`dsh-llm-pi-ai`、`dsh-repeat-tool-reminder`、
 `dsh-commands`、`dsh-compaction`、`dsh-compaction-basic`、
+`dsh-compaction-tool-result-pruner`、
 `dsh-session-persistence`、`dsh-session-persistence-sqlite`、`dsh-settings`、
 `dsh-session-projection`、`dsh-skill`、`dsh-timeout`、`dsh-token-meter`、
 `dsh-tool-skill`、`dsh-typert-protocol`、

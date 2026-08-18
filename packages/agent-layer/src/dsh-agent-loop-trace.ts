@@ -47,6 +47,12 @@ export interface AgentLoopTraceCompaction {
   readonly usage?: AgentLoopTraceUsage;
 }
 
+export interface AgentLoopTracePrune {
+  readonly at: number;
+  readonly shadowedEventCount: number;
+  readonly shadowedTokenCount: number;
+}
+
 export interface AgentLoopTrace {
   readonly sessionId: string;
   readonly asOfSeq: number;
@@ -55,6 +61,7 @@ export interface AgentLoopTrace {
   readonly steps: readonly AgentLoopTraceStep[];
   readonly tools: readonly AgentLoopTraceTool[];
   readonly compactions: readonly AgentLoopTraceCompaction[];
+  readonly prunes: readonly AgentLoopTracePrune[];
   readonly usage: AgentLoopTraceUsage;
 }
 
@@ -78,6 +85,7 @@ type SafeTraceEvent =
   | { readonly type: "compaction/start"; readonly seq: number; readonly time: number; readonly id: string; readonly ownerTurn: number | null }
   | { readonly type: "compaction/summary"; readonly seq: number; readonly time: number; readonly id: string; readonly shadowedEventCount: number; readonly shadowedTokenCount: number; readonly usage?: AgentLoopTraceUsage }
   | { readonly type: "compaction/end"; readonly seq: number; readonly time: number; readonly id: string; readonly failed: boolean }
+  | { readonly type: "compaction/prune"; readonly seq: number; readonly time: number; readonly shadowedEventCount: number; readonly shadowedTokenCount: number }
   | { readonly type: "assistant/usage"; readonly seq: number; readonly time: number; readonly inputTokens: number; readonly outputTokens: number; readonly reasoningTokens: number };
 
 interface SafeTraceLog {
@@ -147,6 +155,7 @@ function projectSafeTrace(
   const steps = new Map<string, AgentLoopTraceStep>();
   const tools = new Map<string, AgentLoopTraceTool>();
   const compactions = new Map<string, AgentLoopTraceCompaction>();
+  const prunes: AgentLoopTracePrune[] = [];
   let inputTokens = 0;
   let outputTokens = 0;
   let reasoningTokens = 0;
@@ -244,6 +253,13 @@ function projectSafeTrace(
         }
         break;
       }
+      case "compaction/prune":
+        prunes.push({
+          at: event.time,
+          shadowedEventCount: event.shadowedEventCount,
+          shadowedTokenCount: event.shadowedTokenCount,
+        });
+        break;
       case "assistant/usage":
         inputTokens += event.inputTokens;
         outputTokens += event.outputTokens;
@@ -260,6 +276,7 @@ function projectSafeTrace(
     steps: [...steps.values()].sort((left, right) => left.turn - right.turn || left.step - right.step),
     tools: [...tools.values()].sort((left, right) => left.startedAt - right.startedAt || left.id.localeCompare(right.id)),
     compactions: [...compactions.values()].sort((left, right) => left.startedAt - right.startedAt),
+    prunes,
     usage: { inputTokens, outputTokens, reasoningTokens },
   };
 }
@@ -333,6 +350,14 @@ function sanitizeEvent(event: SessionEvent): SafeTraceEvent {
         time: event.time,
         id: String(event.data.compactionId),
         failed: event.data.error !== undefined,
+      };
+    case "compaction/prune":
+      return {
+        type: event.type,
+        seq: event.seq,
+        time: event.time,
+        shadowedEventCount: event.data.shadowedSeqs.length,
+        shadowedTokenCount: event.data.shadowedTokenCount,
       };
     default:
       return { type: "ignored", seq: event.seq, time: event.time };

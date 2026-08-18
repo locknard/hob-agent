@@ -11,6 +11,7 @@ import SkillRegistry from "@deepseek-ai/dsh-skill";
 import * as ToolSkill from "@deepseek-ai/dsh-tool-skill";
 import * as RepeatToolReminder from "@deepseek-ai/dsh-repeat-tool-reminder";
 import TokenMeter from "@deepseek-ai/dsh-token-meter";
+import ToolResultPruner from "@deepseek-ai/dsh-compaction-tool-result-pruner";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
@@ -155,6 +156,7 @@ export class DshHomeAgentService extends Service {
       });
     }
     await this.ctx.plugin(TokenMeter);
+    await this.ctx.plugin(ToolResultPruner);
     await this.ctx.plugin(HomeCompactionEngine);
     await this.ctx.plugin(AgentLoopTraceService);
     this.traceService = this.ctx.get("agentLoopTrace");

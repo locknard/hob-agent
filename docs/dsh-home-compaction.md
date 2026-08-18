@@ -41,16 +41,27 @@ pressure failure warns and continues with the existing surface, while a
 provider-confirmed overflow is retried only after DSH records durable surface
 progress. No second session store or custom compaction transaction is added.
 
+The official DSH tool-result pruner is mounted with its reviewed defaults. It
+runs only after pressure or provider overflow qualifies, retains a bounded head
+and tail plus an explicit omission marker, preserves rich blocks and tool
+pairing, and leaves the full original event in the append-only session log.
+This is syntactic pressure relief, not household memory: if an old raw result is
+needed again, the Agent must call the governed read tool again. User messages,
+assistant conclusions, proposals, approvals, and Hub evidence records are not
+pruned by this service.
+
 ## Deferred
 
 - a cheaper independently configured summarization model;
-- model-free tool-result pruning, pending a household-specific review of which
-  evidence fields may be removed without weakening proposal provenance.
+- semantic field-aware pruning, which would create a second household-specific
+  compaction policy and is not justified while the official syntactic seam is
+  sufficient.
 
 ## Metadata visualization
 
 The existing DSH loop trace may project compaction start, completion/failure,
 duration, shadowed event count, shadowed token count, and auxiliary token usage.
+It may also project each model-free prune's time and removed event/token counts.
 It must discard the summary, raw model output, provider error text, and
 shadowed message content before retaining its bounded trace, and omit internal
 compaction identifiers from the user-facing snapshot.

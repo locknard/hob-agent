@@ -12,9 +12,11 @@ export function renderAgentLoopTimeline(trace: AgentLoopTrace): string {
     }).join("");
     return `<li class="agent-loop-turn" data-status="${escapeHtml(turn.status)}"><header><strong>Turn ${turn.turn}</strong><time>${duration(turn.durationMs)}</time></header><ol>${steps}</ol></li>`;
   }).join("");
-  const compactions = trace.compactions.length === 0
+  const compactions = trace.compactions.length === 0 && trace.prunes.length === 0
     ? ""
-    : `<section class="agent-loop-compactions" aria-label="Context maintenance"><h3>Context maintenance</h3><ol>${trace.compactions.map((compaction) => {
+    : `<section class="agent-loop-compactions" aria-label="Context maintenance"><h3>Context maintenance</h3><ol>${trace.prunes.map((prune) =>
+      `<li data-status="completed"><span>${prune.shadowedEventCount} tool result${prune.shadowedEventCount === 1 ? "" : "s"} pruned · ${prune.shadowedTokenCount} tokens removed</span></li>`,
+    ).join("")}${trace.compactions.map((compaction) => {
       const compacted = compaction.shadowedTokenCount === undefined
         ? "no checkpoint"
         : `${compaction.shadowedTokenCount} tokens compacted${compaction.shadowedEventCount === undefined ? "" : ` from ${compaction.shadowedEventCount} events`}`;

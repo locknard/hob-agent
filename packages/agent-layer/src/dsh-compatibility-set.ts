@@ -17,6 +17,7 @@ export const DSH_COMPATIBILITY_SET = {
   '@deepseek-ai/dsh-commands': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-compaction': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-compaction-basic': DSH_COMPATIBILITY_SET_VERSION,
+  '@deepseek-ai/dsh-compaction-tool-result-pruner': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-credentials': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-invariants': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-launch-environment': DSH_COMPATIBILITY_SET_VERSION,

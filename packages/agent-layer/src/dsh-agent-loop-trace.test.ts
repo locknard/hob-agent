@@ -71,13 +71,19 @@ const events = [
     time: 1_140,
     data: { compactionId: "compact-2", turn: null, error: "private provider failure" },
   },
+  {
+    type: "compaction/prune",
+    seq: 12,
+    time: 1_150,
+    data: { shadowedRange: { start: 3, end: 3 }, shadowedSeqs: [3], shadowedTokenCount: 512 },
+  },
 ] as unknown as readonly SessionEvent[];
 
 test("projects stable DSH turn, step, tool, timing and token metadata", () => {
   const trace = projectAgentLoopTrace("home-main", events);
 
   assert.equal(trace.sessionId, "home-main");
-  assert.equal(trace.asOfSeq, 11);
+  assert.equal(trace.asOfSeq, 12);
   assert.deepEqual(trace.turns, [{ turn: 1, status: "completed", startedAt: 1_000, endedAt: 1_080, durationMs: 80 }]);
   assert.deepEqual(trace.steps, [{ turn: 1, step: 1, status: "completed", startedAt: 1_010, endedAt: 1_070, durationMs: 60 }]);
   assert.deepEqual(trace.tools, [{
@@ -107,6 +113,7 @@ test("projects stable DSH turn, step, tool, timing and token metadata", () => {
     endedAt: 1_140,
     durationMs: 10,
   }]);
+  assert.deepEqual(trace.prunes, [{ at: 1_150, shadowedEventCount: 1, shadowedTokenCount: 512 }]);
 });
 
 test("never projects prompts, reasoning text, tool arguments, or tool results", () => {

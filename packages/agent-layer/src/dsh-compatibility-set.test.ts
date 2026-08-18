@@ -43,6 +43,10 @@ describe('DSH compatibility set', () => {
       DSH_COMPATIBILITY_SET_VERSION,
     );
     assert.equal(
+      DSH_COMPATIBILITY_SET['@deepseek-ai/dsh-compaction-tool-result-pruner'],
+      DSH_COMPATIBILITY_SET_VERSION,
+    );
+    assert.equal(
       DSH_COMPATIBILITY_SET['@deepseek-ai/dsh-token-meter'],
       DSH_COMPATIBILITY_SET_VERSION,
     );

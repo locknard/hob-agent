@@ -20,6 +20,7 @@ test("renders an accessible metadata-only DSH loop timeline", () => {
       shadowedTokenCount: 420,
       usage: { inputTokens: 80, outputTokens: 20, reasoningTokens: 10 },
     }],
+    prunes: [{ at: 95, shadowedEventCount: 1, shadowedTokenCount: 512 }],
     usage: { inputTokens: 12, outputTokens: 4, reasoningTokens: 3 },
   });
 
@@ -31,4 +32,5 @@ test("renders an accessible metadata-only DSH loop timeline", () => {
   assert.match(html, /Context maintenance/);
   assert.match(html, /420 tokens compacted/);
   assert.match(html, /80 input · 20 output · 10 reasoning/);
+  assert.match(html, /1 tool result pruned · 512 tokens removed/);
 });
