@@ -26,4 +26,5 @@ recorded result after review. Feedback is local household data. It does not
 modify `HOME.md`, `MEMORY.md`, prompts, Skills, tool authority, proposal policy,
 or device state automatically. A later explicit, human-reviewed knowledge
 workflow may use aggregated feedback as evidence for a proposed correction.
-
+The Inbox exposes these codes only through the count-only local summary defined
+in [`household-calibration-summary.md`](household-calibration-summary.md).

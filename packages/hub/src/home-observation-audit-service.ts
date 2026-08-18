@@ -3,6 +3,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import {
   SqliteObservationAuditStore,
   type ObservationAuditRecord,
+  type ObservationAuditSummary,
   type ObservationAuditStore,
   type ObservationTrigger,
   type SqliteObservationAuditStoreOptions,
@@ -49,5 +50,9 @@ export class HomeObservationAuditService extends Service {
 
   list(query?: { readonly limit?: number }): readonly ObservationAuditRecord[] {
     return this.store.list(query);
+  }
+
+  summary(): ObservationAuditSummary {
+    return this.store.summary();
   }
 }

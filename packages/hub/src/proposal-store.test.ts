@@ -148,6 +148,46 @@ test("reviews with optimistic concurrency and never treats approval as applicati
   store.close();
 });
 
+test("summarizes proposal quality without returning household content", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  const approved = store.create(input({ idempotencyKey: "quality:approved" }));
+  store.review({
+    proposalId: approved.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+  const rejected = store.create(input({ idempotencyKey: "quality:rejected" }));
+  store.review({
+    proposalId: rejected.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+    feedbackCode: "incorrect_assumption",
+  });
+  store.create(input({ idempotencyKey: "quality:pending" }));
+
+  const summary = store.qualitySummary();
+  assert.deepEqual(summary, {
+    total: 3,
+    statuses: { pending_review: 1, approved: 1, rejected: 1, expired: 0 },
+    feedback: {
+      useful_as_is: 1,
+      already_covered: 0,
+      not_useful: 0,
+      incorrect_assumption: 1,
+      insufficient_evidence: 0,
+      household_preference: 0,
+      too_risky: 0,
+      other: 0,
+    },
+    reviewedWithoutFeedback: 0,
+  });
+  assert.equal(JSON.stringify(summary).includes("Turn off a light"), false);
+  store.close();
+});
+
 test("requires bounded decision-specific feedback for new household reviews", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
 
@@ -231,6 +271,7 @@ test("keeps reviewed v1 rows from before structured feedback readable", async ()
   assert.equal(loaded?.status, "approved");
   assert.equal(loaded?.review?.feedbackCode, undefined);
   assert.equal(loaded?.spaceCoverage, undefined);
+  assert.equal(reopened.qualitySummary().reviewedWithoutFeedback, 1);
   reopened.close();
   await rm(directory, { recursive: true, force: true });
 });

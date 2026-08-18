@@ -78,7 +78,9 @@ apply an artifact or control a device.
   `applicationStatus: not_available`. New approve/reject decisions persist a
   bounded quality-feedback code in both review state and append-only audit;
   legacy v1 reviews remain readable and feedback cannot mutate household
-  knowledge automatically.
+  knowledge automatically. The Inbox projects only all-time counts of these
+  codes and observation outcomes for calibration; it does not reinterpret
+  proposal content or notes.
 - Autonomous observation is disabled by default. The Hub owns its bounded
   cadence, requires a ready world and idle DSH Agent, and permits only one
   pending household proposal at a time. Each scheduled, manual, startup, or

@@ -33,6 +33,17 @@ export interface ObservationAuditStore {
     readonly disposition?: HomeObservationDisposition;
   }): void;
   list(query?: { readonly limit?: number }): readonly ObservationAuditRecord[];
+  summary(): ObservationAuditSummary;
+}
+
+export interface ObservationAuditSummary {
+  readonly totalAttempts: number;
+  readonly completedAttempts: number;
+  readonly interruptedAttempts: number;
+  readonly runningAttempts: number;
+  readonly outcomes: Readonly<Record<HomeObservationOutcome, number>>;
+  readonly dispositions: Readonly<Record<HomeObservationDisposition, number>>;
+  readonly noProposalWithoutDisposition: number;
 }
 
 export interface SqliteObservationAuditStoreOptions {
@@ -179,6 +190,73 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
       FROM observation_attempts
       ORDER BY started_at DESC, observation_id DESC LIMIT ?`).all(limit) as ObservationRow[];
     return rows.map(fromRow);
+  }
+
+  /** Aggregates bounded lifecycle metadata without returning attempt identities. */
+  summary(): ObservationAuditSummary {
+    const lifecycles = { running: 0, completed: 0, interrupted: 0 };
+    const outcomes: Record<HomeObservationOutcome, number> = {
+      proposal_created: 0,
+      no_proposal: 0,
+      world_not_ready: 0,
+      proposal_pending: 0,
+      agent_busy: 0,
+      failed: 0,
+    };
+    const dispositions: Record<HomeObservationDisposition, number> = {
+      no_material_value: 0,
+      insufficient_evidence: 0,
+      existing_rule_overlap: 0,
+      mapping_uncertain: 0,
+      other_uncertainty: 0,
+    };
+    const lifecycleRows = this.db.prepare("SELECT status, COUNT(*) AS count FROM observation_attempts GROUP BY status").all() as ObservationRow[];
+    for (const row of lifecycleRows) {
+      const status = String(row.status) as keyof typeof lifecycles;
+      const count = Number(row.count);
+      if (!Object.hasOwn(lifecycles, status) || !Number.isSafeInteger(count) || count < 0) {
+        throw new ObservationAuditError("corrupt", "Observation audit summary is corrupt");
+      }
+      lifecycles[status] = count;
+    }
+    const outcomeRows = this.db.prepare(`SELECT outcome, COUNT(*) AS count
+      FROM observation_attempts WHERE status = 'completed' GROUP BY outcome`).all() as ObservationRow[];
+    for (const row of outcomeRows) {
+      const outcome = String(row.outcome) as HomeObservationOutcome;
+      const count = Number(row.count);
+      if (!Object.hasOwn(outcomes, outcome) || !Number.isSafeInteger(count) || count < 0) {
+        throw new ObservationAuditError("corrupt", "Observation audit summary is corrupt");
+      }
+      outcomes[outcome] = count;
+    }
+    const dispositionRows = this.db.prepare(`SELECT disposition, COUNT(*) AS count
+      FROM observation_attempts WHERE status = 'completed' AND outcome = 'no_proposal'
+      GROUP BY disposition`).all() as ObservationRow[];
+    let noProposalWithoutDisposition = 0;
+    for (const row of dispositionRows) {
+      const count = Number(row.count);
+      if (!Number.isSafeInteger(count) || count < 0) {
+        throw new ObservationAuditError("corrupt", "Observation audit summary is corrupt");
+      }
+      if (row.disposition === null || row.disposition === undefined) {
+        noProposalWithoutDisposition += count;
+        continue;
+      }
+      const disposition = String(row.disposition) as HomeObservationDisposition;
+      if (!Object.hasOwn(dispositions, disposition)) {
+        throw new ObservationAuditError("corrupt", "Observation audit summary is corrupt");
+      }
+      dispositions[disposition] = count;
+    }
+    return {
+      totalAttempts: lifecycles.running + lifecycles.completed + lifecycles.interrupted,
+      completedAttempts: lifecycles.completed,
+      interruptedAttempts: lifecycles.interrupted,
+      runningAttempts: lifecycles.running,
+      outcomes,
+      dispositions,
+      noProposalWithoutDisposition,
+    };
   }
 
   close(): void {

@@ -44,6 +44,28 @@ test("persists only bounded observation lifecycle metadata", async () => {
     outcome: "no_proposal",
     disposition: "insufficient_evidence",
   }]);
+  assert.deepEqual(reopened.summary(), {
+    totalAttempts: 1,
+    completedAttempts: 1,
+    interruptedAttempts: 0,
+    runningAttempts: 0,
+    outcomes: {
+      proposal_created: 0,
+      no_proposal: 1,
+      world_not_ready: 0,
+      proposal_pending: 0,
+      agent_busy: 0,
+      failed: 0,
+    },
+    dispositions: {
+      no_material_value: 0,
+      insufficient_evidence: 1,
+      existing_rule_overlap: 0,
+      mapping_uncertain: 0,
+      other_uncertainty: 0,
+    },
+    noProposalWithoutDisposition: 0,
+  });
   reopened.close();
 
   assert.equal((await stat(path)).mode & 0o777, 0o600);

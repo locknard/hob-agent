@@ -11,6 +11,8 @@ import {
   type InboxObservationStatus,
   type InboxObservationAttempt,
   type InboxReviewInput,
+  type InboxProposalQualitySummary,
+  type InboxObservationQualitySummary,
   type ProposalInboxPort,
   type ProposalTracePort,
 } from "./proposal-inbox.js";
@@ -27,7 +29,11 @@ export class ProposalInboxService extends Service {
 
   private readonly controller: ProposalInboxController;
   private readonly observation?: { snapshot(): InboxObservationStatus };
-  private readonly observationAudit?: { list(query: { limit: number }): readonly InboxObservationAttempt[] };
+  private readonly proposalQuality: { qualitySummary(): InboxProposalQualitySummary };
+  private readonly observationAudit?: {
+    list(query: { limit: number }): readonly InboxObservationAttempt[];
+    summary(): InboxObservationQualitySummary;
+  };
 
   constructor(ctx: Context) {
     super(ctx, "homeInbox");
@@ -36,9 +42,11 @@ export class ProposalInboxService extends Service {
       proposals: ctx.homeProposals as unknown as ProposalInboxPort,
       ...(trace === undefined ? {} : { traces: trace }),
     });
+    this.proposalQuality = ctx.homeProposals as unknown as { qualitySummary(): InboxProposalQualitySummary };
     this.observation = ctx.get("homeObservationScheduler") as unknown as { snapshot(): InboxObservationStatus } | undefined;
     this.observationAudit = ctx.get("homeObservationAudit") as unknown as {
       list(query: { limit: number }): readonly InboxObservationAttempt[];
+      summary(): InboxObservationQualitySummary;
     } | undefined;
   }
 
@@ -59,6 +67,10 @@ export class ProposalInboxService extends Service {
       this.list(query),
       this.observation?.snapshot(),
       this.observationAudit?.list({ limit: 5 }),
+      {
+        proposals: this.proposalQuality.qualitySummary(),
+        ...(this.observationAudit === undefined ? {} : { observations: this.observationAudit.summary() }),
+      },
     );
   }
 

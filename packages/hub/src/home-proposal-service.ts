@@ -5,6 +5,7 @@ import {
   type CreateProposalInput,
   type ProposalEnvelope,
   type ProposalListQuery,
+  type ProposalQualitySummary,
   type ReviewProposalInput,
   type SqliteProposalStoreOptions,
 } from "./proposal-store.js";
@@ -183,6 +184,10 @@ export class HomeProposalService extends Service {
 
   list(query?: ProposalListQuery): readonly ProposalEnvelope[] {
     return this.store.list(query);
+  }
+
+  qualitySummary(): ProposalQualitySummary {
+    return this.store.qualitySummary();
   }
 
   review(input: ReviewProposalInput): ProposalEnvelope {

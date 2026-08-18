@@ -103,8 +103,12 @@ pnpm inbox:home
 The command prints its authenticated `127.0.0.1` URL. It can record an approval
 or rejection, but approval still cannot apply an automation or control a
 device. It also shows the five most recent metadata-only observation attempts.
+The Inbox includes an all-time count-only household calibration summary over
+proposal decisions, structured feedback, observation outcomes, and bounded
+Agent-reported no-proposal dispositions.
 See [`docs/standalone-inbox.md`](docs/standalone-inbox.md) and
-[`docs/observation-audit.md`](docs/observation-audit.md).
+[`docs/observation-audit.md`](docs/observation-audit.md), plus
+[`docs/household-calibration-summary.md`](docs/household-calibration-summary.md).
 
 To create a private review draft of the neutral room/device map without calling
 a model or replacing `HOME.md`, set an explicit private `HOB_HOME_DIR` and run:

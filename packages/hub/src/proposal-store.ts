@@ -166,6 +166,13 @@ export type ProposalRejectionFeedbackCode =
   | "other";
 export type ProposalReviewFeedbackCode = ProposalApprovalFeedbackCode | ProposalRejectionFeedbackCode;
 
+export interface ProposalQualitySummary {
+  readonly total: number;
+  readonly statuses: Readonly<Record<ProposalStatus, number>>;
+  readonly feedback: Readonly<Record<ProposalReviewFeedbackCode, number>>;
+  readonly reviewedWithoutFeedback: number;
+}
+
 const approvalFeedbackCodes = ["useful_as_is"] as const;
 const rejectionFeedbackCodes = [
   "already_covered",
@@ -406,6 +413,63 @@ export class SqliteProposalStore {
       : this.db.prepare(`SELECT payload_json FROM proposals WHERE status = ?
           ORDER BY created_at DESC, proposal_id DESC LIMIT ?`).all(query.status, limit);
     return (rows as ProposalRow[]).map(fromRow);
+  }
+
+  /** Aggregates bounded lifecycle/feedback metadata without loading proposal content into callers. */
+  qualitySummary(): ProposalQualitySummary {
+    const statuses: Record<ProposalStatus, number> = {
+      pending_review: 0,
+      approved: 0,
+      rejected: 0,
+      expired: 0,
+    };
+    const feedback: Record<ProposalReviewFeedbackCode, number> = {
+      useful_as_is: 0,
+      already_covered: 0,
+      not_useful: 0,
+      incorrect_assumption: 0,
+      insufficient_evidence: 0,
+      household_preference: 0,
+      too_risky: 0,
+      other: 0,
+    };
+    const statusRows = this.db.prepare("SELECT status, COUNT(*) AS count FROM proposals GROUP BY status").all() as Record<string, unknown>[];
+    for (const row of statusRows) {
+      const status = String(row.status) as ProposalStatus;
+      const count = Number(row.count);
+      if (!Object.hasOwn(statuses, status) || !Number.isSafeInteger(count) || count < 0) {
+        throw new ProposalStoreError("corrupt_store", "Proposal quality metadata is corrupt");
+      }
+      statuses[status] = count;
+    }
+    const feedbackRows = this.db.prepare(`SELECT
+        json_extract(payload_json, '$.review.feedbackCode') AS feedback_code,
+        COUNT(*) AS count
+      FROM proposals
+      WHERE status IN ('approved', 'rejected')
+      GROUP BY feedback_code`).all() as Record<string, unknown>[];
+    let reviewedWithoutFeedback = 0;
+    for (const row of feedbackRows) {
+      const count = Number(row.count);
+      if (!Number.isSafeInteger(count) || count < 0) {
+        throw new ProposalStoreError("corrupt_store", "Proposal quality metadata is corrupt");
+      }
+      if (row.feedback_code === null || row.feedback_code === undefined) {
+        reviewedWithoutFeedback += count;
+        continue;
+      }
+      const code = String(row.feedback_code) as ProposalReviewFeedbackCode;
+      if (!Object.hasOwn(feedback, code)) {
+        throw new ProposalStoreError("corrupt_store", "Proposal quality metadata is corrupt");
+      }
+      feedback[code] = count;
+    }
+    return {
+      total: Object.values(statuses).reduce((sum, count) => sum + count, 0),
+      statuses,
+      feedback,
+      reviewedWithoutFeedback,
+    };
   }
 
   review(input: ReviewProposalInput): ProposalEnvelope {

@@ -29,3 +29,7 @@ The Inbox may read the bounded recent ledger to explain whether observation is
 working when no proposal exists. DSH traces remain optional debugging material;
 they are not the household governance record and are never copied into this
 ledger.
+
+All-time lifecycle, outcome, and bounded disposition counts are available to
+the local Inbox without attempt identities or content; see
+[`household-calibration-summary.md`](household-calibration-summary.md).

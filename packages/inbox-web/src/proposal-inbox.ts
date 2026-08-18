@@ -133,6 +133,28 @@ export type InboxObservationDisposition =
   | "mapping_uncertain"
   | "other_uncertainty";
 
+export interface InboxProposalQualitySummary {
+  readonly total: number;
+  readonly statuses: Readonly<Record<InboxProposalStatus, number>>;
+  readonly feedback: Readonly<Record<InboxReviewFeedbackCode, number>>;
+  readonly reviewedWithoutFeedback: number;
+}
+
+export interface InboxObservationQualitySummary {
+  readonly totalAttempts: number;
+  readonly completedAttempts: number;
+  readonly interruptedAttempts: number;
+  readonly runningAttempts: number;
+  readonly outcomes: Readonly<Record<NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"], number>>;
+  readonly dispositions: Readonly<Record<InboxObservationDisposition, number>>;
+  readonly noProposalWithoutDisposition: number;
+}
+
+export interface InboxCalibrationSummary {
+  readonly proposals: InboxProposalQualitySummary;
+  readonly observations?: InboxObservationQualitySummary;
+}
+
 export interface InboxProposalDetail {
   readonly proposal: InboxProposal;
   readonly trace?: AgentLoopTrace;
@@ -208,6 +230,7 @@ export function renderProposalList(
   proposals: readonly InboxProposalSummary[],
   observation?: InboxObservationStatus,
   persistedAttempts: readonly InboxObservationAttempt[] = [],
+  calibration?: InboxCalibrationSummary,
 ): string {
   const items = proposals.map((proposal) => `<li class="proposal-card" data-status="${escapeHtml(proposal.status)}">
     <a href="/proposals/${encodeURIComponent(proposal.id)}"><h2>${escapeHtml(proposal.title)}</h2></a>
@@ -223,7 +246,44 @@ export function renderProposalList(
     : `<section aria-label="Recent observations"><h2>Recent observations</h2><ol>${attempts.slice(0, 5).map((attempt) =>
       `<li>${escapeHtml(observationTriggerLabel(attempt.trigger))} · ${observationAttemptLabel(attempt)} · ${escapeHtml(attempt.startedAt)}</li>`,
     ).join("")}</ol></section>`;
-  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header>${observationHistory}<ol>${items}</ol></main>`;
+  const calibrationSection = calibration === undefined ? "" : renderCalibrationSummary(calibration);
+  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header>${calibrationSection}${observationHistory}<ol>${items}</ol></main>`;
+}
+
+function renderCalibrationSummary(summary: InboxCalibrationSummary): string {
+  const proposal = summary.proposals;
+  const feedback = (Object.entries(proposal.feedback) as [InboxReviewFeedbackCode, number][])
+    .filter(([, count]) => count > 0)
+    .map(([code, count]) => `<dt>${escapeHtml(feedbackLabel(code))}</dt><dd>${count}</dd>`)
+    .join("");
+  const observation = summary.observations;
+  const outcomes = observation === undefined ? "" : (Object.entries(observation.outcomes) as [NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"], number][])
+    .filter(([, count]) => count > 0)
+    .map(([outcome, count]) => `<dt>${escapeHtml(observationAggregateOutcomeLabel(outcome))}</dt><dd>${count}</dd>`)
+    .join("");
+  const dispositions = observation === undefined ? "" : (Object.entries(observation.dispositions) as [InboxObservationDisposition, number][])
+    .filter(([, count]) => count > 0)
+    .map(([disposition, count]) => `<dt>${escapeHtml(observationDispositionLabel(disposition))}</dt><dd>${count}</dd>`)
+    .join("");
+  const observationSummary = observation === undefined ? "" : `<h3>Observations</h3><dl>
+    <dt>Total attempts</dt><dd>${observation.totalAttempts}</dd>
+    <dt>Completed</dt><dd>${observation.completedAttempts}</dd>
+    <dt>Interrupted</dt><dd>${observation.interruptedAttempts}</dd>
+    <dt>Running</dt><dd>${observation.runningAttempts}</dd>
+    ${outcomes}
+    ${dispositions}
+    <dt>No-proposal disposition not reported</dt><dd>${observation.noProposalWithoutDisposition}</dd>
+  </dl>`;
+  return `<section aria-label="Household calibration"><h2>Household calibration</h2><p>All local records · descriptive only</p>
+    <h3>Proposals</h3><dl>
+      <dt>Total</dt><dd>${proposal.total}</dd>
+      <dt>Pending review</dt><dd>${proposal.statuses.pending_review}</dd>
+      <dt>Approved</dt><dd>${proposal.statuses.approved}</dd>
+      <dt>Rejected</dt><dd>${proposal.statuses.rejected}</dd>
+      <dt>Expired</dt><dd>${proposal.statuses.expired}</dd>
+      ${feedback}
+      <dt>Legacy review without feedback</dt><dd>${proposal.reviewedWithoutFeedback}</dd>
+    </dl>${observationSummary}</section>`;
 }
 
 function observationAttemptLabel(attempt: InboxObservationAttempt): string {
@@ -321,6 +381,19 @@ function observationDispositionLabel(disposition: InboxObservationDisposition): 
     case "existing_rule_overlap": return "existing rule overlap";
     case "mapping_uncertain": return "home mapping uncertain";
     case "other_uncertainty": return "other uncertainty";
+  }
+}
+
+function observationAggregateOutcomeLabel(
+  outcome: NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"],
+): string {
+  switch (outcome) {
+    case "proposal_created": return "Proposal created";
+    case "no_proposal": return "No proposal";
+    case "world_not_ready": return "Home not ready";
+    case "proposal_pending": return "Review already pending";
+    case "agent_busy": return "Agent busy";
+    case "failed": return "Failed safely";
   }
 }
 
