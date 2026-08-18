@@ -11,7 +11,7 @@ parallel Agent or tool system.
 `pi-agent-core` is forbidden. Standard API-key providers use the official
 `@deepseek-ai/dsh-llm-pi-ai` adapter beneath the DSH LLM seam. Its internal
 `pi-ai` SDK is transitive implementation detail: this package neither declares
-it nor imports it. `mountDshPiHomeAgent` maps the five product provider names to
+it nor imports it. `mountDshHomeAgent` maps the five product provider names to
 DSH routes and owns the adapter and Home Agent in one Cordis lifecycle.
 
 Selected API-key profiles bridge into the official DSH credential seam through

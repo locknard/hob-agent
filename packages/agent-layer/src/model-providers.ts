@@ -1,10 +1,3 @@
-import type {
-  GenerateOptions,
-  LlmModelInfo,
-  LlmResolvedModelInfo,
-  StreamChunk,
-} from "@deepseek-ai/dsh-llm";
-
 export type SupportedModelProvider = "gpt" | "claude" | "deepseek" | "kimi" | "glm";
 
 export interface ProviderSetup {
@@ -27,19 +20,4 @@ export function providerSetup(id: SupportedModelProvider): ProviderSetup {
   const setup = PROVIDERS[id];
   if (!setup) throw new Error(`Unsupported model provider: ${id}`);
   return setup;
-}
-
-/**
- * The only model boundary owned by the product is the DSH LlmRuntime. Keeping
- * this narrow structural type lets callers depend on the DSH seam without
- * importing a provider SDK or constructing a second model registry.
- */
-export interface DshLlmRuntime {
-  resolveModelInfo(
-    provider: string,
-    model: string,
-    signal?: AbortSignal,
-  ): Promise<LlmResolvedModelInfo>;
-  listModels(provider: string): Promise<readonly LlmModelInfo[]>;
-  stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
 }

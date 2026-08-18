@@ -8,10 +8,10 @@ import { DshProfileCredentialProvider } from "./dsh-profile-credential-provider.
 import { providerSetup, type SupportedModelProvider } from "./model-providers.js";
 import type { SecretVault } from "./secret-vault.js";
 
-export interface DshPiHomeAgentOptions {
+export interface DshHomeAgentCompositionOptions {
   readonly provider: SupportedModelProvider;
   readonly model: string;
-  /** Optional explicit API-key profile; requires vault and shadows ambient env. */
+  /** Optional explicit API-key profile; requires vault and takes precedence over ambient env. */
   readonly profile?: AuthProfile;
   readonly vault?: SecretVault;
   readonly sessionId?: string;
@@ -19,9 +19,9 @@ export interface DshPiHomeAgentOptions {
 }
 
 /** Owns the official DSH pi-ai adapter and the single Home Agent as one fiber. */
-class DshPiHomeAgentComposition extends Service {
-  constructor(ctx: Context, private readonly options: DshPiHomeAgentOptions) {
-    super(ctx, "dshPiHomeAgentComposition");
+class DshHomeAgentComposition extends Service {
+  constructor(ctx: Context, private readonly options: DshHomeAgentCompositionOptions) {
+    super(ctx, "dshHomeAgentComposition");
   }
 
   protected async [Service.init](): Promise<void> {
@@ -55,6 +55,6 @@ class DshPiHomeAgentComposition extends Service {
 }
 
 /** Mounts a product provider name onto the official DSH pi-ai provider route. */
-export function mountDshPiHomeAgent(ctx: Context, options: DshPiHomeAgentOptions) {
-  return ctx.plugin(DshPiHomeAgentComposition, options);
+export function mountDshHomeAgent(ctx: Context, options: DshHomeAgentCompositionOptions) {
+  return ctx.plugin(DshHomeAgentComposition, options);
 }

@@ -21,7 +21,7 @@ Provider 目录与协议兼容层由官方 `dsh-llm-pi-ai` 插件管理。其内
 
 DSH 是唯一 Agent Runtime。标准 env API-key 路径使用官方
 `@deepseek-ai/dsh-llm-pi-ai@0.1.0-rc.7`，由它转换 text/tool/reasoning/image、usage、
-replay、取消和应用归因头；hob-agent 的 `mountDshPiHomeAgent` 只负责把产品 provider 名
+replay、取消和应用归因头；hob-agent 的 `mountDshHomeAgent` 只负责把产品 provider 名
 映射到 DSH route 并让 adapter 与 Home Agent 共用一个 Cordis 生命周期。自写的最小 stream
 转换器已经移除，避免 tools 被静默丢弃。
 

@@ -9,9 +9,9 @@
 | --- | --- | --- |
 | 五个 provider 的标准 API key 环境变量 | 通过 DSH credential seam 与官方 adapter 使用；2026-08-18 已真实探测 DeepSeek `deepseek-v4-flash` | API key 不会进入 prompt、状态列表或 SQLite；仍缺设置界面。 |
 | 标准 env API key → DSH Home Agent | 官方 `dsh-llm-pi-ai` 拥有 DSH LLM seam，并映射 GPT/Claude/DeepSeek/Kimi/GLM runtime route | 已真实验证 DeepSeek；设置 UI 和跨平台安全存储仍未完成。 |
-| 选中的 API-key profile → DSH Home Agent | read-only DSH credential provider 将标准 alias 映射到唯一 SecretRef，每次请求重新读取且遮蔽 ambient env | allowlist env 与 macOS Keychain 均可用；`describe` 不读取 Keychain。跨平台加密后端与设置 UI 未完成。 |
+| 选中的 API-key profile → DSH Home Agent | read-only DSH credential provider 将标准 alias 映射到唯一 SecretRef，每次请求重新读取且遮蔽 ambient env | allowlist env 与 macOS Keychain 均可用；`describe` 按 DSH contract 检查凭据当前是否可解析，因此可能访问 Keychain。跨平台加密后端与设置 UI 未完成。 |
 | Claude OAuth | hob-agent 保留 profile-scoped PKCE、token 规范化、跨进程刷新锁、Keychain 与 non-secret expiry 同步，并迁入 DSH-owned OAuth seam | 官方 DSH rc.7 不提供交互式 OAuth adapter；默认 fail closed，故**不可标为产品已接入**。 |
-| GPT/OpenAI API OAuth | 不支持 | 当前选择的是 pi 的 `openai` API provider，其真实认证方式为 API key；不会伪造 OAuth 选项。 |
+| GPT/OpenAI API OAuth | 不支持 | 当前选择的是官方 DSH `openai` provider route，其真实认证方式为 API key；不会伪造 OAuth 选项。 |
 | 外部 Claude/Codex CLI 凭据 | Claude Code 有文件 reader、按需发现、显式 OAuth 导入和仅在导入许可时读取 Keychain；被动发现不触碰 Keychain | Codex reader 不迁移（见下方理由）；还缺外部 CLI runtime。 |
 
 ## 已适配（有代码与测试）
@@ -35,17 +35,17 @@
 | profile failover runner | 显式 profile 顺序执行；仅短暂失败轮换并持久写入冷却状态 | `profile-failover-runner.ts`、测试 |
 | profile health observation | 成功清除 cooldown/连续失败计数并记录 last-success；只持久化 credential-scoped auth/billing/rate-limit，provider-wide overload/timeout/format/unknown 不污染 profile | state store、coordinator、runner 测试 |
 | safe failover error boundary | 最终只返回 provider/profile/reason 的稳定错误，绝不透传供应商原文 | `profile-failover-runner.ts`、测试 |
-| DSH credential seam | 选定 profile 通过 SecretVault 按操作解析为 DSH `CredentialProvider`；`describe` 不读取 key | `dsh-profile-credential-provider.ts`、`secret-vault.ts`、测试 |
-| provider runtime credential injection | 官方 adapter 从 `ctx.credentials` 解析 env-shaped alias；产品代码不接触 provider SDK credential store | `dsh-pi-home-agent.ts`、测试 |
-| official DSH pi-ai adapter | 使用 DSH 官方 rc.7 adapter 处理 tools/reasoning/images/replay/usage/attribution/cancellation；hob 只保留产品名映射与组合生命周期，不维护第二套转换器 | `dsh-pi-home-agent.ts`、兼容集与组合测试 |
+| DSH credential seam | 选定 profile 通过 SecretVault 按操作解析为 DSH `CredentialProvider`；`describe` 会解析凭据以准确报告当前可用性。被动的 profile 状态查询仍走独立 availability seam，不读取 secret | `dsh-profile-credential-provider.ts`、`auth-profile-secret-availability.ts`、`secret-vault.ts`、测试 |
+| provider runtime credential injection | 官方 adapter 从 `ctx.credentials` 解析 env-shaped alias；产品代码不接触 provider SDK credential store | `dsh-home-agent-composition.ts`、测试 |
+| official DSH pi-ai adapter | 使用 DSH 官方 rc.7 adapter 处理 tools/reasoning/images/replay/usage/attribution/cancellation；hob 只保留产品名映射与组合生命周期，不维护第二套转换器 | `dsh-home-agent-composition.ts`、兼容集与组合测试 |
 | profile → DSH credential seam | 选中的 API-key profile 通过只读 alias→SecretRef provider 按请求解析；不缓存、不枚举、不向未映射 provider 泄露 | `dsh-profile-credential-provider.ts`、组合测试 |
-| selected profile → provider runtime | 选中的 API-key profile 仅映射到其对应的 DSH route，不可越权供给其他 provider | `profile-credential-runtime.ts`、测试 |
+| selected profile → provider runtime | 选中的 API-key profile 仅映射到其对应的 DSH route，不可越权供给其他 provider | `dsh-home-agent-composition.ts`、`dsh-profile-credential-provider.ts`、测试 |
 | OS Keychain SecretVault | macOS `keychain:service/account` 精确读写；写入经 stdin 而非子进程参数，不枚举钥匙串且 SQLite 不存 secret | `macos-keychain-secret-vault.ts`、测试 |
 | API-key profile provisioning | 先写 secret 再写元数据；元数据失败时恢复旧 secret 或删除新项，避免遗留或丢失凭据 | `api-key-profile-provisioner.ts`、测试 |
 | turn-local fallback | 显式模型候选链，成功 fallback 不改 session 的 selected model | `model-fallback.ts`、测试 |
 | OAuth PKCE/state | 通用 authorization-code + PKCE 授权 URL 与 callback state 校验 | `oauth-pkce.ts`、测试 |
 | OAuth token 生命周期 | token 响应规范化、5 分钟刷新余量、拒绝较旧刷新结果覆盖 | `oauth-credentials.ts`、测试 |
-| OAuth refresh single-flight | 同进程刷新可合并；默认文件锁按 `(provider, profileId)` 跨进程序列化 `modify/delete`，具备 `0600`、hard timeout、stale recovery 与稳定脱敏错误 | `oauth-refresh-coordinator.ts`、`oauth-refresh-lock.ts`、测试 |
+| OAuth refresh serialization | store 内串行修改；默认文件锁按 `(provider, profileId)` 跨进程序列化 `modify/delete`，具备 expiry double-check、`0600`、hard timeout、stale recovery 与稳定脱敏错误 | `oauth-profile-credential-store.ts`、`oauth-refresh-lock.ts`、测试 |
 | OAuth credential persistence | selected OAuth token JSON 只存 SecretVault；文件锁内重新读取并执行 expiry double-check，两个 store 实例不会用旧 refresh token 覆盖新值；仅向状态层传递 `expiresAt` / 删除标记 | `oauth-profile-credential-store.ts`、测试 |
 | DSH-owned OAuth login seam | provider-specific adapter 负责 callback/device mechanics；hob 边界持久化 token、使用 profile lock 并脱敏错误；缺 adapter 时 fail closed | `dsh-oauth-seam.ts`、`oauth-profile-login.ts`、测试 |
 | DSH-owned OAuth local logout | provider-specific adapter 可撤销当前 credential，成功后才删除本地 token；缺 adapter 时不删除 | `oauth-profile-logout.ts`、测试 |

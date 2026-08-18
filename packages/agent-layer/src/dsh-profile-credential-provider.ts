@@ -39,7 +39,7 @@ export class DshProfileCredentialProvider extends CredentialProvider {
   }
 
   async describe(ref: CredentialRef): Promise<CredentialInfo> {
-    const configured = this.references[ref] !== undefined;
+    const configured = (await this.resolve(ref)) !== undefined;
     return {
       configured,
       ...(configured ? { source: "profile" } : {}),

@@ -20,6 +20,12 @@ test("DSH is the only Agent Runtime dependency and implementation", () => {
     "provider-login.ts",
     "pi-credential-store.test.ts",
     "pi-credential-store.ts",
+    "dsh-pi-home-agent.test.ts",
+    "dsh-pi-home-agent.ts",
+    "oauth-refresh-coordinator.test.ts",
+    "oauth-refresh-coordinator.ts",
+    "profile-credential-runtime.test.ts",
+    "profile-credential-runtime.ts",
   ]);
   const present = readdirSync(sourceDirectory)
     .filter((file) => forbiddenFiles.has(file))

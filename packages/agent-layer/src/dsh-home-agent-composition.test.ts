@@ -4,7 +4,7 @@ import test from "node:test";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
 
-import { mountDshPiHomeAgent } from "./dsh-pi-home-agent.js";
+import { mountDshHomeAgent } from "./dsh-home-agent-composition.js";
 
 class StubHomeAssistantService extends Service {
   readonly snapshot = {
@@ -24,7 +24,7 @@ test("mounts the official DSH pi-ai adapter for a product provider route", async
   const ctx = new Context();
   await ctx.plugin(StubHomeAssistantService);
 
-  const fiber = await mountDshPiHomeAgent(ctx, {
+  const fiber = await mountDshHomeAgent(ctx, {
     provider: "deepseek",
     model: "deepseek-v4-flash",
     sessionId: "home-provider-test",
@@ -42,7 +42,7 @@ test("bridges a selected API-key profile into the official DSH credential seam",
   const ctx = new Context();
   await ctx.plugin(StubHomeAssistantService);
   const reads: string[] = [];
-  const fiber = await mountDshPiHomeAgent(ctx, {
+  const fiber = await mountDshHomeAgent(ctx, {
     provider: "deepseek",
     model: "deepseek-v4-flash",
     profile: {

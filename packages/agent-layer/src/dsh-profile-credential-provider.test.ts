@@ -38,12 +38,13 @@ test("resolves only explicit DSH aliases through selected SecretRefs per operati
   await ctx.fiber.dispose();
 });
 
-test("describes a configured profile without reading it and remains read-only", async () => {
+test("describes current credential availability and remains read-only", async () => {
   let reads = 0;
+  let value: string | undefined = "secret";
   const ctx = new Context();
   await ctx.plugin(DshProfileCredentialProvider, {
     references: { DEEPSEEK_API_KEY: "keychain:hob-agent/deepseek:primary" },
-    vault: { read: async () => { reads += 1; return "secret"; } },
+    vault: { read: async () => { reads += 1; return value; } },
   });
   const ref = credentialRef("DEEPSEEK_API_KEY");
 
@@ -52,10 +53,19 @@ test("describes a configured profile without reading it and remains read-only", 
     source: "profile",
     writable: false,
   });
-  assert.equal(reads, 0);
+  value = undefined;
+  assert.deepEqual(await ctx.credentials.describe(ref), {
+    configured: false,
+    writable: false,
+  });
+  assert.deepEqual(await ctx.credentials.describe(credentialRef("OPENAI_API_KEY")), {
+    configured: false,
+    writable: false,
+  });
+  assert.equal(reads, 2);
   await assert.rejects(ctx.credentials.set(ref, "replacement"), /read-only/);
   await assert.rejects(ctx.credentials.unset(ref), /read-only/);
-  assert.equal(reads, 0);
+  assert.equal(reads, 2);
 
   await ctx.fiber.dispose();
 });
