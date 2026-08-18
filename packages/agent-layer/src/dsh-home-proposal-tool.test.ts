@@ -20,6 +20,12 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
           status: "pending_review",
           applicationStatus: "not_available",
           conflictCheck: { existingAutomationCount: 15, matches: [{ identity: "rule-1" }] },
+          spaceCoverage: {
+            selectedDevices: 1,
+            devicesWithSingleSpace: 0,
+            devicesWithoutSpace: 1,
+            devicesWithMultipleSpaces: 0,
+          },
           evidence: {
             references: [{ source: "post-baseline-event" }],
             temporal: { coverage: [{ status: "partial" }], truncated: false },
@@ -76,6 +82,12 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
     revision: 1,
     applicationStatus: "not_available",
     conflictSummary: { existingAutomationCount: 15, matchCount: 1 },
+    spaceCoverage: {
+      selectedDevices: 1,
+      devicesWithSingleSpace: 0,
+      devicesWithoutSpace: 1,
+      devicesWithMultipleSpaces: 0,
+    },
     evidenceSummary: { referenceCount: 1, coverageStatus: "partial", truncated: false },
   });
 });

@@ -219,6 +219,12 @@ test("runs one DSH observation through governed tools into a trusted Inbox propo
     whyNow: "A post-baseline event is available with complete temporal coverage.",
     uncertainties: ["Whether the observed light activity was intentional."],
   });
+  assert.deepEqual(detail.proposal.spaceCoverage, {
+    selectedDevices: 1,
+    devicesWithSingleSpace: 1,
+    devicesWithoutSpace: 0,
+    devicesWithMultipleSpaces: 0,
+  });
   assert.equal(detail.proposal.conflictCheck.existingAutomationCount, 1);
   assert.deepEqual(detail.proposal.conflictCheck.matches, [{
     identity: "opaque-rule-1",

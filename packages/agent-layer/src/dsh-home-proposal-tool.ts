@@ -27,6 +27,12 @@ interface HomeProposalPort {
     status: "pending_review";
     applicationStatus: "not_available";
     conflictCheck: { existingAutomationCount: number; matches: readonly unknown[] };
+    spaceCoverage: {
+      selectedDevices: number;
+      devicesWithSingleSpace: number;
+      devicesWithoutSpace: number;
+      devicesWithMultipleSpaces: number;
+    };
     evidence: {
       references: readonly unknown[];
       temporal?: {
@@ -54,6 +60,17 @@ const OUTPUT_SCHEMA = {
       properties: {
         existingAutomationCount: { type: "number", required: true },
         matchCount: { type: "number", required: true },
+      },
+    },
+    spaceCoverage: {
+      type: "object",
+      required: true,
+      additionalProperties: false,
+      properties: {
+        selectedDevices: { type: "number", required: true },
+        devicesWithSingleSpace: { type: "number", required: true },
+        devicesWithoutSpace: { type: "number", required: true },
+        devicesWithMultipleSpaces: { type: "number", required: true },
       },
     },
     evidenceSummary: {
@@ -129,6 +146,7 @@ export function apply(ctx: Context): void {
         },
       });
       if (proposal.status !== "pending_review") throw new Error("Created proposal is not pending review");
+      if (proposal.spaceCoverage === undefined) throw new Error("Created proposal is missing Hub-bound space coverage");
       const coverageStatus = summarizeCoverage(proposal.evidence.temporal?.coverage);
       return {
         proposalId: proposal.id,
@@ -139,6 +157,7 @@ export function apply(ctx: Context): void {
           existingAutomationCount: proposal.conflictCheck.existingAutomationCount,
           matchCount: proposal.conflictCheck.matches.length,
         },
+        spaceCoverage: proposal.spaceCoverage,
         evidenceSummary: {
           referenceCount: proposal.evidence.references.length,
           coverageStatus,

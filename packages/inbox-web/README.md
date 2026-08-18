@@ -7,6 +7,8 @@ note so useful, duplicate, weakly evidenced, incorrect, preference-mismatched,
 or risky suggestions can be distinguished without reinterpreting prose.
 New Agent proposals also display expected household value, timing, and
 uncertainties in a clearly model-authored section separate from Hub evidence.
+The Hub's selected-device space coverage is displayed separately again, with
+single-space, unassigned, and multiple-space counts but no household names.
 Approval records intent only; this package has no apply,
 automation-install, or device-control method.
 

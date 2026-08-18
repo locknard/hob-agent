@@ -51,6 +51,10 @@ export class HomeProposalService extends Service {
     if (selectedDevices.length !== selected.size) {
       throw new TypeError("home proposal selected devices are unavailable");
     }
+    const activeSpaceIds = new Set(snapshot.spaces.map((space) => space.hwSpaceId));
+    const selectedDeviceSpaceCounts = selectedDevices.map((device) =>
+      new Set(device.bindings.flatMap((binding) =>
+        binding.hwSpaceId !== undefined && activeSpaceIds.has(binding.hwSpaceId) ? [binding.hwSpaceId] : [])).size);
     const relevantBridgeIds = new Set(selectedDevices.flatMap((device) => [
       ...device.bindings.map((binding) => binding.bridgeId),
       ...device.capabilities.flatMap((capability) =>
@@ -164,6 +168,12 @@ export class HomeProposalService extends Service {
       risk: { ...input.risk, requiresHumanApproval: true },
       intent: input.intent,
       rationale: input.rationale,
+      spaceCoverage: {
+        selectedDevices: selectedDevices.length,
+        devicesWithSingleSpace: selectedDeviceSpaceCounts.filter((count) => count === 1).length,
+        devicesWithoutSpace: selectedDeviceSpaceCounts.filter((count) => count === 0).length,
+        devicesWithMultipleSpaces: selectedDeviceSpaceCounts.filter((count) => count > 1).length,
+      },
     });
   }
 

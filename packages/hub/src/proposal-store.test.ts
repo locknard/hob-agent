@@ -55,6 +55,12 @@ function input(overrides: Partial<CreateProposalInput> = {}): CreateProposalInpu
       whyNow: "Recent bounded evidence suggests a review is timely.",
       uncertainties: ["Whether the current timing reflects household preference."],
     },
+    spaceCoverage: {
+      selectedDevices: 1,
+      devicesWithSingleSpace: 0,
+      devicesWithoutSpace: 1,
+      devicesWithMultipleSpaces: 0,
+    },
     intent: {
       type: "automation-draft",
       description: "Create a draft rule; do not install it.",
@@ -192,7 +198,11 @@ test("keeps reviewed v1 rows from before structured feedback readable", async ()
   store.close();
 
   const reviewedAt = "2026-08-19T01:10:00.000Z";
-  const { rationale: _newRationale, ...legacyProposal } = proposal;
+  const {
+    rationale: _newRationale,
+    spaceCoverage: _newSpaceCoverage,
+    ...legacyProposal
+  } = proposal;
   const legacyReviewed = {
     ...legacyProposal,
     revision: 2,
@@ -220,6 +230,7 @@ test("keeps reviewed v1 rows from before structured feedback readable", async ()
   const loaded = reopened.get(proposal.id);
   assert.equal(loaded?.status, "approved");
   assert.equal(loaded?.review?.feedbackCode, undefined);
+  assert.equal(loaded?.spaceCoverage, undefined);
   reopened.close();
   await rm(directory, { recursive: true, force: true });
 });
@@ -274,6 +285,22 @@ test("rejects missing conflict checks, unsafe approval semantics, and oversized 
   );
   assert.throws(
     () => store.create(input({ idempotencyKey: "missing-rationale", rationale: undefined })),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+  );
+  assert.throws(
+    () => store.create(input({ idempotencyKey: "missing-space-coverage", spaceCoverage: undefined })),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+  );
+  assert.throws(
+    () => store.create(input({
+      idempotencyKey: "invalid-space-coverage-sum",
+      spaceCoverage: {
+        selectedDevices: 1,
+        devicesWithSingleSpace: 1,
+        devicesWithoutSpace: 1,
+        devicesWithMultipleSpaces: 0,
+      },
+    })),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
   );
   assert.throws(

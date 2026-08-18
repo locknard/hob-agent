@@ -32,6 +32,12 @@ const candidate: CreateProposalInput = {
   dryRun: { status: "passed", summary: "Read-only proposal; no changes were made." },
   risk: { level: "low", reasons: [], requiresHumanApproval: true },
   rationale,
+  spaceCoverage: {
+    selectedDevices: 1,
+    devicesWithSingleSpace: 0,
+    devicesWithoutSpace: 1,
+    devicesWithMultipleSpaces: 0,
+  },
   intent: {
     type: "household-insight",
     description: "Ask the household to review coverage.",
@@ -57,6 +63,7 @@ class StubHomeWorld extends Service {
     };
     return {
       generatedAt: "2026-08-19T01:00:00.000Z",
+      spaces: [],
       bridges: {
         "bridge-a": { diagnostics: { historyGapCount: 0 } },
         ...(this.includeUnavailableBridge ? { "bridge-b": { diagnostics: { historyGapCount: 0 } } } : {}),
@@ -270,6 +277,12 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     summary: "No automation artifact exists yet; execution simulation was not run.",
   });
   assert.deepEqual(proposal.rationale, rationale);
+  assert.deepEqual(proposal.spaceCoverage, {
+    selectedDevices: 1,
+    devicesWithSingleSpace: 0,
+    devicesWithoutSpace: 1,
+    devicesWithMultipleSpaces: 0,
+  });
   assert.equal(proposal.applicationStatus, "not_available");
 
   await assert.rejects(() => ctx.homeProposals.createDraft({

@@ -119,6 +119,18 @@ const rationaleSchema = z.object({
   uncertainties: z.array(boundedText).min(1).max(6),
 }).strict();
 
+const spaceCoverageSchema = z.object({
+  selectedDevices: z.number().int().min(1).max(20),
+  devicesWithSingleSpace: z.number().int().nonnegative(),
+  devicesWithoutSpace: z.number().int().nonnegative(),
+  devicesWithMultipleSpaces: z.number().int().nonnegative(),
+}).strict().superRefine((coverage, ctx) => {
+  if (coverage.devicesWithSingleSpace + coverage.devicesWithoutSpace
+    + coverage.devicesWithMultipleSpaces !== coverage.selectedDevices) {
+    ctx.addIssue({ code: "custom", message: "selected-device space coverage must sum to the selected device count" });
+  }
+});
+
 const createProposalInputSchema = z.object({
   kind: z.enum([
     "automation-draft",
@@ -137,6 +149,7 @@ const createProposalInputSchema = z.object({
   risk: riskSchema,
   intent: intentSchema,
   rationale: rationaleSchema.optional(),
+  spaceCoverage: spaceCoverageSchema.optional(),
 }).strict();
 
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
@@ -314,6 +327,9 @@ export class SqliteProposalStore {
     const input = parsed.data;
     if (input.provenance.producer === "dsh-home-agent" && input.rationale === undefined) {
       throw new ProposalStoreError("invalid_proposal", "Agent-created proposals require a bounded household rationale");
+    }
+    if (input.provenance.producer === "dsh-home-agent" && input.spaceCoverage === undefined) {
+      throw new ProposalStoreError("invalid_proposal", "Agent-created proposals require Hub-bound space coverage");
     }
     if (input.conflictCheck.status !== "checked") {
       throw new ProposalStoreError("conflict_check_required", "A completed conflict check is required");

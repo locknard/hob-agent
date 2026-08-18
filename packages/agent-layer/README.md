@@ -31,8 +31,10 @@ treated as evidence or authority. The tool cannot supply its own evidence or
 conflict-check result, approve the proposal, or apply it. For a temporal claim
 it may select current hub capability IDs and a bounded window; the Hub re-runs
 the evidence query and binds exact epoch/sequence references and honest
-coverage to the proposal. DSH session/call identity is injected as trusted
-provenance by the tool implementation.
+coverage to the proposal. The tool result also returns the Hub-produced
+single-space, unassigned, and multiple-space counts for the selected devices,
+without names or native identities. DSH session/call identity is injected as
+trusted provenance by the tool implementation.
 
 `AgentLoopTraceService` is a bounded, read-only projection of DSH's canonical
 `session/event` stream. It exposes turn/step/tool status, compaction/prune

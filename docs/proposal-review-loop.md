@@ -52,6 +52,9 @@ Every proposal is a bounded, versioned envelope with:
   rationale stating expected value, why it is timely, and one to six explicit
   uncertainties; the Inbox labels this as the Agent's case rather than Hub
   evidence;
+- a Hub-bound aggregate showing whether each selected device has exactly one,
+  no, or multiple accepted neutral spaces, so incomplete household mapping
+  cannot be hidden by the Agent's rationale;
 - immutable provenance identifying the producer and, when applicable, the DSH
   session and root tool call;
 - evidence references and per-bridge watermarks rather than copied raw events;

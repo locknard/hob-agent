@@ -55,6 +55,12 @@ const proposal: InboxProposal = {
     whyNow: "Recent bounded evidence shows a candidate pattern.",
     uncertainties: ["Whether late arrivals intentionally keep the light on."],
   },
+  spaceCoverage: {
+    selectedDevices: 1,
+    devicesWithSingleSpace: 0,
+    devicesWithoutSpace: 1,
+    devicesWithMultipleSpaces: 0,
+  },
   intent: { type: "automation-draft", description: "Prepare a draft.", rollback: "Discard it." },
   audit: [{ id: "audit-1", at: "2026-08-19T01:00:00.000Z", action: "created", actor: "dsh-home-agent", revision: 1 }],
 };
@@ -133,6 +139,9 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(detailHtml, /Why now/i);
   assert.match(detailHtml, /Agent-declared uncertainties/i);
   assert.match(detailHtml, /do not replace Hub evidence/i);
+  assert.match(detailHtml, /Selected-device space coverage/i);
+  assert.match(detailHtml, /Unassigned.*1/i);
+  assert.match(detailHtml, /Hub-produced/i);
   assert.match(detailHtml, /create_home_proposal/);
   assert.match(detailHtml, /Approve/);
   assert.match(detailHtml, /Reject/);

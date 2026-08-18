@@ -65,6 +65,10 @@ apply an artifact or control a device.
   labels these as model-authored rationale, while Hub evidence, overlap, and
   risk remain separate authoritative sections. Existing v1 rows without the
   additive rationale remain readable.
+- The Hub binds mutually exclusive selected-device space coverage into each
+  new Home Agent draft. This exposes incomplete or ambiguous mapping in the
+  Inbox without names or identifiers and without trusting the model to report
+  its own context gap; legacy v1 proposals remain readable.
 - Proposal evidence, bridge watermarks, history gaps, and existing-rule
   conflicts are hub-produced. `foreignRules@1` catalogs are accepted only when
   their epoch matches the committed bridge watermark.

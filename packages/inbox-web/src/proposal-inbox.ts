@@ -68,6 +68,12 @@ export interface InboxProposal {
     readonly whyNow: string;
     readonly uncertainties: readonly string[];
   };
+  readonly spaceCoverage?: {
+    readonly selectedDevices: number;
+    readonly devicesWithSingleSpace: number;
+    readonly devicesWithoutSpace: number;
+    readonly devicesWithMultipleSpaces: number;
+  };
   readonly intent: { readonly type: string; readonly description: string; readonly rollback: string };
   readonly review?: {
     readonly decision: "approved" | "rejected" | "expired";
@@ -243,6 +249,9 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   const rationale = proposal.rationale === undefined
     ? "<section aria-label=\"Agent proposal rationale\"><h2>Agent proposal rationale</h2><p>Not recorded in this legacy proposal.</p></section>"
     : `<section aria-label="Agent proposal rationale"><h2>Agent proposal rationale</h2><p>These model-authored statements explain the Agent's case; they do not replace Hub evidence or household judgment.</p><h3>Expected household value</h3><p>${escapeHtml(proposal.rationale.householdValue)}</p><h3>Why now</h3><p>${escapeHtml(proposal.rationale.whyNow)}</p><h3>Agent-declared uncertainties</h3><ul>${proposal.rationale.uncertainties.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`;
+  const spaceCoverage = proposal.spaceCoverage === undefined
+    ? "<section aria-label=\"Selected-device space coverage\"><h2>Selected-device space coverage</h2><p>Not recorded in this legacy proposal.</p></section>"
+    : `<section aria-label="Selected-device space coverage"><h2>Selected-device space coverage</h2><p>Hub-produced mapping coverage; this is separate from the Agent's rationale.</p><dl><dt>Selected devices</dt><dd>${proposal.spaceCoverage.selectedDevices}</dd><dt>Single-space suggestions</dt><dd>${proposal.spaceCoverage.devicesWithSingleSpace}</dd><dt>Unassigned</dt><dd>${proposal.spaceCoverage.devicesWithoutSpace}</dd><dt>Multiple spaces</dt><dd>${proposal.spaceCoverage.devicesWithMultipleSpaces}</dd></dl></section>`;
   const review = proposal.status === "pending_review" ? `<section aria-label="Household review"><h2>Household review</h2>
   <form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
     <input type="hidden" name="expectedRevision" value="${proposal.revision}">
@@ -270,6 +279,7 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   return `<main class="proposal-detail" data-status="${escapeHtml(proposal.status)}">
     <header><a href="/proposals">Proposal inbox</a><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p></header>
     ${rationale}
+    ${spaceCoverage}
     <section aria-label="Intent"><h2>Intended change</h2><p>${escapeHtml(proposal.intent.description)}</p><h3>Rollback</h3><p>${escapeHtml(proposal.intent.rollback)}</p></section>
     <section aria-label="Evidence"><h2>Evidence</h2><p>${proposal.evidence.references.length} bounded references</p><h3>References</h3><ul>${references}</ul><h3>Coverage</h3>${temporalCoverage}<h3>Bridge watermarks</h3><ul>${watermarks}</ul></section>
     <section aria-label="Existing-rule overlap screen"><h2>Existing-rule overlap screen</h2><p>${proposal.conflictCheck.existingAutomationCount} existing automations · ${proposal.conflictCheck.matches.length} possible name overlaps</p><p>Metadata-only overlap screen; zero matches does not prove non-interference. Review existing rule logic before implementation.</p></section>
