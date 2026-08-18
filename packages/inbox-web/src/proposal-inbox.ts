@@ -71,7 +71,7 @@ export interface InboxObservationStatus {
   readonly state: "waiting" | "running" | "stopped";
   readonly lastAttempt?: {
     readonly at: string;
-    readonly outcome: "started" | "world_not_ready" | "proposal_pending" | "agent_busy" | "failed";
+    readonly outcome: "proposal_created" | "no_proposal" | "world_not_ready" | "proposal_pending" | "agent_busy" | "failed";
   };
 }
 
@@ -151,7 +151,7 @@ export function renderProposalList(
   </li>`).join("");
   const observationStatus = observation === undefined
     ? "<p class=\"observation-status\">Observation schedule is disabled.</p>"
-    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observation.lastAttempt.outcome)} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
+    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome))} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
   return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header><ol>${items}</ol></main>`;
 }
 
@@ -185,6 +185,19 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
     <section aria-label="Risk"><h2>Risk: ${escapeHtml(proposal.risk.level)}</h2><ul>${risks}</ul></section>
     ${review}${timeline}
   </main>`;
+}
+
+function observationOutcomeLabel(
+  outcome: NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"],
+): string {
+  switch (outcome) {
+    case "proposal_created": return "proposal created";
+    case "no_proposal": return "no useful proposal";
+    case "world_not_ready": return "home not ready";
+    case "proposal_pending": return "review already pending";
+    case "agent_busy": return "agent busy";
+    case "failed": return "failed safely";
+  }
 }
 
 function escapeHtml(value: string): string {

@@ -31,4 +31,6 @@ their environment settings are present. It uses the normal private SQLite
 paths, so a created proposal remains available to the regular Inbox afterward.
 
 The JSON result contains only the stable outcome and whether a new proposal was
-created, no proposal identity or content.
+created, no proposal identity or content. A successful turn that found no
+materially useful change reports `completed` with `proposal: "none"`; it is not
+reported as a failure or as merely started.

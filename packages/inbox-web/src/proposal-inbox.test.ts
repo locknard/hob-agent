@@ -84,11 +84,11 @@ test("lists and renders untrusted proposal content without creating an applicati
     intervalMinutes: 360,
     runOnStart: false,
     state: "waiting",
-    lastAttempt: { at: "2026-08-19T00:00:00.000Z", outcome: "proposal_pending" },
+    lastAttempt: { at: "2026-08-19T00:00:00.000Z", outcome: "no_proposal" },
   });
   assert.equal(listHtml.includes("<script>"), false);
   assert.match(listHtml, /&lt;script&gt;Unsafe title&lt;\/script&gt;/);
-  assert.match(listHtml, /proposal_pending/);
+  assert.match(listHtml, /no useful proposal/i);
 
   const detail = controller.detail("proposal-1");
   assert.equal(detail?.trace?.sessionId, "home-main");

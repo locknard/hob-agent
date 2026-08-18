@@ -36,6 +36,7 @@ class StubProposals extends Service {
 class StubAgent extends Service {
   observationStatus: "idle" | "running" = "idle";
   observations = 0;
+  onObservation: (() => void) | undefined;
 
   constructor(ctx: Context) {
     super(ctx, "homeAgent");
@@ -43,6 +44,7 @@ class StubAgent extends Service {
 
   async requestObservation() {
     this.observations += 1;
+    this.onObservation?.();
   }
 }
 
@@ -64,19 +66,22 @@ async function setup() {
 test("starts one explicit observation only for a ready idle home with an empty Inbox", async () => {
   const { ctx, fiber } = await setup();
 
-  assert.equal(await ctx.homeObservationScheduler.observeNow(), "started");
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "no_proposal");
   assert.equal(ctx.homeAgent.observations, 1);
-  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "started");
+  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "no_proposal");
+
+  ctx.homeAgent.onObservation = () => { ctx.homeProposals.pending = true; };
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "proposal_created");
+  assert.equal(ctx.homeAgent.observations, 2);
 
   ctx.homeWorld.ready = false;
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "world_not_ready");
   ctx.homeWorld.ready = true;
-  ctx.homeProposals.pending = true;
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "proposal_pending");
   ctx.homeProposals.pending = false;
   ctx.homeAgent.observationStatus = "running";
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "agent_busy");
-  assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeAgent.observations, 2);
   assert.deepEqual(ctx.homeObservationScheduler.snapshot(), {
     enabled: true,
     intervalMinutes: 60,

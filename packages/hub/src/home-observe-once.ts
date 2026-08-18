@@ -38,7 +38,7 @@ export type ObserveHomeReport =
   | { readonly outcome: "completed"; readonly proposal: "created" | "none" }
   | {
       readonly outcome: "not_run";
-      readonly reason: Exclude<HomeObservationOutcome, "started">;
+      readonly reason: Exclude<HomeObservationOutcome, "proposal_created" | "no_proposal">;
       readonly proposal: "already_pending" | "none";
     };
 
@@ -71,7 +71,6 @@ export async function observeHomeEnvironment(
       await wait(Math.min(readyPollMs, remaining));
     }
 
-    const before = runtime.context.homeProposals.list({ status: "pending_review", limit: 1 }).length;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), observationTimeoutMs);
     let outcome: HomeObservationOutcome;
@@ -80,10 +79,8 @@ export async function observeHomeEnvironment(
     } finally {
       clearTimeout(timeout);
     }
-    if (outcome === "started") {
-      const after = runtime.context.homeProposals.list({ status: "pending_review", limit: 1 }).length;
-      return { outcome: "completed", proposal: after > before ? "created" : "none" };
-    }
+    if (outcome === "proposal_created") return { outcome: "completed", proposal: "created" };
+    if (outcome === "no_proposal") return { outcome: "completed", proposal: "none" };
     return {
       outcome: "not_run",
       reason: outcome,

@@ -92,3 +92,30 @@ test("does not call the model when a proposal is already pending", async () => {
   assert.deepEqual(report, { outcome: "not_run", reason: "proposal_pending", proposal: "already_pending" });
   assert.equal(observations, 0);
 });
+
+test("reports a completed observation that intentionally creates no proposal", async () => {
+  const report = await observeHomeEnvironment(ENV, {
+    createRuntime() {
+      return {
+        context: {
+          homeWorld: {
+            snapshot: () => ({
+              bridges: { "bridge-a": {} },
+              bridgeWatermarks: [{ bridgeId: "bridge-a" }],
+              diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready" }],
+            }),
+          },
+          homeProposals: { list: () => [] },
+          homeAgent: {
+            observationStatus: "idle" as const,
+            async requestObservation() {},
+          },
+        } as never,
+        async start() {},
+        async stop() {},
+      };
+    },
+  });
+
+  assert.deepEqual(report, { outcome: "completed", proposal: "none" });
+});

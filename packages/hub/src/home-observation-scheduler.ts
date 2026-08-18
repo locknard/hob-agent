@@ -13,7 +13,8 @@ export interface HomeObservationSchedulerOptions {
 }
 
 export type HomeObservationOutcome =
-  | "started"
+  | "proposal_created"
+  | "no_proposal"
   | "world_not_ready"
   | "proposal_pending"
   | "agent_busy"
@@ -151,7 +152,9 @@ export async function requestGovernedHomeObservation(
     }
     if (ctx.homeAgent.observationStatus !== "idle") return "agent_busy";
     await ctx.homeAgent.requestObservation(signal);
-    return "started";
+    return ctx.homeProposals.list({ status: "pending_review", limit: 1 }).length > 0
+      ? "proposal_created"
+      : "no_proposal";
   } catch {
     return "failed";
   }
