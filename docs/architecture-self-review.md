@@ -56,6 +56,10 @@ apply an artifact or control a device.
 - `pnpm validate:home` provides a model-free, aggregate-only readiness cut over
   the production HomeWorld paths before autonomous observation is enabled. It
   emits no household identities, values, URLs, credentials, or raw errors.
+- The DSH Agent can inspect the existing neutral `foreignRules@1` catalog
+  through bounded `get_home_rules` pages before proposing an automation. The
+  Hub still owns the authoritative proposal-time conflict check, and no rule
+  body or mutation path crosses the tool boundary.
 - Optional Inbox HTTP is disabled without an explicit credential, binds only to
   `127.0.0.1`, stores only a derived verifier, authenticates every request, and
   requires exact same-origin bounded review POSTs.

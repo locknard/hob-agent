@@ -84,7 +84,12 @@ class AcceptanceWorld extends Service {
   }
 
   async foreignRuleCatalog() {
-    return [{ bridgeId: "bridge-a", status: "available" as const, epochId: "epoch-a", rules: [] }];
+    return [{
+      bridgeId: "bridge-a",
+      status: "available" as const,
+      epochId: "epoch-a",
+      rules: [{ ruleRef: "opaque-rule-1", name: "Existing light schedule", enabled: true }],
+    }];
   }
 }
 
@@ -123,8 +128,12 @@ class ObservationScriptAdapter {
       return;
     }
     if (step === 3) {
+      yield* toolCall("call-rules", "get_home_rules", { limit: 20 });
+      return;
+    }
+    if (step === 4) {
       yield* toolCall("call-proposal", "create_home_proposal", {
-        kind: "household-insight",
+        kind: "automation-draft",
         title: "Review repeated light activity",
         summary: "A bounded observed light event may warrant household review.",
         idempotencyKey: "acceptance:light-activity:v1",
@@ -172,10 +181,11 @@ test("runs one DSH observation through governed tools into a trusted Inbox propo
 
   await ctx.homeAgent.requestObservation();
 
-  assert.equal(adapter.requests.length, 4);
+  assert.equal(adapter.requests.length, 5);
   assert.deepEqual(ctx.homeAgent.traceSnapshot()?.tools.map((tool) => tool.name), [
     "get_home_snapshot",
     "get_home_evidence",
+    "get_home_rules",
     "create_home_proposal",
   ]);
   const [summary] = ctx.homeInbox.list({ status: "pending_review" });
@@ -191,6 +201,11 @@ test("runs one DSH observation through governed tools into a trusted Inbox propo
     seq: 11,
   }]);
   assert.equal(detail.proposal.evidence.temporal?.coverage[0]?.status, "complete");
+  assert.equal(detail.proposal.conflictCheck.existingAutomationCount, 1);
+  assert.deepEqual(detail.proposal.conflictCheck.matches, [{
+    identity: "opaque-rule-1",
+    relation: "possible_overlap",
+  }]);
   assert.equal(detail.proposal.applicationStatus, "not_available");
 
   await ctx.fiber.dispose();

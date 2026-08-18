@@ -66,6 +66,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), [
     "get_home_snapshot",
     "get_home_evidence",
+    "get_home_rules",
     "create_home_proposal",
   ]);
 

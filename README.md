@@ -81,7 +81,7 @@ DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
 Home Product Bundle contributes the bounded, paginated, read-only
 `get_home_snapshot` tool and the bounded read-only `get_home_evidence` tool plus the review-only
-`create_home_proposal` tool. Hub-owned evidence and
+`get_home_rules` catalog inspection tool and `create_home_proposal` tool. Hub-owned evidence and
 `foreignRules@1` conflict checks are attached before a proposal enters the
 Inbox. Device actions, configuration writes, and proposal application remain
 deliberately unavailable.
@@ -111,6 +111,12 @@ hub capability IDs and a bounded lookback. The Hub re-runs the query and stores
 exact epoch/sequence references plus coverage in the local proposal; the model
 cannot author journal provenance. See
 [`docs/proposal-evidence-binding.md`](docs/proposal-evidence-binding.md).
+
+Before proposing a new automation, the Agent can inspect bounded metadata for
+existing rules through `get_home_rules`. Missing or inconsistent catalogs stay
+explicitly unavailable rather than looking empty; native rule IDs, YAML,
+triggers, actions, and templates are not exposed. See
+[`docs/home-rule-inspection.md`](docs/home-rule-inspection.md).
 
 Periodic observation is opt-in, local, and Hub-scheduled. It runs only after a
 consistent bridge snapshot, skips a busy Agent, and stops generating new work
