@@ -1,23 +1,22 @@
-import type { AuthInteraction } from "@earendil-works/pi-ai";
-
 import type { ProfileMetadataWriter } from "./api-key-profile-provisioner.js";
 import type { AuthProfile } from "./auth-profiles.js";
+import type { DshOAuthInteraction, DshOAuthProvider } from "./dsh-oauth-seam.js";
 import type { WritableSecretVault } from "./macos-keychain-secret-vault.js";
 import type { OAuthProfileCredentialStoreOptions } from "./oauth-profile-credential-store.js";
-import { loginOAuthProfile, type OAuthProfileModelsFactory } from "./oauth-profile-login.js";
-import { logoutOAuthProfile, type OAuthProfileLogoutModelsFactory } from "./oauth-profile-logout.js";
+import { loginOAuthProfile } from "./oauth-profile-login.js";
+import { logoutOAuthProfile } from "./oauth-profile-logout.js";
 
 /** Persist OAuth lifecycle metadata around provider-owned login/logout flows. */
 export async function loginAndRecordOAuthProfile(
   profile: AuthProfile,
   vault: WritableSecretVault,
   metadata: ProfileMetadataWriter,
-  interaction: AuthInteraction,
-  createModels?: OAuthProfileModelsFactory,
+  interaction: DshOAuthInteraction,
+  provider?: DshOAuthProvider,
 ): Promise<AuthProfile> {
   const pending = withoutExpiry(profile);
   await metadata.upsert(pending);
-  const credential = await loginOAuthProfile(profile, vault, interaction, createModels);
+  const credential = await loginOAuthProfile(profile, vault, interaction, provider);
   if (credential.type !== "oauth") throw new Error("OAuth login did not return an OAuth credential");
   const active = { ...pending, expiresAt: credential.expires };
   await metadata.upsert(active);
@@ -29,16 +28,16 @@ export async function logoutAndRecordOAuthProfile(
   profile: AuthProfile,
   vault: WritableSecretVault,
   metadata: ProfileMetadataWriter,
-  createModels?: OAuthProfileLogoutModelsFactory,
+  provider?: DshOAuthProvider,
 ): Promise<AuthProfile> {
   const pending = withoutExpiry(profile);
   await metadata.upsert(pending);
-  await logoutOAuthProfile(profile, vault, createModels);
+  await logoutOAuthProfile(profile, vault, provider);
   return pending;
 }
 
 /**
- * Turns a non-secret pi credential-store mutation into persisted profile
+ * Turns a non-secret DSH credential-store mutation into persisted profile
  * availability metadata. OAuth token values never leave the SecretVault.
  */
 export function createOAuthProfileMetadataSync(
