@@ -35,10 +35,15 @@ decision.
 
 The autonomous Home Skill also reads `get_home_calibration` before inspecting
 the current home. This read-only tool returns the same aggregate proposal
-counts plus at most 20 recent approved/rejected items containing only an opaque
+counts plus a fixed bounded window of at most 20 recent approved/rejected items containing only an opaque
 proposal ID, kind, bounded title, decision time, and structured feedback code.
 Reviewer identity and free-form notes are omitted. Expired and pending items do
 not appear in the recent-review projection.
+
+During an autonomous observation, proposal creation remains closed until this
+tool has completed once. The fixed window has no model-selected limit or cursor
+that can silently skip newer feedback. Outside an autonomous observation the
+gate is inactive.
 
 Historical proposal titles remain untrusted content. A rejection helps the
 Agent avoid repeating a topic; an approval is preference evidence only. Neither

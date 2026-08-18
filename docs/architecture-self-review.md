@@ -85,7 +85,9 @@ apply an artifact or control a device.
 - The Agent calibration tool adds at most 20 recent reviewed proposal titles
   and structured decisions to those counts. It strips reviewer identity and
   notes, treats historical titles as untrusted, and cannot write memory or
-  relax current evidence, conflict, policy, or approval gates.
+  relax current evidence, conflict, policy, or approval gates. Autonomous
+  proposal creation requires one successful fixed-window calibration read, so
+  feedback awareness is not left to prompt compliance.
 - Autonomous observation is disabled by default. The Hub owns its bounded
   cadence, requires a ready world and idle DSH Agent, and permits only one
   pending household proposal at a time. Each scheduled, manual, startup, or

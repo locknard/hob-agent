@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Context } from "@deepseek-ai/cordis";
 import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
+import { Context } from "@deepseek-ai/cordis";
 
-import { apply, projectHomeCalibration } from "./dsh-home-calibration-tool.js";
+import {
+  apply,
+  HomeCalibrationCoverageService,
+  projectHomeCalibration,
+} from "./dsh-home-calibration-tool.js";
 
 const SUMMARY = {
   total: 4,
@@ -51,6 +55,7 @@ test("registers a bounded read-only calibration tool over the proposal service",
   let registered: ToolDefinition | undefined;
   let query: unknown;
   const ctx = {
+    get: () => undefined,
     homeProposals: {
       qualitySummary: () => SUMMARY,
       calibrationHistory(input: unknown) {
@@ -68,9 +73,20 @@ test("registers a bounded read-only calibration tool over the proposal service",
 
   apply(ctx);
   assert.equal(registered?.name, "get_home_calibration");
-  const value = await registered!.execute({ limit: 8 }, {} as never);
-  assert.equal(query, 8);
+  const value = await registered!.execute({}, {} as never);
+  assert.equal(query, 20);
   assert.deepEqual(value.summary, SUMMARY);
   assert.deepEqual(value.recentReviews, []);
   assert.throws(() => projectHomeCalibration({ summary: SUMMARY, proposals: [], limit: 21 }), /limit/);
+});
+
+test("opens autonomous proposal coverage only after household calibration is read", async () => {
+  const ctx = new Context();
+  await ctx.plugin(HomeCalibrationCoverageService);
+  ctx.homeCalibrationCoverage.beginObservation();
+  assert.throws(() => ctx.homeCalibrationCoverage.assertProposalAllowed(), /calibration/i);
+  ctx.homeCalibrationCoverage.record();
+  assert.doesNotThrow(() => ctx.homeCalibrationCoverage.assertProposalAllowed());
+  ctx.homeCalibrationCoverage.endObservation();
+  await ctx.fiber.dispose();
 });

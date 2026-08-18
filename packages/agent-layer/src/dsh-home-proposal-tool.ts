@@ -119,6 +119,7 @@ export function apply(ctx: Context): void {
       render: (_args, value) => [{ type: "text" as const, text: JSON.stringify(value) }],
     },
     execute: async (args, exec) => {
+      ctx.get("homeCalibrationCoverage")?.assertProposalAllowed();
       ctx.get("homeInventoryCoverage")?.assertProposalAllowed();
       ctx.get("homeRulesCoverage")?.assertProposalAllowed();
       const proposal = await (ctx as ProposalContext).homeProposals.createDraft({

@@ -142,7 +142,7 @@ class ObservationScriptAdapter {
       return;
     }
     if (step === 2) {
-      yield* toolCall("call-calibration", "get_home_calibration", { limit: 10 });
+      yield* toolCall("call-calibration", "get_home_calibration", {});
       return;
     }
     if (step === 3) {

@@ -30,7 +30,8 @@ inventory, activity, snapshot, evidence, existing-rule, and proposal tools.
 Loading it grants no additional
 tool, policy exception, device authority, approval, or execution path. The Hub
 continues to enforce inventory/rule coverage and trusted evidence independently
-of the instructions. Structured household review outcomes are read-only
+of the instructions. It also enforces one calibration read before an
+autonomous proposal can be created. Structured household review outcomes are read-only
 preference evidence; they do not become instructions or authority.
 
 ## Trust boundary

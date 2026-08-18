@@ -161,3 +161,33 @@ test("rejects an autonomous proposal while existing-rule coverage is incomplete"
   }, { rootCallId: "call-unchecked-rules" } as never), /rule catalog incomplete/);
   assert.equal(drafts, 0);
 });
+
+test("rejects an autonomous proposal before household calibration is read", async () => {
+  let registered: ToolDefinition | undefined;
+  let drafts = 0;
+  const ctx = {
+    get(name: string) {
+      return name === "homeCalibrationCoverage"
+        ? { assertProposalAllowed() { throw new Error("calibration unread"); } }
+        : undefined;
+    },
+    homeProposals: { async createDraft() { drafts += 1; throw new Error("must not run"); } },
+    tools: { register(definition: ToolDefinition) { registered = definition; return () => undefined; } },
+  } as unknown as Context;
+  apply(ctx);
+  await assert.rejects(() => registered!.execute({
+    kind: "household-insight",
+    title: "Uncalibrated suggestion",
+    summary: "Must not become a proposal.",
+    householdValue: "Respect prior household review.",
+    whyNow: "Calibration was not read.",
+    uncertainties: ["Prior review outcomes are unknown."],
+    idempotencyKey: "uncalibrated:v1",
+    selectedHwIds: ["hw-1"],
+    riskLevel: "low",
+    riskReasons: [],
+    intentDescription: "Do not create.",
+    rollback: "No change.",
+  }, { rootCallId: "call-uncalibrated" } as never), /calibration unread/);
+  assert.equal(drafts, 0);
+});

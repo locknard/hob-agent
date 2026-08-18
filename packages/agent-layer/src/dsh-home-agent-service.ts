@@ -26,6 +26,7 @@ import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
 import * as HomeActivityTool from "./dsh-home-activity-tool.js";
 import * as HomeCalibrationTool from "./dsh-home-calibration-tool.js";
+import { HomeCalibrationCoverageService } from "./dsh-home-calibration-tool.js";
 import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
 import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
@@ -118,6 +119,8 @@ export class DshHomeAgentService extends Service {
     const priorTurns = new Set(this.traceSnapshot()?.turns.map((turn) => turn.turn) ?? []);
     const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
     if (inventoryCoverage === undefined) throw new Error("Home inventory coverage gate is unavailable");
+    const calibrationCoverage = this.ctx.get("homeCalibrationCoverage");
+    if (calibrationCoverage === undefined) throw new Error("Home calibration coverage gate is unavailable");
     const rulesCoverage = this.ctx.get("homeRulesCoverage");
     if (rulesCoverage === undefined) throw new Error("Home rule coverage gate is unavailable");
     const observationBudget = this.ctx.get("homeObservationBudget");
@@ -134,6 +137,7 @@ export class DshHomeAgentService extends Service {
     observationBudget.begin(this.agent, HOME_OBSERVATION_MAX_TOOL_CALLS);
     observationReport.begin(this.agent);
     inventoryCoverage.beginObservation();
+    calibrationCoverage.beginObservation();
     rulesCoverage.beginObservation();
     let task: Promise<void> | undefined;
     let budgetOutcome: ReturnType<HomeObservationBudgetService["end"]>;
@@ -165,6 +169,7 @@ export class DshHomeAgentService extends Service {
       disposition = observationReport.end();
       this.captureObservationMetrics(priorTurns);
       inventoryCoverage.endObservation();
+      calibrationCoverage.endObservation();
       rulesCoverage.endObservation();
       observationDeadline.signal.removeEventListener("abort", cancel);
       observationDeadline[Symbol.dispose]();
@@ -256,6 +261,7 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(ToolsInvariant);
     await this.ctx.plugin(HomeObservationBudgetService);
     await this.ctx.plugin(HomeInventoryCoverageService);
+    await this.ctx.plugin(HomeCalibrationCoverageService);
     await this.ctx.plugin(HomeCalibrationTool);
     await this.ctx.plugin(HomeInventoryTool);
     await this.ctx.plugin(HomeActivityTool);
