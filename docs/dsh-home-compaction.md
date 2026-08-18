@@ -44,6 +44,13 @@ progress. No second session store or custom compaction transaction is added.
 ## Deferred
 
 - a cheaper independently configured summarization model;
-- Inbox visualization of individual compaction transactions;
 - model-free tool-result pruning, pending a household-specific review of which
   evidence fields may be removed without weakening proposal provenance.
+
+## Metadata visualization
+
+The existing DSH loop trace may project compaction start, completion/failure,
+duration, shadowed event count, shadowed token count, and auxiliary token usage.
+It must discard the summary, raw model output, provider error text, and
+shadowed message content before retaining its bounded trace, and omit internal
+compaction identifiers from the user-facing snapshot.

@@ -12,7 +12,18 @@ export function renderAgentLoopTimeline(trace: AgentLoopTrace): string {
     }).join("");
     return `<li class="agent-loop-turn" data-status="${escapeHtml(turn.status)}"><header><strong>Turn ${turn.turn}</strong><time>${duration(turn.durationMs)}</time></header><ol>${steps}</ol></li>`;
   }).join("");
-  return `<section class="agent-loop-timeline" aria-label="Agent loop timeline" data-session="${escapeHtml(trace.sessionId)}"><header><h2>Agent loop</h2><p>${usage}</p></header><ol>${turns}</ol></section>`;
+  const compactions = trace.compactions.length === 0
+    ? ""
+    : `<section class="agent-loop-compactions" aria-label="Context maintenance"><h3>Context maintenance</h3><ol>${trace.compactions.map((compaction) => {
+      const compacted = compaction.shadowedTokenCount === undefined
+        ? "no checkpoint"
+        : `${compaction.shadowedTokenCount} tokens compacted${compaction.shadowedEventCount === undefined ? "" : ` from ${compaction.shadowedEventCount} events`}`;
+      const compactionUsage = compaction.usage === undefined
+        ? ""
+        : ` · ${compaction.usage.inputTokens} input · ${compaction.usage.outputTokens} output · ${compaction.usage.reasoningTokens} reasoning`;
+      return `<li data-status="${escapeHtml(compaction.status)}"><span>${escapeHtml(compaction.status)} · ${compacted}${compactionUsage}</span><time>${duration(compaction.durationMs)}</time></li>`;
+    }).join("")}</ol></section>`;
+  return `<section class="agent-loop-timeline" aria-label="Agent loop timeline" data-session="${escapeHtml(trace.sessionId)}"><header><h2>Agent loop</h2><p>${usage}</p></header>${compactions}<ol>${turns}</ol></section>`;
 }
 
 function duration(value: number | undefined): string {

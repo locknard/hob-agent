@@ -1,4 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
+import type {} from "@deepseek-ai/dsh-compaction";
 import type { Session, SessionEvent } from "@deepseek-ai/dsh-session";
 
 export interface AgentLoopTraceTurn {
@@ -35,6 +36,17 @@ export interface AgentLoopTraceUsage {
   readonly reasoningTokens: number;
 }
 
+export interface AgentLoopTraceCompaction {
+  readonly status: "running" | "completed" | "failed";
+  readonly ownerTurn: number | null;
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  readonly durationMs?: number;
+  readonly shadowedEventCount?: number;
+  readonly shadowedTokenCount?: number;
+  readonly usage?: AgentLoopTraceUsage;
+}
+
 export interface AgentLoopTrace {
   readonly sessionId: string;
   readonly asOfSeq: number;
@@ -42,6 +54,7 @@ export interface AgentLoopTrace {
   readonly turns: readonly AgentLoopTraceTurn[];
   readonly steps: readonly AgentLoopTraceStep[];
   readonly tools: readonly AgentLoopTraceTool[];
+  readonly compactions: readonly AgentLoopTraceCompaction[];
   readonly usage: AgentLoopTraceUsage;
 }
 
@@ -62,6 +75,9 @@ type SafeTraceEvent =
   | { readonly type: "step/start" | "step/end"; readonly seq: number; readonly time: number; readonly turn: number; readonly step: number }
   | { readonly type: "tool/call"; readonly seq: number; readonly time: number; readonly turn: number; readonly step: number; readonly id: string; readonly name: string }
   | { readonly type: "tool/result"; readonly seq: number; readonly time: number; readonly id: string; readonly failed: boolean }
+  | { readonly type: "compaction/start"; readonly seq: number; readonly time: number; readonly id: string; readonly ownerTurn: number | null }
+  | { readonly type: "compaction/summary"; readonly seq: number; readonly time: number; readonly id: string; readonly shadowedEventCount: number; readonly shadowedTokenCount: number; readonly usage?: AgentLoopTraceUsage }
+  | { readonly type: "compaction/end"; readonly seq: number; readonly time: number; readonly id: string; readonly failed: boolean }
   | { readonly type: "assistant/usage"; readonly seq: number; readonly time: number; readonly inputTokens: number; readonly outputTokens: number; readonly reasoningTokens: number };
 
 interface SafeTraceLog {
@@ -130,6 +146,7 @@ function projectSafeTrace(
   const turns = new Map<number, AgentLoopTraceTurn>();
   const steps = new Map<string, AgentLoopTraceStep>();
   const tools = new Map<string, AgentLoopTraceTool>();
+  const compactions = new Map<string, AgentLoopTraceCompaction>();
   let inputTokens = 0;
   let outputTokens = 0;
   let reasoningTokens = 0;
@@ -196,6 +213,37 @@ function projectSafeTrace(
         }
         break;
       }
+      case "compaction/start":
+        compactions.set(event.id, {
+          status: "running",
+          ownerTurn: event.ownerTurn,
+          startedAt: event.time,
+        });
+        break;
+      case "compaction/summary": {
+        const previous = compactions.get(event.id);
+        if (previous !== undefined) {
+          compactions.set(event.id, {
+            ...previous,
+            shadowedEventCount: event.shadowedEventCount,
+            shadowedTokenCount: event.shadowedTokenCount,
+            ...(event.usage === undefined ? {} : { usage: event.usage }),
+          });
+        }
+        break;
+      }
+      case "compaction/end": {
+        const previous = compactions.get(event.id);
+        if (previous !== undefined) {
+          compactions.set(event.id, {
+            ...previous,
+            status: event.failed ? "failed" : "completed",
+            endedAt: event.time,
+            durationMs: Math.max(0, event.time - previous.startedAt),
+          });
+        }
+        break;
+      }
       case "assistant/usage":
         inputTokens += event.inputTokens;
         outputTokens += event.outputTokens;
@@ -211,6 +259,7 @@ function projectSafeTrace(
     turns: [...turns.values()].sort((left, right) => left.turn - right.turn),
     steps: [...steps.values()].sort((left, right) => left.turn - right.turn || left.step - right.step),
     tools: [...tools.values()].sort((left, right) => left.startedAt - right.startedAt || left.id.localeCompare(right.id)),
+    compactions: [...compactions.values()].sort((left, right) => left.startedAt - right.startedAt),
     usage: { inputTokens, outputTokens, reasoningTokens },
   };
 }
@@ -252,6 +301,38 @@ function sanitizeEvent(event: SessionEvent): SafeTraceEvent {
         inputTokens: event.data.usage?.inputTokens ?? 0,
         outputTokens: event.data.usage?.outputTokens ?? 0,
         reasoningTokens: event.data.usage?.reasoningTokens ?? 0,
+      };
+    case "compaction/start":
+      return {
+        type: event.type,
+        seq: event.seq,
+        time: event.time,
+        id: String(event.data.compactionId),
+        ownerTurn: event.data.turn,
+      };
+    case "compaction/summary":
+      return {
+        type: event.type,
+        seq: event.seq,
+        time: event.time,
+        id: String(event.data.compactionId),
+        shadowedEventCount: event.data.shadowedSeqs.length,
+        shadowedTokenCount: event.data.shadowedTokenCount,
+        ...(event.data.usage === undefined ? {} : {
+          usage: {
+            inputTokens: event.data.usage.inputTokens,
+            outputTokens: event.data.usage.outputTokens,
+            reasoningTokens: event.data.usage.reasoningTokens ?? 0,
+          },
+        }),
+      };
+    case "compaction/end":
+      return {
+        type: event.type,
+        seq: event.seq,
+        time: event.time,
+        id: String(event.data.compactionId),
+        failed: event.data.error !== undefined,
       };
     default:
       return { type: "ignored", seq: event.seq, time: event.time };

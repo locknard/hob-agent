@@ -10,6 +10,16 @@ test("renders an accessible metadata-only DSH loop timeline", () => {
     turns: [{ turn: 1, status: "completed", startedAt: 10, endedAt: 90, durationMs: 80 }],
     steps: [{ turn: 1, step: 1, status: "completed", startedAt: 20, endedAt: 80, durationMs: 60 }],
     tools: [{ id: "call-1", turn: 1, step: 1, name: "get_home_snapshot", status: "completed", startedAt: 30, endedAt: 50, durationMs: 20 }],
+    compactions: [{
+      status: "completed",
+      ownerTurn: null,
+      startedAt: 100,
+      endedAt: 130,
+      durationMs: 30,
+      shadowedEventCount: 7,
+      shadowedTokenCount: 420,
+      usage: { inputTokens: 80, outputTokens: 20, reasoningTokens: 10 },
+    }],
     usage: { inputTokens: 12, outputTokens: 4, reasoningTokens: 3 },
   });
 
@@ -18,4 +28,7 @@ test("renders an accessible metadata-only DSH loop timeline", () => {
   assert.match(html, /get_home_snapshot/);
   assert.match(html, /80 ms/);
   assert.match(html, /12 input · 4 output · 3 reasoning/);
+  assert.match(html, /Context maintenance/);
+  assert.match(html, /420 tokens compacted/);
+  assert.match(html, /80 input · 20 output · 10 reasoning/);
 });

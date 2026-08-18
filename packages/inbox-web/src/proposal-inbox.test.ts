@@ -72,6 +72,7 @@ test("lists and renders untrusted proposal content without creating an applicati
         turns: [{ turn: 1, status: "completed", startedAt: 1, endedAt: 4, durationMs: 3 }],
         steps: [{ turn: 1, step: 1, status: "completed", startedAt: 2, endedAt: 3, durationMs: 1 }],
         tools: [{ id: "call-7", turn: 1, step: 1, name: "create_home_proposal", status: "completed", startedAt: 2, endedAt: 3, durationMs: 1 }],
+        compactions: [],
         usage: { inputTokens: 10, outputTokens: 5, reasoningTokens: 2 },
       }),
     },
