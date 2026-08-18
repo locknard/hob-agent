@@ -32,6 +32,11 @@ test("mounts the persisted Inbox without HomeWorld or DSH", async () => {
       idempotencyKey: "standalone-must-not-create",
       provenance: { producer: "dsh-home-agent" },
       selectedHwIds: ["unknown-device"],
+      rationale: {
+        householdValue: "This must remain impossible.",
+        whyNow: "Standalone review has no live world.",
+        uncertainties: ["All household evidence is unavailable."],
+      },
       risk: { level: "low", reasons: [] },
       intent: {
         type: "household-insight",

@@ -41,6 +41,9 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
     kind: "automation-draft",
     title: "Review arrival lighting",
     summary: "A possible rule based on observed state.",
+    householdValue: "Reduce unnecessary lighting without changing arrival comfort.",
+    whyNow: "A repeated post-baseline pattern is available for review.",
+    uncertainties: ["Whether late arrivals intentionally keep this light on."],
     idempotencyKey: "arrival-light:v1",
     selectedHwIds: ["hw-1"],
     selectedHwCapabilityIds: ["hwc-1"],
@@ -60,6 +63,11 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
     toolCallId: "call-7",
   });
   assert.equal("conflictCheck" in (draft ?? {}), false);
+  assert.deepEqual(draft?.rationale, {
+    householdValue: "Reduce unnecessary lighting without changing arrival comfort.",
+    whyNow: "A repeated post-baseline pattern is available for review.",
+    uncertainties: ["Whether late arrivals intentionally keep this light on."],
+  });
   assert.deepEqual(draft?.selectedHwCapabilityIds, ["hwc-1"]);
   assert.equal(draft?.evidenceLookbackHours, 24);
   assert.deepEqual(value, {
@@ -94,6 +102,9 @@ test("rejects an autonomous proposal while inventory coverage is incomplete", as
     kind: "household-insight",
     title: "Incomplete scan",
     summary: "Must not become a proposal.",
+    householdValue: "No value can be established from an incomplete scan.",
+    whyNow: "The inventory scan is incomplete.",
+    uncertainties: ["The rest of the household inventory is unknown."],
     idempotencyKey: "incomplete-scan:v1",
     selectedHwIds: ["hw-1"],
     riskLevel: "low",

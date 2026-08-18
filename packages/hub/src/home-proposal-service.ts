@@ -163,6 +163,7 @@ export class HomeProposalService extends Service {
       },
       risk: { ...input.risk, requiresHumanApproval: true },
       intent: input.intent,
+      rationale: input.rationale,
     });
   }
 
@@ -190,10 +191,21 @@ export interface CreateHomeProposalDraftInput {
   readonly evidenceLookbackHours?: number;
   readonly risk: Omit<CreateProposalInput["risk"], "requiresHumanApproval">;
   readonly intent: CreateProposalInput["intent"];
+  readonly rationale: NonNullable<CreateProposalInput["rationale"]>;
 }
 
 function validateDraftInput(input: CreateHomeProposalDraftInput): void {
   if (!input || typeof input !== "object") throw new TypeError("home proposal draft is required");
+  const rationale = input.rationale;
+  if (!rationale || typeof rationale !== "object"
+    || !boundedRationaleText(rationale.householdValue)
+    || !boundedRationaleText(rationale.whyNow)
+    || !Array.isArray(rationale.uncertainties)
+    || rationale.uncertainties.length < 1
+    || rationale.uncertainties.length > 6
+    || rationale.uncertainties.some((value) => !boundedRationaleText(value))) {
+    throw new TypeError("home proposal rationale is invalid or unbounded");
+  }
   if (!Array.isArray(input.selectedHwIds) || input.selectedHwIds.length < 1 || input.selectedHwIds.length > 20
     || new Set(input.selectedHwIds).size !== input.selectedHwIds.length
     || input.selectedHwIds.some((value) => typeof value !== "string" || value.length === 0 || value.length > 200)) {
@@ -213,6 +225,10 @@ function validateDraftInput(input: CreateHomeProposalDraftInput): void {
       || input.evidenceLookbackHours! > 168))) {
     throw new TypeError("home proposal temporal evidence selection is invalid or unbounded");
   }
+}
+
+function boundedRationaleText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 1_000;
 }
 
 function latestObservedAt(values: readonly (string | undefined)[], fallback: string): string {

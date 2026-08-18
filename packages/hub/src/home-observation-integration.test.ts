@@ -144,6 +144,9 @@ class ObservationScriptAdapter {
         kind: "automation-draft",
         title: "Review repeated light activity",
         summary: "A bounded observed light event may warrant household review.",
+        householdValue: "Reduce unnecessary repeated lighting while preserving household comfort.",
+        whyNow: "A post-baseline event is available with complete temporal coverage.",
+        uncertainties: ["Whether the observed light activity was intentional."],
         idempotencyKey: "acceptance:light-activity:v1",
         selectedHwIds: ["hw-1"],
         selectedHwCapabilityIds: ["hwc-1"],
@@ -211,6 +214,11 @@ test("runs one DSH observation through governed tools into a trusted Inbox propo
     seq: 11,
   }]);
   assert.equal(detail.proposal.evidence.temporal?.coverage[0]?.status, "complete");
+  assert.deepEqual(detail.proposal.rationale, {
+    householdValue: "Reduce unnecessary repeated lighting while preserving household comfort.",
+    whyNow: "A post-baseline event is available with complete temporal coverage.",
+    uncertainties: ["Whether the observed light activity was intentional."],
+  });
   assert.equal(detail.proposal.conflictCheck.existingAutomationCount, 1);
   assert.deepEqual(detail.proposal.conflictCheck.matches, [{
     identity: "opaque-rule-1",

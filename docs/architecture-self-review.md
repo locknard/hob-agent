@@ -60,6 +60,11 @@ apply an artifact or control a device.
 - Temporal proposal claims are rebound by the Hub from selected current
   capability IDs; exact epoch/sequence references and coverage reach the Inbox,
   while the model cannot author journal provenance.
+- Every new DSH Home Agent proposal includes a bounded expected household
+  value, timing rationale, and one to six explicit uncertainties. The Inbox
+  labels these as model-authored rationale, while Hub evidence, overlap, and
+  risk remain separate authoritative sections. Existing v1 rows without the
+  additive rationale remain readable.
 - Proposal evidence, bridge watermarks, history gaps, and existing-rule
   conflicts are hub-produced. `foreignRules@1` catalogs are accepted only when
   their epoch matches the committed bridge watermark.

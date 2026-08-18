@@ -63,6 +63,11 @@ export interface InboxProposal {
   };
   readonly dryRun: { readonly status: string; readonly summary: string };
   readonly risk: { readonly level: string; readonly reasons: readonly string[]; readonly requiresHumanApproval: boolean };
+  readonly rationale?: {
+    readonly householdValue: string;
+    readonly whyNow: string;
+    readonly uncertainties: readonly string[];
+  };
   readonly intent: { readonly type: string; readonly description: string; readonly rollback: string };
   readonly review?: {
     readonly decision: "approved" | "rejected" | "expired";
@@ -235,6 +240,9 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
     : `<p>Temporal window ${escapeHtml(proposal.evidence.temporal.requestedSince)} to ${escapeHtml(proposal.evidence.temporal.requestedUntil)}${proposal.evidence.temporal.truncated ? " · truncated" : ""}</p><ul>${proposal.evidence.temporal.coverage.map((coverage) =>
       `<li><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}${coverage.reasons.length === 0 ? "" : ` · ${coverage.reasons.map(escapeHtml).join(", ")}`}</li>`,
     ).join("")}</ul>`;
+  const rationale = proposal.rationale === undefined
+    ? "<section aria-label=\"Agent proposal rationale\"><h2>Agent proposal rationale</h2><p>Not recorded in this legacy proposal.</p></section>"
+    : `<section aria-label="Agent proposal rationale"><h2>Agent proposal rationale</h2><p>These model-authored statements explain the Agent's case; they do not replace Hub evidence or household judgment.</p><h3>Expected household value</h3><p>${escapeHtml(proposal.rationale.householdValue)}</p><h3>Why now</h3><p>${escapeHtml(proposal.rationale.whyNow)}</p><h3>Agent-declared uncertainties</h3><ul>${proposal.rationale.uncertainties.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`;
   const review = proposal.status === "pending_review" ? `<section aria-label="Household review"><h2>Household review</h2>
   <form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
     <input type="hidden" name="expectedRevision" value="${proposal.revision}">
@@ -261,6 +269,7 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   const timeline = detail.trace === undefined ? "" : renderAgentLoopTimeline(detail.trace);
   return `<main class="proposal-detail" data-status="${escapeHtml(proposal.status)}">
     <header><a href="/proposals">Proposal inbox</a><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p></header>
+    ${rationale}
     <section aria-label="Intent"><h2>Intended change</h2><p>${escapeHtml(proposal.intent.description)}</p><h3>Rollback</h3><p>${escapeHtml(proposal.intent.rollback)}</p></section>
     <section aria-label="Evidence"><h2>Evidence</h2><p>${proposal.evidence.references.length} bounded references</p><h3>References</h3><ul>${references}</ul><h3>Coverage</h3>${temporalCoverage}<h3>Bridge watermarks</h3><ul>${watermarks}</ul></section>
     <section aria-label="Existing-rule overlap screen"><h2>Existing-rule overlap screen</h2><p>${proposal.conflictCheck.existingAutomationCount} existing automations · ${proposal.conflictCheck.matches.length} possible name overlaps</p><p>Metadata-only overlap screen; zero matches does not prove non-interference. Review existing rule logic before implementation.</p></section>

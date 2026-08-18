@@ -48,6 +48,10 @@ Every proposal is a bounded, versioned envelope with:
 - a generated proposal ID, revision, creation/update timestamps, and lifecycle
   status;
 - a bounded kind, title, summary, and structured intended change;
+- for every new Agent-created proposal, a bounded model-authored household
+  rationale stating expected value, why it is timely, and one to six explicit
+  uncertainties; the Inbox labels this as the Agent's case rather than Hub
+  evidence;
 - immutable provenance identifying the producer and, when applicable, the DSH
   session and root tool call;
 - evidence references and per-bridge watermarks rather than copied raw events;

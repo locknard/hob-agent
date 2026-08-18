@@ -113,6 +113,12 @@ const intentSchema = z.object({
   rollback: boundedText,
 }).strict();
 
+const rationaleSchema = z.object({
+  householdValue: boundedText,
+  whyNow: boundedText,
+  uncertainties: z.array(boundedText).min(1).max(6),
+}).strict();
+
 const createProposalInputSchema = z.object({
   kind: z.enum([
     "automation-draft",
@@ -130,6 +136,7 @@ const createProposalInputSchema = z.object({
   dryRun: dryRunSchema,
   risk: riskSchema,
   intent: intentSchema,
+  rationale: rationaleSchema.optional(),
 }).strict();
 
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
@@ -305,6 +312,9 @@ export class SqliteProposalStore {
       throw new ProposalStoreError("invalid_proposal", "Proposal does not match the bounded v1 envelope");
     }
     const input = parsed.data;
+    if (input.provenance.producer === "dsh-home-agent" && input.rationale === undefined) {
+      throw new ProposalStoreError("invalid_proposal", "Agent-created proposals require a bounded household rationale");
+    }
     if (input.conflictCheck.status !== "checked") {
       throw new ProposalStoreError("conflict_check_required", "A completed conflict check is required");
     }

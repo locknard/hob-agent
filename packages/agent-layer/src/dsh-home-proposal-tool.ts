@@ -14,6 +14,11 @@ interface HomeProposalPort {
     selectedHwIds: readonly string[];
     selectedHwCapabilityIds?: readonly string[];
     evidenceLookbackHours?: number;
+    rationale: {
+      householdValue: string;
+      whyNow: string;
+      uncertainties: readonly string[];
+    };
     risk: { level: "low" | "medium" | "high"; reasons: readonly string[] };
     intent: { type: string; description: string; rollback: string };
   }): Promise<{
@@ -80,6 +85,9 @@ export function apply(ctx: Context): void {
       kind: { type: "string", enum: ["automation-draft", "household-insight"], required: true },
       title: { type: "string", required: true },
       summary: { type: "string", required: true },
+      householdValue: { type: "string", required: true },
+      whyNow: { type: "string", required: true },
+      uncertainties: { type: "array", items: { type: "string" }, required: true },
       idempotencyKey: { type: "string", required: true },
       selectedHwIds: { type: "array", items: { type: "string" }, required: true },
       selectedHwCapabilityIds: { type: "array", items: { type: "string" } },
@@ -108,6 +116,11 @@ export function apply(ctx: Context): void {
         selectedHwIds: args.selectedHwIds,
         ...(args.selectedHwCapabilityIds === undefined ? {} : { selectedHwCapabilityIds: args.selectedHwCapabilityIds }),
         ...(args.evidenceLookbackHours === undefined ? {} : { evidenceLookbackHours: args.evidenceLookbackHours }),
+        rationale: {
+          householdValue: args.householdValue,
+          whyNow: args.whyNow,
+          uncertainties: args.uncertainties,
+        },
         risk: { level: args.riskLevel, reasons: args.riskReasons },
         intent: {
           type: args.kind,

@@ -6,6 +6,12 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { HomeProposalService } from "./home-proposal-service.js";
 import type { CreateProposalInput } from "./proposal-store.js";
 
+const rationale = {
+  householdValue: "Reduce a recurring household inconvenience.",
+  whyNow: "Recent bounded evidence makes the suggestion timely.",
+  uncertainties: ["Whether this behavior reflects an intentional preference."],
+} as const;
+
 const candidate: CreateProposalInput = {
   kind: "household-insight",
   title: "Review unavailable device coverage",
@@ -25,6 +31,7 @@ const candidate: CreateProposalInput = {
   conflictCheck: { status: "checked", existingAutomationCount: 0, matches: [] },
   dryRun: { status: "passed", summary: "Read-only proposal; no changes were made." },
   risk: { level: "low", reasons: [], requiresHumanApproval: true },
+  rationale,
   intent: {
     type: "household-insight",
     description: "Ask the household to review coverage.",
@@ -134,6 +141,7 @@ test("scopes authoritative rule coverage to every bridge bound to selected devic
     idempotencyKey: "bridge-local-coverage:v1",
     provenance: { producer: "dsh-home-agent" },
     selectedHwIds: ["hw-1"],
+    rationale,
     risk: { level: "low" as const, reasons: [] },
     intent: {
       type: "household-insight",
@@ -210,6 +218,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     idempotencyKey: "arrival-light:v1",
     provenance: { producer: "dsh-home-agent", sessionId: "home-main", toolCallId: "call-1" },
     selectedHwIds: ["hw-1"],
+    rationale,
     selectedHwCapabilityIds: ["hwc-1"],
     evidenceLookbackHours: 24,
     risk: { level: "medium", reasons: ["Could overlap an existing rule"] },
@@ -260,6 +269,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     status: "not_run",
     summary: "No automation artifact exists yet; execution simulation was not run.",
   });
+  assert.deepEqual(proposal.rationale, rationale);
   assert.equal(proposal.applicationStatus, "not_available");
 
   await assert.rejects(() => ctx.homeProposals.createDraft({
@@ -269,6 +279,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     idempotencyKey: "another-item:v1",
     provenance: { producer: "dsh-home-agent" },
     selectedHwIds: ["hw-1"],
+    rationale,
     risk: { level: "low", reasons: [] },
     intent: { type: "household-insight", description: "Wait.", rollback: "Discard it." },
   }), /pending review/);
@@ -287,6 +298,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     idempotencyKey: "current-light:v1",
     provenance: { producer: "dsh-home-agent", sessionId: "home-main", toolCallId: "call-2" },
     selectedHwIds: ["hw-1"],
+    rationale,
     risk: { level: "low", reasons: [] },
     intent: {
       type: "household-insight",
@@ -314,11 +326,23 @@ test("rejects temporal capability selections outside the selected devices", asyn
 
   await assert.rejects(() => ctx.homeProposals.createDraft({
     kind: "household-insight",
+    title: "Missing product case",
+    summary: "A model summary cannot replace a household rationale.",
+    idempotencyKey: "missing-rationale:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Review it.", rollback: "Reject it." },
+  }), /rationale/i);
+
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    kind: "household-insight",
     title: "Review evidence",
     summary: "Review a bounded observation.",
     idempotencyKey: "review-evidence:v1",
     provenance: { producer: "dsh-home-agent" },
     selectedHwIds: ["hw-missing"],
+    rationale,
     selectedHwCapabilityIds: ["hwc-1"],
     evidenceLookbackHours: 24,
     risk: { level: "low", reasons: [] },

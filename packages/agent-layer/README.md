@@ -24,13 +24,15 @@ attributes are bounded and JSON-normalized before they reach the model. See
 `docs/bounded-home-inventory.md` and `docs/bounded-home-query.md` for these
 query boundaries.
 
-The proposal tool accepts bounded intent, risk, and selected hub identities,
-then delegates to the hub. It cannot supply its own evidence or conflict-check
-result, approve the proposal, or apply it. For a temporal claim it may select
-current hub capability IDs and a bounded window; the Hub re-runs the evidence
-query and binds exact epoch/sequence references and honest coverage to the
-proposal. DSH session/call identity is injected as trusted provenance by the
-tool implementation.
+The proposal tool accepts bounded intent, risk, selected hub identities, and a
+model-authored household rationale. The rationale must state expected household
+value, why the suggestion is timely, and at least one uncertainty; it is never
+treated as evidence or authority. The tool cannot supply its own evidence or
+conflict-check result, approve the proposal, or apply it. For a temporal claim
+it may select current hub capability IDs and a bounded window; the Hub re-runs
+the evidence query and binds exact epoch/sequence references and honest
+coverage to the proposal. DSH session/call identity is injected as trusted
+provenance by the tool implementation.
 
 `AgentLoopTraceService` is a bounded, read-only projection of DSH's canonical
 `session/event` stream. It exposes turn/step/tool status, compaction/prune

@@ -50,6 +50,11 @@ function input(overrides: Partial<CreateProposalInput> = {}): CreateProposalInpu
       reasons: ["May affect an occupied area"],
       requiresHumanApproval: true,
     },
+    rationale: {
+      householdValue: "Reduce unnecessary lighting.",
+      whyNow: "Recent bounded evidence suggests a review is timely.",
+      uncertainties: ["Whether the current timing reflects household preference."],
+    },
     intent: {
       type: "automation-draft",
       description: "Create a draft rule; do not install it.",
@@ -187,8 +192,9 @@ test("keeps reviewed v1 rows from before structured feedback readable", async ()
   store.close();
 
   const reviewedAt = "2026-08-19T01:10:00.000Z";
+  const { rationale: _newRationale, ...legacyProposal } = proposal;
   const legacyReviewed = {
-    ...proposal,
+    ...legacyProposal,
     revision: 2,
     status: "approved",
     updatedAt: reviewedAt,
@@ -264,6 +270,10 @@ test("rejects missing conflict checks, unsafe approval semantics, and oversized 
   );
   assert.throws(
     () => store.create(input({ title: "x".repeat(121) })),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+  );
+  assert.throws(
+    () => store.create(input({ idempotencyKey: "missing-rationale", rationale: undefined })),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
   );
   assert.throws(

@@ -50,6 +50,11 @@ const proposal: InboxProposal = {
   },
   dryRun: { status: "passed", summary: "No changes were made." },
   risk: { level: "medium", reasons: ["Could overlap"], requiresHumanApproval: true },
+  rationale: {
+    householdValue: "Reduce unnecessary lighting after arrivals.",
+    whyNow: "Recent bounded evidence shows a candidate pattern.",
+    uncertainties: ["Whether late arrivals intentionally keep the light on."],
+  },
   intent: { type: "automation-draft", description: "Prepare a draft.", rollback: "Discard it." },
   audit: [{ id: "audit-1", at: "2026-08-19T01:00:00.000Z", action: "created", actor: "dsh-home-agent", revision: 1 }],
 };
@@ -123,6 +128,11 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(detailHtml, /metadata-only overlap screen/i);
   assert.match(detailHtml, /does not prove non-interference/i);
   assert.match(detailHtml, /seq 607/);
+  assert.match(detailHtml, /Expected household value/i);
+  assert.match(detailHtml, /Reduce unnecessary lighting after arrivals/i);
+  assert.match(detailHtml, /Why now/i);
+  assert.match(detailHtml, /Agent-declared uncertainties/i);
+  assert.match(detailHtml, /do not replace Hub evidence/i);
   assert.match(detailHtml, /create_home_proposal/);
   assert.match(detailHtml, /Approve/);
   assert.match(detailHtml, /Reject/);
