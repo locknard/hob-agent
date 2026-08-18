@@ -200,6 +200,11 @@ runtime or a second service.
 
 ## Open architecture gaps
 
+The immediate next step is the bounded real-household pilot described in
+[`household-pilot.md`](household-pilot.md), not another Agent Runtime layer.
+The pilot's review outcomes and observed run metrics should decide which gap
+below becomes product work next.
+
 ### P2 — non-local Inbox delivery
 
 Authenticated local delivery is implemented. LAN/remote exposure is not: it

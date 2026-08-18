@@ -109,6 +109,8 @@ Agent-reported no-proposal dispositions.
 See [`docs/standalone-inbox.md`](docs/standalone-inbox.md) and
 [`docs/observation-audit.md`](docs/observation-audit.md), plus
 [`docs/household-calibration-summary.md`](docs/household-calibration-summary.md).
+The recommended sequence for a real-home trial is documented in
+[`docs/household-pilot.md`](docs/household-pilot.md).
 
 To create a private review draft of the neutral room/device map without calling
 a model or replacing `HOME.md`, set an explicit private `HOB_HOME_DIR` and run:
