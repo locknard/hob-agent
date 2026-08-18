@@ -106,6 +106,11 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
       JSON.stringify(message).includes("at most one materially useful proposal")),
     true,
   );
+  assert.equal(
+    adapter.requests[1]?.messages.some((message) =>
+      JSON.stringify(message).includes("rapidly flapping software or integration status")),
+    true,
+  );
 
   await fiber.dispose();
   assert.equal(ctx.homeAgent, undefined);

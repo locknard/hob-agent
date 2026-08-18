@@ -79,6 +79,8 @@ export class DshHomeAgentService extends Service {
           "Perform one governed household observation.",
           "Use bounded snapshot pages to find a materially useful candidate and inspect post-baseline evidence when claiming behavior.",
           "Inspect existing household rules before proposing an automation so you do not repeat an obvious existing rule.",
+          "Treat rapidly flapping software or integration status, unknown/unavailable lifecycle changes, and uncorroborated short sensor bursts as noise rather than household routine.",
+          "Use them only when persistent or corroborated and materially relevant to household safety, comfort, resources, or reliability.",
           "Create at most one materially useful proposal, only when its evidence and coverage support review.",
           "If evidence is insufficient or no useful change is warranted, do not create a proposal.",
         ].join(" "),

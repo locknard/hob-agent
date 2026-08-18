@@ -29,6 +29,12 @@ the household has no pending proposal to review.
 - The trusted product prompt asks for at most one materially useful proposal
   and permits no proposal when evidence is insufficient. It does not include
   household data; the Agent must use governed tools.
+- Candidate selection treats rapid software/integration status flapping,
+  `unknown`/`unavailable` lifecycle transitions, and uncorroborated short
+  sensor bursts as noise rather than household routine. They justify a
+  proposal only when persistent or corroborated and materially relevant to
+  household safety, comfort, resources, or reliability. The underlying events
+  remain queryable; this is an observation-quality rule, not evidence deletion.
 - Provider failures do not crash the HomeWorld process and are retried only on
   the next scheduled boundary. Shutdown cancels an observation through DSH's
   canonical cancellation path.
