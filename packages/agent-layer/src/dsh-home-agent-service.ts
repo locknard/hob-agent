@@ -6,6 +6,7 @@ import SessionStore, { SessionId } from "@deepseek-ai/dsh-session";
 import SqliteSessionPersistence from "@deepseek-ai/dsh-session-persistence-sqlite";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime from "@deepseek-ai/dsh-tools";
+import { deadline, timeoutOf } from "@deepseek-ai/dsh-timeout";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
@@ -13,6 +14,7 @@ import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
 import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
 import * as HomeProposalTool from "./dsh-home-proposal-tool.js";
+import { HomeObservationBudgetService } from "./dsh-home-observation-budget.js";
 import {
   AgentLoopTraceService,
   type AgentLoopTrace,
@@ -20,6 +22,9 @@ import {
 import type { HouseholdPromptContext } from "./household-prompt-context.js";
 
 const DEFAULT_SESSION_ID = "home-main";
+const HOME_OBSERVATION_MAX_TOOL_CALLS = 12;
+const HOME_OBSERVATION_TIMEOUT_MS = 120_000;
+const HOME_OBSERVATION_TIMEOUT_CODE = "HOME_OBSERVATION_TIMEOUT";
 const DEFAULT_SYSTEM_PROMPT = [
   "You are a household observer in Phase 0.",
   "You may inspect a compact bounded home inventory, bounded pages of the current home snapshot, bounded post-baseline evidence, existing household rule metadata, and create review-only household proposals.",
@@ -50,6 +55,8 @@ export interface DshHomeAgentOptions {
   readonly sessionPersistencePath?: string;
   readonly householdContext?: HouseholdPromptContext;
   readonly systemPrompt?: string;
+  /** Isolated-test override for the product-owned observation deadline. */
+  readonly observationTimeoutMs?: number;
 }
 
 /**
@@ -73,13 +80,23 @@ export class DshHomeAgentService extends Service {
   async requestObservation(signal?: AbortSignal): Promise<void> {
     if (this.observationStatus !== "idle") throw new Error("Home Agent is busy");
     if (signal?.aborted) throw new Error("Home observation was cancelled");
-    const cancel = () => this.agent.cancel({ kind: "parent" }, { keepInbox: true });
-    signal?.addEventListener("abort", cancel, { once: true });
     const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
     if (inventoryCoverage === undefined) throw new Error("Home inventory coverage gate is unavailable");
+    const observationBudget = this.ctx.get("homeObservationBudget");
+    if (observationBudget === undefined) throw new Error("Home observation budget is unavailable");
+    const timeoutMs = this.options.observationTimeoutMs ?? HOME_OBSERVATION_TIMEOUT_MS;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
+      throw new TypeError("Home observation timeout must be from 1 to 300000 milliseconds");
+    }
+    const observationDeadline = deadline(signal, timeoutMs, HOME_OBSERVATION_TIMEOUT_CODE);
+    const cancel = () => this.agent.cancel({ kind: "parent" }, { keepInbox: true });
+    observationDeadline.signal.addEventListener("abort", cancel, { once: true });
+    observationBudget.begin(this.agent, HOME_OBSERVATION_MAX_TOOL_CALLS);
     inventoryCoverage.beginObservation();
     let task: Promise<void> | undefined;
+    let budgetOutcome: ReturnType<HomeObservationBudgetService["end"]>;
     try {
+      if (observationDeadline.signal.aborted) throw new Error("Home observation was cancelled");
       this.agent.followup(createUserMessage({
         content: [{
           type: "text",
@@ -99,10 +116,19 @@ export class DshHomeAgentService extends Service {
       this.observationTask = task;
       await task;
     } finally {
+      budgetOutcome = observationBudget.end();
       inventoryCoverage.endObservation();
-      signal?.removeEventListener("abort", cancel);
+      observationDeadline.signal.removeEventListener("abort", cancel);
+      observationDeadline[Symbol.dispose]();
       if (task !== undefined && this.observationTask === task) this.observationTask = undefined;
     }
+    if (budgetOutcome === "tool_budget_exhausted") {
+      throw new Error("Home observation tool budget exhausted");
+    }
+    if (timeoutOf(observationDeadline.signal, HOME_OBSERVATION_TIMEOUT_CODE) !== undefined) {
+      throw new Error("Home observation timed out");
+    }
+    if (observationDeadline.signal.aborted) throw new Error("Home observation was cancelled");
   }
 
   traceSnapshot(): AgentLoopTrace | undefined {
@@ -146,6 +172,7 @@ export class DshHomeAgentService extends Service {
       });
     }
     await this.ctx.plugin(ToolRuntime);
+    await this.ctx.plugin(HomeObservationBudgetService);
     await this.ctx.plugin(HomeInventoryCoverageService);
     await this.ctx.plugin(HomeInventoryTool);
     await this.ctx.plugin(HomeSnapshotTool);

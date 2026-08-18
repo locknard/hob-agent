@@ -41,6 +41,38 @@ class RecordingAdapter extends LlmAdapter {
   }
 }
 
+class RepeatingToolAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = [];
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options);
+    const id = `inventory-${this.requests.length}`;
+    const args = JSON.stringify({ limit: 50 });
+    yield { type: "block-start", index: 0, blockType: "tool-call" };
+    yield { type: "tool-call-delta", index: 0, id, name: "get_home_inventory", argumentsDelta: args };
+    yield {
+      type: "block-end",
+      index: 0,
+      block: { type: "tool-call", id, name: "get_home_inventory", arguments: args },
+    };
+    yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+    yield { type: "finish", reason: { kind: "tool-calls" } };
+  }
+}
+
+class HangingAdapter extends LlmAdapter {
+  requests = 0;
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests += 1;
+    await new Promise<void>((resolve) => {
+      if (options.signal?.aborted) return resolve();
+      options.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+    if (false) yield { type: "finish", reason: { kind: "stop" } };
+  }
+}
+
 test("declares the neutral home-world service as a required production dependency", () => {
   assert.deepEqual(DshHomeAgentService.inject, ["homeWorld", "homeProposals"]);
 });
@@ -123,6 +155,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(ctx.get("agentLoopTrace"), undefined);
   assert.equal(ctx.get("agents"), undefined);
   assert.equal(ctx.get("tools"), undefined);
+  assert.equal(ctx.get("homeObservationBudget"), undefined);
   assert.equal(ctx.get("llm"), undefined);
   await ctx.fiber.dispose();
 });
@@ -190,4 +223,49 @@ test("resumes the stable Home Agent session from the official private SQLite sto
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("cancels an autonomous observation that exceeds its product tool budget", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  const adapter = new RepeatingToolAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter,
+    sessionId: "bounded-home",
+  });
+
+  await assert.rejects(
+    ctx.homeAgent.requestObservation(),
+    /tool budget exhausted/i,
+  );
+  assert.equal(adapter.requests.length, 13);
+  assert.equal(ctx.homeAgent.observationStatus, "idle");
+
+  await ctx.fiber.dispose();
+});
+
+test("cancels a model request that exceeds the autonomous observation deadline", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  const adapter = new HangingAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter,
+    sessionId: "timed-home",
+    observationTimeoutMs: 20,
+  });
+
+  await assert.rejects(
+    ctx.homeAgent.requestObservation(),
+    /timed out/i,
+  );
+  assert.equal(adapter.requests, 1);
+  assert.equal(ctx.homeAgent.observationStatus, "idle");
+
+  await ctx.fiber.dispose();
 });
