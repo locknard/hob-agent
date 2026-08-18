@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "exports": {
+    "./composition": "./src/dsh-home-agent-composition.ts",
+    "./model-reference": "./src/model-reference.ts",
+    "./model-providers": "./src/model-providers.ts"
+  },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-agent": "0.1.0-rc.7",

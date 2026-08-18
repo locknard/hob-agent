@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "packageManager": "pnpm@10.0.0",
   "scripts": {
+    "start": "tsx packages/hub/src/main.ts",
     "check": "pnpm check:types && pnpm check:instructions",
     "check:types": "tsc --noEmit -p tsconfig.json",
     "check:instructions": "sh scripts/sync-agent-instructions.sh --check",

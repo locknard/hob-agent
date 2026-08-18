@@ -10,10 +10,11 @@ no direct `pi-ai` or `pi-agent-core` dependency. The official
 `dsh-llm-pi-ai` package is the only provider adapter and carries its SDK as a
 transitive implementation detail.
 
-This repository is not yet a deployable Phase 0 service. It currently provides
-tested hub and Agent compositions, but no executable bootstrap creates a root
-Cordis `Context`, mounts `HomeAssistantService`, mounts the Home Agent, and owns
-process shutdown. Documentation and release claims must retain that distinction.
+This repository now provides an executable Phase 0 composition root. It creates
+one Cordis `Context`, mounts `HomeAssistantService` before the Home Agent, and
+owns bounded process shutdown. The service is runnable but not yet
+production-complete: live HA world-state maintenance, session persistence, and
+household prompt/Skill loading remain open.
 
 ## Verified boundaries
 
@@ -31,22 +32,32 @@ process shutdown. Documentation and release claims must retain that distinction.
 - Runtime ownership tests reject the removed Pi runtime, direct Pi SDK imports,
   and named legacy entry points.
 
-## Open architecture gaps
+## Completed architecture gates
 
 ### P0 — executable composition root
 
-Add one process entry that owns root Cordis startup/shutdown and mounts the HA
-bridge followed by `mountDshHomeAgent`. Until that exists, the repository is a
-composition library with integration tests, not a runnable hub.
+`packages/hub` now owns one process entry that creates the root Cordis context,
+provides an immutable allowlisted DSH launch environment, mounts the HA bridge
+followed by `mountDshHomeAgent`, and disposes the entire tree through the root
+fiber. Startup failure closes already-mounted resources. SIGINT/SIGTERM cleanup
+is bounded to five seconds and a repeated signal escalates to immediate exit.
+
+The Phase 0 composition root belongs to `packages/hub`, which remains the
+single service process. The hub may depend on a narrow agent-layer composition
+export; the agent layer must not depend back on hub implementation modules and
+continues to consume Home Assistant only through the Cordis service seam. This
+keeps process ownership in the monolith without creating a third runtime or a
+second service.
+
+## Open architecture gaps
 
 ### P1 — live HA world state and connection health
 
 `HomeAssistantService.snapshot` is currently the bootstrap snapshot.
 `state_changed` events are forwarded only to an optional callback and do not
-update it; disconnects do not mark bridge health down. The bridge also needs to
-reject the initial connection if the socket closes before authentication.
-Implement these together with the hub-owned world-model index rather than
-creating state inside the Agent layer.
+update it; disconnects do not mark bridge health down. Implement these together
+with the hub-owned world-model index rather than creating state inside the Agent
+layer. Initial connection close and startup timeout are now fail-closed.
 
 ### P1 — session persistence decision
 

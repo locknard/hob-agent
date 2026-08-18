@@ -48,8 +48,10 @@ events. Configure these values locally; never commit a token:
 ```sh
 export HOB_HA_URL=http://homeassistant.local:8123
 export HOB_HA_TOKEN='long-lived-access-token'
-export OPENAI_API_KEY='...'
-# or: ANTHROPIC_API_KEY / DEEPSEEK_API_KEY / MOONSHOT_API_KEY / ZAI_API_KEY
+export HOB_MODEL=deepseek/deepseek-v4-flash
+export DEEPSEEK_API_KEY='...'
+# or select the matching OPENAI_API_KEY / ANTHROPIC_API_KEY / MOONSHOT_API_KEY / ZAI_API_KEY
+pnpm start
 ```
 
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
@@ -75,11 +77,11 @@ Supported model providers and credential boundaries are documented in
 The OpenClaw-derived provider adaptation audit is tracked in
 [`docs/openclaw-provider-adaptation.md`](docs/openclaw-provider-adaptation.md).
 
-The current repository is a tested DSH/HA composition slice, not yet a
-standalone runnable hub: the executable Cordis bootstrap, live HA world-state
-updates, session persistence, and household prompt/Skill loading remain open.
-See [`docs/architecture-self-review.md`](docs/architecture-self-review.md) for
-the verified boundaries and prioritized gaps.
+The repository now has one executable Cordis composition root for the DSH/HA
+service. Live HA world-state updates, session persistence, and household
+prompt/Skill loading remain open; see
+[`docs/architecture-self-review.md`](docs/architecture-self-review.md) for the
+verified boundaries and prioritized gaps.
 The intended provider authorization and model-selection journey is documented
 in [`docs/provider-onboarding.md`](docs/provider-onboarding.md).
 

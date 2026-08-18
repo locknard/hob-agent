@@ -36,7 +36,10 @@ export interface HomeAssistantBridgeOptions {
   accessToken: string;
   socketFactory?: SocketFactory;
   onStateEvent?: (event: StateEvent) => void;
+  connectTimeoutMs?: number;
 }
+
+export const DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS = 5_000;
 
 export interface HomeAssistantEndpointProbeOptions {
   baseUrl: string;
@@ -142,11 +145,40 @@ export class HomeAssistantBridge {
     if (this.socket) throw new Error("Home Assistant bridge is already connected");
 
     return new Promise((resolve, reject) => {
+      const timeoutMs = this.options.connectTimeoutMs ?? DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS;
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settleResolve = (snapshot: HomeAssistantSnapshot): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(snapshot);
+      };
+      const settleReject = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        this.rejectPending(error);
+        reject(error);
+      };
       const socket = this.socketFactory(toHomeAssistantWebSocketUrl(this.options.baseUrl));
       this.socket = socket;
-      socket.onerror = reject;
-      socket.onclose = () => this.rejectPending(new Error("Home Assistant WebSocket closed"));
-      socket.onmessage = (event) => this.handleMessage(event.data, resolve, reject);
+      let authenticated = false;
+      socket.onerror = settleReject;
+      socket.onclose = () => {
+        const error = new Error(authenticated
+          ? "Home Assistant WebSocket closed"
+          : "Home Assistant connection closed before authentication");
+        settleReject(error);
+      };
+      socket.onmessage = (event) => this.handleMessage(event.data, settleResolve, settleReject, () => {
+        authenticated = true;
+      });
+      timer = setTimeout(() => {
+        const error = new Error("Home Assistant connection timed out during startup");
+        settleReject(error);
+        socket.close();
+      }, timeoutMs);
     });
   }
 
@@ -155,7 +187,12 @@ export class HomeAssistantBridge {
     this.socket = undefined;
   }
 
-  private handleMessage(data: string, resolveConnect: (snapshot: HomeAssistantSnapshot) => void, rejectConnect: (error: Error) => void): void {
+  private handleMessage(
+    data: string,
+    resolveConnect: (snapshot: HomeAssistantSnapshot) => void,
+    rejectConnect: (error: Error) => void,
+    markAuthenticated: () => void,
+  ): void {
     let message: Record<string, unknown>;
     try {
       message = JSON.parse(data) as Record<string, unknown>;
@@ -173,6 +210,7 @@ export class HomeAssistantBridge {
       return;
     }
     if (message.type === "auth_ok") {
+      markAuthenticated();
       void this.bootstrap().then(resolveConnect, rejectConnect);
       return;
     }

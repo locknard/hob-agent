@@ -1,0 +1,86 @@
+import { Context } from "@deepseek-ai/cordis";
+import {
+  DSH_LAUNCH_ENVIRONMENT_KEY,
+  type LaunchEnvironmentSnapshot,
+} from "@deepseek-ai/dsh-launch-environment";
+
+import {
+  type HomeAssistantBridgeOptions,
+} from "./home-assistant-bridge.js";
+import { HomeAssistantService } from "./home-assistant-service.js";
+import {
+  mountDshHomeAgent,
+  type DshHomeAgentCompositionOptions,
+} from "@hob-agent/agent-layer/composition";
+
+export interface HomeAgentRuntimeOptions {
+  readonly homeAssistant: HomeAssistantBridgeOptions;
+  readonly agent: DshHomeAgentCompositionOptions;
+  readonly launchEnvironment: LaunchEnvironmentSnapshot;
+}
+
+export type HomeAgentRuntimeStatus = "created" | "starting" | "running" | "stopping" | "stopped";
+
+/**
+ * Owns the process-level Cordis root and the two Phase 0 runtime fibers.
+ *
+ * Home Assistant is mounted first so the DSH Home Agent can resolve its
+ * required `homeAssistant` service during startup. Disposing the root fiber
+ * unloads the Agent before the bridge, in reverse registration order.
+ */
+export class HomeAgentRuntime {
+  readonly context: Context;
+  private statusValue: HomeAgentRuntimeStatus = "created";
+  private stopTask: Promise<void> | undefined;
+
+  constructor(private readonly options: HomeAgentRuntimeOptions) {
+    this.context = new Context();
+    this.context.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.launchEnvironment);
+  }
+
+  get status(): HomeAgentRuntimeStatus {
+    return this.statusValue;
+  }
+
+  async start(): Promise<void> {
+    if (this.statusValue !== "created") {
+      throw new Error(`Home Agent runtime cannot start from ${this.statusValue} state`);
+    }
+    this.statusValue = "starting";
+    try {
+      await this.context.plugin(HomeAssistantService, this.options.homeAssistant);
+      await mountDshHomeAgent(this.context, this.options.agent);
+      this.statusValue = "running";
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (this.statusValue === "stopped") return;
+    if (this.stopTask) return this.stopTask;
+
+    this.statusValue = "stopping";
+    this.stopTask = this.context.fiber.dispose().then(
+      () => {
+        this.statusValue = "stopped";
+      },
+      (error: unknown) => {
+        this.statusValue = "stopped";
+        throw error;
+      },
+    );
+    return this.stopTask;
+  }
+}
+
+export function createHomeAgentRuntime(options: HomeAgentRuntimeOptions): HomeAgentRuntime {
+  return new HomeAgentRuntime(options);
+}
+
+export async function startHomeAgentRuntime(options: HomeAgentRuntimeOptions): Promise<HomeAgentRuntime> {
+  const runtime = createHomeAgentRuntime(options);
+  await runtime.start();
+  return runtime;
+}

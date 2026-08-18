@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS,
   HomeAssistantBridge,
   probeHomeAssistantEndpoint,
   type SocketFactory,
@@ -57,6 +58,53 @@ test("preflights the WebSocket endpoint without sending credentials or commands"
     latencyMs: 123,
   });
   assert.deepEqual(socket.sent, []);
+});
+
+test("rejects a formal connection that closes before authentication", async () => {
+  const socket = new FakeSocket();
+  const bridge = new HomeAssistantBridge({
+    baseUrl: "http://ha.local:8123",
+    accessToken: "not-logged",
+    socketFactory: () => socket,
+  });
+
+  const connecting = bridge.connect();
+  socket.close();
+
+  await assert.rejects(
+    Promise.race([
+      connecting,
+      new Promise<never>((_, reject) => {
+        setImmediate(() => reject(new Error("connect did not settle before test deadline")));
+      }),
+    ]),
+    /Home Assistant connection closed before authentication/,
+  );
+});
+
+test("bounds formal connection startup with a configurable timeout", async () => {
+  const socket = new FakeSocket();
+  const bridge = new HomeAssistantBridge({
+    baseUrl: "http://ha.local:8123",
+    accessToken: "not-logged",
+    socketFactory: () => socket,
+    connectTimeoutMs: 1,
+  });
+
+  await assert.rejects(
+    Promise.race([
+      bridge.connect(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("connect did not time out before test deadline")), 50);
+      }),
+    ]),
+    /Home Assistant connection timed out during startup/,
+  );
+  assert.deepEqual(socket.sent, []);
+});
+
+test("keeps formal connection startup bounded by a five-second default", () => {
+  assert.equal(DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS, 5_000);
 });
 
 test("bounds an unresponsive Home Assistant preflight", async () => {
