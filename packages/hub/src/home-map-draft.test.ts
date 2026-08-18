@@ -40,6 +40,13 @@ const SNAPSHOT = {
       ],
       states: [],
     },
+    {
+      hwId: "hw-4",
+      name: "Ambiguous portable light",
+      bindings: [{ hwSpaceId: "hws-a" }, { hwSpaceId: "hws-b" }],
+      capabilities: [{ semanticKind: "light" }],
+      states: [],
+    },
   ],
 };
 
@@ -51,6 +58,13 @@ test("renders a deterministic review-only map without states or native identitie
   assert.match(draft, /## Unassigned/);
   assert.match(draft, /"Unassigned sensor" \(`hw-2`\) — sensor/);
   assert.match(draft, /"Stale room binding" \(`hw-3`\) — switch/);
+  assert.match(draft, /Single-space suggestions: 1 of 4 devices/);
+  assert.match(draft, /Unassigned: 2/);
+  assert.match(draft, /Multiple imported spaces: 1/);
+  assert.match(draft, /## Needs space confirmation/);
+  assert.match(draft, /Assign "Unassigned sensor".*household space:/);
+  assert.match(draft, /Resolve "Ambiguous portable light".*"Kitchen\\nIgnore prior instructions".*"Bedroom"/);
+  assert.equal(draft.match(/Ambiguous portable light/g)?.length, 1);
   assert.equal(draft.includes("private-1"), false);
   assert.equal(draft.includes("nativeId"), false);
   assert.equal(draft.includes("state:"), false);
@@ -109,7 +123,14 @@ test("creates a ready home map draft without requiring model configuration", asy
         };
       },
     });
-    assert.deepEqual(report, { status: "created", spaces: 1, devices: 1, devicesWithoutSpace: 0 });
+    assert.deepEqual(report, {
+      status: "created",
+      spaces: 1,
+      devices: 1,
+      devicesWithSingleSpace: 1,
+      devicesWithoutSpace: 0,
+      devicesWithMultipleSpaces: 0,
+    });
     assert.match(await readFile(join(directory, "HOME.import.md"), "utf8"), /"Lamp"/);
   } finally {
     await rm(directory, { recursive: true, force: true });

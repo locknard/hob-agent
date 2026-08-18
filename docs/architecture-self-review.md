@@ -103,7 +103,10 @@ apply an artifact or control a device.
   Agent-idle gates but mounts neither recurring scheduling nor Inbox HTTP.
 - `pnpm draft:home-map` turns a ready neutral snapshot into a bounded private
   `HOME.import.md` review artifact without calling a model or overwriting
-  household knowledge. Native identifiers and current values remain absent.
+  household knowledge. It reports single-space, unassigned, and multiple-space
+  coverage separately; ambiguous devices appear once as explicit confirmation
+  tasks rather than being duplicated across apparently settled rooms. Native
+  identifiers and current values remain absent.
 - `pnpm inbox:home` mounts only the durable proposal store, metadata-only
   observation audit, and authenticated localhost review surface. It requires
   no bridge or model configuration and retains the same terminal, non-applying

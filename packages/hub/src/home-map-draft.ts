@@ -49,7 +49,9 @@ export interface HomeMapDraftReport {
   readonly status: "created";
   readonly spaces: number;
   readonly devices: number;
+  readonly devicesWithSingleSpace: number;
   readonly devicesWithoutSpace: number;
+  readonly devicesWithMultipleSpaces: number;
 }
 
 /** Produces a bounded private review artifact without current state values. */
@@ -58,25 +60,45 @@ export function renderHomeMapDraft(snapshot: Pick<HomeMapSnapshot, "spaces" | "d
   const spaces = [...snapshot.spaces].sort((left, right) => left.hwSpaceId.localeCompare(right.hwSpaceId));
   const knownSpaceIds = new Set(spaces.map((space) => space.hwSpaceId));
   const devices = [...snapshot.devices].sort((left, right) => left.hwId.localeCompare(right.hwId));
+  const placements = classifyPlacements(devices, knownSpaceIds);
+  const singleSpace = placements.filter((placement) => placement.spaceIds.length === 1);
+  const unassigned = placements.filter((placement) => placement.spaceIds.length === 0);
+  const multipleSpaces = placements.filter((placement) => placement.spaceIds.length > 1);
+  const spacesById = new Map(spaces.map((space) => [space.hwSpaceId, space]));
   const lines = [
     "# Imported home map — review required",
     "",
     `Generated from a read-only neutral HomeWorld snapshot at ${generatedAt}.`,
     "This file is not loaded automatically. Verify every name and assignment before merging accepted facts into HOME.md.",
     "",
+    "## Imported coverage",
+    "",
+    `- Single-space suggestions: ${singleSpace.length} of ${devices.length} devices`,
+    `- Unassigned: ${unassigned.length}`,
+    `- Multiple imported spaces: ${multipleSpaces.length}`,
+    "",
   ];
   for (const space of spaces) {
     lines.push(`## Space: ${quoted(space.name ?? "Unnamed space")}`, "");
-    const assigned = devices.filter((device) => device.bindings.some((binding) => binding.hwSpaceId === space.hwSpaceId));
+    const assigned = singleSpace
+      .filter((placement) => placement.spaceIds[0] === space.hwSpaceId)
+      .map((placement) => placement.device);
     if (assigned.length === 0) lines.push("_No devices currently assigned._");
-    else lines.push(...assigned.map(deviceLine));
+    else lines.push(...assigned.map((device) =>
+      `- [ ] Confirm ${deviceDescription(device)} — source: imported space suggestion`));
     lines.push("");
   }
-  const unassigned = devices.filter((device) =>
-    !device.bindings.some((binding) => binding.hwSpaceId !== undefined && knownSpaceIds.has(binding.hwSpaceId)));
-  lines.push("## Unassigned", "");
+  lines.push("## Needs space confirmation", "", "### Unassigned", "");
   if (unassigned.length === 0) lines.push("_No unassigned devices._");
-  else lines.push(...unassigned.map(deviceLine));
+  else lines.push(...unassigned.map((placement) =>
+    `- [ ] Assign ${deviceDescription(placement.device)} — household space: __________`));
+  lines.push("", "### Multiple imported spaces", "");
+  if (multipleSpaces.length === 0) lines.push("_No devices with multiple imported spaces._");
+  else lines.push(...multipleSpaces.map((placement) => {
+    const candidates = placement.spaceIds.map((spaceId) =>
+      quoted(spacesById.get(spaceId)?.name ?? "Unnamed space")).join(", ");
+    return `- [ ] Resolve ${deviceDescription(placement.device)} — imported candidates: ${candidates}; household space: __________`;
+  }));
   lines.push("");
   const draft = lines.join("\n");
   if (Buffer.byteLength(draft, "utf8") > MAX_DRAFT_BYTES) {
@@ -134,11 +156,12 @@ export async function draftHomeMapEnvironment(
   if (readiness.status !== "ready") throw new Error("Home map draft requires a ready home world");
   const draft = renderHomeMapDraft(snapshot, new Date().toISOString());
   await writeHomeMapDraft(homeDirectory, draft);
+  const placementCounts = countPlacements(snapshot);
   return {
     status: "created",
     spaces: readiness.spaces,
     devices: readiness.devices,
-    devicesWithoutSpace: readiness.devicesWithoutSpace,
+    ...placementCounts,
   };
 }
 
@@ -171,10 +194,36 @@ async function loadReadySnapshot(
   }
 }
 
-function deviceLine(device: HomeMapSnapshot["devices"][number]): string {
+function deviceDescription(device: HomeMapSnapshot["devices"][number]): string {
   const kinds = [...new Set(device.capabilities.map((capability) => capability.semanticKind ?? "unclassified"))]
     .sort((left, right) => left.localeCompare(right));
-  return `- ${quoted(device.name ?? "Unnamed device")} (\`${safeHubId(device.hwId)}\`) — ${kinds.join(", ") || "unclassified"}`;
+  return `${quoted(device.name ?? "Unnamed device")} (\`${safeHubId(device.hwId)}\`) — ${kinds.join(", ") || "unclassified"}`;
+}
+
+function countPlacements(snapshot: Pick<HomeMapSnapshot, "spaces" | "devices">): {
+  readonly devicesWithSingleSpace: number;
+  readonly devicesWithoutSpace: number;
+  readonly devicesWithMultipleSpaces: number;
+} {
+  const knownSpaceIds = new Set(snapshot.spaces.map((space) => space.hwSpaceId));
+  const placements = classifyPlacements(snapshot.devices, knownSpaceIds);
+  return {
+    devicesWithSingleSpace: placements.filter((placement) => placement.spaceIds.length === 1).length,
+    devicesWithoutSpace: placements.filter((placement) => placement.spaceIds.length === 0).length,
+    devicesWithMultipleSpaces: placements.filter((placement) => placement.spaceIds.length > 1).length,
+  };
+}
+
+function classifyPlacements(
+  devices: readonly HomeMapSnapshot["devices"][number][],
+  knownSpaceIds: ReadonlySet<string>,
+): readonly { readonly device: HomeMapSnapshot["devices"][number]; readonly spaceIds: readonly string[] }[] {
+  return devices.map((device) => ({
+    device,
+    spaceIds: [...new Set(device.bindings.flatMap((binding) =>
+      binding.hwSpaceId !== undefined && knownSpaceIds.has(binding.hwSpaceId) ? [binding.hwSpaceId] : []))]
+      .sort((left, right) => left.localeCompare(right)),
+  }));
 }
 
 function quoted(value: string): string {

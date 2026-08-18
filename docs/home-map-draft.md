@@ -17,9 +17,12 @@ It never replaces `HOME.md` and never modifies `SOUL.md` or `MEMORY.md`.
 The draft contains:
 
 - an explicit review-required warning;
+- an aggregate coverage summary showing single-space, unassigned, and
+  multiple-space device counts;
 - neutral spaces with their current display names;
-- devices grouped by accepted Hub space binding;
-- a separate unassigned section;
+- only unambiguous single-space device suggestions grouped beneath a space;
+- separate editable confirmation sections for unassigned and multiple-space
+  devices, with one unchecked household-review item per device;
 - opaque Hub device IDs; and
 - closed neutral capability semantic kinds.
 
@@ -36,4 +39,9 @@ limit.
 rename, reorganize, and deliberately merge accepted facts into `HOME.md`.
 Names and space assignments imported from a bridge are suggestions with source
 provenance, not verified household truth. Missing assignments remain explicit;
-the command never infers a room from a device name.
+the command never infers a room from a device name. A device with bindings to
+more than one accepted neutral space is not duplicated across apparently
+settled rooms: it is shown once as a conflict that requires household
+resolution. The machine-readable command report includes the same
+multiple-space count so automation cannot mistake “has some space binding” for
+“has an unambiguous household location.”
