@@ -30,10 +30,12 @@ observation has product-specific costs and risks: a real home may contain many
 devices, inventory pages, evidence pages, and rules, while an ordinary chat
 turn should not silently inherit the same limit.
 
-At the current observed home scale, a normal useful path needs about six calls:
-two inventory pages, one detailed snapshot, one evidence read, one rule read,
-and at most one proposal. Twelve permits bounded correction and pagination
-without allowing an open-ended loop.
+At the current observed home scale, a normal useful path needs about seven or
+eight calls: one calibration read, bounded inventory pages, activity triage,
+one detailed snapshot, one evidence read, one rule read, and at most one
+proposal. Twelve permits bounded correction and pagination without allowing an
+open-ended loop. Completed attempts persist numeric turn/tool metrics so this
+budget can later be reviewed from actual household runs rather than guesses.
 
 ## Safety properties
 

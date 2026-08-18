@@ -83,6 +83,15 @@ export interface DshHomeAgentOptions {
   readonly observationTimeoutMs?: number;
 }
 
+export interface HomeObservationRunMetrics {
+  readonly durationMs: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningTokens: number;
+  readonly toolCalls: number;
+  readonly failedToolCalls: number;
+}
+
 /**
  * The production Home Agent composition.
  *
@@ -95,6 +104,7 @@ export class DshHomeAgentService extends Service {
   agent!: Agent;
   private observationTask: Promise<void> | undefined;
   private traceService: AgentLoopTraceService | undefined;
+  private lastObservationMetrics: HomeObservationRunMetrics | undefined;
 
   get observationStatus(): "idle" | "running" {
     return this.observationTask === undefined && this.agent.status === "idle" ? "idle" : "running";
@@ -104,6 +114,8 @@ export class DshHomeAgentService extends Service {
   async requestObservation(signal?: AbortSignal): Promise<HomeObservationDisposition | undefined> {
     if (this.observationStatus !== "idle") throw new Error("Home Agent is busy");
     if (signal?.aborted) throw new Error("Home observation was cancelled");
+    this.lastObservationMetrics = undefined;
+    const priorTurns = new Set(this.traceSnapshot()?.turns.map((turn) => turn.turn) ?? []);
     const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
     if (inventoryCoverage === undefined) throw new Error("Home inventory coverage gate is unavailable");
     const rulesCoverage = this.ctx.get("homeRulesCoverage");
@@ -151,6 +163,7 @@ export class DshHomeAgentService extends Service {
     } finally {
       budgetOutcome = observationBudget.end();
       disposition = observationReport.end();
+      this.captureObservationMetrics(priorTurns);
       inventoryCoverage.endObservation();
       rulesCoverage.endObservation();
       observationDeadline.signal.removeEventListener("abort", cancel);
@@ -169,6 +182,25 @@ export class DshHomeAgentService extends Service {
 
   traceSnapshot(): AgentLoopTrace | undefined {
     return this.traceService?.snapshot(String(this.agent.id));
+  }
+
+  observationMetrics(): HomeObservationRunMetrics | undefined {
+    return this.lastObservationMetrics === undefined ? undefined : { ...this.lastObservationMetrics };
+  }
+
+  private captureObservationMetrics(priorTurns: ReadonlySet<number>): void {
+    const trace = this.traceSnapshot();
+    const turn = trace?.turns.filter((item) => !priorTurns.has(item.turn)).at(-1);
+    if (trace === undefined || turn === undefined) return;
+    const tools = trace.tools.filter((tool) => tool.turn === turn.turn);
+    this.lastObservationMetrics = {
+      durationMs: turn.durationMs ?? 0,
+      inputTokens: turn.usage.inputTokens,
+      outputTokens: turn.usage.outputTokens,
+      reasoningTokens: turn.usage.reasoningTokens,
+      toolCalls: tools.length,
+      failedToolCalls: tools.filter((tool) => tool.status === "failed").length,
+    };
   }
 
   constructor(ctx: Context, private readonly options: DshHomeAgentOptions) {

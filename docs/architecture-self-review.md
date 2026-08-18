@@ -91,6 +91,10 @@ apply an artifact or control a device.
   pending household proposal at a time. Each scheduled, manual, startup, or
   one-shot attempt also enters a separate metadata-only Hub audit ledger before
   the model can run; unfinished rows become interrupted on restart.
+- Completed audit attempts may retain only turn duration, token counters, and
+  tool success/failure counts from the exact observation turn. This makes
+  no-proposal cost visible without persisting prompts, tool payloads, provider
+  identity, household state, or inferred monetary pricing.
 - One-root acceptance coverage now exercises the canonical DSH tool loop from
   observation through trusted Hub evidence binding into the Inbox. The Home
   Agent retains its trace service explicitly so cross-plugin Inbox reads do not

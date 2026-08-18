@@ -362,6 +362,15 @@ test("returns the bounded disposition reported by one canonical DSH observation 
   assert.equal(await ctx.homeAgent.requestObservation(), "insufficient_evidence");
   assert.equal(adapter.requests, 2);
   assert.equal(ctx.homeAgent.observationStatus, "idle");
+  assert.deepEqual(ctx.homeAgent.observationMetrics(), {
+    durationMs: ctx.homeAgent.observationMetrics()?.durationMs,
+    inputTokens: 2,
+    outputTokens: 2,
+    reasoningTokens: 0,
+    toolCalls: 1,
+    failedToolCalls: 0,
+  });
+  assert.equal((ctx.homeAgent.observationMetrics()?.durationMs ?? -1) >= 0, true);
 
   await ctx.fiber.dispose();
 });

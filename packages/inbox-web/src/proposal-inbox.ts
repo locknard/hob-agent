@@ -110,6 +110,7 @@ export interface InboxObservationStatus {
     readonly at: string;
     readonly outcome: "proposal_created" | "no_proposal" | "world_not_ready" | "proposal_pending" | "agent_busy" | "failed";
     readonly disposition?: InboxObservationDisposition;
+    readonly metrics?: InboxObservationMetrics;
   };
   readonly recentAttempts?: readonly InboxObservationAttempt[];
 }
@@ -126,8 +127,18 @@ export type InboxObservationAttempt = {
       readonly completedAt: string;
       readonly outcome: NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"];
       readonly disposition?: InboxObservationDisposition;
+      readonly metrics?: InboxObservationMetrics;
     }
 );
+
+export interface InboxObservationMetrics {
+  readonly durationMs: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningTokens: number;
+  readonly toolCalls: number;
+  readonly failedToolCalls: number;
+}
 
 export type InboxObservationDisposition =
   | "no_material_value"
@@ -242,12 +253,12 @@ export function renderProposalList(
   </li>`).join("");
   const observationStatus = observation === undefined
     ? "<p class=\"observation-status\">Observation schedule is disabled.</p>"
-    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome, observation.lastAttempt.disposition))} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
+    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome, observation.lastAttempt.disposition))}${observationMetricsLabel(observation.lastAttempt.metrics)} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
   const attempts = observation?.recentAttempts ?? persistedAttempts;
   const observationHistory = attempts.length === 0
     ? ""
     : `<section aria-label="Recent observations"><h2>Recent observations</h2><ol>${attempts.slice(0, 5).map((attempt) =>
-      `<li>${escapeHtml(observationTriggerLabel(attempt.trigger))} · ${observationAttemptLabel(attempt)} · ${escapeHtml(attempt.startedAt)}</li>`,
+      `<li>${escapeHtml(observationTriggerLabel(attempt.trigger))} · ${observationAttemptLabel(attempt)}${observationMetricsLabel(attempt.status === "completed" ? attempt.metrics : undefined)} · ${escapeHtml(attempt.startedAt)}</li>`,
     ).join("")}</ol></section>`;
   const calibrationSection = calibration === undefined ? "" : renderCalibrationSummary(calibration);
   return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header>${calibrationSection}${observationHistory}<ol>${items}</ol></main>`;
@@ -293,6 +304,12 @@ function observationAttemptLabel(attempt: InboxObservationAttempt): string {
   if (attempt.status === "running") return "running";
   if (attempt.status === "interrupted") return "interrupted safely";
   return escapeHtml(observationOutcomeLabel(attempt.outcome, attempt.disposition));
+}
+
+function observationMetricsLabel(metrics: InboxObservationMetrics | undefined): string {
+  if (metrics === undefined) return "";
+  const failed = metrics.failedToolCalls === 0 ? "" : ` · ${metrics.failedToolCalls} failed`;
+  return ` · ${metrics.toolCalls} tools${failed} · ${metrics.inputTokens} input / ${metrics.outputTokens} output / ${metrics.reasoningTokens} reasoning tokens · ${metrics.durationMs} ms`;
 }
 
 function observationTriggerLabel(trigger: InboxObservationAttempt["trigger"]): string {

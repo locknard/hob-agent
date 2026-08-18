@@ -107,6 +107,14 @@ test("lists and renders untrusted proposal content without creating an applicati
       at: "2026-08-19T00:00:00.000Z",
       outcome: "no_proposal",
       disposition: "insufficient_evidence",
+      metrics: {
+        durationMs: 2500,
+        inputTokens: 120,
+        outputTokens: 18,
+        reasoningTokens: 7,
+        toolCalls: 6,
+        failedToolCalls: 0,
+      },
     },
     recentAttempts: [{
       id: "observation-2",
@@ -116,6 +124,14 @@ test("lists and renders untrusted proposal content without creating an applicati
       status: "completed",
       outcome: "no_proposal",
       disposition: "insufficient_evidence",
+      metrics: {
+        durationMs: 2500,
+        inputTokens: 120,
+        outputTokens: 18,
+        reasoningTokens: 7,
+        toolCalls: 6,
+        failedToolCalls: 0,
+      },
     }, {
       id: "observation-1",
       trigger: "startup",
@@ -133,6 +149,7 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(listHtml, /no proposal · Agent reported: insufficient evidence/i);
   assert.match(listHtml, /Recent observations/i);
   assert.match(listHtml, /scheduled · no proposal · Agent reported: insufficient evidence/i);
+  assert.match(listHtml, /6 tools · 120 input \/ 18 output \/ 7 reasoning tokens · 2500 ms/i);
   assert.match(listHtml, /startup · interrupted safely/i);
   assert.match(listHtml, /manual · running/i);
 

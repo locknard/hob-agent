@@ -2,6 +2,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
 
 import type { ObservationTrigger } from "./observation-audit-store.js";
+import type { ObservationRunMetrics } from "./observation-audit-store.js";
 
 export interface HomeObservationSchedulerLike {
   wait(delayMs: number, signal: AbortSignal): Promise<void>;
@@ -32,12 +33,14 @@ export interface HomeObservationStatus {
     readonly at: string;
     readonly outcome: HomeObservationOutcome;
     readonly disposition?: HomeObservationDisposition;
+    readonly metrics?: ObservationRunMetrics;
   };
 }
 
 export interface HomeObservationResult {
   readonly outcome: HomeObservationOutcome;
   readonly disposition?: HomeObservationDisposition;
+  readonly metrics?: ObservationRunMetrics;
 }
 
 export interface ObservationPorts {
@@ -54,6 +57,7 @@ export interface ObservationPorts {
   homeAgent: {
     readonly observationStatus: "idle" | "running";
     requestObservation(signal?: AbortSignal): Promise<HomeObservationDisposition | undefined>;
+    observationMetrics?(): ObservationRunMetrics | undefined;
   };
 }
 
@@ -197,6 +201,7 @@ export async function requestGovernedHomeObservation(
   ctx: ObservationPorts,
   signal: AbortSignal = new AbortController().signal,
 ): Promise<HomeObservationResult> {
+  let agentRequested = false;
   try {
     if (signal.aborted) return { outcome: "failed" };
     if (!isHomeWorldReady(ctx.homeWorld.snapshot())) return { outcome: "world_not_ready" };
@@ -204,12 +209,19 @@ export async function requestGovernedHomeObservation(
       return { outcome: "proposal_pending" };
     }
     if (ctx.homeAgent.observationStatus !== "idle") return { outcome: "agent_busy" };
+    agentRequested = true;
     const disposition = await ctx.homeAgent.requestObservation(signal);
+    const metrics = ctx.homeAgent.observationMetrics?.();
     return ctx.homeProposals.list({ status: "pending_review", limit: 1 }).length > 0
-      ? { outcome: "proposal_created" }
-      : { outcome: "no_proposal", ...(disposition === undefined ? {} : { disposition }) };
+      ? { outcome: "proposal_created", ...(metrics === undefined ? {} : { metrics }) }
+      : {
+          outcome: "no_proposal",
+          ...(disposition === undefined ? {} : { disposition }),
+          ...(metrics === undefined ? {} : { metrics }),
+        };
   } catch {
-    return { outcome: "failed" };
+    const metrics = agentRequested ? ctx.homeAgent.observationMetrics?.() : undefined;
+    return { outcome: "failed", ...(metrics === undefined ? {} : { metrics }) };
   }
 }
 

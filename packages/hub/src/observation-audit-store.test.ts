@@ -31,6 +31,14 @@ test("persists only bounded observation lifecycle metadata", async () => {
     completedAt: "2026-08-19T04:00:03.000Z",
     outcome: "no_proposal",
     disposition: "insufficient_evidence",
+    metrics: {
+      durationMs: 2_500,
+      inputTokens: 120,
+      outputTokens: 18,
+      reasoningTokens: 7,
+      toolCalls: 6,
+      failedToolCalls: 0,
+    },
   });
   first.close();
 
@@ -43,6 +51,14 @@ test("persists only bounded observation lifecycle metadata", async () => {
     status: "completed",
     outcome: "no_proposal",
     disposition: "insufficient_evidence",
+    metrics: {
+      durationMs: 2_500,
+      inputTokens: 120,
+      outputTokens: 18,
+      reasoningTokens: 7,
+      toolCalls: 6,
+      failedToolCalls: 0,
+    },
   }]);
   assert.deepEqual(reopened.summary(), {
     totalAttempts: 1,
@@ -97,6 +113,19 @@ test("fails closed on invalid, duplicate, or mismatched lifecycle writes", async
     id,
     completedAt: "2026-08-19T03:59:59.000Z",
     outcome: "failed",
+  }), /invalid observation audit/i);
+  assert.throws(() => store.complete({
+    id,
+    completedAt: "2026-08-19T04:00:02.000Z",
+    outcome: "failed",
+    metrics: {
+      durationMs: -1,
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      toolCalls: 0,
+      failedToolCalls: 0,
+    },
   }), /invalid observation audit/i);
   assert.throws(() => store.complete({
     id,

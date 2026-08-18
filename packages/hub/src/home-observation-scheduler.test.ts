@@ -48,11 +48,22 @@ class StubAgent extends Service {
     this.onObservation?.();
     return this.disposition;
   }
+
+  observationMetrics() {
+    return {
+      durationMs: 25,
+      inputTokens: 10,
+      outputTokens: 2,
+      reasoningTokens: 1,
+      toolCalls: 3,
+      failedToolCalls: 0,
+    };
+  }
 }
 
 class StubObservationAudit extends Service {
   readonly starts: { id: string; trigger: string; startedAt: string }[] = [];
-  readonly completions: { id: string; completedAt: string; outcome: string; disposition?: string }[] = [];
+  readonly completions: { id: string; completedAt: string; outcome: string; disposition?: string; metrics?: unknown }[] = [];
   failBegin = false;
   failCompletion = false;
 
@@ -67,7 +78,7 @@ class StubObservationAudit extends Service {
     return id;
   }
 
-  complete(input: { id: string; completedAt: string; outcome: string; disposition?: string }) {
+  complete(input: { id: string; completedAt: string; outcome: string; disposition?: string; metrics?: unknown }) {
     if (this.failCompletion) throw new Error("audit completion unavailable");
     this.completions.push(input);
   }
@@ -101,6 +112,14 @@ test("starts one explicit observation only for a ready idle home with an empty I
     at: "2026-08-19T04:00:00.000Z",
     outcome: "no_proposal",
     disposition: "insufficient_evidence",
+    metrics: {
+      durationMs: 25,
+      inputTokens: 10,
+      outputTokens: 2,
+      reasoningTokens: 1,
+      toolCalls: 3,
+      failedToolCalls: 0,
+    },
   });
 
   ctx.homeAgent.onObservation = () => { ctx.homeProposals.pending = true; };
@@ -137,6 +156,14 @@ test("starts one explicit observation only for a ready idle home with an empty I
     "agent_busy",
   ]);
   assert.equal(ctx.homeObservationAudit.completions[0]?.disposition, "insufficient_evidence");
+  assert.deepEqual(ctx.homeObservationAudit.completions[0]?.metrics, {
+    durationMs: 25,
+    inputTokens: 10,
+    outputTokens: 2,
+    reasoningTokens: 1,
+    toolCalls: 3,
+    failedToolCalls: 0,
+  });
   assert.equal(ctx.homeObservationAudit.completions[1]?.disposition, undefined);
 
   await fiber.dispose();

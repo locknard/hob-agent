@@ -15,6 +15,7 @@ import {
 } from "./home-observation-scheduler.js";
 import type { LaunchEnvironment } from "./launch-config.js";
 import type { ObservationAuditStore } from "./observation-audit-store.js";
+import type { ObservationRunMetrics } from "./observation-audit-store.js";
 import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
 
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
@@ -76,6 +77,7 @@ export async function observeHomeEnvironment(
     });
     let auditOutcome: HomeObservationOutcome = "failed";
     let auditDisposition: HomeObservationDisposition | undefined;
+    let auditMetrics: ObservationRunMetrics | undefined;
     try {
       const readyDeadline = Date.now() + readyTimeoutMs;
       while (!isHomeWorldReady(runtime.context.homeWorld.snapshot())) {
@@ -97,6 +99,7 @@ export async function observeHomeEnvironment(
       }
       auditOutcome = result.outcome;
       auditDisposition = result.disposition;
+      auditMetrics = result.metrics;
       if (result.outcome === "proposal_created") return { outcome: "completed", proposal: "created" };
       if (result.outcome === "no_proposal") return {
         outcome: "completed",
@@ -114,6 +117,7 @@ export async function observeHomeEnvironment(
         completedAt: new Date().toISOString(),
         outcome: auditOutcome,
         ...(auditDisposition === undefined ? {} : { disposition: auditDisposition }),
+        ...(auditMetrics === undefined ? {} : { metrics: auditMetrics }),
       });
     }
   } finally {

@@ -9,6 +9,15 @@ import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
 
 export type ObservationTrigger = "startup" | "scheduled" | "manual" | "one_shot";
 
+export interface ObservationRunMetrics {
+  readonly durationMs: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningTokens: number;
+  readonly toolCalls: number;
+  readonly failedToolCalls: number;
+}
+
 export type ObservationAuditRecord = {
   readonly id: string;
   readonly trigger: ObservationTrigger;
@@ -21,6 +30,7 @@ export type ObservationAuditRecord = {
       readonly completedAt: string;
       readonly outcome: HomeObservationOutcome;
       readonly disposition?: HomeObservationDisposition;
+      readonly metrics?: ObservationRunMetrics;
     }
 );
 
@@ -31,6 +41,7 @@ export interface ObservationAuditStore {
     readonly completedAt: string;
     readonly outcome: HomeObservationOutcome;
     readonly disposition?: HomeObservationDisposition;
+    readonly metrics?: ObservationRunMetrics;
   }): void;
   list(query?: { readonly limit?: number }): readonly ObservationAuditRecord[];
   summary(): ObservationAuditSummary;
@@ -104,6 +115,12 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
         completed_at TEXT,
         outcome TEXT,
         disposition TEXT,
+        duration_ms INTEGER,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        reasoning_tokens INTEGER,
+        tool_calls INTEGER,
+        failed_tool_calls INTEGER,
         CHECK ((status IN ('running', 'interrupted') AND completed_at IS NULL AND outcome IS NULL)
           OR (status = 'completed' AND completed_at IS NOT NULL AND outcome IS NOT NULL)),
         CHECK (disposition IS NULL OR (outcome = 'no_proposal' AND disposition IN
@@ -115,6 +132,18 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
     const columns = this.db.prepare("PRAGMA table_info(observation_attempts)").all() as ObservationRow[];
     if (!columns.some((column) => column.name === "disposition")) {
       this.db.exec("ALTER TABLE observation_attempts ADD COLUMN disposition TEXT");
+    }
+    for (const [name, type] of [
+      ["duration_ms", "INTEGER"],
+      ["input_tokens", "INTEGER"],
+      ["output_tokens", "INTEGER"],
+      ["reasoning_tokens", "INTEGER"],
+      ["tool_calls", "INTEGER"],
+      ["failed_tool_calls", "INTEGER"],
+    ] as const) {
+      if (!columns.some((column) => column.name === name)) {
+        this.db.exec(`ALTER TABLE observation_attempts ADD COLUMN ${name} ${type}`);
+      }
     }
     this.db.prepare(`UPDATE observation_attempts SET status = 'interrupted'
       WHERE status = 'running'`).run();
@@ -149,13 +178,15 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
     readonly completedAt: string;
     readonly outcome: HomeObservationOutcome;
     readonly disposition?: HomeObservationDisposition;
+    readonly metrics?: ObservationRunMetrics;
   }): void {
     if (!input
       || !isBoundedId(input.id)
       || !isIsoTimestamp(input.completedAt)
       || !OUTCOMES.has(input.outcome)
       || (input.disposition !== undefined
-        && (input.outcome !== "no_proposal" || !DISPOSITIONS.has(input.disposition)))) {
+        && (input.outcome !== "no_proposal" || !DISPOSITIONS.has(input.disposition)))
+      || (input.metrics !== undefined && !validMetrics(input.metrics))) {
       throw new ObservationAuditError("invalid", "Invalid observation audit completion");
     }
     const row = this.db.prepare(`SELECT started_at, status
@@ -168,11 +199,19 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
       throw new ObservationAuditError("invalid", "Invalid observation audit completion time");
     }
     const result = this.db.prepare(`UPDATE observation_attempts
-      SET status = 'completed', completed_at = ?, outcome = ?, disposition = ?
+      SET status = 'completed', completed_at = ?, outcome = ?, disposition = ?,
+        duration_ms = ?, input_tokens = ?, output_tokens = ?, reasoning_tokens = ?,
+        tool_calls = ?, failed_tool_calls = ?
       WHERE observation_id = ? AND status = 'running'`).run(
       input.completedAt,
       input.outcome,
       input.disposition ?? null,
+      input.metrics?.durationMs ?? null,
+      input.metrics?.inputTokens ?? null,
+      input.metrics?.outputTokens ?? null,
+      input.metrics?.reasoningTokens ?? null,
+      input.metrics?.toolCalls ?? null,
+      input.metrics?.failedToolCalls ?? null,
       input.id,
     );
     this.ensurePrivateFiles();
@@ -186,7 +225,8 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new TypeError("Invalid observation audit query limit");
     }
-    const rows = this.db.prepare(`SELECT observation_id, trigger, started_at, status, completed_at, outcome, disposition
+    const rows = this.db.prepare(`SELECT observation_id, trigger, started_at, status, completed_at, outcome, disposition,
+        duration_ms, input_tokens, output_tokens, reasoning_tokens, tool_calls, failed_tool_calls
       FROM observation_attempts
       ORDER BY started_at DESC, observation_id DESC LIMIT ?`).all(limit) as ObservationRow[];
     return rows.map(fromRow);
@@ -287,11 +327,31 @@ function fromRow(row: ObservationRow): ObservationAuditRecord {
   const disposition = row.disposition === null || row.disposition === undefined
     ? undefined
     : String(row.disposition) as HomeObservationDisposition;
+  const metricValues = [
+    row.duration_ms,
+    row.input_tokens,
+    row.output_tokens,
+    row.reasoning_tokens,
+    row.tool_calls,
+    row.failed_tool_calls,
+  ];
+  const hasMetrics = metricValues.every((value) => value !== null && value !== undefined);
+  const hasPartialMetrics = metricValues.some((value) => value !== null && value !== undefined) && !hasMetrics;
+  const metrics = hasMetrics ? {
+    durationMs: Number(row.duration_ms),
+    inputTokens: Number(row.input_tokens),
+    outputTokens: Number(row.output_tokens),
+    reasoningTokens: Number(row.reasoning_tokens),
+    toolCalls: Number(row.tool_calls),
+    failedToolCalls: Number(row.failed_tool_calls),
+  } : undefined;
   if (row.status !== "completed"
     || !isIsoTimestamp(completedAt)
     || Date.parse(completedAt) < Date.parse(startedAt)
     || !OUTCOMES.has(outcome)
-    || (disposition !== undefined && (outcome !== "no_proposal" || !DISPOSITIONS.has(disposition)))) {
+    || (disposition !== undefined && (outcome !== "no_proposal" || !DISPOSITIONS.has(disposition)))
+    || hasPartialMetrics
+    || (metrics !== undefined && !validMetrics(metrics))) {
     throw new ObservationAuditError("corrupt", "Observation audit row is corrupt");
   }
   return {
@@ -302,7 +362,23 @@ function fromRow(row: ObservationRow): ObservationAuditRecord {
     status: "completed",
     outcome,
     ...(disposition === undefined ? {} : { disposition }),
+    ...(metrics === undefined ? {} : { metrics }),
   };
+}
+
+function validMetrics(value: ObservationRunMetrics): boolean {
+  const counts = [
+    value.durationMs,
+    value.inputTokens,
+    value.outputTokens,
+    value.reasoningTokens,
+    value.toolCalls,
+    value.failedToolCalls,
+  ];
+  return counts.every((item) => Number.isSafeInteger(item) && item >= 0 && item <= 1_000_000_000_000)
+    && value.durationMs <= 24 * 60 * 60 * 1_000
+    && value.toolCalls <= 1_000
+    && value.failedToolCalls <= value.toolCalls;
 }
 
 function isIsoTimestamp(value: unknown): value is string {
