@@ -313,7 +313,7 @@ DSH 当前仍处于 developer preview，源码和 npm 各 package 的发布进�
 及其必需 peer 精确锁定为 `0.1.0-rc.7`：`dsh-llm`、`dsh-session`、
 `dsh-system-prompt`、`dsh-tools`、`dsh-scope`、`dsh-agent`、`dsh-agent-loop`，以及
 `dsh-attachment`、`dsh-brand`、`dsh-code-runtime`、`dsh-credentials`、`dsh-invariants`、
-`dsh-launch-environment`、`dsh-llm-pi-ai`、
+`dsh-launch-environment`、`dsh-llm-pi-ai`、`dsh-repeat-tool-reminder`、
 `dsh-session-persistence`、`dsh-session-persistence-sqlite`、`dsh-settings`、
 `dsh-skill`、`dsh-timeout`、`dsh-tool-skill`、`dsh-typert-protocol`、
 `dsh-user-approval`。底层 `@deepseek-ai/cordis` 固定为 `4.0.1`；DSH core 所需的

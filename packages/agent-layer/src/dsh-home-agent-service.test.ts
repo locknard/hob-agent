@@ -268,6 +268,11 @@ test("cancels an autonomous observation that exceeds its product tool budget", a
     /tool budget exhausted/i,
   );
   assert.equal(adapter.requests.length, 13);
+  assert.equal(
+    adapter.requests.some((request) => request.messages.some((message) =>
+      JSON.stringify(message).includes("repeating the exact same tool call"))),
+    true,
+  );
   assert.equal(ctx.homeAgent.observationStatus, "idle");
 
   await ctx.fiber.dispose();

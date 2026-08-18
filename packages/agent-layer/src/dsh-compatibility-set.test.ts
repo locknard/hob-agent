@@ -34,6 +34,10 @@ describe('DSH compatibility set', () => {
       DSH_COMPATIBILITY_SET['@deepseek-ai/dsh-tool-skill'],
       DSH_COMPATIBILITY_SET_VERSION,
     );
+    assert.equal(
+      DSH_COMPATIBILITY_SET['@deepseek-ai/dsh-repeat-tool-reminder'],
+      DSH_COMPATIBILITY_SET_VERSION,
+    );
     assert.doesNotThrow(() =>
       assertDshCompatibilitySet(DSH_COMPATIBILITY_SET),
     );

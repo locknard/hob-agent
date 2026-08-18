@@ -9,6 +9,7 @@ import ToolRuntime from "@deepseek-ai/dsh-tools";
 import { deadline, timeoutOf } from "@deepseek-ai/dsh-timeout";
 import SkillRegistry from "@deepseek-ai/dsh-skill";
 import * as ToolSkill from "@deepseek-ai/dsh-tool-skill";
+import * as RepeatToolReminder from "@deepseek-ai/dsh-repeat-tool-reminder";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
@@ -186,6 +187,7 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(SkillRegistry);
     await this.ctx.plugin(HomeSkills);
     await this.ctx.plugin(AgentRegistry);
+    await this.ctx.plugin(RepeatToolReminder, { thresholds: [3, 5, 8] });
     await this.ctx.plugin(ToolSkill);
     await this.ctx.plugin(AgentLoop, { agents: [] });
 

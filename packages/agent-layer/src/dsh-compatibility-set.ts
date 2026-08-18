@@ -19,6 +19,7 @@ export const DSH_COMPATIBILITY_SET = {
   '@deepseek-ai/dsh-launch-environment': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-llm': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-llm-pi-ai': DSH_COMPATIBILITY_SET_VERSION,
+  '@deepseek-ai/dsh-repeat-tool-reminder': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-scope': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-session': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-session-persistence': DSH_COMPATIBILITY_SET_VERSION,

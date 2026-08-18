@@ -12,6 +12,11 @@ tool-budget or wall-clock breach cancels the active observation turn and the
 observation is reported as failed. Interactive Agent turns are not subject to
 this product-specific budget.
 
+The official DSH repeat-tool reminder is mounted as a softer first response at
+three, five, and eight consecutive identical calls. It gives the model a chance
+to re-read a result or conclude before the product-owned hard limit cancels the
+turn. The reminder is advisory and does not replace the hard safety bound.
+
 The deadline uses `@deepseek-ai/dsh-timeout` for official signal fusion, then
 cancels through the Agent surface because the timeout library intentionally
 only delivers abort notification. The existing one-shot process deadline
