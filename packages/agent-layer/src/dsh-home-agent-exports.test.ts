@@ -4,6 +4,7 @@ import test from "node:test";
 import { DshHomeAgentService } from "@hob-agent/agent-layer/home-agent";
 import { AgentLoopTraceService, projectAgentLoopTrace } from "@hob-agent/agent-layer/agent-loop-trace";
 import { inject, name, projectHomeSnapshot } from "@hob-agent/agent-layer/home-snapshot-tool";
+import { pageHomeInventory } from "@hob-agent/agent-layer/home-inventory-tool";
 import { pageHomeRules } from "@hob-agent/agent-layer/home-rules-tool";
 
 test("exports the neutral Home Agent and snapshot tool entry points", () => {
@@ -20,4 +21,5 @@ test("exports the neutral Home Agent and snapshot tool entry points", () => {
     topology: { spaces: 0, totalDevices: 0, devicesWithSpace: 0, devicesWithoutSpace: 0 },
   });
   assert.equal(typeof pageHomeRules, "function");
+  assert.equal(typeof pageHomeInventory, "function");
 });

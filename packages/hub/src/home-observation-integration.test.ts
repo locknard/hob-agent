@@ -116,10 +116,14 @@ class ObservationScriptAdapter {
     this.requests.push(options);
     const step = this.requests.length;
     if (step === 1) {
-      yield* toolCall("call-snapshot", "get_home_snapshot", { semanticKinds: ["light"], limit: 10 });
+      yield* toolCall("call-inventory", "get_home_inventory", { limit: 50 });
       return;
     }
     if (step === 2) {
+      yield* toolCall("call-snapshot", "get_home_snapshot", { semanticKinds: ["light"], limit: 10 });
+      return;
+    }
+    if (step === 3) {
       yield* toolCall("call-evidence", "get_home_evidence", {
         hwCapabilityIds: ["hwc-1"],
         lookbackHours: 24,
@@ -127,11 +131,11 @@ class ObservationScriptAdapter {
       });
       return;
     }
-    if (step === 3) {
+    if (step === 4) {
       yield* toolCall("call-rules", "get_home_rules", { limit: 20 });
       return;
     }
-    if (step === 4) {
+    if (step === 5) {
       yield* toolCall("call-proposal", "create_home_proposal", {
         kind: "automation-draft",
         title: "Review repeated light activity",
@@ -181,8 +185,9 @@ test("runs one DSH observation through governed tools into a trusted Inbox propo
 
   await ctx.homeAgent.requestObservation();
 
-  assert.equal(adapter.requests.length, 5);
+  assert.equal(adapter.requests.length, 6);
   assert.deepEqual(ctx.homeAgent.traceSnapshot()?.tools.map((tool) => tool.name), [
+    "get_home_inventory",
     "get_home_snapshot",
     "get_home_evidence",
     "get_home_rules",

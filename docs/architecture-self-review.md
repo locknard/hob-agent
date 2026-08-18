@@ -30,9 +30,13 @@ apply an artifact or control a device.
 
 ## Verified boundaries
 
-- The Home Agent exposes bounded, paginated `get_home_snapshot`, bounded read-only
-  `get_home_evidence`, and review-only `create_home_proposal`; none has device
-  or configuration authority.
+- The Home Agent exposes compact paginated `get_home_inventory`, bounded
+  paginated `get_home_snapshot`, bounded read-only `get_home_evidence`, and
+  review-only `create_home_proposal`; none has device or configuration
+  authority. Inventory discovery omits current values, capability identities,
+  schemas, and native identities. During autonomous observations, a runtime
+  gate rejects proposal creation until a stable ordered inventory cursor is
+  exhausted.
 - Temporal evidence reads only selected current hub capability IDs and
   post-`sync-complete` state changes in the current epoch. Bootstrap rows are
   excluded, raw attributes/native identifiers stay in the Hub, and partial

@@ -29,6 +29,11 @@ the household has no pending proposal to review.
 - The trusted product prompt asks for at most one materially useful proposal
   and permits no proposal when evidence is insufficient. It does not include
   household data; the Agent must use governed tools.
+- Household-wide discovery must exhaust the compact `get_home_inventory`
+  cursor before selecting a small candidate set for detailed snapshot reads.
+  The autonomous runtime gate rejects proposal creation after a partial,
+  out-of-order, or version-changing inventory; this is not left to prompt
+  compliance.
 - Candidate selection treats rapid software/integration status flapping,
   `unknown`/`unavailable` lifecycle transitions, and uncorroborated short
   sensor bursts as noise rather than household routine. They justify a

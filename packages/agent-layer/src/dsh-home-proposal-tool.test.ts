@@ -10,6 +10,7 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
   let registered: ToolDefinition | undefined;
   let draft: Record<string, unknown> | undefined;
   const ctx = {
+    get() { return undefined; },
     homeProposals: {
       async createDraft(input: Record<string, unknown>) {
         draft = input;
@@ -69,4 +70,36 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
     conflictSummary: { existingAutomationCount: 15, matchCount: 1 },
     evidenceSummary: { referenceCount: 1, coverageStatus: "partial", truncated: false },
   });
+});
+
+test("rejects an autonomous proposal while inventory coverage is incomplete", async () => {
+  let registered: ToolDefinition | undefined;
+  let drafts = 0;
+  const ctx = {
+    get(name: string) {
+      return name === "homeInventoryCoverage"
+        ? { assertProposalAllowed() { throw new Error("inventory incomplete"); } }
+        : undefined;
+    },
+    homeProposals: { async createDraft() { drafts += 1; throw new Error("must not run"); } },
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => undefined;
+      },
+    },
+  } as unknown as Context;
+  apply(ctx);
+  await assert.rejects(() => registered!.execute({
+    kind: "household-insight",
+    title: "Incomplete scan",
+    summary: "Must not become a proposal.",
+    idempotencyKey: "incomplete-scan:v1",
+    selectedHwIds: ["hw-1"],
+    riskLevel: "low",
+    riskReasons: [],
+    intentDescription: "Do not create.",
+    rollback: "No change.",
+  }, { rootCallId: "call-incomplete" } as never), /inventory incomplete/);
+  assert.equal(drafts, 0);
 });

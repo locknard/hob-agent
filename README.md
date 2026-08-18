@@ -114,8 +114,9 @@ merge accepted facts into `HOME.md`. See
 
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
-Home Product Bundle contributes the bounded, paginated, read-only
-`get_home_snapshot` tool and the bounded read-only `get_home_evidence` tool plus the review-only
+Home Product Bundle contributes compact paginated `get_home_inventory`
+discovery, the bounded paginated read-only `get_home_snapshot` tool, the
+bounded read-only `get_home_evidence` tool, plus the review-only
 `get_home_rules` catalog inspection tool and `create_home_proposal` tool. Hub-owned evidence and
 `foreignRules@1` conflict checks are attached before a proposal enters the
 Inbox. Device actions, configuration writes, and proposal application remain
@@ -137,6 +138,12 @@ filters, with an exclusive opaque cursor for deterministic continuation.
 Model-facing pages correlate states through Hub capability IDs and do not
 return adapter-native device, property, space, or schema identifiers. See
 [`docs/bounded-home-query.md`](docs/bounded-home-query.md).
+
+`get_home_inventory` returns at most 50 compact device summaries without
+current values, capability identities, schemas, or adapter-native identities.
+An observation exhausts this cheaper cursor before selecting a small candidate
+set for detailed snapshot reads. See
+[`docs/bounded-home-inventory.md`](docs/bounded-home-inventory.md).
 
 `get_home_evidence` accepts only current hub capability IDs and returns at most
 200 locally observed post-baseline state changes from the last seven days.

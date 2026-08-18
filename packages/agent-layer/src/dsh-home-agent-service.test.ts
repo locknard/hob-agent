@@ -64,6 +64,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
 
   assert.equal(String(ctx.homeAgent.agent.id), "home-main");
   assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), [
+    "get_home_inventory",
     "get_home_snapshot",
     "get_home_evidence",
     "get_home_rules",
@@ -109,6 +110,11 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(
     adapter.requests[1]?.messages.some((message) =>
       JSON.stringify(message).includes("rapidly flapping software or integration status")),
+    true,
+  );
+  assert.equal(
+    adapter.requests[1]?.messages.some((message) =>
+      JSON.stringify(message).includes("inventory cursor until it is exhausted")),
     true,
   );
 

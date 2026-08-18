@@ -8,6 +8,8 @@ import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime from "@deepseek-ai/dsh-tools";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
+import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
+import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
 import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
 import * as HomeProposalTool from "./dsh-home-proposal-tool.js";
@@ -20,7 +22,8 @@ import type { HouseholdPromptContext } from "./household-prompt-context.js";
 const DEFAULT_SESSION_ID = "home-main";
 const DEFAULT_SYSTEM_PROMPT = [
   "You are a household observer in Phase 0.",
-  "You may inspect bounded pages of the current home snapshot, inspect bounded post-baseline evidence, inspect existing household rule metadata, and create review-only household proposals.",
+  "You may inspect a compact bounded home inventory, bounded pages of the current home snapshot, bounded post-baseline evidence, existing household rule metadata, and create review-only household proposals.",
+  "For household-wide discovery, follow the inventory cursor until it is exhausted before selecting a small candidate set for detailed snapshot reads.",
   "Narrow snapshot reads by hub device, neutral space, or semantic kind and follow the returned cursor when another page is needed.",
   "Never infer a repeated household behavior from bootstrap state or incomplete evidence coverage.",
   "When a proposal relies on recent behavior, include the selected hub capability IDs and bounded lookback so the Hub can bind trusted event provenance.",
@@ -72,28 +75,33 @@ export class DshHomeAgentService extends Service {
     if (signal?.aborted) throw new Error("Home observation was cancelled");
     const cancel = () => this.agent.cancel({ kind: "parent" }, { keepInbox: true });
     signal?.addEventListener("abort", cancel, { once: true });
-    this.agent.followup(createUserMessage({
-      content: [{
-        type: "text",
-        text: [
-          "Perform one governed household observation.",
-          "Use bounded snapshot pages to find a materially useful candidate and inspect post-baseline evidence when claiming behavior.",
-          "Inspect existing household rules before proposing an automation so you do not repeat an obvious existing rule.",
-          "Treat rapidly flapping software or integration status, unknown/unavailable lifecycle changes, and uncorroborated short sensor bursts as noise rather than household routine.",
-          "Use them only when persistent or corroborated and materially relevant to household safety, comfort, resources, or reliability.",
-          "Create at most one materially useful proposal, only when its evidence and coverage support review.",
-          "If evidence is insufficient or no useful change is warranted, do not create a proposal.",
-        ].join(" "),
-      }],
-      source: { kind: "user" },
-    }));
-    const task = this.agent.whenIdle();
-    this.observationTask = task;
+    const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
+    if (inventoryCoverage === undefined) throw new Error("Home inventory coverage gate is unavailable");
+    inventoryCoverage.beginObservation();
+    let task: Promise<void> | undefined;
     try {
+      this.agent.followup(createUserMessage({
+        content: [{
+          type: "text",
+          text: [
+            "Perform one governed household observation.",
+            "Follow the compact inventory cursor until it is exhausted, then use bounded detailed snapshot pages for a small materially useful candidate set and inspect post-baseline evidence when claiming behavior.",
+            "Inspect existing household rules before proposing an automation so you do not repeat an obvious existing rule.",
+            "Treat rapidly flapping software or integration status, unknown/unavailable lifecycle changes, and uncorroborated short sensor bursts as noise rather than household routine.",
+            "Use them only when persistent or corroborated and materially relevant to household safety, comfort, resources, or reliability.",
+            "Create at most one materially useful proposal, only when its evidence and coverage support review.",
+            "If evidence is insufficient or no useful change is warranted, do not create a proposal.",
+          ].join(" "),
+        }],
+        source: { kind: "user" },
+      }));
+      task = this.agent.whenIdle();
+      this.observationTask = task;
       await task;
     } finally {
+      inventoryCoverage.endObservation();
       signal?.removeEventListener("abort", cancel);
-      if (this.observationTask === task) this.observationTask = undefined;
+      if (task !== undefined && this.observationTask === task) this.observationTask = undefined;
     }
   }
 
@@ -138,6 +146,8 @@ export class DshHomeAgentService extends Service {
       });
     }
     await this.ctx.plugin(ToolRuntime);
+    await this.ctx.plugin(HomeInventoryCoverageService);
+    await this.ctx.plugin(HomeInventoryTool);
     await this.ctx.plugin(HomeSnapshotTool);
     await this.ctx.plugin(HomeEvidenceTool);
     await this.ctx.plugin(HomeRulesTool);
