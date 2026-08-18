@@ -10,7 +10,7 @@
     "check:instructions": "sh scripts/sync-agent-instructions.sh --check",
     "prepare": "sh scripts/install-git-hooks.sh",
     "sync:agents": "sh scripts/sync-agent-instructions.sh",
-    "test": "sh tests/agent-instructions.test.sh && NODE_NO_WARNINGS=1 tsx --test packages/*/src/**/*.test.ts"
+    "test": "sh tests/agent-instructions.test.sh && NODE_NO_WARNINGS=1 tsx --test contracts/*.test.ts packages/*/src/**/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

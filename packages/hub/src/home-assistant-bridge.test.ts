@@ -120,7 +120,7 @@ test("bounds an unresponsive Home Assistant preflight", async () => {
   assert.deepEqual(socket.sent, []);
 });
 
-test("authenticates, reads a bootstrap snapshot, and forwards state changes", async () => {
+test("authenticates, reads a bootstrap snapshot, and forwards native state changes to the adapter seam", async () => {
   const socket = new FakeSocket();
   const socketFactory: SocketFactory = () => socket;
   const stateEvents: unknown[] = [];
@@ -128,7 +128,7 @@ test("authenticates, reads a bootstrap snapshot, and forwards state changes", as
     baseUrl: "http://ha.local:8123",
     accessToken: "not-logged",
     socketFactory,
-    onStateEvent: (event) => stateEvents.push(event),
+    onNativeStateEvent: (event) => stateEvents.push(event),
   });
 
   const bootstrapPromise = bridge.connect();
@@ -178,8 +178,60 @@ test("authenticates, reads a bootstrap snapshot, and forwards state changes", as
 
   assert.deepEqual(stateEvents, [{
     entityId: "light.kitchen",
-    capability: "light",
+    state: "off",
     attrs: {},
     ts: "2026-08-18T00:00:00.000Z",
   }]);
+});
+
+test("does not expose a raw onStateEvent bypass at the Home Assistant boundary", () => {
+  let seen: unknown;
+  const bridge = new HomeAssistantBridge({
+    baseUrl: "http://ha.local:8123",
+    accessToken: "not-logged",
+    onStateEvent: (event) => { seen = event; },
+  } as never);
+
+  (bridge as unknown as { forwardStateEvent(message: Record<string, unknown>): void }).forwardStateEvent({
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-18T00:00:00.000Z",
+      data: {
+        entity_id: "light.kitchen",
+        new_state: { state: "off", attributes: { secret: "raw" } },
+      },
+    },
+  });
+
+  assert.equal(seen, undefined);
+});
+
+test("rejects a bootstrap snapshot that exceeds the structural item budget", async () => {
+  const socket = new FakeSocket();
+  const bridge = new HomeAssistantBridge({
+    baseUrl: "http://ha.local:8123",
+    accessToken: "not-logged",
+    socketFactory: () => socket,
+    maxBootstrapItems: 1,
+  } as never);
+
+  const connecting = bridge.connect();
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  for (const command of commands) {
+    socket.receive({
+      id: command.id,
+      type: "result",
+      success: true,
+      result: command.type === "get_states"
+        ? [
+          { entity_id: "light.one", state: "on", attributes: {} },
+          { entity_id: "light.two", state: "off", attributes: {} },
+        ]
+        : [],
+    });
+  }
+
+  await assert.rejects(connecting, /bootstrap snapshot budget/);
 });

@@ -6,7 +6,10 @@ only governed tools with audit logging and approval checks.
 DSH is the only Agent Runtime in this package. It owns the LLM seam, session,
 prompt, tool, agent, and loop services. The Home Product Bundle contributes the
 read-only `get_home_snapshot` tool through DSH's registry; it does not create a
-parallel Agent or tool system.
+parallel Agent or tool system. The tool injects the neutral `homeWorld` service
+and projects deterministic devices, capabilities, states, bridge watermarks,
+and consistency/event/connection summaries. External attributes are bounded and
+JSON-normalized before they reach the model.
 
 `pi-agent-core` is forbidden. Standard API-key providers use the official
 `@deepseek-ai/dsh-llm-pi-ai` adapter beneath the DSH LLM seam. Its internal

@@ -11,13 +11,16 @@ Postgres/Redis, a native chat application, or a new skill format during Phase 0.
 
 ## Architecture boundaries
 
-- `packages/hub` owns HA connectivity, event ingestion, SQLite persistence,
-  world-model indexing, scheduling, and policy-enforced execution boundaries.
+- `packages/hub` owns the neutral bridge catalog and runtime, event ingestion,
+  SQLite persistence, world-model indexing, scheduling, and policy-enforced
+  execution boundaries. Ecosystem adapters, including HA, plug into this seam.
 - `packages/agent-layer` embeds the agent loop, assembles prompts, and exposes
   governed tools. Agents never receive unrestricted shell or device execution.
 - `packages/inbox-web` is the minimal human review surface for proposals.
-- `contracts` holds versioned, process-external bridge contract types. Keep the
-  Phase 0 HA client internal to the hub.
+- `contracts` holds the versioned, Zod-first neutral bridge contract used by
+  in-process trusted adapters today and preserved as a future process boundary.
+  Ecosystem-native payloads must not cross that contract into hub core or the
+  agent layer.
 - `home-template` is the editable, file-first household knowledge source.
 
 ## Safety and governance

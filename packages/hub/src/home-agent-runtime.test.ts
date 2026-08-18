@@ -6,52 +6,8 @@ import {
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from "@deepseek-ai/dsh-launch-environment";
 
-import { type HomeAssistantBridgeOptions, type WebSocketLike } from "./home-assistant-bridge.js";
-import {
-  createHomeAgentRuntime,
-} from "./home-agent-runtime.js";
-
-class FakeSocket implements WebSocketLike {
-  readonly sent: Array<Record<string, unknown>> = [];
-  closeCount = 0;
-  onclose: (() => void) | undefined;
-  onerror: ((error: Error) => void) | undefined;
-  onmessage: ((event: { data: string }) => void) | undefined;
-
-  send(data: string): void {
-    this.sent.push(JSON.parse(data) as Record<string, unknown>);
-  }
-
-  close(): void {
-    this.closeCount += 1;
-    this.onclose?.();
-  }
-
-  receive(message: unknown): void {
-    this.onmessage?.({ data: JSON.stringify(message) });
-  }
-}
-
-function respondToBootstrap(socket: FakeSocket): void {
-  for (const command of socket.sent.slice(1)) {
-    socket.receive({
-      id: command.id,
-      type: "result",
-      success: true,
-      result: command.type === "get_states"
-        ? [{ entity_id: "light.kitchen", state: "on", attributes: {} }]
-        : [],
-    });
-  }
-}
-
-function homeAssistantOptions(socket: FakeSocket): HomeAssistantBridgeOptions {
-  return {
-    baseUrl: "http://ha.local:8123",
-    accessToken: "not-logged",
-    socketFactory: () => socket,
-  };
-}
+import { BridgeCatalog } from "./bridge-catalog.js";
+import { createHomeAgentRuntime } from "./home-agent-runtime.js";
 
 function launchEnvironment() {
   return createLaunchEnvironmentSnapshot([{
@@ -60,10 +16,17 @@ function launchEnvironment() {
   }]);
 }
 
-test("starts HA before the DSH Home Agent and stops both from one owned runtime", async () => {
-  const socket = new FakeSocket();
+function homeWorldOptions() {
+  return {
+    catalog: new BridgeCatalog(),
+    bridges: [],
+    monitorIntervalMs: 0,
+  };
+}
+
+test("starts HomeWorld before the DSH Home Agent and stops both from one root", async () => {
   const runtime = createHomeAgentRuntime({
-    homeAssistant: homeAssistantOptions(socket),
+    homeWorld: homeWorldOptions(),
     launchEnvironment: launchEnvironment(),
     agent: {
       provider: "deepseek",
@@ -77,33 +40,25 @@ test("starts HA before the DSH Home Agent and stops both from one owned runtime"
   });
 
   assert.equal(runtime.status, "created");
-  const starting = runtime.start();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  socket.receive({ type: "auth_required" });
-  socket.receive({ type: "auth_ok" });
-  respondToBootstrap(socket);
-  await starting;
+  await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 2), ["HomeAssistantService", "DshHomeAgentComposition"]);
+  assert.deepEqual(pluginOrder.slice(0, 2), ["HomeWorldService", "DshHomeAgentComposition"]);
   assert.equal(runtime.context.root, runtime.context);
-  assert.equal(runtime.context.homeAssistant.snapshot.states[0]?.entity_id, "light.kitchen");
+  assert.equal(runtime.context.homeWorld.name, "homeWorld");
   assert.equal(String(runtime.context.homeAgent.agent.id), "home-runtime-test");
 
   await runtime.stop();
 
   assert.equal(runtime.status, "stopped");
-  assert.equal(socket.closeCount, 1);
-  assert.equal(runtime.context.homeAssistant, undefined);
+  assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
   await runtime.stop();
-  assert.equal(socket.closeCount, 1);
 });
 
-test("stops the already-mounted HA bridge when DSH startup fails", async () => {
-  const socket = new FakeSocket();
+test("stops the already-mounted HomeWorld when DSH startup fails", async () => {
   const runtime = createHomeAgentRuntime({
-    homeAssistant: homeAssistantOptions(socket),
+    homeWorld: homeWorldOptions(),
     launchEnvironment: launchEnvironment(),
     agent: {
       provider: "deepseek",
@@ -117,23 +72,16 @@ test("stops the already-mounted HA bridge when DSH startup fails", async () => {
     },
   });
 
-  const starting = runtime.start();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  socket.receive({ type: "auth_required" });
-  socket.receive({ type: "auth_ok" });
-  respondToBootstrap(socket);
-
-  await assert.rejects(starting, /Selected profile and SecretVault must be provided together/);
+  await assert.rejects(runtime.start(), /Selected profile and SecretVault must be provided together/);
   assert.equal(runtime.status, "stopped");
-  assert.equal(socket.closeCount, 1);
-  assert.equal(runtime.context.homeAssistant, undefined);
+  assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
 });
 
 test("provides the immutable DSH launch environment before any runtime plugin mounts", () => {
   const snapshot = launchEnvironment();
   const runtime = createHomeAgentRuntime({
-    homeAssistant: homeAssistantOptions(new FakeSocket()),
+    homeWorld: homeWorldOptions(),
     launchEnvironment: snapshot,
     agent: {
       provider: "deepseek",

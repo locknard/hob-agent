@@ -1,154 +1,690 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
-/** Cordis service surface consumed by this read-only adapter. */
-interface HomeAssistantSnapshotLike {
-  states: readonly HomeAssistantStateLike[];
-  health: {
-    bridge: "up";
-    devices: Readonly<Record<string, "reachable" | "unreachable" | "unknown">>;
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type HomeWorldDeviceValidity = "valid" | "stale" | "invalid-source" | "present-but-invalid";
+export type HomeWorldConnectionState =
+  | "starting"
+  | "syncing"
+  | "ready"
+  | "degraded"
+  | "paused"
+  | "quarantined"
+  | "down";
+
+export interface HomeWorldBinding {
+  readonly bridgeId: string;
+  readonly nativeId: string;
+  readonly nativeInstanceId: string;
+}
+
+export interface HomeWorldCapability {
+  readonly hwCapabilityId: string;
+  readonly hwId: string;
+  readonly schema: string;
+  readonly schemaVersion: string;
+  readonly bindings: HomeWorldBinding[];
+}
+
+export interface HomeWorldState {
+  readonly nativeId: string;
+  readonly nativeInstanceId: string;
+  readonly attrs: Readonly<Record<string, unknown>>;
+  readonly time: {
+    readonly sourceTs?: string;
+    readonly sourceTsQuality: "device" | "platform" | "none";
+  };
+  readonly origin: "observed" | "imported";
+}
+
+export interface HomeWorldDevice {
+  readonly hwId: string;
+  readonly bindings: readonly HomeWorldBinding[];
+  readonly name?: string;
+  readonly capabilities: readonly HomeWorldCapability[];
+  readonly states: readonly HomeWorldState[];
+  readonly validity: HomeWorldDeviceValidity;
+}
+
+/** Neutral device record emitted by the home-world service's bridge reducer. */
+export interface HomeWorldDeviceRecord {
+  readonly bridgeId?: string;
+  readonly hwId: string;
+  readonly bindings: readonly HomeWorldBinding[];
+  readonly name?: string;
+  readonly capabilities: readonly HomeWorldCapability[];
+  readonly states: readonly HomeWorldState[] | Readonly<Record<string, HomeWorldState>>;
+  readonly validity: HomeWorldDeviceValidity;
+}
+
+export interface HomeWorldWatermark {
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly lastSeq: number;
+  readonly lastSyncCompleteAt?: string;
+}
+
+export interface HomeWorldDiagnostics {
+  readonly bridgeId: string;
+  readonly connectionState: HomeWorldConnectionState;
+  readonly lastSyncCompleteAt?: string;
+  readonly lastEventReceivedAt?: string;
+  readonly lastSuccessfulContactAt?: string;
+}
+
+export interface HomeWorldBridgeMetrics {
+  readonly consistency: "ready" | "not_ready" | "degraded";
+  readonly eventActivity: "active" | "idle";
+  readonly connection: "up" | "degraded" | "down";
+}
+
+export interface HomeWorldBridgeSnapshot {
+  readonly bridgeId?: string;
+  readonly diagnostics?: Omit<HomeWorldDiagnostics, "bridgeId"> & { readonly bridgeId?: string };
+  readonly watermark?: Omit<HomeWorldWatermark, "bridgeId"> & { readonly bridgeId?: string } | null;
+  readonly devices?: readonly HomeWorldDeviceRecord[];
+  readonly metrics?: HomeWorldBridgeMetrics;
+}
+
+export interface HomeWorldSnapshot {
+  readonly devices?: readonly (HomeWorldDevice | HomeWorldDeviceRecord)[];
+  /** `watermarks` is accepted as the internal facade name; output is canonicalized. */
+  readonly bridgeWatermarks?: readonly HomeWorldWatermark[];
+  readonly watermarks?: readonly HomeWorldWatermark[];
+  readonly diagnostics?: readonly (Omit<HomeWorldDiagnostics, "bridgeId"> & { readonly bridgeId?: string })[];
+  readonly bridges?: Readonly<Record<string, HomeWorldBridgeSnapshot>>;
+  readonly watermarkVector?: Readonly<Record<string, Omit<HomeWorldWatermark, "bridgeId"> & { readonly bridgeId?: string } | null>>;
+}
+
+export interface HomeWorldService {
+  readonly snapshot: HomeWorldSnapshot | (() => HomeWorldSnapshot | undefined | Promise<HomeWorldSnapshot | undefined>);
+}
+
+export interface HomeSnapshotToolValue {
+  readonly devices: {
+    readonly bridgeId?: string;
+    readonly hwId: string;
+    readonly bindings: HomeWorldBinding[];
+    readonly name?: string;
+    readonly validity: HomeWorldDeviceValidity;
+    readonly capabilities: HomeWorldCapability[];
+    readonly states: {
+      readonly nativeId: string;
+      readonly nativeInstanceId: string;
+      readonly attrs: Record<string, JsonValue>;
+      readonly time: {
+        readonly sourceTs?: string;
+        readonly sourceTsQuality: "device" | "platform" | "none";
+      };
+      readonly origin: "observed" | "imported";
+    }[];
+  }[];
+  readonly bridgeWatermarks: HomeWorldWatermark[];
+  readonly metrics: {
+    readonly consistency: {
+      readonly bridgeId: string;
+      readonly state: HomeWorldConnectionState;
+      readonly lastSyncCompleteAt?: string;
+    }[];
+    readonly eventActivity: {
+      readonly bridgeId: string;
+      readonly lastEventReceivedAt?: string;
+    }[];
+    readonly connectionActivity: {
+      readonly bridgeId: string;
+      readonly state: HomeWorldConnectionState;
+      readonly lastSuccessfulContactAt?: string;
+    }[];
   };
 }
 
-interface HomeAssistantStateLike {
-  entity_id: string;
-  state: string;
-  attributes: Readonly<Record<string, unknown>>;
-}
-
-type HomeAssistantContext = Context & { homeAssistant: { snapshot: HomeAssistantSnapshotLike } };
-
-interface HomeSnapshotToolValue {
-  states: Array<{
-    entity_id: string;
-    state: string;
-    attributes: Record<string, JsonValue>;
-  }>;
-  health: {
-    bridge: "up";
-    devices: Record<string, "reachable" | "unreachable" | "unknown">;
-  };
-}
-
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+type HomeWorldContext = Context & { homeWorld: HomeWorldService };
 
 export const name = "dsh-home-snapshot-tool";
-export const inject = ["tools", "homeAssistant"];
+export const inject = ["tools", "homeWorld"] as const;
+
+const metricConsistencySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    bridgeId: { type: "string", required: true },
+    state: { type: "string", required: true },
+    lastSyncCompleteAt: { type: "string" },
+  },
+} as const;
+
+const metricEventSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    bridgeId: { type: "string", required: true },
+    lastEventReceivedAt: { type: "string" },
+  },
+} as const;
+
+const metricConnectionSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    bridgeId: { type: "string", required: true },
+    state: { type: "string", required: true },
+    lastSuccessfulContactAt: { type: "string" },
+  },
+} as const;
 
 const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    states: {
+    devices: {
       type: "array",
       required: true,
       items: {
         type: "object",
         additionalProperties: false,
         properties: {
-          entity_id: { type: "string", required: true },
-          state: { type: "string", required: true },
-          attributes: {
-            type: "object",
+          bridgeId: { type: "string" },
+          hwId: { type: "string", required: true },
+          bindings: {
+            type: "array",
             required: true,
-            additionalProperties: true,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                bridgeId: { type: "string", required: true },
+                nativeId: { type: "string", required: true },
+                nativeInstanceId: { type: "string", required: true },
+              },
+            },
+          },
+          name: { type: "string" },
+          validity: {
+            type: "string",
+            required: true,
+            enum: ["valid", "stale", "invalid-source", "present-but-invalid"],
+          },
+          capabilities: {
+            type: "array",
+            required: true,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                hwCapabilityId: { type: "string", required: true },
+                hwId: { type: "string", required: true },
+                schema: { type: "string", required: true },
+                schemaVersion: { type: "string", required: true },
+                bindings: {
+                  type: "array",
+                  required: true,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      bridgeId: { type: "string", required: true },
+                      nativeId: { type: "string", required: true },
+                      nativeInstanceId: { type: "string", required: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          states: {
+            type: "array",
+            required: true,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                nativeId: { type: "string", required: true },
+                nativeInstanceId: { type: "string", required: true },
+                attrs: { type: "object", required: true, additionalProperties: true },
+                time: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: true,
+                  properties: {
+                    sourceTs: { type: "string" },
+                    sourceTsQuality: {
+                      type: "string",
+                      required: true,
+                      enum: ["device", "platform", "none"],
+                    },
+                  },
+                },
+                origin: { type: "string", required: true, enum: ["observed", "imported"] },
+              },
+            },
           },
         },
       },
     },
-    health: {
+    bridgeWatermarks: {
+      type: "array",
+      required: true,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          bridgeId: { type: "string", required: true },
+          epochId: { type: "string", required: true },
+          lastSeq: { type: "number", required: true },
+          lastSyncCompleteAt: { type: "string" },
+        },
+      },
+    },
+    metrics: {
       type: "object",
       required: true,
       additionalProperties: false,
       properties: {
-        bridge: { type: "string", required: true, enum: ["up"] },
-        devices: {
-          type: "object",
-          required: true,
-          additionalProperties: true,
-        },
+        consistency: { type: "array", required: true, items: metricConsistencySchema },
+        eventActivity: { type: "array", required: true, items: metricEventSchema },
+        connectionActivity: { type: "array", required: true, items: metricConnectionSchema },
       },
     },
   },
 } as const;
 
-/**
- * Register the model-facing home read. Registry payloads are intentionally
- * excluded: they are unbounded external data and are not needed for this
- * first deterministic state summary.
- */
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: "get_home_snapshot",
-    description: "Read the current Home Assistant household state snapshot. This tool is read-only.",
+    description: "Read the current neutral home-world snapshot. This tool is read-only.",
     parameters: {},
     output: {
       schema: HOME_SNAPSHOT_OUTPUT_SCHEMA,
       render: (_args, value) => [{ type: "text" as const, text: JSON.stringify(value) }],
     },
-    execute: async () => projectHomeSnapshot((ctx as HomeAssistantContext).homeAssistant.snapshot),
+    execute: async () => projectHomeSnapshot(await readHomeWorld((ctx as HomeWorldContext).homeWorld)),
   }));
 }
 
-function projectHomeSnapshot(snapshot: HomeAssistantSnapshotLike): HomeSnapshotToolValue {
-  const states = snapshot.states
-    .map((state) => ({
-      entity_id: state.entity_id,
-      state: state.state,
-      attributes: stableRecord(state.attributes),
-    }))
-    .sort((left, right) => {
-      const byEntity = compareStrings(left.entity_id, right.entity_id);
-      if (byEntity !== 0) return byEntity;
-      return compareStrings(left.state, right.state);
-    });
+export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): HomeSnapshotToolValue {
+  const bridges = Object.entries(snapshot?.bridges ?? {}).sort(([left], [right]) => compareStrings(left, right));
+  const deviceInputs = [
+    ...normalizeArray(snapshot?.devices),
+    ...bridges.flatMap(([bridgeId, bridge]) => normalizeArray<HomeWorldDeviceRecord>(bridge.devices).map((device) => ({ ...device, bridgeId }))),
+  ];
+  const devicesByKey = new Map<string, HomeSnapshotToolValue["devices"][number]>();
+  for (const input of deviceInputs) {
+    const device = normalizeDevice(input);
+    if (device === undefined) continue;
+    const key = `hw\u0000${device.hwId}`;
+    const existing = devicesByKey.get(key);
+    if (existing === undefined) devicesByKey.set(key, device);
+    else devicesByKey.set(key, mergeDevices(existing, device));
+  }
+  const devices = [...devicesByKey.values()]
+    .sort((left, right) => compareStrings(left.hwId, right.hwId)
+      || compareStrings(left.bridgeId ?? "", right.bridgeId ?? ""));
 
-  const devices = Object.fromEntries(
-    Object.entries(snapshot.health.devices).sort(([left], [right]) => compareStrings(left, right)),
-  );
+  const watermarkInputs: Array<{ value: unknown; bridgeId?: string }> = [
+    ...normalizeArray(snapshot?.bridgeWatermarks ?? snapshot?.watermarks).map((value) => ({ value })),
+    ...Object.entries(snapshot?.watermarkVector ?? {}).map(([bridgeId, value]) => ({ value, bridgeId })),
+    ...bridges.map(([bridgeId, bridge]) => ({ value: bridge.watermark, bridgeId })),
+  ];
+  const watermarksByBridge = new Map<string, HomeWorldWatermark>();
+  for (const { value, bridgeId } of watermarkInputs) {
+    const watermark = normalizeWatermark(value, bridgeId);
+    if (watermark !== undefined && !watermarksByBridge.has(watermark.bridgeId)) {
+      watermarksByBridge.set(watermark.bridgeId, watermark);
+    }
+  }
+  const bridgeWatermarks = [...watermarksByBridge.values()].sort(compareWatermarks);
+
+  const diagnosticsByBridge = new Map<string, HomeWorldDiagnostics>();
+  for (const diagnostic of normalizeArray(snapshot?.diagnostics)) {
+    const normalized = normalizeDiagnostics(diagnostic);
+    if (normalized !== undefined) diagnosticsByBridge.set(normalized.bridgeId, normalized);
+  }
+  for (const [bridgeId, bridge] of bridges) {
+    if (diagnosticsByBridge.has(bridgeId)) continue;
+    const normalized = normalizeDiagnostics(bridge.diagnostics, bridgeId)
+      ?? normalizeMetricDiagnostics(bridge.metrics, bridgeId);
+    if (normalized !== undefined) diagnosticsByBridge.set(normalized.bridgeId, normalized);
+  }
+  const diagnostics = [...diagnosticsByBridge.values()].sort((left, right) => compareStrings(left.bridgeId, right.bridgeId));
 
   return {
-    states,
-    health: {
-      bridge: snapshot.health.bridge,
-      devices,
+    devices,
+    bridgeWatermarks,
+    metrics: {
+      consistency: diagnostics.map(({ bridgeId, connectionState: state, lastSyncCompleteAt }) => ({
+        bridgeId,
+        state,
+        ...(lastSyncCompleteAt === undefined ? {} : { lastSyncCompleteAt }),
+      })),
+      eventActivity: diagnostics.map(({ bridgeId, lastEventReceivedAt }) => ({
+        bridgeId,
+        ...(lastEventReceivedAt === undefined ? {} : { lastEventReceivedAt }),
+      })),
+      connectionActivity: diagnostics.map(({ bridgeId, connectionState: state, lastSuccessfulContactAt }) => ({
+        bridgeId,
+        state,
+        ...(lastSuccessfulContactAt === undefined ? {} : { lastSuccessfulContactAt }),
+      })),
     },
   };
 }
 
-function stableRecord(value: Readonly<Record<string, unknown>>): Record<string, JsonValue> {
-  const result: Record<string, JsonValue> = {};
-  for (const [key, item] of Object.entries(value).sort(([left], [right]) => compareStrings(left, right))) {
-    const normalized = stableValue(item, new WeakSet<object>());
-    if (normalized !== undefined) result[key] = normalized;
-  }
-  return result;
+async function readHomeWorld(service: HomeWorldService): Promise<HomeWorldSnapshot | undefined> {
+  const snapshot = service?.snapshot;
+  return typeof snapshot === "function" ? await snapshot() : snapshot;
 }
 
-function stableValue(value: unknown, seen: WeakSet<object>): JsonValue | undefined {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-  if (typeof value !== "object") return undefined;
+function normalizeDevice(device: unknown): HomeSnapshotToolValue["devices"][number] | undefined {
+  if (!isRecord(device)) return undefined;
+  const hwId = safeString(device.hwId);
+  const bindings = normalizeBindings(device.bindings);
+  if (hwId === undefined || bindings.length === 0) return undefined;
+  if (!isArray(device.capabilities) || device.capabilities.length === 0) return undefined;
+  const rawCapabilities = device.capabilities;
+  const capabilities = normalizeArray(rawCapabilities)
+    .map(normalizeCapability)
+    .filter((capability): capability is HomeWorldCapability => capability !== undefined)
+    .sort(compareCapabilities);
+  const deviceBindingKeys = new Set(bindings.map((binding) => bindingKey(binding)));
+  if (capabilities.length !== rawCapabilities.length
+    || capabilities.some((capability) => capability.hwId !== hwId
+      || capability.bindings.length === 0
+      || capability.bindings.some((binding) => !deviceBindingKeys.has(bindingKey(binding))))) return undefined;
+  const states = normalizeStates(device.states, undefined, new Set(bindings.map((binding) => binding.nativeId)))
+    .filter((state): state is HomeSnapshotToolValue["devices"][number]["states"][number] => state !== undefined)
+    .sort(compareStates);
+  const name = safeString(device.name);
+  const validity = isValidity(device.validity) ? device.validity : "invalid-source";
+  const bridgeId = safeString(device.bridgeId);
+  return {
+    ...(bridgeId === undefined ? {} : { bridgeId }),
+    hwId,
+    bindings,
+    ...(name === undefined ? {} : { name }),
+    validity,
+    capabilities,
+    states,
+  };
+}
+
+function normalizeStates(
+  value: unknown,
+  nativeId: string | undefined,
+  allowedNativeIds: ReadonlySet<string> = new Set(),
+): Array<HomeSnapshotToolValue["devices"][number]["states"][number] | undefined> {
+  const values = Array.isArray(value)
+    ? value
+    : value instanceof Map
+      ? [...value.values()]
+      : isRecord(value) ? Object.entries(value).sort(([left], [right]) => compareStrings(left, right)).map(([, state]) => state) : [];
+  return values.map((state) => normalizeState(state, nativeId, allowedNativeIds));
+}
+
+function normalizeCapability(capability: unknown): HomeWorldCapability | undefined {
+  if (!isRecord(capability)) return undefined;
+  const hwCapabilityId = safeString(capability?.hwCapabilityId);
+  const hwId = safeString(capability?.hwId);
+  const schema = safeString(capability?.schema);
+  const schemaVersion = safeString(capability?.schemaVersion);
+  if (hwCapabilityId === undefined || hwId === undefined || schema === undefined || schemaVersion === undefined) return undefined;
+  const bindings = normalizeBindings(capability.bindings);
+  if (bindings.length === 0) return undefined;
+  return { hwCapabilityId, hwId, schema, schemaVersion, bindings };
+}
+
+function normalizeState(
+  state: unknown,
+  nativeId: string | undefined,
+  allowedNativeIds: ReadonlySet<string> = new Set(),
+): HomeSnapshotToolValue["devices"][number]["states"][number] | undefined {
+  if (!isRecord(state)) return undefined;
+  const stateNativeId = safeString(state?.nativeId);
+  const nativeInstanceId = safeString(state?.nativeInstanceId);
+  if (stateNativeId === undefined
+    || (nativeId !== undefined && stateNativeId !== nativeId)
+    || (nativeId === undefined && allowedNativeIds.size > 0 && !allowedNativeIds.has(stateNativeId))
+    || nativeInstanceId === undefined
+    || !isRecord(state.attrs)) return undefined;
+  if (!isRecord(state.time) || !isSourceQuality(state.time.sourceTsQuality) || !isOrigin(state.origin)) return undefined;
+  const attrs = stableRecord(state.attrs);
+  const sourceTs = safeString(state.time.sourceTs);
+  return {
+    nativeId: stateNativeId,
+    nativeInstanceId,
+    attrs,
+    time: {
+      ...(sourceTs === undefined ? {} : { sourceTs }),
+      sourceTsQuality: state.time.sourceTsQuality,
+    },
+    origin: state.origin,
+  };
+}
+
+function normalizeBindings(value: unknown): HomeWorldBinding[] {
+  const bindings = normalizeArray(value)
+    .map((binding): HomeWorldBinding | undefined => {
+      if (!isRecord(binding)) return undefined;
+      const bridgeId = safeString(binding.bridgeId);
+      const nativeId = safeString(binding.nativeId);
+      const nativeInstanceId = safeString(binding.nativeInstanceId);
+      if (bridgeId === undefined || nativeId === undefined || nativeInstanceId === undefined) return undefined;
+      return { bridgeId, nativeId, nativeInstanceId };
+    })
+    .filter((binding): binding is HomeWorldBinding => binding !== undefined)
+    .sort((left, right) => compareStrings(left.bridgeId, right.bridgeId)
+      || compareStrings(left.nativeId, right.nativeId)
+      || compareStrings(left.nativeInstanceId, right.nativeInstanceId));
+  const unique = new Map<string, HomeWorldBinding>();
+  for (const binding of bindings) {
+    const key = `${binding.bridgeId}\u0000${binding.nativeId}\u0000${binding.nativeInstanceId}`;
+    if (!unique.has(key)) unique.set(key, binding);
+  }
+  return [...unique.values()];
+}
+
+function bindingKey(binding: HomeWorldBinding): string {
+  return `${binding.bridgeId}\u0000${binding.nativeId}\u0000${binding.nativeInstanceId}`;
+}
+
+function mergeDevices(
+  left: HomeSnapshotToolValue["devices"][number],
+  right: HomeSnapshotToolValue["devices"][number],
+): HomeSnapshotToolValue["devices"][number] {
+  if (left.hwId !== right.hwId) return left;
+  const bindings = normalizeBindings([...left.bindings, ...right.bindings]);
+  const capabilitiesByKey = new Map<string, HomeWorldCapability>();
+  for (const capability of [...left.capabilities, ...right.capabilities]) {
+    const key = capability.hwCapabilityId;
+    const prior = capabilitiesByKey.get(key);
+    if (prior === undefined) {
+      capabilitiesByKey.set(key, {
+        ...capability,
+        bindings: normalizeBindings(capability.bindings),
+      });
+    } else {
+      capabilitiesByKey.set(key, {
+        ...prior,
+        bindings: normalizeBindings([...prior.bindings, ...capability.bindings]),
+      });
+    }
+  }
+  const statesByKey = new Map<string, HomeSnapshotToolValue["devices"][number]["states"][number]>();
+  for (const state of [...left.states, ...right.states]) statesByKey.set(`${state.nativeId}\u0000${state.nativeInstanceId}`, state);
+  return {
+    ...(left.bridgeId === undefined ? {} : { bridgeId: left.bridgeId }),
+    hwId: left.hwId,
+    ...((left.name ?? right.name) === undefined ? {} : { name: left.name ?? right.name }),
+    validity: left.validity === "valid" || right.validity === "valid" ? "valid" : left.validity,
+    bindings,
+    capabilities: [...capabilitiesByKey.values()].sort(compareCapabilities),
+    states: [...statesByKey.values()].sort(compareStates),
+  };
+}
+
+function normalizeWatermark(watermark: unknown, fallbackBridgeId?: string): HomeWorldWatermark | undefined {
+  if (!isRecord(watermark)) return undefined;
+  const bridgeId = safeString(watermark.bridgeId) ?? safeString(fallbackBridgeId);
+  const epochId = safeString(watermark.epochId);
+  const lastSeq = watermark.lastSeq;
+  if (bridgeId === undefined || epochId === undefined || typeof lastSeq !== "number" || !Number.isSafeInteger(lastSeq) || lastSeq < 0) {
+    return undefined;
+  }
+  const lastSyncCompleteAt = safeString(watermark.lastSyncCompleteAt);
+  return {
+    bridgeId,
+    epochId,
+    lastSeq,
+    ...(lastSyncCompleteAt === undefined ? {} : { lastSyncCompleteAt }),
+  };
+}
+
+function normalizeDiagnostics(diagnostic: unknown, fallbackBridgeId?: string): HomeWorldDiagnostics | undefined {
+  if (!isRecord(diagnostic)) return undefined;
+  const bridgeId = safeString(diagnostic.bridgeId) ?? safeString(fallbackBridgeId);
+  if (bridgeId === undefined || !isConnectionState(diagnostic.connectionState)) return undefined;
+  const lastSyncCompleteAt = safeString(diagnostic.lastSyncCompleteAt);
+  const lastEventReceivedAt = safeString(diagnostic.lastEventReceivedAt);
+  const lastSuccessfulContactAt = safeString(diagnostic.lastSuccessfulContactAt);
+  return {
+    bridgeId,
+    connectionState: diagnostic.connectionState,
+    ...(lastSyncCompleteAt === undefined ? {} : { lastSyncCompleteAt }),
+    ...(lastEventReceivedAt === undefined ? {} : { lastEventReceivedAt }),
+    ...(lastSuccessfulContactAt === undefined ? {} : { lastSuccessfulContactAt }),
+  };
+}
+
+function normalizeMetricDiagnostics(metrics: unknown, bridgeId: string): HomeWorldDiagnostics | undefined {
+  if (!isRecord(metrics)) return undefined;
+  const connection = metrics.connection;
+  const connectionState = connection === "up" ? "ready" : connection === "degraded" ? "degraded" : connection === "down" ? "down" : undefined;
+  if (connectionState === undefined) return undefined;
+  return { bridgeId, connectionState };
+}
+
+function stableRecord(value: Readonly<Record<string, unknown>>): Record<string, JsonValue> {
+  const normalized = stableValue(value, new WeakSet<object>(), 0, { fields: 0, bytes: 0 });
+  return isRecord(normalized) ? normalized as Record<string, JsonValue> : {};
+}
+
+const MAX_FIELDS = 128;
+const MAX_DEPTH = 8;
+const MAX_STRING_LENGTH = 4_096;
+const MAX_SERIALIZED_BYTES = 64 * 1024;
+
+interface Budget {
+  fields: number;
+  bytes: number;
+}
+
+function stableValue(value: unknown, seen: WeakSet<object>, depth: number, budget: Budget): JsonValue | undefined {
+  if (depth > MAX_DEPTH || budget.bytes > MAX_SERIALIZED_BYTES) return undefined;
+  if (value === null) {
+    budget.bytes += 4;
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value.length > MAX_STRING_LENGTH) return undefined;
+    budget.bytes += value.length;
+    return value;
+  }
+  if (typeof value === "boolean") {
+    budget.bytes += 5;
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return undefined;
+    budget.bytes += 8;
+    return value;
+  }
+  if (!isRecord(value) && !Array.isArray(value)) return undefined;
   if (seen.has(value)) return undefined;
   seen.add(value);
 
-  if (Array.isArray(value)) {
-    const result: JsonValue[] = [];
-    for (const item of value) {
-      const normalized = stableValue(item, seen);
-      if (normalized !== undefined) result.push(normalized);
+  try {
+    if (Array.isArray(value)) {
+      const result: JsonValue[] = [];
+      for (const item of value) {
+        if (++budget.fields > MAX_FIELDS) break;
+        const normalized = stableValue(item, seen, depth + 1, budget);
+        if (normalized !== undefined) result.push(normalized);
+      }
+      return result;
     }
-    seen.delete(value);
-    return result;
-  }
 
-  const result: { [key: string]: JsonValue } = {};
-  for (const [key, item] of Object.entries(value).sort(([left], [right]) => compareStrings(left, right))) {
-    const normalized = stableValue(item, seen);
-    if (normalized !== undefined) result[key] = normalized;
+    const result: { [key: string]: JsonValue } = {};
+    for (const [key, item] of Object.entries(value).sort(([left], [right]) => compareStrings(left, right))) {
+      if (++budget.fields > MAX_FIELDS || key.length > MAX_STRING_LENGTH) break;
+      const normalized = stableValue(item, seen, depth + 1, budget);
+      if (normalized !== undefined) result[key] = normalized;
+    }
+    return result;
+  } catch {
+    return undefined;
+  } finally {
+    seen.delete(value);
   }
-  seen.delete(value);
-  return result;
+}
+
+function normalizeArray<T>(value: unknown): readonly T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (value instanceof Map) return [...value.values()] as T[];
+  return [];
+}
+
+function isArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
+}
+
+function safeString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_STRING_LENGTH ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isValidity(value: unknown): value is HomeWorldDeviceValidity {
+  return value === "valid" || value === "stale" || value === "invalid-source" || value === "present-but-invalid";
+}
+
+function isSourceQuality(value: unknown): value is HomeWorldState["time"]["sourceTsQuality"] {
+  return value === "device" || value === "platform" || value === "none";
+}
+
+function isOrigin(value: unknown): value is HomeWorldState["origin"] {
+  return value === "observed" || value === "imported";
+}
+
+function isConnectionState(value: unknown): value is HomeWorldConnectionState {
+  return value === "starting"
+    || value === "syncing"
+    || value === "ready"
+    || value === "degraded"
+    || value === "paused"
+    || value === "quarantined"
+    || value === "down";
+}
+
+function compareCapabilities(left: HomeWorldCapability, right: HomeWorldCapability): number {
+  return compareStrings(left.hwCapabilityId, right.hwCapabilityId)
+    || compareStrings(left.schema, right.schema)
+    || compareStrings(left.schemaVersion, right.schemaVersion);
+}
+
+function compareStates(
+  left: HomeSnapshotToolValue["devices"][number]["states"][number],
+  right: HomeSnapshotToolValue["devices"][number]["states"][number],
+): number {
+  return compareStrings(left.nativeInstanceId, right.nativeInstanceId)
+    || compareStrings(JSON.stringify(left.attrs), JSON.stringify(right.attrs))
+    || compareStrings(left.origin, right.origin);
+}
+
+function compareWatermarks(left: HomeWorldWatermark, right: HomeWorldWatermark): number {
+  return compareStrings(left.bridgeId, right.bridgeId)
+    || compareStrings(left.epochId, right.epochId)
+    || left.lastSeq - right.lastSeq;
 }
 
 function compareStrings(left: string, right: string): number {

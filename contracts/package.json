@@ -1,0 +1,12 @@
+{
+  "name": "@hob/bridge-contract",
+  "private": true,
+  "version": "6.3.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

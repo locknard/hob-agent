@@ -5,7 +5,8 @@ instance and turns observations into reviewable, reversible proposals.
 
 ## Workspace
 
-- `packages/hub`: Home Assistant bridge, event ingestion, and core services.
+- `packages/hub`: neutral bridge runtime, event ingestion, world model, and the
+  built-in Home Assistant adapter.
 - `packages/agent-layer`: agent prompts, governed tools, and audit boundaries.
 - `packages/inbox-web`: proposal inbox web application.
 - `contracts`: versioned bridge-contract types.
@@ -43,10 +44,13 @@ and test/commit discipline.
 
 The initial implementation connects to Home Assistant's WebSocket API, reads a
 state and registry bootstrap snapshot, and subscribes to `state_changed`
-events. Configure these values locally; never commit a token:
+events. Configure a neutral bridge catalog locally; never commit a token.
+`HOB_BRIDGES` contains only bridge identity, adapter type, non-secret config, and
+explicit credential environment-name references:
 
 ```sh
-export HOB_HA_URL=http://homeassistant.local:8123
+export HOB_DATA_DIR="/var/lib/hob-agent"
+export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","config":{"baseUrl":"http://homeassistant.local:8123","authenticationPrincipal":"home-owner"},"credentialRefs":{"access-token":"HOB_HA_TOKEN"}}]'
 export HOB_HA_TOKEN='long-lived-access-token'
 export HOB_MODEL=deepseek/deepseek-v4-flash
 export DEEPSEEK_API_KEY='...'
@@ -77,8 +81,8 @@ Supported model providers and credential boundaries are documented in
 The OpenClaw-derived provider adaptation audit is tracked in
 [`docs/openclaw-provider-adaptation.md`](docs/openclaw-provider-adaptation.md).
 
-The repository now has one executable Cordis composition root for the DSH/HA
-service. Live HA world-state updates, session persistence, and household
+The repository now has one executable Cordis composition root for the neutral
+HomeWorld bridge runtime and DSH agent. Live session persistence and household
 prompt/Skill loading remain open; see
 [`docs/architecture-self-review.md`](docs/architecture-self-review.md) for the
 verified boundaries and prioritized gaps.

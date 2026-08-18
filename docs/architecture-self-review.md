@@ -1,6 +1,6 @@
 # Architecture self-review
 
-Date: 2026-08-18
+Date: 2026-08-19
 
 ## Scope conclusion
 
@@ -11,10 +11,16 @@ no direct `pi-ai` or `pi-agent-core` dependency. The official
 transitive implementation detail.
 
 This repository now provides an executable Phase 0 composition root. It creates
-one Cordis `Context`, mounts `HomeAssistantService` before the Home Agent, and
-owns bounded process shutdown. The service is runnable but not yet
-production-complete: live HA world-state maintenance, session persistence, and
-household prompt/Skill loading remain open.
+one Cordis `Context`, mounts the neutral `HomeWorldService` before the Home
+Agent, and owns bounded process shutdown. The service is runnable but not yet
+production-complete: session persistence and household prompt/Skill loading
+remain open.
+
+The frozen neutral bridge read path is implemented through migration step 6:
+one Zod-first v6.3 contract, catalog/registry/scoped credentials, epoch-aware
+SQLite ingest, canonical identity and authority, world-model indexing, the HA
+adapter, and the neutral agent snapshot. Actions and artifact hosting remain an
+explicit M3 boundary rather than a second runtime hidden in Phase 0.
 
 ## Verified boundaries
 
@@ -31,33 +37,39 @@ household prompt/Skill loading remain open.
   adapted from OpenClaw without importing its runtime.
 - Runtime ownership tests reject the removed Pi runtime, direct Pi SDK imports,
   and named legacy entry points.
+- Bridge architecture guards reject ecosystem vocabulary in the agent layer,
+  removed bridge contracts/services, and raw HA payloads in the canonical
+  world model.
+- Bridge IDs and remote installation IDs are independently bound; a changed
+  remote identity fails closed until an explicit rebind.
+- SQLite journals, registry data, world-model files, and WAL/SHM sidecars are
+  private; production launch requires an explicit durable data directory.
+- State authority changes use a candidate resync and a new consistent watermark
+  before one atomic coordinator commit. Snapshot reads cannot invoke the
+  chooser as an implicit failover path.
+- Hub world and capability IDs are deterministic opaque identifiers across
+  restart and observation order. Device identity remains separate from the
+  bridge-salted principal registry.
 
 ## Completed architecture gates
 
 ### P0 — executable composition root
 
 `packages/hub` now owns one process entry that creates the root Cordis context,
-provides an immutable allowlisted DSH launch environment, mounts the HA bridge
-followed by `mountDshHomeAgent`, and disposes the entire tree through the root
-fiber. Startup failure closes already-mounted resources. SIGINT/SIGTERM cleanup
-is bounded to five seconds and a repeated signal escalates to immediate exit.
+provides an immutable allowlisted DSH launch environment, mounts the neutral
+HomeWorld bridge runtime followed by `mountDshHomeAgent`, and disposes the
+entire tree through the root fiber. Startup failure closes already-mounted
+resources. SIGINT/SIGTERM cleanup is bounded to five seconds and a repeated
+signal escalates to immediate exit.
 
 The Phase 0 composition root belongs to `packages/hub`, which remains the
 single service process. The hub may depend on a narrow agent-layer composition
 export; the agent layer must not depend back on hub implementation modules and
-continues to consume Home Assistant only through the Cordis service seam. This
-keeps process ownership in the monolith without creating a third runtime or a
-second service.
+continues to consume household data only through the neutral HomeWorld service
+seam. This keeps process ownership in the monolith without creating a third
+runtime or a second service.
 
 ## Open architecture gaps
-
-### P1 — live HA world state and connection health
-
-`HomeAssistantService.snapshot` is currently the bootstrap snapshot.
-`state_changed` events are forwarded only to an optional callback and do not
-update it; disconnects do not mark bridge health down. Implement these together
-with the hub-owned world-model index rather than creating state inside the Agent
-layer. Initial connection close and startup timeout are now fail-closed.
 
 ### P1 — session persistence decision
 

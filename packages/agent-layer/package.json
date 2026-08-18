@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     "./composition": "./src/dsh-home-agent-composition.ts",
+    "./home-agent": "./src/dsh-home-agent-service.ts",
+    "./home-snapshot-tool": "./src/dsh-home-snapshot-tool.ts",
     "./model-reference": "./src/model-reference.ts",
     "./model-providers": "./src/model-providers.ts"
   },

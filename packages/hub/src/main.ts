@@ -39,7 +39,14 @@ export function createHomeHubProcessOptions(
   const config = readHomeHubLaunchConfig(environment);
   return {
     runtime: {
-      homeAssistant: config.homeAssistant,
+      homeWorld: {
+        catalog: config.catalog,
+        bridges: config.bridges,
+        credentialSource: config.bridgeCredentialSource,
+        journalDirectory: config.journalDirectory,
+        registryPath: config.registryPath,
+        worldModelPath: config.worldModelPath,
+      },
       agent: config.agent,
       launchEnvironment: config.launchEnvironment,
     },

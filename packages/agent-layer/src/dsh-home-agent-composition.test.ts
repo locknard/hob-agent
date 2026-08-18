@@ -6,23 +6,17 @@ import { credentialRef } from "@deepseek-ai/dsh-credentials";
 
 import { mountDshHomeAgent } from "./dsh-home-agent-composition.js";
 
-class StubHomeAssistantService extends Service {
-  readonly snapshot = {
-    states: [],
-    entityRegistry: [],
-    deviceRegistry: [],
-    areaRegistry: [],
-    health: { bridge: "up" as const, devices: {} },
-  };
+class StubWorldService extends Service {
+  readonly snapshot = { devices: [], bridgeWatermarks: [], diagnostics: [] };
 
   constructor(ctx: Context) {
-    super(ctx, "homeAssistant");
+    super(ctx, "homeWorld");
   }
 }
 
 test("mounts the official DSH pi-ai adapter for a product provider route", async () => {
   const ctx = new Context();
-  await ctx.plugin(StubHomeAssistantService);
+  await ctx.plugin(StubWorldService);
 
   const fiber = await mountDshHomeAgent(ctx, {
     provider: "deepseek",
@@ -40,7 +34,7 @@ test("mounts the official DSH pi-ai adapter for a product provider route", async
 
 test("bridges a selected API-key profile into the official DSH credential seam", async () => {
   const ctx = new Context();
-  await ctx.plugin(StubHomeAssistantService);
+  await ctx.plugin(StubWorldService);
   const reads: string[] = [];
   const fiber = await mountDshHomeAgent(ctx, {
     provider: "deepseek",

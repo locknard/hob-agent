@@ -5,16 +5,16 @@ import {
 } from "@deepseek-ai/dsh-launch-environment";
 
 import {
-  type HomeAssistantBridgeOptions,
-} from "./home-assistant-bridge.js";
-import { HomeAssistantService } from "./home-assistant-service.js";
+  HomeWorldService,
+  type HomeWorldServiceOptions,
+} from "./home-world-service.js";
 import {
   mountDshHomeAgent,
   type DshHomeAgentCompositionOptions,
 } from "@hob-agent/agent-layer/composition";
 
 export interface HomeAgentRuntimeOptions {
-  readonly homeAssistant: HomeAssistantBridgeOptions;
+  readonly homeWorld: HomeWorldServiceOptions;
   readonly agent: DshHomeAgentCompositionOptions;
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
 }
@@ -22,11 +22,10 @@ export interface HomeAgentRuntimeOptions {
 export type HomeAgentRuntimeStatus = "created" | "starting" | "running" | "stopping" | "stopped";
 
 /**
- * Owns the process-level Cordis root and the two Phase 0 runtime fibers.
- *
- * Home Assistant is mounted first so the DSH Home Agent can resolve its
- * required `homeAssistant` service during startup. Disposing the root fiber
- * unloads the Agent before the bridge, in reverse registration order.
+ * Owns the process-level Cordis root and the neutral Phase 0 runtime fibers.
+ * HomeWorld owns all configured bridge adapters; the DSH Home Agent only sees
+ * its neutral service. Disposing the root fiber unloads the Agent before the
+ * world runtime, in reverse registration order.
  */
 export class HomeAgentRuntime {
   readonly context: Context;
@@ -48,7 +47,7 @@ export class HomeAgentRuntime {
     }
     this.statusValue = "starting";
     try {
-      await this.context.plugin(HomeAssistantService, this.options.homeAssistant);
+      await this.context.plugin(HomeWorldService, this.options.homeWorld);
       await mountDshHomeAgent(this.context, this.options.agent);
       this.statusValue = "running";
     } catch (error) {

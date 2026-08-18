@@ -11,14 +11,11 @@ import {
 
 import { DshHomeAgentService } from "./dsh-home-agent-service.js";
 
-class StubHomeAssistantService extends Service {
-  readonly snapshot = {
-    states: [{ entity_id: "light.kitchen", state: "on", attributes: {} }],
-    health: { bridge: "up" as const, devices: {} },
-  };
+class StubWorldService extends Service {
+  readonly snapshot = { devices: [], bridgeWatermarks: [], diagnostics: [] };
 
   constructor(ctx: Context) {
-    super(ctx, "homeAssistant");
+    super(ctx, "homeWorld");
   }
 }
 
@@ -35,13 +32,13 @@ class RecordingAdapter extends LlmAdapter {
   }
 }
 
-test("declares Home Assistant as a required production dependency", () => {
-  assert.deepEqual(DshHomeAgentService.inject, ["homeAssistant"]);
+test("declares the neutral home-world service as a required production dependency", () => {
+  assert.deepEqual(DshHomeAgentService.inject, ["homeWorld"]);
 });
 
 test("mounts the sole production Agent through the DSH runtime", async () => {
   const ctx = new Context();
-  await ctx.plugin(StubHomeAssistantService);
+  await ctx.plugin(StubWorldService);
   const adapter = new RecordingAdapter();
   const fiber = await ctx.plugin(DshHomeAgentService, {
     provider: "test-provider",

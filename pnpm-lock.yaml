@@ -18,6 +18,12 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  contracts:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/agent-layer:
     dependencies:
       '@deepseek-ai/cordis':
@@ -101,6 +107,9 @@ importers:
       ws:
         specifier: ^8.21.3
         version: 8.21.3
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
 packages:
 
