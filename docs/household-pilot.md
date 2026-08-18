@@ -66,6 +66,17 @@ Hub/native identities, state values, epochs, timestamps, URLs, and credentials.
 Coverage was partial solely because the one-hour requested window began before
 the fresh baseline, confirming the guard above on real household traffic.
 
+A subsequent model-free DSH loop smoke used a scripted adapter against the same
+real neutral HomeWorld. It completed the production workflow in 11 tool calls:
+Skill load, calibration, four adaptive inventory pages, activity triage, one
+candidate snapshot, bounded evidence, the complete rule catalog, and one
+`insufficient_evidence` report. During that epoch the activity query counted 67
+events and the selected evidence query returned 19 provenance-bound events.
+The loop created no proposal. This proves the real 75-device read workflow fits
+the fixed 12-call observation budget without weakening the no-proposal path;
+it does not claim that a real provider/model will choose the same sequence or
+produce a useful suggestion.
+
 After every run:
 
 - return to the full runtime Inbox;
