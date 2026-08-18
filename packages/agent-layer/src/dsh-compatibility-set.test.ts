@@ -26,6 +26,14 @@ describe('DSH compatibility set', () => {
       DSH_COMPATIBILITY_SET['@deepseek-ai/dsh-session-persistence-sqlite'],
       DSH_COMPATIBILITY_SET_VERSION,
     );
+    assert.equal(
+      DSH_COMPATIBILITY_SET['@deepseek-ai/dsh-skill'],
+      DSH_COMPATIBILITY_SET_VERSION,
+    );
+    assert.equal(
+      DSH_COMPATIBILITY_SET['@deepseek-ai/dsh-tool-skill'],
+      DSH_COMPATIBILITY_SET_VERSION,
+    );
     assert.doesNotThrow(() =>
       assertDshCompatibilitySet(DSH_COMPATIBILITY_SET),
     );

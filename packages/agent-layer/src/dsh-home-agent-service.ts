@@ -7,6 +7,8 @@ import SqliteSessionPersistence from "@deepseek-ai/dsh-session-persistence-sqlit
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime from "@deepseek-ai/dsh-tools";
 import { deadline, timeoutOf } from "@deepseek-ai/dsh-timeout";
+import SkillRegistry from "@deepseek-ai/dsh-skill";
+import * as ToolSkill from "@deepseek-ai/dsh-tool-skill";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
@@ -15,6 +17,7 @@ import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
 import * as HomeProposalTool from "./dsh-home-proposal-tool.js";
 import { HomeObservationBudgetService } from "./dsh-home-observation-budget.js";
+import * as HomeSkills from "./dsh-home-skills.js";
 import {
   AgentLoopTraceService,
   type AgentLoopTrace,
@@ -102,6 +105,7 @@ export class DshHomeAgentService extends Service {
           type: "text",
           text: [
             "Perform one governed household observation.",
+            "First load the review-home-observation skill and follow its workflow.",
             "Follow the compact inventory cursor until it is exhausted, then use bounded detailed snapshot pages for a small materially useful candidate set and inspect post-baseline evidence when claiming behavior.",
             "Inspect existing household rules before proposing an automation so you do not repeat an obvious existing rule.",
             "Treat rapidly flapping software or integration status, unknown/unavailable lifecycle changes, and uncorroborated short sensor bursts as noise rather than household routine.",
@@ -179,7 +183,10 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(HomeEvidenceTool);
     await this.ctx.plugin(HomeRulesTool);
     await this.ctx.plugin(HomeProposalTool);
+    await this.ctx.plugin(SkillRegistry);
+    await this.ctx.plugin(HomeSkills);
     await this.ctx.plugin(AgentRegistry);
+    await this.ctx.plugin(ToolSkill);
     await this.ctx.plugin(AgentLoop, { agents: [] });
 
     const llm = this.ctx.get("llm");

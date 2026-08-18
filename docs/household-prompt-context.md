@@ -13,9 +13,10 @@ An explicitly configured `HOB_HOME_DIR` may contribute three bounded files:
 
 `HEARTBEAT.md` is not loaded until DSH jobs/scheduling has a governed product
 composition. `AGENTS.md` remains the template's operating manual rather than a
-second runtime instruction loader. `skills/` remains inactive until the
-official DSH filesystem Skill packages are available in the same compatibility
-family as the runtime.
+second runtime instruction loader. The runtime now uses the official DSH Skill
+registry and loader for a reviewed embedded Home Product Bundle Skill.
+Tenant-editable `skills/` remains inactive until filesystem reads are contained,
+non-symlinked, and size-bounded as recorded in `dsh-home-skills.md`.
 
 ## Authority and safety
 

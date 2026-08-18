@@ -101,7 +101,22 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "get_home_evidence",
     "get_home_rules",
     "create_home_proposal",
+    "skill",
   ]);
+  const skills = ctx.get("skills") as unknown as { list(): Promise<readonly { name: string }[]> };
+  assert.deepEqual((await skills.list()).map((skill) => skill.name), ["review-home-observation"]);
+  const loadedSkill = await ctx.tools.execute({
+    callId: "load-home-skill" as never,
+    name: "skill",
+    arguments: { name: "review-home-observation" },
+    agent: ctx.homeAgent.agent,
+    signal: new AbortController().signal,
+  });
+  assert.equal(loadedSkill.isError, false);
+  assert.match(
+    loadedSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
+    /inventory.*evidence.*rule metadata/is,
+  );
 
   ctx.homeAgent.agent.followup(createUserMessage({
     content: [{ type: "text", text: "What can you see?" }],
@@ -120,6 +135,11 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(
     adapter.requests[0]?.messages.some((message) =>
       JSON.stringify(message).includes("prior lighting proposal was rejected")),
+    true,
+  );
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) =>
+      JSON.stringify(message).includes("review-home-observation")),
     true,
   );
   assert.equal(
@@ -149,6 +169,11 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
       JSON.stringify(message).includes("inventory cursor until it is exhausted")),
     true,
   );
+  assert.equal(
+    adapter.requests[1]?.messages.some((message) =>
+      JSON.stringify(message).includes("load the review-home-observation skill")),
+    true,
+  );
 
   await fiber.dispose();
   assert.equal(ctx.homeAgent, undefined);
@@ -156,6 +181,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(ctx.get("agents"), undefined);
   assert.equal(ctx.get("tools"), undefined);
   assert.equal(ctx.get("homeObservationBudget"), undefined);
+  assert.equal(ctx.get("skills"), undefined);
   assert.equal(ctx.get("llm"), undefined);
   await ctx.fiber.dispose();
 });

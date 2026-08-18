@@ -191,8 +191,10 @@ home-template/skills/
 └── away-mode/SKILL.md
 ```
 
-如果这些 Skill 能由 DSH 的通用 filesystem provider 直接读取，就不创建
-`HomeSkillProvider`。配置一个家庭 Skill 根目录已经足够。
+如果这些 Skill 能由 DSH 的通用 filesystem provider 在家庭产品要求的路径 containment、
+非符号链接和内容大小边界内直接读取，就不创建 `HomeSkillProvider`。当前 rc.7 provider
+会按需重读无大小上限的 body，并在 Node fallback 中跟随符号链接，因此第一片只使用
+官方 registry/loader 加载第一方内嵌 Skill；租户 Skill 根目录保持关闭。
 
 只有出现真实需求时，才增加家庭专用 provider，例如：
 
@@ -276,8 +278,9 @@ fallback，不在 Agent loop 内重复这些逻辑。
 
 ### 3. 接入 Skills
 
-优先使用 DSH filesystem provider 读取 `home-template/skills`；只有真实需求出现后才
-实现家庭专用 provider。
+先用 DSH registry 与 `dsh-tool-skill` 承载第一方内嵌家庭 Skill。待通用 filesystem
+provider 具备或外接家庭产品所需的 containment、非符号链接和大小边界后，再读取
+`home-template/skills`；不建立第二套 registry/loader。
 
 ### 4. 增加家庭提案和治理链
 
@@ -312,7 +315,7 @@ DSH 当前仍处于 developer preview，源码和 npm 各 package 的发布进�
 `dsh-attachment`、`dsh-brand`、`dsh-code-runtime`、`dsh-credentials`、`dsh-invariants`、
 `dsh-launch-environment`、`dsh-llm-pi-ai`、
 `dsh-session-persistence`、`dsh-session-persistence-sqlite`、`dsh-settings`、
-`dsh-timeout`、`dsh-typert-protocol`、
+`dsh-skill`、`dsh-timeout`、`dsh-tool-skill`、`dsh-typert-protocol`、
 `dsh-user-approval`。底层 `@deepseek-ai/cordis` 固定为 `4.0.1`；DSH core 所需的
 `@deepseek-ai/schemastery` peer 固定为 `3.18.1`。
 

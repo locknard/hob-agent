@@ -12,9 +12,11 @@ transitive implementation detail.
 
 This repository now provides an executable Phase 0 composition root. It creates
 one Cordis `Context`, mounts the neutral `HomeWorldService` before the Home
-Agent, and owns bounded process shutdown. The service is runnable but not yet
-production-complete: official DSH session persistence and bounded household
-prompt context are composed, while governed Skill loading remains open.
+Agent, and owns bounded process shutdown. Official DSH session persistence,
+bounded household prompt context, the DSH Skill registry/loader, and one
+reviewed first-party household-observation Skill are composed. Tenant
+filesystem Skill installation remains closed pending containment and body-size
+guards.
 
 The neutral bridge read path is implemented through migration step 6: one
 Zod-first v6.3 base contract plus the additive v6.4 read-only capability
