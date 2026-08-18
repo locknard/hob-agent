@@ -26,6 +26,14 @@ total and prevent ambiguous bindings from looking complete. It omits current
 values, capability IDs, adapter schemas, native
 device/entity/property/space IDs, URLs, credentials, and bridge errors.
 
+The requested page limit is an upper bound. Before returning, the tool measures
+the complete serialized page and shortens it until it fits a 7,500-byte
+model-visible budget below DSH's 8,192-character pruning threshold. It returns
+the last visible Hub ID as the next cursor, so adaptive pages still cover every
+device in stable order. If even one device cannot fit, the read fails closed
+instead of allowing the coverage gate to certify a result whose middle would
+later disappear during compaction.
+
 An unfiltered observation must follow the inventory cursor until exhausted
 before it treats discovery as household-wide. It then uses exact Hub IDs with
 `get_home_snapshot` for a small candidate set and uses bounded temporal

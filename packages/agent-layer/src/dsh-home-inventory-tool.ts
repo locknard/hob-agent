@@ -199,6 +199,7 @@ export function apply(ctx: Context): void {
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 50;
 const MAX_ID_LENGTH = 256;
+const MODEL_VISIBLE_PAGE_BYTES = 7_500;
 
 export function pageHomeInventory(
   snapshot: HomeSnapshotToolValue,
@@ -236,23 +237,33 @@ export function pageHomeInventory(
   const inventoryVersion = createHash("sha256")
     .update(JSON.stringify({ spaces: inventorySpaces, devices: projectedInventory }))
     .digest("hex");
-  const projectedDevices = projectedInventory.slice(pageStart, pageStart + limit);
-  const referencedSpaceIds = new Set(projectedDevices.flatMap((device) => device.hwSpaceIds));
-  const hasNextPage = pageStart + projectedDevices.length < devices.length;
-  return {
-    inventoryVersion,
-    spaces: inventorySpaces.filter((space) => referencedSpaceIds.has(space.hwSpaceId)),
-    devices: projectedDevices,
-    topology: snapshot.topology,
-    page: {
-      limit,
-      returnedDevices: projectedDevices.length,
-      totalDevices: devices.length,
-      ...(hasNextPage && projectedDevices.length > 0
-        ? { nextAfterHwId: projectedDevices.at(-1)!.hwId }
-        : {}),
-    },
-  };
+  let returnedDevices = Math.min(limit, devices.length - pageStart);
+  while (returnedDevices >= 0) {
+    const projectedDevices = projectedInventory.slice(pageStart, pageStart + returnedDevices);
+    const referencedSpaceIds = new Set(projectedDevices.flatMap((device) => device.hwSpaceIds));
+    const hasNextPage = pageStart + projectedDevices.length < devices.length;
+    const page: HomeInventoryPageValue = {
+      inventoryVersion,
+      spaces: inventorySpaces.filter((space) => referencedSpaceIds.has(space.hwSpaceId)),
+      devices: projectedDevices,
+      topology: snapshot.topology,
+      page: {
+        limit,
+        returnedDevices: projectedDevices.length,
+        totalDevices: devices.length,
+        ...(hasNextPage && projectedDevices.length > 0
+          ? { nextAfterHwId: projectedDevices.at(-1)!.hwId }
+          : {}),
+      },
+    };
+    if (Buffer.byteLength(JSON.stringify(page), "utf8") <= MODEL_VISIBLE_PAGE_BYTES) return page;
+    if (returnedDevices === 1) {
+      throw new RangeError("one compact inventory device exceeds the model-visible page budget");
+    }
+    returnedDevices -= 1;
+  }
+  /* v8 ignore next -- the zero-device page has bounded fixed metadata. */
+  throw new RangeError("compact inventory metadata exceeds the model-visible page budget");
 }
 
 async function readHomeWorld(service: HomeWorldService): Promise<HomeWorldSnapshot | undefined> {

@@ -26,6 +26,12 @@ are ordered by event count, latest observation time, then opaque Hub identity.
 The query has a bounded lookback and reports per-bridge baseline/coverage gaps
 and truncation.
 
+Because the minimum lookback is one hour, a newly started epoch reports
+`window_before_baseline` until it has observed the entire requested interval.
+Post-baseline events are still returned, but the unobserved prefix is unknown,
+not evidence that nothing happened. A behavior-over-time proposal must wait for
+complete coverage or use a different source with explicit provenance.
+
 The index is a discovery aid, not behavioral evidence. High activity may be
 noise, integration churn, or repeated identical updates. An Agent must still
 select a small candidate set, read its detailed snapshot, and use
@@ -34,4 +40,3 @@ proposal. Bootstrap state remains excluded.
 
 This is an internal Hub/DSH capability. It does not revise the process-external
 bridge contract and grants no device or rule authority.
-

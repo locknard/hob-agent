@@ -176,6 +176,10 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     loadedSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
     /inventory.*evidence.*rule metadata/is,
   );
+  assert.match(
+    loadedSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
+    /window_before_baseline.*missing interval.*not quiet/is,
+  );
 
   ctx.homeAgent.agent.followup(createUserMessage({
     content: [{ type: "text", text: "What can you see?" }],
@@ -185,6 +189,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
 
   assert.equal(adapter.requests.length, 1);
   assert.match(adapter.requests[0]?.system ?? "", /cannot control devices/i);
+  assert.match(adapter.requests[0]?.system ?? "", /window_before_baseline.*not observed/is);
   assert.match(adapter.requests[0]?.system ?? "", /calm, reversible household suggestions/i);
   assert.equal(
     adapter.requests[0]?.messages.some((message) =>

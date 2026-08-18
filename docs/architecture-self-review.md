@@ -185,6 +185,10 @@ apply an artifact or control a device.
   single-space, unassigned, and multiple-space device counts. Unknown space
   references are unassigned and cross-binding ambiguity cannot inflate the
   apparent household-map coverage.
+- Compact inventory pagination now treats the requested count as an upper bound
+  and adapts each result below the DSH pruning threshold. The coverage cursor
+  advances only through fully model-visible devices; an oversized single
+  device fails closed instead of creating false whole-home coverage.
 - Bridge IDs and remote installation IDs are independently bound; a changed
   remote identity fails closed until an explicit rebind.
 - SQLite journals, registry data, world-model files, proposals, observation

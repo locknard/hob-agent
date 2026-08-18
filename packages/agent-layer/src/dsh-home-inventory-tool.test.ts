@@ -103,6 +103,64 @@ test("inventory omits current values, capability identities, schemas, and native
   ]) assert.equal(serialized.includes(secret), false);
 });
 
+test("adapts page length so every compact inventory result remains model-visible", () => {
+  const snapshot = structuredClone(fixture());
+  const template = snapshot.devices[0]!;
+  snapshot.devices = Array.from({ length: 25 }, (_, index) => ({
+    ...structuredClone(template),
+    hwId: `hw-${String(index).padStart(3, "0")}`,
+    name: `device-${String(index).padStart(3, "0")}-${"x".repeat(500)}`,
+  }));
+  snapshot.topology = {
+    spaces: 1,
+    totalDevices: 25,
+    devicesWithSingleSpace: 25,
+    devicesWithoutSpace: 0,
+    devicesWithMultipleSpaces: 0,
+  };
+
+  const seen: string[] = [];
+  const versions = new Set<string>();
+  let afterHwId: string | undefined;
+  let pages = 0;
+  do {
+    const page = pageHomeInventory(snapshot, { limit: 25, ...(afterHwId === undefined ? {} : { afterHwId }) });
+    assert.ok(Buffer.byteLength(JSON.stringify(page), "utf8") <= 7_500);
+    assert.ok(page.page.returnedDevices > 0);
+    seen.push(...page.devices.map((device) => device.hwId));
+    versions.add(page.inventoryVersion);
+    afterHwId = page.page.nextAfterHwId;
+    pages += 1;
+    assert.ok(pages < 10);
+  } while (afterHwId !== undefined);
+
+  assert.deepEqual(seen, snapshot.devices.map((device) => device.hwId));
+  assert.equal(versions.size, 1);
+  assert.ok(pages > 1);
+});
+
+test("fails closed when one compact device cannot fit the model-visible budget", () => {
+  const snapshot = structuredClone(fixture());
+  snapshot.devices = [{
+    ...snapshot.devices[0]!,
+    bindings: Array.from({ length: 40 }, (_, index) => ({
+      bridgeId: `bridge-${String(index).padStart(2, "0")}-${"x".repeat(220)}`,
+      nativeId: `private-${index}`,
+      nativeInstanceId: `private-instance-${index}`,
+      hwSpaceId: "hws-a",
+    })),
+  }];
+  snapshot.topology = {
+    spaces: 1,
+    totalDevices: 1,
+    devicesWithSingleSpace: 1,
+    devicesWithoutSpace: 0,
+    devicesWithMultipleSpaces: 0,
+  };
+
+  assert.throws(() => pageHomeInventory(snapshot, { limit: 1 }), /model-visible page budget/);
+});
+
 test("retains the neutral non-spatial disposition in compact discovery", () => {
   const snapshot = structuredClone(fixture());
   (snapshot.devices[1] as typeof snapshot.devices[number] & { spatialDisposition?: "non_spatial" }).spatialDisposition = "non_spatial";

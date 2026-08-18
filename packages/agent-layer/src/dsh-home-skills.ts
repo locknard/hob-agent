@@ -17,6 +17,7 @@ export function apply(ctx: Context): void {
       "3. Read get_home_activity for bounded post-baseline candidate triage. Treat activity as possible noise, never as proof of a routine.",
       "4. Select a small materially useful candidate set, then read only its bounded detailed snapshot pages.",
       "5. For any claim about behavior over time, read post-baseline evidence for the selected capabilities and reject incomplete, noisy, or uncorroborated patterns.",
+      "A window_before_baseline coverage reason means part of the requested interval was not observed. Treat the missing interval as unknown, not quiet, and never use the visible suffix to claim a repeated routine.",
       "6. Read every page of existing household rule metadata in stable cursor order before proposing an automation. Treat this as a heuristic overlap screen, not proof of non-interference.",
       "7. Before proposing, state the concrete household value, why the suggestion is timely now, and at least one uncertainty that still requires household judgment or more observation.",
       "8. Create at most one review-only proposal. If evidence, coverage, benefit, timing, uncertainty, or rollback clarity is insufficient, create none.",

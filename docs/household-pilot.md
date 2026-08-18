@@ -40,6 +40,32 @@ ordinary household activity accumulates, then use **Observe now** in its Inbox
 at a few meaningful times. This preserves one evidence epoch while still
 making every paid model turn an explicit household action.
 
+The temporal tools have a one-hour minimum lookback. During the first hour of a
+new epoch they correctly report `window_before_baseline`: events after startup
+remain readable, but the missing prefix is unknown rather than quiet. Use an
+early observation only to verify the current-state path; leave the runtime
+connected for at least one hour before asking it to support a behavior-over-time
+proposal. This is an evidence-coverage requirement, not a release-age rule.
+
+## 2026-08-19 model-free household checkpoint
+
+The real HA pilot completed the governed read path without a model call:
+
+- four model-visible compact-inventory pages covered all 75 neutral devices
+  after adaptive page budgeting (23, 24, 24, and four devices);
+- four detailed snapshot pages covered the same 75 devices without native
+  identity fields;
+- the 12-rule catalog remained stable across three deliberately small pages;
+- after one minute in a single verified epoch, four devices produced 24
+  post-baseline activity events; and
+- a bounded 20-capability evidence selection returned 23 provenance-bound
+  events with no truncation.
+
+Only aggregate counts are recorded. The checkpoint intentionally omits names,
+Hub/native identities, state values, epochs, timestamps, URLs, and credentials.
+Coverage was partial solely because the one-hour requested window began before
+the fresh baseline, confirming the guard above on real household traffic.
+
 After every run:
 
 - return to the full runtime Inbox;
