@@ -57,6 +57,9 @@ export DEEPSEEK_API_KEY='...'
 # Optional local review UI (HTTP Basic user is `home`):
 export HOB_INBOX_AUTH_TOKEN='at-least-32-random-characters-kept-local'
 export HOB_INBOX_PORT=8787
+# Optional local observation cadence (disabled unless explicitly set):
+export HOB_OBSERVATION_INTERVAL_MINUTES=360
+export HOB_OBSERVE_ON_START=false
 # Optional bounded SOUL.md, HOME.md, and MEMORY.md household context:
 export HOB_HOME_DIR='/absolute/path/to/private-home'
 # or select the matching OPENAI_API_KEY / ANTHROPIC_API_KEY / MOONSHOT_API_KEY / ZAI_API_KEY
@@ -97,6 +100,12 @@ hub capability IDs and a bounded lookback. The Hub re-runs the query and stores
 exact epoch/sequence references plus coverage in the local proposal; the model
 cannot author journal provenance. See
 [`docs/proposal-evidence-binding.md`](docs/proposal-evidence-binding.md).
+
+Periodic observation is opt-in, local, and Hub-scheduled. It runs only after a
+consistent bridge snapshot, skips a busy Agent, and stops generating new work
+while any proposal is pending household review. The interval is limited to one
+hour through seven days. See
+[`docs/observation-scheduling.md`](docs/observation-scheduling.md).
 
 Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
 When enabled it binds only to `127.0.0.1`, requires authentication on every

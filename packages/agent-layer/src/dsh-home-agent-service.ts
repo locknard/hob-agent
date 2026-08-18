@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import AgentRegistry, { type Agent } from "@deepseek-ai/dsh-agent";
 import AgentLoop from "@deepseek-ai/dsh-agent-loop";
-import LlmRuntime, { type LlmAdapter } from "@deepseek-ai/dsh-llm";
+import LlmRuntime, { createUserMessage, type LlmAdapter } from "@deepseek-ai/dsh-llm";
 import SessionStore, { SessionId } from "@deepseek-ai/dsh-session";
 import SqliteSessionPersistence from "@deepseek-ai/dsh-session-persistence-sqlite";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
@@ -57,6 +57,39 @@ export class DshHomeAgentService extends Service {
   static inject = ["homeWorld", "homeProposals"];
 
   agent!: Agent;
+  private observationTask: Promise<void> | undefined;
+
+  get observationStatus(): "idle" | "running" {
+    return this.observationTask === undefined && this.agent.status === "idle" ? "idle" : "running";
+  }
+
+  /** Starts one trusted product observation turn through the canonical DSH loop. */
+  async requestObservation(signal?: AbortSignal): Promise<void> {
+    if (this.observationStatus !== "idle") throw new Error("Home Agent is busy");
+    if (signal?.aborted) throw new Error("Home observation was cancelled");
+    const cancel = () => this.agent.cancel({ kind: "parent" }, { keepInbox: true });
+    signal?.addEventListener("abort", cancel, { once: true });
+    this.agent.followup(createUserMessage({
+      content: [{
+        type: "text",
+        text: [
+          "Perform one governed household observation.",
+          "Use bounded snapshot pages to find a materially useful candidate and inspect post-baseline evidence when claiming behavior.",
+          "Create at most one materially useful proposal, only when its evidence and coverage support review.",
+          "If evidence is insufficient or no useful change is warranted, do not create a proposal.",
+        ].join(" "),
+      }],
+      source: { kind: "user" },
+    }));
+    const task = this.agent.whenIdle();
+    this.observationTask = task;
+    try {
+      await task;
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+      if (this.observationTask === task) this.observationTask = undefined;
+    }
+  }
 
   traceSnapshot(): AgentLoopTrace | undefined {
     return this.ctx.agentLoopTrace.snapshot(String(this.agent.id));

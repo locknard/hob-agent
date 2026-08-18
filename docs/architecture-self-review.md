@@ -46,6 +46,9 @@ apply an artifact or control a device.
 - Proposal creation is idempotent per producer/key. Review uses optimistic
   revisions, terminal decisions are immutable, and approval has
   `applicationStatus: not_available`.
+- Autonomous observation is disabled by default. The Hub owns its bounded
+  cadence, requires a ready world and idle DSH Agent, and permits only one
+  pending household proposal at a time.
 - Optional Inbox HTTP is disabled without an explicit credential, binds only to
   `127.0.0.1`, stores only a derived verifier, authenticates every request, and
   requires exact same-origin bounded review POSTs.

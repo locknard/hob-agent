@@ -98,6 +98,14 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.deepEqual(trace?.usage, { inputTokens: 0, outputTokens: 3, reasoningTokens: 0 });
   assert.equal(JSON.stringify(trace).includes("home is readable"), false);
 
+  await ctx.homeAgent.requestObservation();
+  assert.equal(adapter.requests.length, 2);
+  assert.equal(
+    adapter.requests[1]?.messages.some((message) =>
+      JSON.stringify(message).includes("at most one materially useful proposal")),
+    true,
+  );
+
   await fiber.dispose();
   assert.equal(ctx.homeAgent, undefined);
   assert.equal(ctx.get("agentLoopTrace"), undefined);

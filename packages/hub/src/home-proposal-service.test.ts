@@ -195,6 +195,23 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
   });
   assert.equal(proposal.applicationStatus, "not_available");
 
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Another pending item",
+    summary: "This must wait for household review.",
+    idempotencyKey: "another-item:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Wait.", rollback: "Discard it." },
+  }), /pending review/);
+  ctx.homeProposals.review({
+    proposalId: proposal.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+  });
+
   const currentStateProposal = await ctx.homeProposals.createDraft({
     kind: "household-insight",
     title: "Review current light state",

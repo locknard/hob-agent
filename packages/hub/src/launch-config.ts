@@ -53,6 +53,10 @@ export interface HomeHubLaunchConfig {
     readonly port: number;
     readonly authenticate: InboxAuthenticator;
   };
+  readonly observation?: {
+    readonly intervalMinutes: number;
+    readonly runOnStart: boolean;
+  };
   /** DSH sees only the selected provider's standard credential alias. */
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
 }
@@ -78,6 +82,10 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
   const apiKey = requiredValue(environment, credentialEnv).trim();
   const inboxHttp = parseInboxHttp(environment.HOB_INBOX_AUTH_TOKEN, environment.HOB_INBOX_PORT);
   const householdDirectory = parseHouseholdDirectory(environment.HOB_HOME_DIR);
+  const observation = parseObservationSchedule(
+    environment.HOB_OBSERVATION_INTERVAL_MINUTES,
+    environment.HOB_OBSERVE_ON_START,
+  );
   const launchEnvironment = createLaunchEnvironmentSnapshot([{
     source: "process",
     values: { [credentialEnv]: apiKey },
@@ -97,8 +105,28 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
     catalog: createBuiltinBridgeCatalog(),
     agent: { provider: model.provider, model: model.modelId },
     ...(inboxHttp === undefined ? {} : { inboxHttp }),
+    ...(observation === undefined ? {} : { observation }),
     launchEnvironment,
   };
+}
+
+function parseObservationSchedule(
+  intervalValue: string | undefined,
+  runOnStartValue: string | undefined,
+): HomeHubLaunchConfig["observation"] {
+  if (intervalValue === undefined && runOnStartValue === undefined) return undefined;
+  if (intervalValue === undefined || !/^\d+$/.test(intervalValue.trim())) {
+    throw new Error("Invalid HOB_OBSERVATION_INTERVAL_MINUTES; expected 60 to 10080");
+  }
+  const intervalMinutes = Number(intervalValue.trim());
+  if (!Number.isSafeInteger(intervalMinutes) || intervalMinutes < 60 || intervalMinutes > 10_080) {
+    throw new Error("Invalid HOB_OBSERVATION_INTERVAL_MINUTES; expected 60 to 10080");
+  }
+  const runOnStart = runOnStartValue === undefined ? false : runOnStartValue.trim();
+  if (runOnStart !== false && runOnStart !== "true" && runOnStart !== "false") {
+    throw new Error("Invalid HOB_OBSERVE_ON_START; expected true or false");
+  }
+  return { intervalMinutes, runOnStart: runOnStart === "true" };
 }
 
 function parseHouseholdDirectory(value: string | undefined): string | undefined {

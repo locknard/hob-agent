@@ -55,6 +55,15 @@ test("forwards only the Inbox verifier and port into the process composition", (
   assert.equal(JSON.stringify(options).includes(inboxToken), false);
 });
 
+test("forwards an explicit observation schedule into the Hub runtime", () => {
+  const options = createHomeHubProcessOptions({
+    ...ENV,
+    HOB_OBSERVATION_INTERVAL_MINUTES: "180",
+    HOB_OBSERVE_ON_START: "false",
+  });
+  assert.deepEqual(options.runtime.observation, { intervalMinutes: 180, runOnStart: false });
+});
+
 test("importing the executable module does not install process signal handlers", async () => {
   const signalCount = (signal: NodeJS.Signals): number => process.listenerCount(signal);
   const before = {

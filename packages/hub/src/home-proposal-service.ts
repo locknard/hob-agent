@@ -37,6 +37,12 @@ export class HomeProposalService extends Service {
 
   async createDraft(input: CreateHomeProposalDraftInput): Promise<ProposalEnvelope> {
     validateDraftInput(input);
+    const pending = this.store.list({ status: "pending_review", limit: 1 })[0];
+    if (pending !== undefined) {
+      if (pending.provenance.producer === input.provenance.producer
+        && pending.idempotencyKey === input.idempotencyKey) return pending;
+      throw new Error("A household proposal is already pending review");
+    }
     const world = this.ctx.homeWorld as HomeWorldService;
     const snapshot = world.snapshot();
     const selected = new Set(input.selectedHwIds);

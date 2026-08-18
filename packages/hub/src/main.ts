@@ -56,6 +56,7 @@ export function createHomeHubProcessOptions(
           : { householdDirectory: config.householdDirectory }),
       },
       ...(config.inboxHttp === undefined ? {} : { inboxHttp: config.inboxHttp }),
+      ...(config.observation === undefined ? {} : { observation: config.observation }),
       launchEnvironment: config.launchEnvironment,
     },
   };

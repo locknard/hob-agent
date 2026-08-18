@@ -106,6 +106,29 @@ test("mounts authenticated Inbox HTTP only when explicitly configured", async ()
   assert.equal(runtime.context.homeInboxHttp, undefined);
 });
 
+test("mounts the opt-in Hub observation scheduler after the DSH Home Agent", async () => {
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "observation-scheduler-test",
+    },
+    observation: {
+      intervalMinutes: 60,
+      scheduler: { wait: (_delay, signal) => new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      }) },
+    },
+  });
+
+  await runtime.start();
+  assert.equal(runtime.context.homeObservationScheduler.name, "homeObservationScheduler");
+  await runtime.stop();
+  assert.equal(runtime.context.homeObservationScheduler, undefined);
+});
+
 test("provides the immutable DSH launch environment before any runtime plugin mounts", () => {
   const snapshot = launchEnvironment();
   const runtime = createHomeAgentRuntime({

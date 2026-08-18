@@ -63,6 +63,18 @@ test("accepts only an explicit absolute household context directory", () => {
   );
 });
 
+test("enables only an explicit bounded observation schedule", () => {
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_OBSERVATION_INTERVAL_MINUTES: "360",
+    HOB_OBSERVE_ON_START: "true",
+  });
+  assert.deepEqual(config.observation, { intervalMinutes: 360, runOnStart: true });
+  assert.equal(readHomeHubLaunchConfig(BASE_ENV).observation, undefined);
+  assert.throws(() => readHomeHubLaunchConfig({ ...BASE_ENV, HOB_OBSERVE_ON_START: "true" }), /HOB_OBSERVATION/);
+  assert.throws(() => readHomeHubLaunchConfig({ ...BASE_ENV, HOB_OBSERVATION_INTERVAL_MINUTES: "59" }), /HOB_OBSERVATION/);
+});
+
 test("does not require legacy Home Assistant URL or token variables when bridges are declared", async () => {
   const config = readHomeHubLaunchConfig({
     HOB_DATA_DIR: "/tmp/hob-agent-launch-test-empty",
@@ -179,6 +191,8 @@ test("reads only the explicit launch allowlist before lazy bridge credential res
     "HOB_INBOX_AUTH_TOKEN",
     "HOB_INBOX_PORT",
     "HOB_HOME_DIR",
+    "HOB_OBSERVATION_INTERVAL_MINUTES",
+    "HOB_OBSERVE_ON_START",
   ]);
   await config.bridgeCredentialSource.describeForBridge("ha-main", "access-token");
   assert.equal(reads.at(-1), "HOB_HA_TOKEN");
