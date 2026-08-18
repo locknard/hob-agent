@@ -35,6 +35,13 @@ export interface HomeMapSnapshot {
     readonly capabilities: readonly { readonly semanticKind?: string }[];
     readonly states: readonly unknown[];
   }[];
+  readonly identityProposals?: readonly {
+    readonly kind: "identity-link";
+    readonly status: "proposed" | "approved" | "rejected" | "applied";
+    readonly hwId?: string;
+    readonly targetHwId?: string;
+    readonly sourceKind?: "device_reported" | "independent_registry" | "platform_registry" | "inferred";
+  }[];
 }
 
 export interface DraftHomeMapOptions {
@@ -55,10 +62,14 @@ export interface HomeMapDraftReport {
   readonly devicesWithMultipleSpaces: number;
   readonly devicesNotRequiringSpace: number;
   readonly devicesRequiringSpaceReview: number;
+  readonly identityLinksForReview: number;
 }
 
 /** Produces a bounded private review artifact without current state values. */
-export function renderHomeMapDraft(snapshot: Pick<HomeMapSnapshot, "spaces" | "devices">, generatedAt: string): string {
+export function renderHomeMapDraft(
+  snapshot: Pick<HomeMapSnapshot, "spaces" | "devices" | "identityProposals">,
+  generatedAt: string,
+): string {
   if (!Number.isFinite(Date.parse(generatedAt))) throw new TypeError("home map draft timestamp is invalid");
   const spaces = [...snapshot.spaces].sort((left, right) => left.hwSpaceId.localeCompare(right.hwSpaceId));
   const knownSpaceIds = new Set(spaces.map((space) => space.hwSpaceId));
@@ -71,6 +82,8 @@ export function renderHomeMapDraft(snapshot: Pick<HomeMapSnapshot, "spaces" | "d
     && placement.device.spatialDisposition !== "non_spatial");
   const multipleSpaces = placements.filter((placement) => placement.spaceIds.length > 1);
   const spacesById = new Map(spaces.map((space) => [space.hwSpaceId, space]));
+  const devicesById = new Map(devices.map((device) => [device.hwId, device]));
+  const identityLinks = uniqueIdentityLinks(snapshot.identityProposals ?? [], devicesById);
   const lines = [
     "# Imported home map — review required",
     "",
@@ -85,6 +98,12 @@ export function renderHomeMapDraft(snapshot: Pick<HomeMapSnapshot, "spaces" | "d
     `- Multiple imported spaces: ${multipleSpaces.length}`,
     "",
   ];
+  lines.push("## Possible duplicate devices", "",
+    "These are record-only review hints. Marking a decision in this draft does not merge devices or change Hub identity.", "");
+  if (identityLinks.length === 0) lines.push("_No possible duplicate-device links require review._");
+  else lines.push(...identityLinks.map(({ left, right, sourceKind }) =>
+    `- [ ] Are ${deviceIdentity(left)} and ${deviceIdentity(right)} the same physical device? Decision: same physical device / separate devices — source: ${sourceKindLabel(sourceKind)}`));
+  lines.push("");
   for (const space of spaces) {
     lines.push(`## Space: ${quoted(space.name ?? "Unnamed space")}`, "");
     const assigned = singleSpace
@@ -174,6 +193,7 @@ export async function draftHomeMapEnvironment(
     spaces: readiness.spaces,
     devices: readiness.devices,
     ...placementCounts,
+    identityLinksForReview: countIdentityLinks(snapshot),
   };
 }
 
@@ -195,7 +215,18 @@ async function loadReadySnapshot(
     while (true) {
       const snapshot: HomeMapSnapshot = ctx.homeWorld.snapshot();
       if (projectHomeValidation({ configuredBridgeCount: config.bridges.length, snapshot }).status === "ready") {
-        return snapshot;
+        return {
+          ...snapshot,
+          identityProposals: ctx.homeWorld.identity.proposals()
+            .filter((proposal) => proposal.kind === "identity-link")
+            .map(({ status, hwId, targetHwId, sourceKind }) => ({
+              kind: "identity-link" as const,
+              status,
+              ...(hwId === undefined ? {} : { hwId }),
+              ...(targetHwId === undefined ? {} : { targetHwId }),
+              ...(sourceKind === undefined ? {} : { sourceKind }),
+            })),
+        };
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Home map draft requires a ready home world");
@@ -203,6 +234,52 @@ async function loadReadySnapshot(
     }
   } finally {
     await ctx.fiber.dispose();
+  }
+}
+
+function uniqueIdentityLinks(
+  proposals: readonly NonNullable<HomeMapSnapshot["identityProposals"]>[number][],
+  devicesById: ReadonlyMap<string, HomeMapSnapshot["devices"][number]>,
+): readonly {
+  readonly left: HomeMapSnapshot["devices"][number];
+  readonly right: HomeMapSnapshot["devices"][number];
+  readonly sourceKind: NonNullable<HomeMapSnapshot["identityProposals"]>[number]["sourceKind"];
+}[] {
+  const links = new Map<string, {
+    readonly left: HomeMapSnapshot["devices"][number];
+    readonly right: HomeMapSnapshot["devices"][number];
+    readonly sourceKind: NonNullable<HomeMapSnapshot["identityProposals"]>[number]["sourceKind"];
+  }>();
+  for (const proposal of proposals) {
+    if (proposal.status !== "proposed" || proposal.hwId === undefined || proposal.targetHwId === undefined) continue;
+    const ids = [proposal.hwId, proposal.targetHwId].sort();
+    const left = devicesById.get(ids[0]!);
+    const right = devicesById.get(ids[1]!);
+    if (left === undefined || right === undefined) continue;
+    const key = ids.join("\u0000");
+    if (!links.has(key)) links.set(key, { left, right, sourceKind: proposal.sourceKind });
+  }
+  return [...links.values()];
+}
+
+function countIdentityLinks(snapshot: Pick<HomeMapSnapshot, "devices" | "identityProposals">): number {
+  return uniqueIdentityLinks(
+    snapshot.identityProposals ?? [],
+    new Map(snapshot.devices.map((device) => [device.hwId, device])),
+  ).length;
+}
+
+function deviceIdentity(device: HomeMapSnapshot["devices"][number]): string {
+  return `${quoted(device.name ?? "Unnamed device")} (\`${safeHubId(device.hwId)}\`)`;
+}
+
+function sourceKindLabel(sourceKind: NonNullable<HomeMapSnapshot["identityProposals"]>[number]["sourceKind"]): string {
+  switch (sourceKind) {
+    case "platform_registry": return "platform registry hint";
+    case "inferred": return "adapter inference";
+    case "device_reported": return "device-reported identity";
+    case "independent_registry": return "independent registry";
+    case undefined: return "unspecified identity hint";
   }
 }
 

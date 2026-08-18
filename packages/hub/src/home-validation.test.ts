@@ -41,6 +41,11 @@ test("projects only aggregate neutral readiness without household identities or 
       status: "available",
       rules: [{ ruleRef: "secret-rule", name: "Private automation" }],
     }],
+    identityProposals: [
+      { kind: "identity-link", status: "proposed" },
+      { kind: "capability-binding", status: "proposed" },
+      { kind: "identity-link", status: "approved" },
+    ],
   });
 
   assert.deepEqual(report, {
@@ -59,6 +64,7 @@ test("projects only aggregate neutral readiness without household identities or 
     states: 1,
     semanticKinds: { light: 1, sensor: 1, switch: 1, unclassified: 1 },
     ruleCatalogs: { available: 1, unavailable: 0, totalRules: 1 },
+    identityGovernance: { proposedIdentityLinks: 1, proposedCapabilityBindings: 1 },
   });
   const serialized = JSON.stringify(report);
   for (const secret of ["secret", "Private", "private-value"]) {

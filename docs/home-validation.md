@@ -21,11 +21,16 @@ report containing only:
   still require household placement review; and
 - counts by closed capability semantic kind; and
 - available/unavailable neutral existing-rule catalog counts plus the aggregate
-  number of visible rules.
+  number of visible rules; and
+- aggregate counts of proposed device-identity links and capability bindings
+  that still require governance review.
 
 The report never contains bridge IDs, native IDs, hub IDs, names, state values,
 attributes, URLs, credentials, provider errors, or household prompt content.
 Rule names, opaque references, epochs, and bridge identities are also omitted.
+Identity proposal IDs, participating Hub IDs, identity claims, evidence, and
+reasons are omitted as well; these counts indicate review work, not accepted
+equivalence or authority.
 Every configured bridge must also have delivered traffic to the current
 process and completed a ready cut. A restored consistent SQLite cut remains
 readable but cannot make validation return before the new adapter bootstrap

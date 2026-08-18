@@ -147,7 +147,7 @@ export class WorldIdentityManager {
         outcome: "merged",
       });
     }
-    proposals.push(...this.identityLinkProposals(identity.hwId, claims, ineligibleMatches));
+    proposals.push(...this.identityLinkProposals(identity.hwId, claims));
     if (!canMerge && eligibleMatches.size > 0) {
       proposals.push(...this.ambiguousEligibleLinkProposals(identity.hwId, claims, eligibleMatches));
     }
@@ -209,7 +209,7 @@ export class WorldIdentityManager {
     const proposals: GovernanceProposal[] = [];
     const ineligibleMatches = this.findMatches(claims, false);
     ineligibleMatches.delete(identity.hwId);
-    proposals.push(...this.identityLinkProposals(identity.hwId, claims, ineligibleMatches));
+    proposals.push(...this.identityLinkProposals(identity.hwId, claims));
     const capabilities = this.allocateCapabilities(
       registration,
       identity.hwId,
@@ -348,15 +348,18 @@ export class WorldIdentityManager {
   private identityLinkProposals(
     hwId: string,
     claims: readonly IdentityClaim[],
-    ineligibleMatches: Set<string>,
   ): GovernanceProposal[] {
     const proposals: GovernanceProposal[] = [];
     for (const claim of claims) {
       if (claim.source.kind !== "platform_registry" && claim.source.kind !== "inferred") continue;
+      const matches = new Set(this.claimIndex.get(claimKey(claim)) ?? []);
+      matches.delete(hwId);
+      const targetHwId = [...matches].sort(compare)[0];
+      if (targetHwId === undefined) continue;
       const proposal = this.createProposal({
         kind: "identity-link",
         hwId,
-        targetHwId: [...ineligibleMatches].sort(compare)[0],
+        targetHwId,
         sourceKind: claim.source.kind,
         reason: "claim_source_requires_human_identity_review",
       });

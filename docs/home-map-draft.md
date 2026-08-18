@@ -26,6 +26,8 @@ The draft contains:
 - a separate informational section for objects explicitly marked non-spatial
   through the committed neutral `orgHints@1` extension; these do not become
   room-assignment tasks;
+- deduplicated possible-device-identity links as explicit household questions,
+  using only display names, opaque Hub IDs, and a closed source-kind label;
 - opaque Hub device IDs; and
 - closed neutral capability semantic kinds.
 
@@ -48,6 +50,13 @@ settled rooms: it is shown once as a conflict that requires household
 resolution. The machine-readable command report includes the same
 multiple-space count so automation cannot mistake “has some space binding” for
 “has an unambiguous household location.”
+
+Possible duplicate-device entries are record-only review hints. Checking or
+editing the draft neither approves an identity proposal nor merges devices.
+The draft never includes proposal IDs, native identities, claim values,
+evidence, or free-form proposal reasons. Applying a reviewed identity decision
+requires a separate governed persistent workflow; until then the devices stay
+independent.
 
 A missing organization hint remains unknown. The draft never infers
 non-spatial status from a display name, integration name, or capability kind.

@@ -137,6 +137,11 @@ apply an artifact or control a device.
   coverage separately; ambiguous devices appear once as explicit confirmation
   tasks rather than being duplicated across apparently settled rooms. Native
   identifiers and current values remain absent.
+- Aggregate validation exposes the count of pending identity-governance work,
+  while the private map draft renders deduplicated possible-device links using
+  only display names, opaque Hub IDs, and closed source provenance. It omits
+  claims and evidence, and remains record-only: no draft edit approves or
+  applies an identity merge.
 - The neutral `orgHints@1` stream extension can mark a device explicitly
   non-spatial from structured adapter evidence. The Hub accepts it only in the
   committed replay epoch; names never drive this classification, and merged

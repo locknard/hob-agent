@@ -234,9 +234,11 @@ test("platform and inferred claims never merge devices automatically and emit re
     }],
   });
 
+  assert.equal(first.proposals.some((proposal) => proposal.kind === "identity-link"), false);
   assert.notEqual(second.identity.hwId, first.identity.hwId);
   assert.equal(second.autoMerged, false);
-  assert.equal(second.proposals.some((proposal) => proposal.kind === "identity-link"), true);
+  assert.equal(second.proposals.some((proposal) =>
+    proposal.kind === "identity-link" && proposal.targetHwId === first.identity.hwId), true);
   assert.equal(second.proposals.every((proposal) => proposal.requiresHumanApproval), true);
 });
 
@@ -252,9 +254,19 @@ test("same-schema capability candidates produce proposals rather than implicit c
 
 test("identity and governance records expose only hub-assigned ids and source qualification", () => {
   const manager = new WorldIdentityManager();
-  const result = manager.observe("bridge-a", {
+  const first = manager.observe("bridge-a", {
     nativeId: "native-a",
-    capabilities: [capability("sensor-a")],
+    capabilities: [],
+    identityClaims: [{
+      type: "serial" as const,
+      value: "serial-a",
+      source: { kind: "inferred" as const, method: "same-room" },
+      confidence: "low" as const,
+    }],
+  });
+  const result = manager.observe("bridge-b", {
+    nativeId: "native-b",
+    capabilities: [],
     identityClaims: [{
       type: "serial" as const,
       value: "serial-a",
@@ -263,7 +275,9 @@ test("identity and governance records expose only hub-assigned ids and source qu
     }],
   });
 
+  assert.equal(first.proposals.length, 0);
   assert.equal(Object.prototype.hasOwnProperty.call(result.identity, "principal"), false);
   assert.equal(result.audit.some((record) => record.kind === "identity-observed"), true);
   assert.equal(result.proposals[0]?.sourceKind, "inferred");
+  assert.equal(result.proposals[0]?.targetHwId, first.identity.hwId);
 });

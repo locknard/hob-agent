@@ -59,12 +59,20 @@ export interface HomeValidationReport {
     readonly unavailable: number;
     readonly totalRules: number;
   };
+  readonly identityGovernance: {
+    readonly proposedIdentityLinks: number;
+    readonly proposedCapabilityBindings: number;
+  };
 }
 
 export function projectHomeValidation(input: {
   readonly configuredBridgeCount: number;
   readonly snapshot: ValidationSnapshot;
   readonly ruleCatalogs?: readonly HomeWorldForeignRuleCatalog[];
+  readonly identityProposals?: readonly {
+    readonly kind: string;
+    readonly status: string;
+  }[];
 }): HomeValidationReport {
   const bridgeIds = Object.keys(input.snapshot.bridges);
   const watermarks = new Set(input.snapshot.bridgeWatermarks.map((item) => item.bridgeId));
@@ -93,6 +101,7 @@ export function projectHomeValidation(input: {
       && watermarks.has(bridgeId)
       && currentProcessReady.has(bridgeId));
   const ruleCatalogs = input.ruleCatalogs ?? [];
+  const identityProposals = input.identityProposals ?? [];
   return {
     status: ready ? "ready" : "not_ready",
     configuredBridges: input.configuredBridgeCount,
@@ -115,6 +124,12 @@ export function projectHomeValidation(input: {
       unavailable: ruleCatalogs.filter((catalog) => catalog.status === "unavailable").length,
       totalRules: ruleCatalogs.reduce((total, catalog) =>
         total + (catalog.status === "available" ? catalog.rules.length : 0), 0),
+    },
+    identityGovernance: {
+      proposedIdentityLinks: identityProposals.filter((proposal) =>
+        proposal.kind === "identity-link" && proposal.status === "proposed").length,
+      proposedCapabilityBindings: identityProposals.filter((proposal) =>
+        proposal.kind === "capability-binding" && proposal.status === "proposed").length,
     },
   };
 }
@@ -156,6 +171,7 @@ export async function validateHomeEnvironment(
       configuredBridgeCount: config.bridges.length,
       snapshot: ctx.homeWorld.snapshot(),
       ruleCatalogs: await ctx.homeWorld.foreignRuleCatalog(),
+      identityProposals: ctx.homeWorld.identity.proposals(),
     });
   } finally {
     await ctx.fiber.dispose();
