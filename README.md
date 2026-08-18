@@ -90,6 +90,17 @@ It uses the same Hub gates, creates at most one review-only proposal, prints
 only a metadata outcome, and then exits. See
 [`docs/one-shot-observation.md`](docs/one-shot-observation.md).
 
+To create a private review draft of the neutral room/device map without calling
+a model or replacing `HOME.md`, set an explicit private `HOB_HOME_DIR` and run:
+
+```sh
+pnpm draft:home-map
+```
+
+This exclusively creates mode-`0600` `HOME.import.md`; review and deliberately
+merge accepted facts into `HOME.md`. See
+[`docs/home-map-draft.md`](docs/home-map-draft.md).
+
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
 Home Product Bundle contributes the bounded, paginated, read-only
