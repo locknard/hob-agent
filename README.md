@@ -77,6 +77,17 @@ The command mounts only HomeWorld and prints aggregate readiness and counts; it
 never prints household names, IDs, state values, URLs, credentials, or raw
 errors. See [`docs/home-validation.md`](docs/home-validation.md).
 
+After validation, one explicit paid/model-backed observation can be run without
+enabling the recurring scheduler or Inbox HTTP listener:
+
+```sh
+pnpm observe:home
+```
+
+It uses the same Hub gates, creates at most one review-only proposal, prints
+only a metadata outcome, and then exits. See
+[`docs/one-shot-observation.md`](docs/one-shot-observation.md).
+
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
 Home Product Bundle contributes the bounded, paginated, read-only

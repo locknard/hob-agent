@@ -27,7 +27,7 @@ export interface HomeObservationStatus {
   readonly lastAttempt?: { readonly at: string; readonly outcome: HomeObservationOutcome };
 }
 
-interface ObservationPorts {
+export interface ObservationPorts {
   homeWorld: {
     snapshot(): {
       readonly bridges: Readonly<Record<string, unknown>>;
@@ -104,30 +104,8 @@ export class HomeObservationSchedulerService extends Service {
     if (this.stopped) return "failed";
     this.state = "running";
     let outcome: HomeObservationOutcome = "failed";
-    const ctx = this.ctx as unknown as ObservationPorts;
     try {
-      if (signal.aborted) return outcome;
-      const snapshot = ctx.homeWorld.snapshot();
-      const bridgeIds = Object.keys(snapshot.bridges);
-      const watermarks = new Set(snapshot.bridgeWatermarks.map((item) => item.bridgeId));
-      const diagnostics = new Map(snapshot.diagnostics.map((item) => [item.bridgeId, item.connectionState]));
-      if (bridgeIds.length === 0
-        || bridgeIds.some((bridgeId) => diagnostics.get(bridgeId) !== "ready" || !watermarks.has(bridgeId))) {
-        outcome = "world_not_ready";
-        return outcome;
-      }
-      if (ctx.homeProposals.list({ status: "pending_review", limit: 1 }).length > 0) {
-        outcome = "proposal_pending";
-        return outcome;
-      }
-      if (ctx.homeAgent.observationStatus !== "idle") {
-        outcome = "agent_busy";
-        return outcome;
-      }
-      await ctx.homeAgent.requestObservation(signal);
-      outcome = "started";
-      return outcome;
-    } catch {
+      outcome = await requestGovernedHomeObservation(this.ctx as unknown as ObservationPorts, signal);
       return outcome;
     } finally {
       this.lastAttempt = { at: observationTimestamp(this.clock), outcome };
@@ -158,6 +136,33 @@ export class HomeObservationSchedulerService extends Service {
       if (!signal.aborted) await this.observeNow(signal);
     }
   }
+}
+
+/** Applies the shared Hub-owned gates to one explicit or scheduled observation. */
+export async function requestGovernedHomeObservation(
+  ctx: ObservationPorts,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<HomeObservationOutcome> {
+  try {
+    if (signal.aborted) return "failed";
+    if (!isHomeWorldReady(ctx.homeWorld.snapshot())) return "world_not_ready";
+    if (ctx.homeProposals.list({ status: "pending_review", limit: 1 }).length > 0) {
+      return "proposal_pending";
+    }
+    if (ctx.homeAgent.observationStatus !== "idle") return "agent_busy";
+    await ctx.homeAgent.requestObservation(signal);
+    return "started";
+  } catch {
+    return "failed";
+  }
+}
+
+export function isHomeWorldReady(snapshot: ReturnType<ObservationPorts["homeWorld"]["snapshot"]>): boolean {
+  const bridgeIds = Object.keys(snapshot.bridges);
+  const watermarks = new Set(snapshot.bridgeWatermarks.map((item) => item.bridgeId));
+  const diagnostics = new Map(snapshot.diagnostics.map((item) => [item.bridgeId, item.connectionState]));
+  return bridgeIds.length > 0
+    && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready" && watermarks.has(bridgeId));
 }
 
 const defaultScheduler: HomeObservationSchedulerLike = {
