@@ -55,6 +55,8 @@ export interface ObservationAuditSummary {
   readonly outcomes: Readonly<Record<HomeObservationOutcome, number>>;
   readonly dispositions: Readonly<Record<HomeObservationDisposition, number>>;
   readonly noProposalWithoutDisposition: number;
+  readonly measuredAttempts: number;
+  readonly metrics: ObservationRunMetrics;
 }
 
 export interface SqliteObservationAuditStoreOptions {
@@ -288,6 +290,42 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
       }
       dispositions[disposition] = count;
     }
+    const metricRow = this.db.prepare(`SELECT
+        COUNT(duration_ms) AS duration_count,
+        COUNT(input_tokens) AS input_count,
+        COUNT(output_tokens) AS output_count,
+        COUNT(reasoning_tokens) AS reasoning_count,
+        COUNT(tool_calls) AS tool_count,
+        COUNT(failed_tool_calls) AS failed_tool_count,
+        COALESCE(SUM(duration_ms), 0) AS duration_ms,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+        COALESCE(SUM(tool_calls), 0) AS tool_calls,
+        COALESCE(SUM(failed_tool_calls), 0) AS failed_tool_calls
+      FROM observation_attempts WHERE status = 'completed'`).get() as ObservationRow;
+    const metricCounts = [
+      metricRow.duration_count,
+      metricRow.input_count,
+      metricRow.output_count,
+      metricRow.reasoning_count,
+      metricRow.tool_count,
+      metricRow.failed_tool_count,
+    ].map(Number);
+    const measuredAttempts = metricCounts[0]!;
+    const metrics = {
+      durationMs: Number(metricRow.duration_ms),
+      inputTokens: Number(metricRow.input_tokens),
+      outputTokens: Number(metricRow.output_tokens),
+      reasoningTokens: Number(metricRow.reasoning_tokens),
+      toolCalls: Number(metricRow.tool_calls),
+      failedToolCalls: Number(metricRow.failed_tool_calls),
+    };
+    if (!metricCounts.every((count) => Number.isSafeInteger(count) && count >= 0 && count === measuredAttempts)
+      || !Object.values(metrics).every((value) => Number.isSafeInteger(value) && value >= 0)
+      || metrics.failedToolCalls > metrics.toolCalls) {
+      throw new ObservationAuditError("corrupt", "Observation audit metrics summary is corrupt");
+    }
     return {
       totalAttempts: lifecycles.running + lifecycles.completed + lifecycles.interrupted,
       completedAttempts: lifecycles.completed,
@@ -296,6 +334,8 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
       outcomes,
       dispositions,
       noProposalWithoutDisposition,
+      measuredAttempts,
+      metrics,
     };
   }
 

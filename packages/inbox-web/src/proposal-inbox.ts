@@ -162,6 +162,8 @@ export interface InboxObservationQualitySummary {
   readonly outcomes: Readonly<Record<NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"], number>>;
   readonly dispositions: Readonly<Record<InboxObservationDisposition, number>>;
   readonly noProposalWithoutDisposition: number;
+  readonly measuredAttempts: number;
+  readonly metrics: InboxObservationMetrics;
 }
 
 export interface InboxCalibrationSummary {
@@ -287,6 +289,10 @@ function renderCalibrationSummary(summary: InboxCalibrationSummary): string {
     ${outcomes}
     ${dispositions}
     <dt>No-proposal disposition not reported</dt><dd>${observation.noProposalWithoutDisposition}</dd>
+    <dt>Measured attempts</dt><dd>${observation.measuredAttempts}</dd>
+    <dt>Cumulative model tokens</dt><dd>${observation.metrics.inputTokens} input / ${observation.metrics.outputTokens} output / ${observation.metrics.reasoningTokens} reasoning tokens</dd>
+    <dt>Cumulative tools</dt><dd>${observation.metrics.toolCalls} tool calls / ${observation.metrics.failedToolCalls} failed</dd>
+    <dt>Cumulative turn duration</dt><dd>${observation.metrics.durationMs} ms</dd>
   </dl>`;
   return `<section aria-label="Household calibration"><h2>Household calibration</h2><p>All local records · descriptive only</p>
     <h3>Proposals</h3><dl>

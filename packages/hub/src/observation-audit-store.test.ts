@@ -81,6 +81,15 @@ test("persists only bounded observation lifecycle metadata", async () => {
       other_uncertainty: 0,
     },
     noProposalWithoutDisposition: 0,
+    measuredAttempts: 1,
+    metrics: {
+      durationMs: 2_500,
+      inputTokens: 120,
+      outputTokens: 18,
+      reasoningTokens: 7,
+      toolCalls: 6,
+      failedToolCalls: 0,
+    },
   });
   reopened.close();
 

@@ -71,6 +71,15 @@ class StubObservationAudit extends Service {
         other_uncertainty: 0,
       },
       noProposalWithoutDisposition: 0,
+      measuredAttempts: 2,
+      metrics: {
+        durationMs: 5_000,
+        inputTokens: 240,
+        outputTokens: 36,
+        reasoningTokens: 14,
+        toolCalls: 12,
+        failedToolCalls: 1,
+      },
     };
   }
 }
@@ -102,6 +111,9 @@ test("renders bounded persisted observation history without DSH trace content", 
   assert.match(ctx.homeInbox.renderList(), /Incorrect assumption.*1/i);
   assert.match(ctx.homeInbox.renderList(), /No material household value.*1/i);
   assert.match(ctx.homeInbox.renderList(), /Existing rule overlap.*1/i);
+  assert.match(ctx.homeInbox.renderList(), /Measured attempts.*2/i);
+  assert.match(ctx.homeInbox.renderList(), /240 input \/ 36 output \/ 14 reasoning tokens/i);
+  assert.match(ctx.homeInbox.renderList(), /12 tool calls \/ 1 failed/i);
   assert.equal(ctx.homeInbox.renderList().includes("observation-1"), false);
 
   await fiber.dispose();

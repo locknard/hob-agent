@@ -14,12 +14,17 @@ The Hub therefore exposes all-time, aggregate-only local summaries:
 - the count of legacy reviewed proposals without structured feedback;
 - observation lifecycle totals and completed counts by closed Hub outcome;
 - no-proposal counts by bounded Agent-reported disposition; and
-- the count of no-proposal attempts without a reported disposition.
+- the count of no-proposal attempts without a reported disposition; and
+- measured observation count plus cumulative duration, model-token counters,
+  tool calls, and failed tool calls.
 
 The SQLite stores compute these summaries directly from bounded columns and
 review codes. The Inbox receives counts only. It does not load or reinterpret
 proposal titles, rationale, notes, device/space identities, observation IDs,
 model text, or tool traces for calibration.
+Metric totals include only attempts written after numeric run metrics became
+available; the measured-attempt count makes legacy coverage explicit. They are
+observed usage facts, not monetary estimates.
 
 These metrics are descriptive, not authority. They do not modify household
 files, prompts, Skills, schedules, policy, model selection, proposals, or
