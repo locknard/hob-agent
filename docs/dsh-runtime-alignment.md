@@ -314,8 +314,10 @@ DSH 当前仍处于 developer preview，源码和 npm 各 package 的发布进�
 `dsh-system-prompt`、`dsh-tools`、`dsh-scope`、`dsh-agent`、`dsh-agent-loop`，以及
 `dsh-attachment`、`dsh-brand`、`dsh-code-runtime`、`dsh-credentials`、`dsh-invariants`、
 `dsh-launch-environment`、`dsh-llm-pi-ai`、`dsh-repeat-tool-reminder`、
+`dsh-commands`、`dsh-compaction`、`dsh-compaction-basic`、
 `dsh-session-persistence`、`dsh-session-persistence-sqlite`、`dsh-settings`、
-`dsh-skill`、`dsh-timeout`、`dsh-tool-skill`、`dsh-typert-protocol`、
+`dsh-session-projection`、`dsh-skill`、`dsh-timeout`、`dsh-token-meter`、
+`dsh-tool-skill`、`dsh-typert-protocol`、
 `dsh-user-approval`。底层 `@deepseek-ai/cordis` 固定为 `4.0.1`；DSH core 所需的
 `@deepseek-ai/schemastery` peer 固定为 `3.18.1`。
 

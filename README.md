@@ -116,7 +116,8 @@ merge accepted facts into `HOME.md`. See
 [`docs/home-map-draft.md`](docs/home-map-draft.md).
 
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
-loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
+loop, session, prompt assembly, tool registry, cancellation lifecycle, token
+metering, and compaction transaction. The
 Home Product Bundle contributes compact paginated `get_home_inventory`
 discovery, the bounded paginated read-only `get_home_snapshot` tool, the
 bounded read-only `get_home_evidence` tool, plus the review-only
@@ -124,6 +125,11 @@ bounded read-only `get_home_evidence` tool, plus the review-only
 `foreignRules@1` conflict checks are attached before a proposal enters the
 Inbox. Device actions, configuration writes, and proposal application remain
 deliberately unavailable.
+
+Long-running sessions use the official DSH compaction engine with its one
+supported summarizer hook replaced by a household checkpoint template; the
+project does not implement a second compaction runtime. See
+[`docs/dsh-home-compaction.md`](docs/dsh-home-compaction.md).
 
 The v6.4 read path also carries an optional closed `semanticKind` per
 capability so the Agent can group lights, switches, sensors, and other reviewed

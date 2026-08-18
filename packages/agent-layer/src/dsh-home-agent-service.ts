@@ -10,6 +10,7 @@ import { deadline, timeoutOf } from "@deepseek-ai/dsh-timeout";
 import SkillRegistry from "@deepseek-ai/dsh-skill";
 import * as ToolSkill from "@deepseek-ai/dsh-tool-skill";
 import * as RepeatToolReminder from "@deepseek-ai/dsh-repeat-tool-reminder";
+import TokenMeter from "@deepseek-ai/dsh-token-meter";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
@@ -24,6 +25,7 @@ import {
   type AgentLoopTrace,
 } from "./dsh-agent-loop-trace.js";
 import type { HouseholdPromptContext } from "./household-prompt-context.js";
+import { HomeCompactionEngine } from "./dsh-home-compaction.js";
 
 const DEFAULT_SESSION_ID = "home-main";
 const HOME_OBSERVATION_MAX_TOOL_CALLS = 12;
@@ -152,6 +154,8 @@ export class DshHomeAgentService extends Service {
         path: this.options.sessionPersistencePath,
       });
     }
+    await this.ctx.plugin(TokenMeter);
+    await this.ctx.plugin(HomeCompactionEngine);
     await this.ctx.plugin(AgentLoopTraceService);
     this.traceService = this.ctx.get("agentLoopTrace");
     if (this.traceService === undefined) throw new Error("DSH Agent trace service did not initialize");
