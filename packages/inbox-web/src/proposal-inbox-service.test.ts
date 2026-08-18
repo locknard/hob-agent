@@ -15,6 +15,23 @@ class StubProposals extends Service {
   review() { throw new Error("not used"); }
 }
 
+class StubObservationAudit extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeObservationAudit");
+  }
+
+  list() {
+    return [{
+      id: "observation-1",
+      trigger: "one_shot",
+      startedAt: "2026-08-19T04:00:00.000Z",
+      completedAt: "2026-08-19T04:00:01.000Z",
+      status: "completed",
+      outcome: "no_proposal",
+    }];
+  }
+}
+
 test("mounts a local review facade when the optional DSH trace is absent", async () => {
   const ctx = new Context();
   await ctx.plugin(StubProposals);
@@ -27,5 +44,18 @@ test("mounts a local review facade when the optional DSH trace is absent", async
 
   await fiber.dispose();
   assert.equal(ctx.homeInbox, undefined);
+  await ctx.fiber.dispose();
+});
+
+test("renders bounded persisted observation history without DSH trace content", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubObservationAudit);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  assert.match(ctx.homeInbox.renderList(), /one shot · no useful proposal/i);
+  assert.equal(ctx.homeInbox.renderList().includes("observation-1"), false);
+
+  await fiber.dispose();
   await ctx.fiber.dispose();
 });

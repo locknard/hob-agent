@@ -14,13 +14,16 @@ import {
   type ObservationPorts,
 } from "./home-observation-scheduler.js";
 import type { LaunchEnvironment } from "./launch-config.js";
+import type { ObservationAuditStore } from "./observation-audit-store.js";
 
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_READY_POLL_MS = 250;
 const DEFAULT_OBSERVATION_TIMEOUT_MS = 300_000;
 
 interface OneShotRuntime {
-  readonly context: ObservationPorts;
+  readonly context: ObservationPorts & {
+    readonly homeObservationAudit: Pick<ObservationAuditStore, "begin" | "complete">;
+  };
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -62,30 +65,45 @@ export async function observeHomeEnvironment(
 
   try {
     await runtime.start();
-    const readyDeadline = Date.now() + readyTimeoutMs;
-    while (!isHomeWorldReady(runtime.context.homeWorld.snapshot())) {
-      const remaining = readyDeadline - Date.now();
-      if (remaining <= 0) {
-        return { outcome: "not_run", reason: "world_not_ready", proposal: "none" };
-      }
-      await wait(Math.min(readyPollMs, remaining));
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), observationTimeoutMs);
-    let outcome: HomeObservationOutcome;
+    const auditId = runtime.context.homeObservationAudit.begin({
+      trigger: "one_shot",
+      startedAt: new Date().toISOString(),
+    });
+    let auditOutcome: HomeObservationOutcome = "failed";
     try {
-      outcome = await requestGovernedHomeObservation(runtime.context, controller.signal);
+      const readyDeadline = Date.now() + readyTimeoutMs;
+      while (!isHomeWorldReady(runtime.context.homeWorld.snapshot())) {
+        const remaining = readyDeadline - Date.now();
+        if (remaining <= 0) {
+          auditOutcome = "world_not_ready";
+          return { outcome: "not_run", reason: "world_not_ready", proposal: "none" };
+        }
+        await wait(Math.min(readyPollMs, remaining));
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), observationTimeoutMs);
+      let outcome: HomeObservationOutcome;
+      try {
+        outcome = await requestGovernedHomeObservation(runtime.context, controller.signal);
+      } finally {
+        clearTimeout(timeout);
+      }
+      auditOutcome = outcome;
+      if (outcome === "proposal_created") return { outcome: "completed", proposal: "created" };
+      if (outcome === "no_proposal") return { outcome: "completed", proposal: "none" };
+      return {
+        outcome: "not_run",
+        reason: outcome,
+        proposal: outcome === "proposal_pending" ? "already_pending" : "none",
+      };
     } finally {
-      clearTimeout(timeout);
+      runtime.context.homeObservationAudit.complete({
+        id: auditId,
+        completedAt: new Date().toISOString(),
+        outcome: auditOutcome,
+      });
     }
-    if (outcome === "proposal_created") return { outcome: "completed", proposal: "created" };
-    if (outcome === "no_proposal") return { outcome: "completed", proposal: "none" };
-    return {
-      outcome: "not_run",
-      reason: outcome,
-      proposal: outcome === "proposal_pending" ? "already_pending" : "none",
-    };
   } finally {
     await runtime.stop();
   }

@@ -10,6 +10,10 @@ import { ProposalInboxService } from "@hob-agent/inbox-web/service";
 
 import { HomeProposalService } from "./home-proposal-service.js";
 import {
+  HomeObservationAuditService,
+  type HomeObservationAuditServiceOptions,
+} from "./home-observation-audit-service.js";
+import {
   readHomeInboxLaunchConfig,
   type LaunchEnvironment,
 } from "./launch-config.js";
@@ -23,6 +27,7 @@ import type { SqliteProposalStoreOptions } from "./proposal-store.js";
 
 export interface HomeInboxRuntimeOptions {
   readonly homeProposals: SqliteProposalStoreOptions;
+  readonly homeObservationAudit: HomeObservationAuditServiceOptions;
   readonly inboxHttp: ProposalInboxHttpOptions;
 }
 
@@ -47,6 +52,7 @@ export class HomeInboxRuntime implements HomeHubRuntime {
     this.statusValue = "starting";
     try {
       await this.context.plugin(HomeProposalService, this.options.homeProposals);
+      await this.context.plugin(HomeObservationAuditService, this.options.homeObservationAudit);
       await this.context.plugin(ProposalInboxService);
       await this.context.plugin(ProposalInboxHttpService, this.options.inboxHttp);
       this.statusValue = "running";
@@ -79,6 +85,7 @@ export function createHomeInboxProcessOptions(environment: LaunchEnvironment): H
   const config = readHomeInboxLaunchConfig(environment);
   return {
     homeProposals: { path: config.proposalPath },
+    homeObservationAudit: { path: config.observationAuditPath },
     inboxHttp: config.inboxHttp,
   };
 }

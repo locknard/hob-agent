@@ -8,7 +8,8 @@ home bridge or starting DSH. This closes the review gap after
 result without causing another device snapshot, model request, or observation.
 
 The command mounts one Cordis root containing only the Hub proposal store, the
-Inbox review facade, and authenticated localhost HTTP delivery. This is a
+metadata-only observation audit store, the Inbox review facade, and
+authenticated localhost HTTP delivery. This is a
 smaller composition of existing neutral services, not a second Agent Runtime.
 It requires an explicit absolute `HOB_DATA_DIR` and the same explicit
 `HOB_INBOX_AUTH_TOKEN`; `HOB_MODEL`, provider credentials, `HOB_BRIDGES`, and
@@ -25,6 +26,9 @@ bridge credentials are neither required nor read.
 - DSH trace detail is optional. Because DSH is intentionally absent, standalone
   proposal detail omits the live metadata trace rather than opening its session
   database or inventing another trace reader.
+- The list shows at most five recent observation attempts from the separate
+  Hub audit ledger. It exposes trigger, lifecycle result, and timestamps only;
+  it does not expose run ids, prompts, tool data, or household state.
 - The existing bounded process shutdown controller owns SIGINT and SIGTERM and
   disposes the complete Cordis tree.
 

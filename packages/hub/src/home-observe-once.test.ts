@@ -25,6 +25,7 @@ test("runs one governed observation without mounting HTTP or recurring schedulin
   let observations = 0;
   let receivedOptions: Record<string, unknown> | undefined;
   const proposals: unknown[] = [];
+  const audit = createAuditStub();
   const context = {
     homeWorld: {
       snapshot: () => ({
@@ -43,6 +44,7 @@ test("runs one governed observation without mounting HTTP or recurring schedulin
         proposals.push({ status: "pending_review" });
       },
     },
+    homeObservationAudit: audit,
   };
 
   const report = await observeHomeEnvironment(ENV, {
@@ -60,6 +62,8 @@ test("runs one governed observation without mounting HTTP or recurring schedulin
   assert.equal(started, 1);
   assert.equal(stopped, 1);
   assert.equal(observations, 1);
+  assert.deepEqual(audit.starts.map((attempt) => attempt.trigger), ["one_shot"]);
+  assert.deepEqual(audit.completions.map((attempt) => attempt.outcome), ["proposal_created"]);
   assert.equal("observation" in receivedOptions!, false);
   assert.equal("inboxHttp" in receivedOptions!, false);
 });
@@ -82,6 +86,7 @@ test("does not call the model when a proposal is already pending", async () => {
             observationStatus: "idle" as const,
             async requestObservation() { observations += 1; },
           },
+          homeObservationAudit: createAuditStub(),
         } as never,
         async start() {},
         async stop() {},
@@ -110,6 +115,7 @@ test("reports a completed observation that intentionally creates no proposal", a
             observationStatus: "idle" as const,
             async requestObservation() {},
           },
+          homeObservationAudit: createAuditStub(),
         } as never,
         async start() {},
         async stop() {},
@@ -119,3 +125,21 @@ test("reports a completed observation that intentionally creates no proposal", a
 
   assert.deepEqual(report, { outcome: "completed", proposal: "none" });
 });
+
+function createAuditStub() {
+  const starts: { id: string; trigger: string; startedAt: string }[] = [];
+  const completions: { id: string; completedAt: string; outcome: string }[] = [];
+  return {
+    starts,
+    completions,
+    begin(input: { trigger: string; startedAt: string }) {
+      const id = `observation-${starts.length + 1}`;
+      starts.push({ id, ...input });
+      return id;
+    },
+    complete(input: { id: string; completedAt: string; outcome: string }) {
+      completions.push(input);
+    },
+    list() { return []; },
+  };
+}

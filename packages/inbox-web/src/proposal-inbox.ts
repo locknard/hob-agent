@@ -79,7 +79,22 @@ export interface InboxObservationStatus {
     readonly at: string;
     readonly outcome: "proposal_created" | "no_proposal" | "world_not_ready" | "proposal_pending" | "agent_busy" | "failed";
   };
+  readonly recentAttempts?: readonly InboxObservationAttempt[];
 }
+
+export type InboxObservationAttempt = {
+  readonly id: string;
+  readonly trigger: "startup" | "scheduled" | "manual" | "one_shot";
+  readonly startedAt: string;
+} & (
+  | { readonly status: "running" }
+  | { readonly status: "interrupted" }
+  | {
+      readonly status: "completed";
+      readonly completedAt: string;
+      readonly outcome: NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"];
+    }
+);
 
 export interface InboxProposalDetail {
   readonly proposal: InboxProposal;
@@ -150,6 +165,7 @@ export class ProposalInboxController {
 export function renderProposalList(
   proposals: readonly InboxProposalSummary[],
   observation?: InboxObservationStatus,
+  persistedAttempts: readonly InboxObservationAttempt[] = [],
 ): string {
   const items = proposals.map((proposal) => `<li class="proposal-card" data-status="${escapeHtml(proposal.status)}">
     <a href="/proposals/${encodeURIComponent(proposal.id)}"><h2>${escapeHtml(proposal.title)}</h2></a>
@@ -159,7 +175,28 @@ export function renderProposalList(
   const observationStatus = observation === undefined
     ? "<p class=\"observation-status\">Observation schedule is disabled.</p>"
     : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome))} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
-  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header><ol>${items}</ol></main>`;
+  const attempts = observation?.recentAttempts ?? persistedAttempts;
+  const observationHistory = attempts.length === 0
+    ? ""
+    : `<section aria-label="Recent observations"><h2>Recent observations</h2><ol>${attempts.slice(0, 5).map((attempt) =>
+      `<li>${escapeHtml(observationTriggerLabel(attempt.trigger))} · ${observationAttemptLabel(attempt)} · ${escapeHtml(attempt.startedAt)}</li>`,
+    ).join("")}</ol></section>`;
+  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header>${observationHistory}<ol>${items}</ol></main>`;
+}
+
+function observationAttemptLabel(attempt: InboxObservationAttempt): string {
+  if (attempt.status === "running") return "running";
+  if (attempt.status === "interrupted") return "interrupted safely";
+  return escapeHtml(observationOutcomeLabel(attempt.outcome));
+}
+
+function observationTriggerLabel(trigger: InboxObservationAttempt["trigger"]): string {
+  switch (trigger) {
+    case "startup": return "startup";
+    case "scheduled": return "scheduled";
+    case "manual": return "manual";
+    case "one_shot": return "one shot";
+  }
 }
 
 export function renderProposalDetail(detail: InboxProposalDetail): string {

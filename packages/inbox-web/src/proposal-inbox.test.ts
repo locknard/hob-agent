@@ -85,10 +85,32 @@ test("lists and renders untrusted proposal content without creating an applicati
     runOnStart: false,
     state: "waiting",
     lastAttempt: { at: "2026-08-19T00:00:00.000Z", outcome: "no_proposal" },
+    recentAttempts: [{
+      id: "observation-2",
+      trigger: "scheduled",
+      startedAt: "2026-08-19T00:00:00.000Z",
+      completedAt: "2026-08-19T00:00:02.000Z",
+      status: "completed",
+      outcome: "no_proposal",
+    }, {
+      id: "observation-1",
+      trigger: "startup",
+      startedAt: "2026-08-18T23:00:00.000Z",
+      status: "interrupted",
+    }, {
+      id: "observation-current",
+      trigger: "manual",
+      startedAt: "2026-08-19T00:01:00.000Z",
+      status: "running",
+    }],
   });
   assert.equal(listHtml.includes("<script>"), false);
   assert.match(listHtml, /&lt;script&gt;Unsafe title&lt;\/script&gt;/);
   assert.match(listHtml, /no useful proposal/i);
+  assert.match(listHtml, /Recent observations/i);
+  assert.match(listHtml, /scheduled · no useful proposal/i);
+  assert.match(listHtml, /startup · interrupted safely/i);
+  assert.match(listHtml, /manual · running/i);
 
   const detail = controller.detail("proposal-1");
   assert.equal(detail?.trace?.sessionId, "home-main");

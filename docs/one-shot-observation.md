@@ -4,8 +4,9 @@
 
 The first real-household Agent check must not require enabling a recurring
 schedule. `pnpm observe:home` therefore mounts the normal HomeWorld, proposal
-store, and DSH Home Agent, performs at most one governed observation, reports a
-metadata-only outcome, and disposes the runtime.
+store, metadata-only observation audit, and DSH Home Agent, performs at most
+one governed observation, reports a metadata-only outcome, and disposes the
+runtime.
 
 Invoking the command is an explicit request to call the configured model. The
 model may receive the same bounded household snapshot, evidence, existing-rule
@@ -29,6 +30,9 @@ readiness and the model turn have independent bounded timeouts. The command
 does not mount the recurring scheduler or the Inbox HTTP listener even when
 their environment settings are present. It uses the normal private SQLite
 paths, so a created proposal remains available to the regular Inbox afterward.
+The Hub starts the audit record before waiting for readiness or calling the
+model and completes it with the same closed product outcome. A process restart
+marks an unfinished attempt as interrupted rather than success.
 
 The JSON result contains only the stable outcome and whether a new proposal was
 created, no proposal identity or content. A successful turn that found no

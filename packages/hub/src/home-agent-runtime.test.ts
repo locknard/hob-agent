@@ -43,10 +43,16 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 3), ["HomeWorldService", "HomeProposalService", "DshHomeAgentComposition"]);
+  assert.deepEqual(pluginOrder.slice(0, 4), [
+    "HomeWorldService",
+    "HomeObservationAuditService",
+    "HomeProposalService",
+    "DshHomeAgentComposition",
+  ]);
   assert.equal(runtime.context.root, runtime.context);
   assert.equal(runtime.context.homeWorld.name, "homeWorld");
   assert.equal(runtime.context.homeProposals.name, "homeProposals");
+  assert.equal(runtime.context.homeObservationAudit.name, "homeObservationAudit");
   assert.equal(runtime.context.homeInbox.name, "homeInbox");
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(pluginOrder.includes("ProposalInboxService"), true);
@@ -57,6 +63,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.status, "stopped");
   assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeProposals, undefined);
+  assert.equal(runtime.context.homeObservationAudit, undefined);
   assert.equal(runtime.context.homeInbox, undefined);
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);

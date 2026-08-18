@@ -48,6 +48,7 @@ export function createHomeHubProcessOptions(
         worldModelPath: config.worldModelPath,
       },
       homeProposals: { path: config.proposalPath },
+      homeObservationAudit: { path: config.observationAuditPath },
       agent: {
         ...config.agent,
         sessionPersistencePath: config.sessionPath,

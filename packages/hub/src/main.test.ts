@@ -31,6 +31,7 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   }]);
   assert.equal(options.runtime.homeWorld.catalog.hasAdapter("home-assistant"), true);
   assert.equal(options.runtime.homeProposals.path, "/tmp/hob-agent-main-test/proposals.sqlite");
+  assert.equal(options.runtime.homeObservationAudit.path, "/tmp/hob-agent-main-test/observation-audit.sqlite");
   assert.deepEqual(options.runtime.agent, {
     provider: "gpt",
     model: "gpt-5.4",

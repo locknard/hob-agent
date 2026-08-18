@@ -22,8 +22,9 @@ available.
 before the DSH Home Agent. `pnpm start` requires the absolute durable
 `HOB_DATA_DIR`, reads `HOB_BRIDGES`, `HOB_MODEL`, the selected provider
 credential, and only the bridge credential env names declared by those entries.
-Journal, registry, and world-model SQLite files are placed below that
-directory; the launch path never silently falls back to `:memory:`.
+Journal, registry, world-model, proposal, DSH session, and metadata-only
+observation-audit SQLite files are placed below that directory; the launch path
+never silently falls back to `:memory:`.
 
 `probeHomeAssistantEndpoint` is the credential-free onboarding preflight. It
 reads only HA's initial `auth_required` challenge, returns version and latency,

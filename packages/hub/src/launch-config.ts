@@ -40,6 +40,7 @@ export interface HomeHubLaunchConfig {
   readonly registryPath: string;
   readonly worldModelPath: string;
   readonly proposalPath: string;
+  readonly observationAuditPath: string;
   readonly sessionPath: string;
   readonly householdDirectory?: string;
   readonly bridges: readonly BridgeConfigEntry<unknown>[];
@@ -73,6 +74,7 @@ export interface HomeWorldLaunchConfig {
 
 export interface HomeInboxLaunchConfig {
   readonly proposalPath: string;
+  readonly observationAuditPath: string;
   readonly inboxHttp: NonNullable<HomeHubLaunchConfig["inboxHttp"]>;
 }
 
@@ -85,6 +87,7 @@ export function readHomeInboxLaunchConfig(environment: LaunchEnvironment): HomeI
   }
   return {
     proposalPath: join(dataDirectory, "proposals.sqlite"),
+    observationAuditPath: join(dataDirectory, "observation-audit.sqlite"),
     inboxHttp,
   };
 }
@@ -137,6 +140,7 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
   return {
     ...world,
     proposalPath: join(world.dataDirectory, "proposals.sqlite"),
+    observationAuditPath: join(world.dataDirectory, "observation-audit.sqlite"),
     sessionPath: join(world.dataDirectory, "dsh-sessions.sqlite"),
     ...(householdDirectory === undefined ? {} : { householdDirectory }),
     agent: { provider: model.provider, model: model.modelId },

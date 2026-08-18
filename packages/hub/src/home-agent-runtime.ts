@@ -10,6 +10,10 @@ import {
 } from "./home-world-service.js";
 import { HomeProposalService } from "./home-proposal-service.js";
 import {
+  HomeObservationAuditService,
+  type HomeObservationAuditServiceOptions,
+} from "./home-observation-audit-service.js";
+import {
   HomeObservationSchedulerService,
   type HomeObservationSchedulerOptions,
 } from "./home-observation-scheduler.js";
@@ -27,6 +31,7 @@ import {
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
   readonly homeProposals?: SqliteProposalStoreOptions;
+  readonly homeObservationAudit?: HomeObservationAuditServiceOptions;
   readonly inboxHttp?: ProposalInboxHttpOptions;
   readonly observation?: HomeObservationSchedulerOptions;
   readonly agent: DshHomeAgentCompositionOptions;
@@ -62,6 +67,10 @@ export class HomeAgentRuntime {
     this.statusValue = "starting";
     try {
       await this.context.plugin(HomeWorldService, this.options.homeWorld);
+      await this.context.plugin(
+        HomeObservationAuditService,
+        this.options.homeObservationAudit ?? { path: ":memory:" },
+      );
       await this.context.plugin(HomeProposalService, this.options.homeProposals ?? { path: ":memory:" });
       await mountDshHomeAgent(this.context, this.options.agent);
       if (this.options.observation !== undefined) {

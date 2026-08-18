@@ -13,6 +13,7 @@ test("mounts the persisted Inbox without HomeWorld or DSH", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-standalone-inbox-"));
   const runtime = createHomeInboxRuntime({
     homeProposals: { path: join(directory, "proposals.sqlite") },
+    homeObservationAudit: { path: join(directory, "observation-audit.sqlite") },
     inboxHttp: { port: 0, authenticate: () => true },
   });
   try {
@@ -20,6 +21,7 @@ test("mounts the persisted Inbox without HomeWorld or DSH", async () => {
     assert.equal(runtime.status, "running");
     assert.notEqual(runtime.context.homeProposals, undefined);
     assert.notEqual(runtime.context.homeInbox, undefined);
+    assert.notEqual(runtime.context.homeObservationAudit, undefined);
     assert.notEqual(runtime.context.homeInboxHttp, undefined);
     assert.equal(runtime.context.homeWorld, undefined);
     assert.equal(runtime.context.homeAgent, undefined);
@@ -54,6 +56,7 @@ test("builds a standalone process slice without bridge or model options", () => 
     HOB_INBOX_AUTH_TOKEN: "i".repeat(32),
   });
   assert.equal(options.homeProposals.path, "/tmp/hob-standalone-inbox-config/proposals.sqlite");
+  assert.equal(options.homeObservationAudit.path, "/tmp/hob-standalone-inbox-config/observation-audit.sqlite");
   assert.equal(options.inboxHttp.port, 8_787);
   assert.equal("homeWorld" in options, false);
   assert.equal("agent" in options, false);

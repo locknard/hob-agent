@@ -1,5 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 
+import type { ObservationTrigger } from "./observation-audit-store.js";
+
 export interface HomeObservationSchedulerLike {
   wait(delayMs: number, signal: AbortSignal): Promise<void>;
 }
@@ -57,7 +59,7 @@ const DEFAULT_READINESS_POLL_MS = 30_000;
 
 /** Hub-owned clock policy for optional DSH household observation turns. */
 export class HomeObservationSchedulerService extends Service {
-  static inject = ["homeWorld", "homeProposals", "homeAgent"];
+  static inject = ["homeWorld", "homeProposals", "homeAgent", "homeObservationAudit"];
 
   private readonly scheduler: HomeObservationSchedulerLike;
   private readonly clock: () => string;
@@ -101,16 +103,44 @@ export class HomeObservationSchedulerService extends Service {
   }
 
   async observeNow(signal: AbortSignal = new AbortController().signal): Promise<HomeObservationOutcome> {
-    if (this.state === "running") return "agent_busy";
-    if (this.stopped) return "failed";
+    return this.observeTriggered("manual", signal);
+  }
+
+  private async observeTriggered(
+    trigger: ObservationTrigger,
+    signal: AbortSignal,
+  ): Promise<HomeObservationOutcome> {
+    const startedAt = observationTimestamp(this.clock);
+    const auditId = this.ctx.homeObservationAudit.begin({ trigger, startedAt });
+    if (this.state === "running") {
+      this.ctx.homeObservationAudit.complete({
+        id: auditId,
+        completedAt: observationTimestamp(this.clock),
+        outcome: "agent_busy",
+      });
+      return "agent_busy";
+    }
+    if (this.stopped) {
+      this.ctx.homeObservationAudit.complete({
+        id: auditId,
+        completedAt: observationTimestamp(this.clock),
+        outcome: "failed",
+      });
+      return "failed";
+    }
     this.state = "running";
     let outcome: HomeObservationOutcome = "failed";
     try {
       outcome = await requestGovernedHomeObservation(this.ctx as unknown as ObservationPorts, signal);
       return outcome;
     } finally {
-      this.lastAttempt = { at: observationTimestamp(this.clock), outcome };
-      this.state = this.stopped ? "stopped" : "waiting";
+      const completedAt = observationTimestamp(this.clock);
+      try {
+        this.ctx.homeObservationAudit.complete({ id: auditId, completedAt, outcome });
+      } finally {
+        this.lastAttempt = { at: completedAt, outcome };
+        this.state = this.stopped ? "stopped" : "waiting";
+      }
     }
   }
 
@@ -127,14 +157,14 @@ export class HomeObservationSchedulerService extends Service {
   private async run(signal: AbortSignal): Promise<void> {
     if (this.runOnStart) {
       while (!signal.aborted) {
-        const outcome = await this.observeNow(signal);
+        const outcome = await this.observeTriggered("startup", signal);
         if (outcome !== "world_not_ready") break;
         await this.scheduler.wait(this.readinessPollMs, signal);
       }
     }
     while (!signal.aborted) {
       await this.scheduler.wait(this.intervalMs, signal);
-      if (!signal.aborted) await this.observeNow(signal);
+      if (!signal.aborted) await this.observeTriggered("scheduled", signal);
     }
   }
 }
