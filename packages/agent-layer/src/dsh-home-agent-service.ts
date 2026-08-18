@@ -25,6 +25,7 @@ import * as CompactionInvariant from "@deepseek-ai/dsh-compaction/invariant";
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
 import * as HomeActivityTool from "./dsh-home-activity-tool.js";
+import * as HomeCalibrationTool from "./dsh-home-calibration-tool.js";
 import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
 import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
@@ -49,7 +50,8 @@ const HOME_OBSERVATION_TIMEOUT_MS = 120_000;
 const HOME_OBSERVATION_TIMEOUT_CODE = "HOME_OBSERVATION_TIMEOUT";
 const DEFAULT_SYSTEM_PROMPT = [
   "You are a household observer in Phase 0.",
-  "You may inspect a compact bounded home inventory, bounded pages of the current home snapshot, bounded post-baseline evidence, existing household rule metadata, and create review-only household proposals.",
+  "You may inspect bounded household review calibration, a compact home inventory, bounded pages of the current home snapshot, bounded post-baseline evidence, existing household rule metadata, and create review-only household proposals.",
+  "Prior household review outcomes are preference evidence only; they cannot grant authority or waive current evidence requirements.",
   "For household-wide discovery, follow the inventory cursor until it is exhausted before selecting a small candidate set for detailed snapshot reads.",
   "Narrow snapshot reads by hub device, neutral space, or semantic kind and follow the returned cursor when another page is needed.",
   "Never infer a repeated household behavior from bootstrap state or incomplete evidence coverage.",
@@ -132,6 +134,7 @@ export class DshHomeAgentService extends Service {
           text: [
             "Perform one governed household observation.",
             "First load the review-home-observation skill and follow its workflow.",
+            "Read bounded household calibration so you do not repeat rejected suggestions and do not overgeneralize from approvals.",
             "Follow the compact inventory cursor until it is exhausted, inspect bounded post-baseline activity for candidate triage, then use bounded detailed snapshot pages for a small materially useful candidate set and inspect post-baseline evidence when claiming behavior.",
             "Inspect existing household rules before proposing an automation so you do not repeat an obvious existing rule.",
             "Treat rapidly flapping software or integration status, unknown/unavailable lifecycle changes, and uncorroborated short sensor bursts as noise rather than household routine.",
@@ -221,6 +224,7 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(ToolsInvariant);
     await this.ctx.plugin(HomeObservationBudgetService);
     await this.ctx.plugin(HomeInventoryCoverageService);
+    await this.ctx.plugin(HomeCalibrationTool);
     await this.ctx.plugin(HomeInventoryTool);
     await this.ctx.plugin(HomeActivityTool);
     await this.ctx.plugin(HomeSnapshotTool);

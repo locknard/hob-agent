@@ -25,3 +25,17 @@ These metrics are descriptive, not authority. They do not modify household
 files, prompts, Skills, schedules, policy, model selection, proposals, or
 devices. Any future change based on them remains an explicit reviewed product
 decision.
+
+## Agent-facing bounded calibration
+
+The autonomous Home Skill also reads `get_home_calibration` before inspecting
+the current home. This read-only tool returns the same aggregate proposal
+counts plus at most 20 recent approved/rejected items containing only an opaque
+proposal ID, kind, bounded title, decision time, and structured feedback code.
+Reviewer identity and free-form notes are omitted. Expired and pending items do
+not appear in the recent-review projection.
+
+Historical proposal titles remain untrusted content. A rejection helps the
+Agent avoid repeating a topic; an approval is preference evidence only. Neither
+can waive current evidence, conflict inspection, policy, review, or execution
+boundaries. The tool does not write `MEMORY.md` or silently tune the runtime.

@@ -188,6 +188,38 @@ test("summarizes proposal quality without returning household content", () => {
   store.close();
 });
 
+test("projects recent structured calibration without reviewer identity or notes", () => {
+  let now = createdAt;
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
+  const approved = store.create(input({ idempotencyKey: "calibration:approved" }));
+  now = "2026-08-19T01:01:00.000Z";
+  store.review({
+    proposalId: approved.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "private-reviewer",
+    feedbackCode: "useful_as_is",
+    note: "private household detail",
+  });
+  now = "2026-08-19T01:02:00.000Z";
+  store.create(input({ idempotencyKey: "calibration:pending", title: "Pending topic" }));
+
+  const history = store.calibrationHistory(1);
+  assert.deepEqual(history, [{
+    proposalId: approved.id,
+    kind: "automation-draft",
+    title: "Turn off a light after an inactive period",
+    decision: "approved",
+    reviewedAt: "2026-08-19T01:01:00.000Z",
+    feedbackCode: "useful_as_is",
+  }]);
+  assert.equal(JSON.stringify(history).includes("private-reviewer"), false);
+  assert.equal(JSON.stringify(history).includes("private household detail"), false);
+  assert.equal(JSON.stringify(history).includes("Pending topic"), false);
+  assert.throws(() => store.calibrationHistory(21), /limit/);
+  store.close();
+});
+
 test("requires bounded decision-specific feedback for new household reviews", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
 

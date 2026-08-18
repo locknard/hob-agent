@@ -152,6 +152,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "@deepseek-ai/dsh-tools",
   ]);
   assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), [
+    "get_home_calibration",
     "get_home_inventory",
     "get_home_activity",
     "get_home_snapshot",

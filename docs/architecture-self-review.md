@@ -46,8 +46,9 @@ apply an artifact or control a device.
 
 ## Verified boundaries
 
-- The Home Agent exposes compact paginated `get_home_inventory`, metadata-only
-  post-baseline `get_home_activity` candidate triage, bounded paginated
+- The Home Agent exposes bounded structured `get_home_calibration` review
+  history, compact paginated `get_home_inventory`, metadata-only post-baseline
+  `get_home_activity` candidate triage, bounded paginated
   `get_home_snapshot`, bounded read-only `get_home_evidence`, and
   review-only `create_home_proposal`; none has device or configuration
   authority. Inventory discovery omits current values, capability identities,
@@ -81,6 +82,10 @@ apply an artifact or control a device.
   knowledge automatically. The Inbox projects only all-time counts of these
   codes and observation outcomes for calibration; it does not reinterpret
   proposal content or notes.
+- The Agent calibration tool adds at most 20 recent reviewed proposal titles
+  and structured decisions to those counts. It strips reviewer identity and
+  notes, treats historical titles as untrusted, and cannot write memory or
+  relax current evidence, conflict, policy, or approval gates.
 - Autonomous observation is disabled by default. The Hub owns its bounded
   cadence, requires a ready world and idle DSH Agent, and permits only one
   pending household proposal at a time. Each scheduled, manual, startup, or

@@ -4,6 +4,7 @@ import {
   SqliteProposalStore,
   type CreateProposalInput,
   type ProposalEnvelope,
+  type ProposalCalibrationItem,
   type ProposalListQuery,
   type ProposalQualitySummary,
   type ReviewProposalInput,
@@ -188,6 +189,10 @@ export class HomeProposalService extends Service {
 
   qualitySummary(): ProposalQualitySummary {
     return this.store.qualitySummary();
+  }
+
+  calibrationHistory(limit?: number): readonly ProposalCalibrationItem[] {
+    return this.store.calibrationHistory(limit);
   }
 
   review(input: ReviewProposalInput): ProposalEnvelope {

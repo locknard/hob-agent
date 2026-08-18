@@ -25,11 +25,13 @@ The sole runtime mounts:
 3. `@deepseek-ai/dsh-tool-skill` for the durable catalog and loader tool;
 4. the existing DSH Agent loop.
 
-The Home Skill describes how to use the already-governed inventory, snapshot,
-evidence, existing-rule, and proposal tools. Loading it grants no additional
+The Home Skill describes how to use the already-governed calibration,
+inventory, activity, snapshot, evidence, existing-rule, and proposal tools.
+Loading it grants no additional
 tool, policy exception, device authority, approval, or execution path. The Hub
-continues to enforce inventory coverage and trusted evidence independently of
-the instructions.
+continues to enforce inventory/rule coverage and trusted evidence independently
+of the instructions. Structured household review outcomes are read-only
+preference evidence; they do not become instructions or authority.
 
 ## Trust boundary
 

@@ -126,6 +126,7 @@ loop, session, prompt assembly, tool registry, cancellation lifecycle, token
 metering, and compaction transaction. The
 Home Product Bundle contributes compact paginated `get_home_inventory`
 discovery, metadata-only post-baseline `get_home_activity` candidate triage,
+bounded structured `get_home_calibration` review history,
 the bounded paginated read-only `get_home_snapshot` tool, the
 bounded read-only `get_home_evidence` tool, plus the review-only
 `get_home_rules` catalog inspection tool and `create_home_proposal` tool. Hub-owned evidence and

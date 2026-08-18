@@ -173,6 +173,15 @@ export interface ProposalQualitySummary {
   readonly reviewedWithoutFeedback: number;
 }
 
+export interface ProposalCalibrationItem {
+  readonly proposalId: string;
+  readonly kind: CreateProposalInput["kind"];
+  readonly title: string;
+  readonly decision: "approved" | "rejected";
+  readonly reviewedAt: string;
+  readonly feedbackCode?: ProposalReviewFeedbackCode;
+}
+
 const approvalFeedbackCodes = ["useful_as_is"] as const;
 const rejectionFeedbackCodes = [
   "already_covered",
@@ -470,6 +479,28 @@ export class SqliteProposalStore {
       feedback,
       reviewedWithoutFeedback,
     };
+  }
+
+  /** Returns only the bounded reviewed-topic projection needed for Agent calibration. */
+  calibrationHistory(limit = 10): readonly ProposalCalibrationItem[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
+      throw new TypeError("proposal calibration limit must be an integer from 1 to 20");
+    }
+    const rows = this.db.prepare(`SELECT payload_json FROM proposals
+      WHERE status IN ('approved', 'rejected')
+      ORDER BY updated_at DESC, proposal_id DESC LIMIT ?`).all(limit) as ProposalRow[];
+    return rows.map((row) => {
+      const proposal = fromRow(row);
+      const review = proposal.review!;
+      return {
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        title: proposal.title,
+        decision: review.decision as "approved" | "rejected",
+        reviewedAt: review.reviewedAt,
+        ...(review.feedbackCode === undefined ? {} : { feedbackCode: review.feedbackCode }),
+      };
+    });
   }
 
   review(input: ReviewProposalInput): ProposalEnvelope {
