@@ -34,6 +34,21 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   assert.deepEqual(options.runtime.agent, { provider: "gpt", model: "gpt-5.4" });
   assert.equal(options.runtime.launchEnvironment.get("OPENAI_API_KEY")?.value, "openai-secret");
   assert.equal(JSON.stringify(options.runtime.homeWorld.bridges).includes("home-assistant-secret"), false);
+  assert.equal(options.runtime.inboxHttp, undefined);
+});
+
+test("forwards only the Inbox verifier and port into the process composition", () => {
+  const inboxToken = "local-inbox-token-that-is-longer-than-32-chars";
+  const options = createHomeHubProcessOptions({
+    ...ENV,
+    HOB_INBOX_AUTH_TOKEN: inboxToken,
+    HOB_INBOX_PORT: "9876",
+  });
+  const authorization = `Basic ${Buffer.from(`home:${inboxToken}`).toString("base64")}`;
+
+  assert.equal(options.runtime.inboxHttp?.port, 9876);
+  assert.equal(options.runtime.inboxHttp?.authenticate(authorization), true);
+  assert.equal(JSON.stringify(options).includes(inboxToken), false);
 });
 
 test("importing the executable module does not install process signal handlers", async () => {

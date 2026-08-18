@@ -115,3 +115,28 @@ private data directory outside the repository and reports aggregate results.
 - semantic scheduling/energy optimization;
 - Code Mode or a second runtime;
 - bridge-specific proposal engines.
+
+## M3b authenticated local delivery
+
+The HTML/controller slice is not an authorization boundary by itself. Browser
+delivery therefore remains disabled unless an explicit local Inbox credential
+is configured. The first HTTP delivery contract is deliberately narrow:
+
+- bind only to `127.0.0.1`; the host is not configurable;
+- use an explicit 32-or-more-character secret and compare only a derived digest;
+- require authentication for every list, detail, and review request;
+- never place the credential in a URL, HTML response, error, trace, or launch
+  snapshot;
+- require an exact same-origin `Origin` for review POSTs, form content type, and
+  a 4 KiB request-body limit;
+- derive reviewer identity from the authenticated local endpoint, never from a
+  model or form field;
+- emit no-store, no-referrer, frame-denial, nosniff, and restrictive CSP headers;
+- map stale revisions to conflict and all arbitrary internal failures to a
+  redacted response; and
+- expose approve/reject only. HTTP delivery does not add an apply route.
+
+Port `0` is a test-only seam. Production launch accepts an explicit local port
+or uses the documented default. Missing authentication configuration keeps the
+listener absent while the same-root Inbox service remains available to local
+composition code.

@@ -54,6 +54,9 @@ export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","confi
 export HOB_HA_TOKEN='long-lived-access-token'
 export HOB_MODEL=deepseek/deepseek-v4-flash
 export DEEPSEEK_API_KEY='...'
+# Optional local review UI (HTTP Basic user is `home`):
+export HOB_INBOX_AUTH_TOKEN='at-least-32-random-characters-kept-local'
+export HOB_INBOX_PORT=8787
 # or select the matching OPENAI_API_KEY / ANTHROPIC_API_KEY / MOONSHOT_API_KEY / ZAI_API_KEY
 pnpm start
 ```
@@ -65,6 +68,11 @@ review-only `create_home_proposal` tool. Hub-owned evidence and
 `foreignRules@1` conflict checks are attached before a proposal enters the
 Inbox. Device actions, configuration writes, and proposal application remain
 deliberately unavailable.
+
+Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
+When enabled it binds only to `127.0.0.1`, requires authentication on every
+request, and enforces same-origin review POSTs. The launch config retains only a
+credential verifier, not the raw token.
 
 `pi-agent-core` is not part of the architecture. `pi-ai` exists only as a
 transitive implementation detail of the official DSH LLM adapter; hob-agent

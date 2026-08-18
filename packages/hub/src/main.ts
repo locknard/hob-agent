@@ -49,6 +49,7 @@ export function createHomeHubProcessOptions(
       },
       homeProposals: { path: config.proposalPath },
       agent: config.agent,
+      ...(config.inboxHttp === undefined ? {} : { inboxHttp: config.inboxHttp }),
       launchEnvironment: config.launchEnvironment,
     },
   };

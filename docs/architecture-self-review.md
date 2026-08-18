@@ -37,6 +37,9 @@ apply an artifact or control a device.
 - Proposal creation is idempotent per producer/key. Review uses optimistic
   revisions, terminal decisions are immutable, and approval has
   `applicationStatus: not_available`.
+- Optional Inbox HTTP is disabled without an explicit credential, binds only to
+  `127.0.0.1`, stores only a derived verifier, authenticates every request, and
+  requires exact same-origin bounded review POSTs.
 - API-key profiles enter the official adapter through DSH `CredentialProvider`;
   the adapter resolves the selected SecretRef per operation.
 - `CredentialProvider.describe()` now reports actual current availability, in
@@ -83,13 +86,11 @@ runtime or a second service.
 
 ## Open architecture gaps
 
-### P1 — authenticated Inbox delivery
+### P2 — non-local Inbox delivery
 
-The Inbox controller and escaped HTML review fragments are mounted in the same
-Cordis root, but no HTTP listener is exposed yet. Before browser delivery,
-define local authentication, CSRF/origin checks, reviewer identity, body/route
-budgets, and secure bind defaults. Do not turn the current controller into an
-unauthenticated approval endpoint.
+Authenticated local delivery is implemented. LAN/remote exposure is not: it
+would require TLS, device/user identity, stronger session management, and a
+separate threat review. Do not make the bind host configurable as a shortcut.
 
 ### P1 — session persistence decision
 

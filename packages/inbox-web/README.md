@@ -13,4 +13,7 @@ another agent/runtime connection.
 `ProposalInboxService` mounts in the same Cordis root after the DSH Home Agent
 and composes durable hub proposal state with that trace. The current slice
 provides escaped HTML fragments and a review controller; authenticated HTTP
-delivery remains a separate boundary.
+delivery is an optional sibling service. It is disabled without an explicit
+credential, binds only to `127.0.0.1`, requires HTTP Basic authentication
+(`home` plus the configured local token), rejects cross-origin review POSTs,
+bounds form bodies, and emits restrictive browser security headers.

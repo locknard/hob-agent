@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./http": "./src/proposal-inbox-http-service.ts",
     "./service": "./src/proposal-inbox-service.ts"
   },
   "dependencies": {

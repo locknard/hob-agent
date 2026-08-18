@@ -64,6 +64,38 @@ test("does not require legacy Home Assistant URL or token variables when bridges
 
   assert.equal(config.bridges[0]?.bridgeId, "bridge-empty-credential");
   assert.equal(await config.bridgeCredentialSource.resolveForBridge("bridge-empty-credential", "token"), undefined);
+  assert.equal(config.inboxHttp, undefined);
+});
+
+test("enables authenticated local Inbox delivery without retaining the raw token in launch config", () => {
+  const inboxToken = "local-inbox-token-that-is-longer-than-32-chars";
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_INBOX_AUTH_TOKEN: inboxToken,
+    HOB_INBOX_PORT: "9876",
+  });
+  const authorization = `Basic ${Buffer.from(`home:${inboxToken}`).toString("base64")}`;
+
+  assert.equal(config.inboxHttp?.port, 9876);
+  assert.equal(config.inboxHttp?.authenticate(authorization), true);
+  assert.equal(config.inboxHttp?.authenticate(undefined), false);
+  assert.equal(JSON.stringify(config).includes(inboxToken), false);
+});
+
+test("fails closed for an invalid Inbox credential or production port without echoing secrets", () => {
+  const short = "do-not-echo-short-token";
+  assert.throws(
+    () => readHomeHubLaunchConfig({ ...BASE_ENV, HOB_INBOX_AUTH_TOKEN: short }),
+    (error: unknown) => error instanceof Error && !error.message.includes(short),
+  );
+  assert.throws(
+    () => readHomeHubLaunchConfig({
+      ...BASE_ENV,
+      HOB_INBOX_AUTH_TOKEN: "local-inbox-token-that-is-longer-than-32-chars",
+      HOB_INBOX_PORT: "0",
+    }),
+    /HOB_INBOX_PORT/,
+  );
 });
 
 test("selects the corresponding standard model credential and never copies the provider allowlist", () => {
@@ -130,6 +162,8 @@ test("reads only the explicit launch allowlist before lazy bridge credential res
     "HOB_BRIDGES",
     "HOB_MODEL",
     "OPENAI_API_KEY",
+    "HOB_INBOX_AUTH_TOKEN",
+    "HOB_INBOX_PORT",
   ]);
   await config.bridgeCredentialSource.describeForBridge("ha-main", "access-token");
   assert.equal(reads.at(-1), "HOB_HA_TOKEN");

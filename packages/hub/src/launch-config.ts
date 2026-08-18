@@ -10,6 +10,10 @@ import {
   type SupportedModelProvider,
 } from "@hob-agent/agent-layer/model-providers";
 import { isAbsolute, join } from "node:path";
+import {
+  createInboxBasicAuthenticator,
+  type InboxAuthenticator,
+} from "@hob-agent/inbox-web/http";
 
 import type { BridgeAwareCredentialSource } from "./bridge-credentials.js";
 import { createBuiltinBridgeCatalog } from "./bridge-bundle.js";
@@ -43,6 +47,10 @@ export interface HomeHubLaunchConfig {
     readonly provider: SupportedModelProvider;
     readonly model: string;
   };
+  readonly inboxHttp?: {
+    readonly port: number;
+    readonly authenticate: InboxAuthenticator;
+  };
   /** DSH sees only the selected provider's standard credential alias. */
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
 }
@@ -66,6 +74,7 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
 
   const credentialEnv = providerSetup(model.provider).credentialEnv;
   const apiKey = requiredValue(environment, credentialEnv).trim();
+  const inboxHttp = parseInboxHttp(environment.HOB_INBOX_AUTH_TOKEN, environment.HOB_INBOX_PORT);
   const launchEnvironment = createLaunchEnvironmentSnapshot([{
     source: "process",
     values: { [credentialEnv]: apiKey },
@@ -82,8 +91,36 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
     bridgeCredentialSource: createBridgeCredentialSource(environment, refsByBridge),
     catalog: createBuiltinBridgeCatalog(),
     agent: { provider: model.provider, model: model.modelId },
+    ...(inboxHttp === undefined ? {} : { inboxHttp }),
     launchEnvironment,
   };
+}
+
+function parseInboxHttp(
+  token: string | undefined,
+  portValue: string | undefined,
+): HomeHubLaunchConfig["inboxHttp"] {
+  if (token === undefined && portValue === undefined) return undefined;
+  if (token === undefined) throw new Error("HOB_INBOX_AUTH_TOKEN is required when Inbox HTTP is configured");
+  let authenticate: InboxAuthenticator;
+  try {
+    authenticate = createInboxBasicAuthenticator(token);
+  } catch {
+    throw new Error("Invalid HOB_INBOX_AUTH_TOKEN; expected 32 to 512 characters");
+  }
+  const port = portValue === undefined ? 8_787 : parseProductionPort(portValue);
+  return { port, authenticate };
+}
+
+function parseProductionPort(value: string): number {
+  if (!/^[1-9]\d{0,4}$/.test(value)) {
+    throw new Error("Invalid HOB_INBOX_PORT; expected an integer from 1 to 65535");
+  }
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port > 65_535) {
+    throw new Error("Invalid HOB_INBOX_PORT; expected an integer from 1 to 65535");
+  }
+  return port;
 }
 
 function requiredDataDirectory(environment: LaunchEnvironment): string {

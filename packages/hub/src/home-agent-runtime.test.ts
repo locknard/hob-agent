@@ -48,6 +48,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeWorld.name, "homeWorld");
   assert.equal(runtime.context.homeProposals.name, "homeProposals");
   assert.equal(runtime.context.homeInbox.name, "homeInbox");
+  assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(pluginOrder.includes("ProposalInboxService"), true);
   assert.equal(String(runtime.context.homeAgent.agent.id), "home-runtime-test");
 
@@ -57,6 +58,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeProposals, undefined);
   assert.equal(runtime.context.homeInbox, undefined);
+  assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
   await runtime.stop();
 });
@@ -82,7 +84,26 @@ test("stops the already-mounted HomeWorld when DSH startup fails", async () => {
   assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeProposals, undefined);
   assert.equal(runtime.context.homeInbox, undefined);
+  assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
+});
+
+test("mounts authenticated Inbox HTTP only when explicitly configured", async () => {
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "inbox-http-test",
+    },
+    inboxHttp: { port: 0, authenticate: () => true },
+  });
+
+  await runtime.start();
+  assert.match(runtime.context.homeInboxHttp.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+  await runtime.stop();
+  assert.equal(runtime.context.homeInboxHttp, undefined);
 });
 
 test("provides the immutable DSH launch environment before any runtime plugin mounts", () => {
