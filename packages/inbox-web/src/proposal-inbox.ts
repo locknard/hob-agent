@@ -16,8 +16,29 @@ export interface InboxProposal {
   readonly updatedAt: string;
   readonly provenance: { readonly producer: string; readonly sessionId?: string; readonly turnId?: string };
   readonly evidence: {
-    readonly references: readonly { readonly bridgeId: string; readonly hwId?: string; readonly capabilityId?: string; readonly observedAt: string }[];
+    readonly references: readonly {
+      readonly bridgeId: string;
+      readonly hwId?: string;
+      readonly capabilityId?: string;
+      readonly observedAt: string;
+      readonly source?: "current-state" | "post-baseline-event";
+      readonly epochId?: string;
+      readonly seq?: number;
+    }[];
     readonly watermarks: readonly { readonly bridgeId: string; readonly epochId: string; readonly lastSeq: number; readonly freshness: string; readonly gapCount: number }[];
+    readonly temporal?: {
+      readonly requestedSince: string;
+      readonly requestedUntil: string;
+      readonly truncated: boolean;
+      readonly coverage: readonly {
+        readonly bridgeId: string;
+        readonly epochId?: string;
+        readonly baselineSeq?: number;
+        readonly baselineAt?: string;
+        readonly status: "complete" | "partial" | "unavailable";
+        readonly reasons: readonly string[];
+      }[];
+    };
   };
   readonly conflictCheck: {
     readonly status: "checked" | "unavailable";
@@ -123,6 +144,14 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
     `<li><strong>${escapeHtml(watermark.bridgeId)}</strong> · seq ${watermark.lastSeq} · ${escapeHtml(watermark.freshness)} · ${watermark.gapCount} gaps</li>`,
   ).join("");
   const risks = proposal.risk.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("");
+  const references = proposal.evidence.references.map((reference) =>
+    `<li><strong>${escapeHtml(reference.capabilityId ?? reference.hwId ?? reference.bridgeId)}</strong> · ${escapeHtml(reference.source ?? "legacy-reference")} · ${escapeHtml(reference.observedAt)}${reference.seq === undefined ? "" : ` · seq ${reference.seq}`}</li>`,
+  ).join("");
+  const temporalCoverage = proposal.evidence.temporal === undefined
+    ? "<p>Current-state references only; no behavioral coverage is claimed.</p>"
+    : `<p>Temporal window ${escapeHtml(proposal.evidence.temporal.requestedSince)} to ${escapeHtml(proposal.evidence.temporal.requestedUntil)}${proposal.evidence.temporal.truncated ? " · truncated" : ""}</p><ul>${proposal.evidence.temporal.coverage.map((coverage) =>
+      `<li><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}${coverage.reasons.length === 0 ? "" : ` · ${coverage.reasons.map(escapeHtml).join(", ")}`}</li>`,
+    ).join("")}</ul>`;
   const review = proposal.status === "pending_review" ? `<form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
     <input type="hidden" name="expectedRevision" value="${proposal.revision}">
     <label>Review note <textarea name="note" maxlength="1000"></textarea></label>
@@ -133,7 +162,7 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   return `<main class="proposal-detail" data-status="${escapeHtml(proposal.status)}">
     <header><a href="/proposals">Proposal inbox</a><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p></header>
     <section aria-label="Intent"><h2>Intended change</h2><p>${escapeHtml(proposal.intent.description)}</p><h3>Rollback</h3><p>${escapeHtml(proposal.intent.rollback)}</p></section>
-    <section aria-label="Evidence"><h2>Evidence</h2><p>${proposal.evidence.references.length} bounded references</p><ul>${watermarks}</ul></section>
+    <section aria-label="Evidence"><h2>Evidence</h2><p>${proposal.evidence.references.length} bounded references</p><h3>References</h3><ul>${references}</ul><h3>Coverage</h3>${temporalCoverage}<h3>Bridge watermarks</h3><ul>${watermarks}</ul></section>
     <section aria-label="Conflict check"><h2>Conflict check</h2><p>${proposal.conflictCheck.existingAutomationCount} existing automations · ${proposal.conflictCheck.matches.length} possible overlaps</p></section>
     <section aria-label="Dry run"><h2>Dry run: ${escapeHtml(proposal.dryRun.status)}</h2><p>${escapeHtml(proposal.dryRun.summary)}</p></section>
     <section aria-label="Risk"><h2>Risk: ${escapeHtml(proposal.risk.level)}</h2><ul>${risks}</ul></section>

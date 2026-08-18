@@ -147,6 +147,26 @@ test("rejects missing conflict checks, unsafe approval semantics, and oversized 
     () => store.create(input({ title: "x".repeat(121) })),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
   );
+  assert.throws(
+    () => store.create(input({
+      evidence: {
+        references: [{
+          bridgeId: "bridge-a",
+          observedAt: createdAt,
+          source: "post-baseline-event",
+          epochId: "model-authored-epoch",
+        }],
+        watermarks: [{
+          bridgeId: "bridge-a",
+          epochId: "epoch-a",
+          lastSeq: 1,
+          freshness: "fresh",
+          gapCount: 0,
+        }],
+      },
+    })),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+  );
   store.close();
 });
 

@@ -92,6 +92,12 @@ filters, with an exclusive opaque cursor for deterministic continuation. See
 Bootstrap state is excluded, and incomplete bridge coverage or truncation is
 reported explicitly. See [`docs/temporal-evidence.md`](docs/temporal-evidence.md).
 
+When a proposal relies on those observations, the Agent selects only current
+hub capability IDs and a bounded lookback. The Hub re-runs the query and stores
+exact epoch/sequence references plus coverage in the local proposal; the model
+cannot author journal provenance. See
+[`docs/proposal-evidence-binding.md`](docs/proposal-evidence-binding.md).
+
 Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
 When enabled it binds only to `127.0.0.1`, requires authentication on every
 request, and enforces same-origin review POSTs. The launch config retains only a

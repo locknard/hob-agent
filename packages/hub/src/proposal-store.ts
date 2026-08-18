@@ -17,13 +17,44 @@ const provenanceSchema = z.object({
   turnId: boundedId.optional(),
 }).strict();
 
-const evidenceSchema = z.object({
-  references: z.array(z.object({
+const evidenceCoverageReasons = [
+  "bridge_not_ready",
+  "missing_consistent_baseline",
+  "baseline_time_unknown",
+  "window_before_baseline",
+  "history_gap",
+  "journal_query_unavailable",
+  "selection_too_broad",
+  "query_truncated",
+  "merge_truncated",
+] as const;
+
+const evidenceReferenceSchema = z.object({
     bridgeId: boundedId,
     hwId: boundedId.optional(),
     capabilityId: boundedId.optional(),
     observedAt: isoTimestamp,
-  }).strict()).max(50),
+    source: z.enum(["current-state", "post-baseline-event"]).optional(),
+    epochId: boundedId.optional(),
+    seq: z.number().int().nonnegative().optional(),
+  }).strict().superRefine((reference, ctx) => {
+    const hasEventProvenance = reference.epochId !== undefined && reference.seq !== undefined;
+    if ((reference.epochId === undefined) !== (reference.seq === undefined)) {
+      ctx.addIssue({ code: "custom", message: "evidence epoch and sequence must appear together" });
+    }
+    if (reference.source === "post-baseline-event" && !hasEventProvenance) {
+      ctx.addIssue({ code: "custom", message: "post-baseline evidence requires epoch and sequence" });
+    }
+    if (reference.source === "current-state" && (reference.epochId !== undefined || reference.seq !== undefined)) {
+      ctx.addIssue({ code: "custom", message: "current-state evidence cannot claim journal provenance" });
+    }
+    if (reference.source === undefined && (reference.epochId !== undefined || reference.seq !== undefined)) {
+      ctx.addIssue({ code: "custom", message: "legacy evidence cannot claim journal provenance" });
+    }
+  });
+
+const evidenceSchema = z.object({
+  references: z.array(evidenceReferenceSchema).max(50),
   watermarks: z.array(z.object({
     bridgeId: boundedId,
     epochId: boundedId,
@@ -31,7 +62,28 @@ const evidenceSchema = z.object({
     freshness: z.enum(["fresh", "stale", "unknown"]),
     gapCount: z.number().int().nonnegative(),
   }).strict()).min(1).max(16),
-}).strict();
+  temporal: z.object({
+    requestedSince: isoTimestamp,
+    requestedUntil: isoTimestamp,
+    truncated: z.boolean(),
+    coverage: z.array(z.object({
+      bridgeId: boundedId,
+      epochId: boundedId.optional(),
+      baselineSeq: z.number().int().nonnegative().optional(),
+      baselineAt: isoTimestamp.optional(),
+      status: z.enum(["complete", "partial", "unavailable"]),
+      reasons: z.array(z.enum(evidenceCoverageReasons)).max(evidenceCoverageReasons.length),
+    }).strict()).max(16),
+  }).strict().optional(),
+}).strict().superRefine((evidence, ctx) => {
+  const eventReferences = evidence.references.filter((reference) => reference.source === "post-baseline-event");
+  if (evidence.temporal === undefined && eventReferences.length > 0) {
+    ctx.addIssue({ code: "custom", message: "event references require temporal coverage" });
+  }
+  if (evidence.temporal !== undefined && eventReferences.length !== evidence.references.length) {
+    ctx.addIssue({ code: "custom", message: "temporal evidence must contain only event references" });
+  }
+});
 
 const conflictCheckSchema = z.object({
   status: z.enum(["checked", "unavailable"]),

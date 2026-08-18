@@ -20,8 +20,28 @@ const proposal: InboxProposal = {
   updatedAt: "2026-08-19T01:00:00.000Z",
   provenance: { producer: "dsh-home-agent", sessionId: "home-main", turnId: "call-7" },
   evidence: {
-    references: [{ bridgeId: "ha-main", hwId: "hw-1", observedAt: "2026-08-19T00:59:00.000Z" }],
+    references: [{
+      bridgeId: "ha-main",
+      hwId: "hw-1",
+      capabilityId: "hwc-1",
+      observedAt: "2026-08-19T00:59:00.000Z",
+      source: "post-baseline-event",
+      epochId: "epoch-a",
+      seq: 607,
+    }],
     watermarks: [{ bridgeId: "ha-main", epochId: "epoch-a", lastSeq: 606, freshness: "fresh", gapCount: 0 }],
+    temporal: {
+      requestedSince: "2026-08-18T01:00:00.000Z",
+      requestedUntil: "2026-08-19T01:00:00.000Z",
+      truncated: false,
+      coverage: [{
+        bridgeId: "ha-main",
+        epochId: "epoch-a",
+        baselineSeq: 606,
+        status: "partial",
+        reasons: ["window_before_baseline"],
+      }],
+    },
   },
   conflictCheck: {
     status: "checked",
@@ -67,6 +87,9 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.equal(detail?.trace?.sessionId, "home-main");
   const detailHtml = renderProposalDetail(detail!);
   assert.match(detailHtml, /606/);
+  assert.match(detailHtml, /partial/);
+  assert.match(detailHtml, /window_before_baseline/);
+  assert.match(detailHtml, /seq 607/);
   assert.match(detailHtml, /create_home_proposal/);
   assert.match(detailHtml, /Approve/);
   assert.match(detailHtml, /Reject/);

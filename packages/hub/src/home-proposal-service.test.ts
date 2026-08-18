@@ -33,6 +33,8 @@ const candidate: CreateProposalInput = {
 };
 
 class StubHomeWorld extends Service {
+  evidenceQueries: unknown[] = [];
+
   constructor(ctx: Context) {
     super(ctx, "homeWorld");
   }
@@ -46,8 +48,15 @@ class StubHomeWorld extends Service {
       devices: [{
         hwId: "hw-1",
         bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
-        capabilities: [{ hwCapabilityId: "hwc-1" }],
-        states: [{ time: { sourceTs: "2026-08-19T00:59:00.000Z" } }],
+        capabilities: [{
+          hwCapabilityId: "hwc-1",
+          bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
+        }],
+        states: [{
+          nativeId: "native-1",
+          nativeInstanceId: "entity-1",
+          time: { sourceTs: "2026-08-19T00:59:00.000Z" },
+        }],
       }],
     };
   }
@@ -59,6 +68,32 @@ class StubHomeWorld extends Service {
       epochId: "epoch-a",
       rules: [{ ruleRef: "rule-1", name: "Arrival light", enabled: true }],
     }];
+  }
+
+  queryRecentEvidence(input: unknown) {
+    this.evidenceQueries.push(input);
+    return {
+      requestedSince: "2026-08-18T01:00:00.000Z",
+      requestedUntil: "2026-08-19T01:00:00.000Z",
+      events: [{
+        hwId: "hw-1",
+        hwCapabilityId: "hwc-1",
+        value: "on",
+        observedAt: "2026-08-19T00:30:00.000Z",
+        sourceTsQuality: "platform" as const,
+        origin: "observed" as const,
+        provenance: { bridgeId: "bridge-a", epochId: "epoch-a", seq: 11 },
+      }],
+      coverage: [{
+        bridgeId: "bridge-a",
+        epochId: "epoch-a",
+        baselineSeq: 8,
+        baselineAt: "2026-08-18T01:00:00.000Z",
+        status: "complete" as const,
+        reasons: [],
+      }],
+      truncated: false,
+    };
   }
 }
 
@@ -108,6 +143,8 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     idempotencyKey: "arrival-light:v1",
     provenance: { producer: "dsh-home-agent", sessionId: "home-main", turnId: "turn-1" },
     selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
     risk: { level: "medium", reasons: ["Could overlap an existing rule"] },
     intent: {
       type: "automation-draft",
@@ -123,12 +160,33 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     freshness: "fresh",
     gapCount: 0,
   }]);
+  assert.deepEqual(ctx.homeWorld.evidenceQueries, [{
+    hwCapabilityIds: ["hwc-1"],
+    lookbackHours: 24,
+    limit: 50,
+  }]);
   assert.deepEqual(proposal.evidence.references, [{
     bridgeId: "bridge-a",
     hwId: "hw-1",
     capabilityId: "hwc-1",
-    observedAt: "2026-08-19T00:59:00.000Z",
+    observedAt: "2026-08-19T00:30:00.000Z",
+    source: "post-baseline-event",
+    epochId: "epoch-a",
+    seq: 11,
   }]);
+  assert.deepEqual(proposal.evidence.temporal, {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    truncated: false,
+    coverage: [{
+      bridgeId: "bridge-a",
+      epochId: "epoch-a",
+      baselineSeq: 8,
+      baselineAt: "2026-08-18T01:00:00.000Z",
+      status: "complete",
+      reasons: [],
+    }],
+  });
   assert.equal(proposal.conflictCheck.existingAutomationCount, 1);
   assert.deepEqual(proposal.conflictCheck.matches, [{ identity: "rule-1", relation: "possible_overlap" }]);
   assert.deepEqual(proposal.dryRun, {
@@ -136,6 +194,52 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     summary: "No automation artifact exists yet; execution simulation was not run.",
   });
   assert.equal(proposal.applicationStatus, "not_available");
+
+  const currentStateProposal = await ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Review current light state",
+    summary: "A current-state-only observation for review.",
+    idempotencyKey: "current-light:v1",
+    provenance: { producer: "dsh-home-agent", sessionId: "home-main", turnId: "turn-2" },
+    selectedHwIds: ["hw-1"],
+    risk: { level: "low", reasons: [] },
+    intent: {
+      type: "household-insight",
+      description: "Review the current state only.",
+      rollback: "Discard the insight.",
+    },
+  });
+  assert.deepEqual(currentStateProposal.evidence.references, [{
+    bridgeId: "bridge-a",
+    hwId: "hw-1",
+    capabilityId: "hwc-1",
+    observedAt: "2026-08-19T00:59:00.000Z",
+    source: "current-state",
+  }]);
+  assert.equal(currentStateProposal.evidence.temporal, undefined);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("rejects temporal capability selections outside the selected devices", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Review evidence",
+    summary: "Review a bounded observation.",
+    idempotencyKey: "review-evidence:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-missing"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Review it.", rollback: "Reject it." },
+  }), /selected devices/);
+  assert.deepEqual(ctx.homeWorld.evidenceQueries, []);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

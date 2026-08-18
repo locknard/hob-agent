@@ -37,6 +37,9 @@ apply an artifact or control a device.
   post-`sync-complete` state changes in the current epoch. Bootstrap rows are
   excluded, raw attributes/native identifiers stay in the Hub, and partial
   coverage is explicit.
+- Temporal proposal claims are rebound by the Hub from selected current
+  capability IDs; exact epoch/sequence references and coverage reach the Inbox,
+  while the model cannot author journal provenance.
 - Proposal evidence, bridge watermarks, history gaps, and existing-rule
   conflicts are hub-produced. `foreignRules@1` catalogs are accepted only when
   their epoch matches the committed bridge watermark.

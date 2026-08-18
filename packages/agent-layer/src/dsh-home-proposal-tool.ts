@@ -12,6 +12,8 @@ interface HomeProposalPort {
     idempotencyKey: string;
     provenance: { producer: string; sessionId?: string; turnId?: string };
     selectedHwIds: readonly string[];
+    selectedHwCapabilityIds?: readonly string[];
+    evidenceLookbackHours?: number;
     risk: { level: "low" | "medium" | "high"; reasons: readonly string[] };
     intent: { type: string; description: string; rollback: string };
   }): Promise<{
@@ -20,6 +22,13 @@ interface HomeProposalPort {
     status: "pending_review";
     applicationStatus: "not_available";
     conflictCheck: { existingAutomationCount: number; matches: readonly unknown[] };
+    evidence: {
+      references: readonly unknown[];
+      temporal?: {
+        truncated: boolean;
+        coverage: readonly { status: "complete" | "partial" | "unavailable" }[];
+      };
+    };
   }>;
 }
 
@@ -42,6 +51,20 @@ const OUTPUT_SCHEMA = {
         matchCount: { type: "number", required: true },
       },
     },
+    evidenceSummary: {
+      type: "object",
+      required: true,
+      additionalProperties: false,
+      properties: {
+        referenceCount: { type: "number", required: true },
+        coverageStatus: {
+          type: "string",
+          required: true,
+          enum: ["current_state_only", "complete", "partial", "unavailable"],
+        },
+        truncated: { type: "boolean", required: true },
+      },
+    },
   },
 } as const;
 
@@ -50,6 +73,7 @@ export function apply(ctx: Context): void {
     name: "create_home_proposal",
     description: [
       "Create a local pending household proposal from bounded hub evidence.",
+      "When the proposal relies on recent behavior, select current hub capability IDs and a lookback window; the Hub binds exact event provenance and coverage.",
       "This only adds an Inbox item; it cannot control a device or install an automation.",
     ].join(" "),
     parameters: {
@@ -58,6 +82,8 @@ export function apply(ctx: Context): void {
       summary: { type: "string", required: true },
       idempotencyKey: { type: "string", required: true },
       selectedHwIds: { type: "array", items: { type: "string" }, required: true },
+      selectedHwCapabilityIds: { type: "array", items: { type: "string" } },
+      evidenceLookbackHours: { type: "integer" },
       riskLevel: { type: "string", enum: ["low", "medium", "high"], required: true },
       riskReasons: { type: "array", items: { type: "string" }, required: true },
       intentDescription: { type: "string", required: true },
@@ -79,6 +105,8 @@ export function apply(ctx: Context): void {
           turnId: String(exec.rootCallId),
         },
         selectedHwIds: args.selectedHwIds,
+        ...(args.selectedHwCapabilityIds === undefined ? {} : { selectedHwCapabilityIds: args.selectedHwCapabilityIds }),
+        ...(args.evidenceLookbackHours === undefined ? {} : { evidenceLookbackHours: args.evidenceLookbackHours }),
         risk: { level: args.riskLevel, reasons: args.riskReasons },
         intent: {
           type: args.kind,
@@ -87,6 +115,7 @@ export function apply(ctx: Context): void {
         },
       });
       if (proposal.status !== "pending_review") throw new Error("Created proposal is not pending review");
+      const coverageStatus = summarizeCoverage(proposal.evidence.temporal?.coverage);
       return {
         proposalId: proposal.id,
         status: "pending_review" as const,
@@ -96,7 +125,20 @@ export function apply(ctx: Context): void {
           existingAutomationCount: proposal.conflictCheck.existingAutomationCount,
           matchCount: proposal.conflictCheck.matches.length,
         },
+        evidenceSummary: {
+          referenceCount: proposal.evidence.references.length,
+          coverageStatus,
+          truncated: proposal.evidence.temporal?.truncated ?? false,
+        },
       };
     },
   }));
+}
+
+function summarizeCoverage(
+  coverage: readonly { status: "complete" | "partial" | "unavailable" }[] | undefined,
+): "current_state_only" | "complete" | "partial" | "unavailable" {
+  if (coverage === undefined) return "current_state_only";
+  if (coverage.length === 0 || coverage.some((item) => item.status === "unavailable")) return "unavailable";
+  return coverage.some((item) => item.status === "partial") ? "partial" : "complete";
 }
