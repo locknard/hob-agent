@@ -12,6 +12,15 @@ import * as ToolSkill from "@deepseek-ai/dsh-tool-skill";
 import * as RepeatToolReminder from "@deepseek-ai/dsh-repeat-tool-reminder";
 import TokenMeter from "@deepseek-ai/dsh-token-meter";
 import ToolResultPruner from "@deepseek-ai/dsh-compaction-tool-result-pruner";
+import InvariantRegistry from "@deepseek-ai/dsh-invariants";
+import * as LlmInvariant from "@deepseek-ai/dsh-llm/invariant";
+import * as SessionInvariant from "@deepseek-ai/dsh-session/invariant";
+import * as AgentInvariant from "@deepseek-ai/dsh-agent/invariant";
+import * as ScopeInvariant from "@deepseek-ai/dsh-scope/invariant";
+import * as AgentLoopInvariant from "@deepseek-ai/dsh-agent-loop/invariant";
+import * as ToolsInvariant from "@deepseek-ai/dsh-tools/invariant";
+import * as SystemPromptInvariant from "@deepseek-ai/dsh-system-prompt/invariant";
+import * as CompactionInvariant from "@deepseek-ai/dsh-compaction/invariant";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
@@ -149,7 +158,15 @@ export class DshHomeAgentService extends Service {
 
   protected async [Service.init](): Promise<void> {
     if (!this.ctx.get("llm")) await this.ctx.plugin(LlmRuntime);
+    await this.ctx.plugin(InvariantRegistry, {
+      enabled: true,
+      package_allowlist: [
+        "^@deepseek-ai/dsh-(?:agent|agent-loop|compaction|llm|scope|session|system-prompt|tools)$",
+      ],
+    });
+    await this.ctx.plugin(LlmInvariant);
     await this.ctx.plugin(SessionStore);
+    await this.ctx.plugin(SessionInvariant);
     if (this.options.sessionPersistencePath !== undefined) {
       await this.ctx.plugin(SqliteSessionPersistence, {
         path: this.options.sessionPersistencePath,
@@ -157,6 +174,7 @@ export class DshHomeAgentService extends Service {
     }
     await this.ctx.plugin(TokenMeter);
     await this.ctx.plugin(ToolResultPruner);
+    await this.ctx.plugin(CompactionInvariant);
     await this.ctx.plugin(HomeCompactionEngine);
     await this.ctx.plugin(AgentLoopTraceService);
     this.traceService = this.ctx.get("agentLoopTrace");
@@ -168,6 +186,7 @@ export class DshHomeAgentService extends Service {
         ? basePersona
         : householdPersona(basePersona, this.options.householdContext.soul),
     });
+    await this.ctx.plugin(SystemPromptInvariant);
     const systemPrompt = this.ctx.get("systemPrompt");
     if (!systemPrompt) throw new Error("DSH system prompt service did not initialize");
     if (this.options.householdContext !== undefined) {
@@ -183,6 +202,7 @@ export class DshHomeAgentService extends Service {
       });
     }
     await this.ctx.plugin(ToolRuntime);
+    await this.ctx.plugin(ToolsInvariant);
     await this.ctx.plugin(HomeObservationBudgetService);
     await this.ctx.plugin(HomeInventoryCoverageService);
     await this.ctx.plugin(HomeInventoryTool);
@@ -193,9 +213,12 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(SkillRegistry);
     await this.ctx.plugin(HomeSkills);
     await this.ctx.plugin(AgentRegistry);
+    await this.ctx.plugin(AgentInvariant);
+    await this.ctx.plugin(ScopeInvariant);
     await this.ctx.plugin(RepeatToolReminder, { thresholds: [3, 5, 8] });
     await this.ctx.plugin(ToolSkill);
     await this.ctx.plugin(AgentLoop, { agents: [] });
+    await this.ctx.plugin(AgentLoopInvariant);
 
     const llm = this.ctx.get("llm");
     const agents = this.ctx.get("agents");

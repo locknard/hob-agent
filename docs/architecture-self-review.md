@@ -5,7 +5,8 @@ Date: 2026-08-19
 ## Scope conclusion
 
 The DSH migration is complete at the runtime composition boundary: DSH owns the
-Agent loop, session, prompt, tools, provider seam, and lifecycle. Hob-agent has
+Agent loop, session, prompt, tools, provider seam, token measurement,
+compaction transaction, and lifecycle. Hob-agent has
 no direct `pi-ai` or `pi-agent-core` dependency. The official
 `dsh-llm-pi-ai` package is the only provider adapter and carries its SDK as a
 transitive implementation detail.
@@ -17,6 +18,19 @@ bounded household prompt context, the DSH Skill registry/loader, and one
 reviewed first-party household-observation Skill are composed. Tenant
 filesystem Skill installation remains closed pending containment and body-size
 guards.
+
+Long-running observation sessions now mount the official DSH token meter,
+basic compaction engine, and replay-safe tool-result pruner. The Home Product
+Bundle overrides only the basic engine's supported summarizer hook so a coding
+checkpoint is not used as household memory. Metadata-only compaction/prune
+events reach the Inbox trace; summaries, raw outputs, provider errors, and
+internal compaction ids do not.
+
+The official DSH invariant registry is enabled before the first Agent is
+created. Its executable session, Agent, scope, loop, LLM, tool, system-prompt,
+and compaction companions check their package-owned event relationships at
+runtime; rc.7 companions that explicitly declare no runtime invariant remain
+unit/load-test concerns rather than decorative registrations.
 
 The neutral bridge read path is implemented through migration step 6: one
 Zod-first v6.3 base contract plus the additive v6.4 read-only capability
@@ -54,7 +68,9 @@ apply an artifact or control a device.
   `applicationStatus: not_available`.
 - Autonomous observation is disabled by default. The Hub owns its bounded
   cadence, requires a ready world and idle DSH Agent, and permits only one
-  pending household proposal at a time.
+  pending household proposal at a time. Each scheduled, manual, startup, or
+  one-shot attempt also enters a separate metadata-only Hub audit ledger before
+  the model can run; unfinished rows become interrupted on restart.
 - One-root acceptance coverage now exercises the canonical DSH tool loop from
   observation through trusted Hub evidence binding into the Inbox. The Home
   Agent retains its trace service explicitly so cross-plugin Inbox reads do not
@@ -66,6 +82,10 @@ apply an artifact or control a device.
   through bounded `get_home_rules` pages before proposing an automation. The
   Hub still owns the authoritative proposal-time conflict check, and no rule
   body or mutation path crosses the tool boundary.
+- Authoritative conflict coverage is scoped to every bridge binding of the
+  selected devices. An unrelated bridge without a rule catalog cannot block a
+  proposal, while a selected or merged cross-bridge device still fails closed
+  unless every relevant catalog is available.
 - The paginated DSH snapshot boundary strips adapter-native device,
   capability-instance, space, and schema identifiers. Model-visible states are
   correlated only by opaque Hub capability ID and neutral bridge ID; the full
@@ -76,9 +96,10 @@ apply an artifact or control a device.
 - `pnpm draft:home-map` turns a ready neutral snapshot into a bounded private
   `HOME.import.md` review artifact without calling a model or overwriting
   household knowledge. Native identifiers and current values remain absent.
-- `pnpm inbox:home` mounts only the durable proposal store and authenticated
-  localhost review surface. It requires no bridge or model configuration and
-  retains the same terminal, non-applying approval semantics.
+- `pnpm inbox:home` mounts only the durable proposal store, metadata-only
+  observation audit, and authenticated localhost review surface. It requires
+  no bridge or model configuration and retains the same terminal, non-applying
+  approval semantics.
 - Optional Inbox HTTP is disabled without an explicit credential, binds only to
   `127.0.0.1`, stores only a derived verifier, authenticates every request, and
   requires exact same-origin bounded review POSTs.
@@ -94,6 +115,8 @@ apply an artifact or control a device.
   adapted from OpenClaw without importing its runtime.
 - Runtime ownership tests reject the removed Pi runtime, direct Pi SDK imports,
   and named legacy entry points.
+- Runtime invariant companions fail structural DSH protocol violations under
+  the owning upstream package instead of adding a product-side shadow checker.
 - Bridge architecture guards reject ecosystem vocabulary in the agent layer,
   removed bridge contracts/services, and raw HA payloads in the canonical
   world model.
@@ -107,8 +130,9 @@ apply an artifact or control a device.
   supply room metadata. Equal names across bridges never auto-merge.
 - Bridge IDs and remote installation IDs are independently bound; a changed
   remote identity fails closed until an explicit rebind.
-- SQLite journals, registry data, world-model files, and WAL/SHM sidecars are
-  private; production launch requires an explicit durable data directory.
+- SQLite journals, registry data, world-model files, proposals, observation
+  audits, DSH sessions, and WAL/SHM sidecars are private; production launch
+  requires an explicit durable data directory.
 - The stable Home Agent session is created or resumed through the official DSH
   SQLite provider. Raw conversation and tool events remain DSH-owned local
   data, while Inbox trace reconstruction stays bounded and metadata-only.
@@ -156,22 +180,17 @@ do not mutate DSH tables directly.
 
 An explicit household directory can now load bounded `SOUL.md`, `HOME.md`, and
 `MEMORY.md` startup snapshots through the DSH prompt/context registry without
-expanding tool authority. `HEARTBEAT.md`, hot reload, memory writes, and
-filesystem Skills remain deferred. Skills should enter through DSH's provider
-once its filesystem packages share the runtime compatibility family; do not
-create a parallel registry.
+expanding tool authority. `HEARTBEAT.md`, hot reload, memory writes, and tenant
+filesystem Skills remain deferred. The official filesystem provider now shares
+the pinned compatibility family, but its uncapped bodies, repeat reads, and
+symlink fallback require containment review before mounting. Do not create a
+parallel registry.
 
 ### P2 — bounded probe lifecycle
 
 `ProfileLiveProbeOptions.createRuntime` returns only an LLM boundary and has no
 disposer contract. A future factory that creates a Cordis fiber must return an
 owned disposable handle so probes cannot leak adapters, timers, or services.
-
-### P2 — DSH invariant companions
-
-The composition has not enabled the optional DSH invariant companions. Decide
-which invariants run in production when the executable composition root is
-introduced.
 
 ## Cleanup decisions
 

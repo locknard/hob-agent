@@ -6,6 +6,7 @@ import test from "node:test";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const agentSourceRoot = join(repositoryRoot, "packages", "agent-layer", "src");
+const inboxSourceRoot = join(repositoryRoot, "packages", "inbox-web", "src");
 const hubSourceRoot = join(repositoryRoot, "packages", "hub", "src");
 
 function sourceFiles(directory: string): string[] {
@@ -31,6 +32,7 @@ function violations(files: readonly string[], pattern: RegExp, stripComments = t
 
 test("architecture guards keep the agent and neutral hub boundaries closed", () => {
   const agentFiles = sourceFiles(agentSourceRoot);
+  const inboxFiles = sourceFiles(inboxSourceRoot);
   const hubFiles = sourceFiles(hubSourceRoot);
 
   assert.deepEqual(
@@ -39,10 +41,11 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     "agent-layer production source must not depend on an ecosystem vocabulary",
   );
 
-  const adapterImport = /\b(?:from|import)\s*(?:\(\s*)?["'][^"']*(?:home-assistant|homeassistant|home-assistant-service)[^"']*["']/i;
+  const adapterImport = /\b(?:from|import)\s*(?:\(\s*)?["'][^"']*(?:home-assistant|homeassistant|xiaomi-home)[^"']*["']/i;
   const allowedProductBundle = join(hubSourceRoot, "bridge-bundle.ts");
   const hubCoreFiles = hubFiles.filter((file) => file !== allowedProductBundle
-    && !file.endsWith("home-assistant-bridge.ts"));
+    && !file.endsWith("home-assistant-bridge.ts")
+    && !file.endsWith("xiaomi-home-bridge.ts"));
   assert.deepEqual(
     violations(hubCoreFiles, adapterImport, false),
     [],
@@ -70,7 +73,7 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   assert.deepEqual(
     violations(
       compositionRootFiles,
-      /HomeAssistantService|HomeAssistantBridge|home-assistant(?:-service|-bridge)?|HOB_HA_URL|HOB_HA_TOKEN|HOME_ASSISTANT/i,
+      /HomeAssistantService|HomeAssistantBridge|home-assistant(?:-service|-bridge)?|XiaomiHome|xiaomi-home|HOB_HA_URL|HOB_HA_TOKEN|HOME_ASSISTANT/i,
     ),
     [],
     "composition roots must expose catalog/world seams rather than an ecosystem service identity",
@@ -83,11 +86,8 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   ].filter(existsSync).map((path) => relative(repositoryRoot, path));
   assert.deepEqual(removedEntries, [], "deprecated contract and HomeAssistantService entries must stay deleted");
 
-  const packageFiles = [
-    join(repositoryRoot, "package.json"),
-    join(repositoryRoot, "packages", "hub", "package.json"),
-    join(repositoryRoot, "packages", "agent-layer", "package.json"),
-  ];
+  const packageFiles = ["package.json", "packages/hub/package.json", "packages/agent-layer/package.json", "packages/inbox-web/package.json", "contracts/package.json"]
+    .map((path) => join(repositoryRoot, path));
   const dependencyNames = packageFiles.flatMap((path) => {
     const packageJson = JSON.parse(readFileSync(path, "utf8")) as Record<string, Record<string, unknown>>;
     return Object.keys({
@@ -101,5 +101,11 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     dependencyNames.filter((name) => /(?:sqlite3|better-sqlite3|postgres|^pg$|redis|mongodb|home-assistant|homeassistant)/i.test(name)),
     [],
     "Phase 0 packages must not add ecosystem/database service dependencies",
+  );
+
+  assert.deepEqual(
+    violations([...agentFiles, ...inboxFiles], /(?:from|import\s*\()["'][^"']*@hob-agent\/hub(?:\/[^"']*)?["']/),
+    [],
+    "agent and Inbox layers must not depend back on Hub implementation modules",
   );
 });

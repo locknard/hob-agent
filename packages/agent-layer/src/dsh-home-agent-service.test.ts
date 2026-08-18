@@ -103,6 +103,17 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     tailChars: 1_024,
   });
   assert.equal(ctx.get("compaction")?.constructor.name, "HomeCompactionEngine");
+  const invariants = ctx.get("invariants") as unknown as { registrations: Map<string, unknown> };
+  assert.deepEqual([...invariants.registrations.keys()].sort(), [
+    "@deepseek-ai/dsh-agent",
+    "@deepseek-ai/dsh-agent-loop",
+    "@deepseek-ai/dsh-compaction",
+    "@deepseek-ai/dsh-llm",
+    "@deepseek-ai/dsh-scope",
+    "@deepseek-ai/dsh-session",
+    "@deepseek-ai/dsh-system-prompt",
+    "@deepseek-ai/dsh-tools",
+  ]);
   assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), [
     "get_home_inventory",
     "get_home_snapshot",
@@ -187,6 +198,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(ctx.get("compaction"), undefined);
   assert.equal(ctx.get("toolResultPruner"), undefined);
   assert.equal(ctx.get("tokenMeter"), undefined);
+  assert.equal(ctx.get("invariants"), undefined);
   assert.equal(ctx.homeAgent, undefined);
   assert.equal(ctx.get("agentLoopTrace"), undefined);
   assert.equal(ctx.get("agents"), undefined);

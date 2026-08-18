@@ -4,7 +4,11 @@ Embeds the agent loop, builds role prompts from the home workspace, and exposes
 only governed tools with audit logging and approval checks.
 
 DSH is the only Agent Runtime in this package. It owns the LLM seam, session,
-prompt, tool, agent, and loop services. The Home Product Bundle contributes
+prompt, tool, agent, loop, token-meter, and compaction services. The official
+runtime-invariant companions protect the stateful DSH protocols, and the Home
+Product Bundle changes only the supported compaction summarizer hook to use a
+household checkpoint rather than the upstream coding template. The Home
+Product Bundle contributes
 compact paginated `get_home_inventory`, bounded paginated read-only
 `get_home_snapshot`, bounded read-only `get_home_evidence`, and review-only
 `create_home_proposal` tools through DSH's registry; it does not create a
@@ -29,8 +33,9 @@ proposal. DSH session/call identity is injected as trusted provenance by the
 tool implementation.
 
 `AgentLoopTraceService` is a bounded, read-only projection of DSH's canonical
-`session/event` stream. It exposes turn/step/tool status, timing, and aggregate
-token counts to the local review surface, while omitting prompts, assistant and
+`session/event` stream. It exposes turn/step/tool status, compaction/prune
+maintenance, timing, and aggregate token counts to the local review surface,
+while omitting prompts, summaries, raw outputs, provider errors, assistant and
 reasoning text, tool arguments/results, and household state. It neither owns a
 loop nor appears in the model's tool/context surface.
 
