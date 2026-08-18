@@ -20,7 +20,9 @@ test("publishes the DSH route catalog without resolving credentials", () => {
 });
 
 test("publishes provider setup without exposing credential values", () => {
-  assert.equal(providerSetup("glm").runtimeProviderId, "zai");
-  assert.equal(providerSetup("glm").credentialEnv, "ZAI_API_KEY");
+  const setup = providerSetup("glm");
+  assert.equal(setup.runtimeProviderId, "zai");
+  assert.equal(setup.credentialEnv, "ZAI_API_KEY");
+  assert.equal(Object.hasOwn(setup, "piProviderId"), false);
   assert.throws(() => providerSetup("unknown" as never), /Unsupported model provider/);
 });

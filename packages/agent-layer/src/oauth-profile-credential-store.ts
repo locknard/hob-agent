@@ -1,13 +1,28 @@
 import type { AuthProfile } from "./auth-profiles.js";
+import type { DshOAuthCredential } from "./dsh-oauth-seam.js";
 import type { WritableSecretVault } from "./macos-keychain-secret-vault.js";
 import { providerSetup, type SupportedModelProvider } from "./model-providers.js";
 import {
   withOAuthRefreshLock,
   type OAuthRefreshLockOptions,
 } from "./oauth-refresh-lock.js";
-import type { Credential, CredentialInfo, CredentialStore } from "./pi-credential-store.js";
 
-type StoredOAuthCredential = Extract<Credential, { type: "oauth" }>;
+type StoredOAuthCredential = DshOAuthCredential;
+
+export interface OAuthCredentialInfo {
+  readonly providerId: string;
+  readonly type: "oauth";
+}
+
+export interface OAuthCredentialStore {
+  read(providerId: string): Promise<StoredOAuthCredential | undefined>;
+  list(): Promise<readonly OAuthCredentialInfo[]>;
+  modify(
+    providerId: string,
+    fn: (current: StoredOAuthCredential | undefined) => Promise<StoredOAuthCredential | undefined>,
+  ): Promise<StoredOAuthCredential | undefined>;
+  delete(providerId: string): Promise<void>;
+}
 
 export interface OAuthProfileCredentialStoreOptions {
   /** Called only after a vault mutation, without exposing OAuth token material. */
@@ -24,7 +39,7 @@ export interface OAuthProfileCredentialStoreOptions {
  * this provider-owned OAuth store stays outside the DSH model path until DSH
  * exposes a structured OAuth credential contract.
  */
-export class OAuthProfileCredentialStore implements CredentialStore {
+export class OAuthProfileCredentialStore implements OAuthCredentialStore {
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -38,19 +53,19 @@ export class OAuthProfileCredentialStore implements CredentialStore {
     },
   ) {}
 
-  async read(providerId: string): Promise<Credential | undefined> {
+  async read(providerId: string): Promise<StoredOAuthCredential | undefined> {
     if (providerId !== this.providerId) return undefined;
     return this.readSelected();
   }
 
-  async list(): Promise<readonly CredentialInfo[]> {
+  async list(): Promise<readonly OAuthCredentialInfo[]> {
     return [{ providerId: this.providerId, type: "oauth" }];
   }
 
   async modify(
     providerId: string,
-    fn: (current: Credential | undefined) => Promise<Credential | undefined>,
-  ): Promise<Credential | undefined> {
+    fn: (current: StoredOAuthCredential | undefined) => Promise<StoredOAuthCredential | undefined>,
+  ): Promise<StoredOAuthCredential | undefined> {
     this.assertProvider(providerId);
     return this.enqueue(() => this.withRefreshLock(async () => {
       const current = await this.readSelected();
@@ -117,7 +132,7 @@ export function createOAuthProfileCredentialStore(
   if (!profile.secretRef) throw new Error("Selected OAuth profile is missing a secret reference");
   const provider = providerSetup(profile.provider as SupportedModelProvider);
   return new OAuthProfileCredentialStore(
-    provider.piProviderId,
+    provider.runtimeProviderId,
     profile.secretRef,
     vault,
     options,

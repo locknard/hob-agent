@@ -23,7 +23,7 @@ const profile = {
   secretRef: "keychain:hob-agent/claude:household",
 };
 
-test("stores a selected OAuth profile in the vault and exposes only pi credential metadata", async () => {
+test("stores a selected OAuth profile in the vault and exposes only non-secret metadata", async () => {
   const secrets = vault();
   const credentials = createOAuthProfileCredentialStore(profile, secrets);
 
@@ -44,7 +44,7 @@ test("stores a selected OAuth profile in the vault and exposes only pi credentia
   assert.equal(await credentials.read("openai"), undefined);
 });
 
-test("reports only OAuth expiry metadata after pi refreshes the selected credential", async () => {
+test("reports only OAuth expiry metadata after the adapter refreshes the selected credential", async () => {
   const secrets = vault();
   const changes: Array<{ expiresAt?: number }> = [];
   const credentials = createOAuthProfileCredentialStore(profile, secrets, {
@@ -61,7 +61,7 @@ test("reports only OAuth expiry metadata after pi refreshes the selected credent
   assert.deepEqual(changes, [{ expiresAt: 20_000 }]);
 });
 
-test("reports a missing expiry after pi deletes the selected OAuth credential", async () => {
+test("reports a missing expiry after the adapter deletes the selected OAuth credential", async () => {
   const secrets = vault({
     "keychain:hob-agent/claude:household": JSON.stringify({
       type: "oauth", access: "access-token", refresh: "refresh-token", expires: 20_000,

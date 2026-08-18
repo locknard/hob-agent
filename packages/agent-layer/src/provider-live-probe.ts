@@ -47,7 +47,11 @@ export async function probeLiveProvider(
     for await (const chunk of models.stream(options)) {
       if (chunk.type !== "finish") continue;
       finished = true;
-      if (chunk.reason.kind === "stop") return;
+      if (
+        chunk.reason.kind === "stop" ||
+        chunk.reason.kind === "max-tokens" ||
+        chunk.reason.kind === "tool-calls"
+      ) return;
       throw dshFailureError(chunk.reason);
     }
     if (!finished) throw new Error("DSH provider stream ended without a terminal finish");

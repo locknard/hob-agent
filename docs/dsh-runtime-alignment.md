@@ -18,10 +18,10 @@ hob-agent 只维护一个 DSH Agent Runtime，不设置第二套兼容路径或�
 - tool registry 与执行管线；
 - Agent scope 与后续 subagent/compaction 能力。
 
-`pi-ai` 与 `pi-agent-core` 不作同类处理。前者可以暂时作为 DSH LLM adapter 内部的
-provider SDK，以保留 OAuth、Keychain、profile、fallback 和 probe 能力；后者属于竞争
-Runtime，必须移除。任何 `pi-ai` 类型都不得再进入 Home Agent 的公共 API，未来若 DSH
-原生 adapter 完整覆盖这些 provider 能力，再独立移除 `pi-ai`。
+`pi-ai` 与 `pi-agent-core` 不作同类处理。前者只作为官方 DSH LLM adapter 的传递依赖，
+hob-agent 不声明、不导入，也不让其类型进入产品 API；后者属于竞争 Runtime，已经移除。
+Keychain、profile、fallback 与 probe 机制保留在产品治理层，但调用边界分别收口到 DSH
+credentials、OAuth seam 与 LlmRuntime。
 
 ## 背景
 
@@ -324,8 +324,8 @@ release family 时 fail closed。传递依赖的 install scripts 默认拒绝执
 
 1. DSH session persistence 应直接采用其后端，还是由 `packages/hub` 实现兼容的 SQLite
    persistence provider？
-2. Claude OAuth CredentialStore 如何进入官方 DSH adapter，而不复制 `llm-pi-ai` 或把
-   OAuth token 降格成 API key？API-key profile/Keychain 已通过只读 credential provider 接入。
+2. 上游何时提供结构化 OAuth contract/provider adapter，使 Claude OAuth 能进入 DSH
+   LLM seam，而不复制 `llm-pi-ai` 或把 token 降格成 API key？
 3. `home-template` 的现有顶层 Markdown 如何映射到 prompt sections、memory 和 Skills？
 4. 哪些 Cordis 插件允许动态重载，哪些家庭安全组件必须在活动操作期间固定版本？
 

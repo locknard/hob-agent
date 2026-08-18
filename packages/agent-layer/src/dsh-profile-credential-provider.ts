@@ -6,8 +6,8 @@ import CredentialProvider, {
   type ResolvedCredential,
 } from "@deepseek-ai/dsh-credentials";
 
-import type { SecretVault } from "./pi-credential-store.js";
 import { parseSecretRef } from "./secret-ref.js";
+import type { SecretVault } from "./secret-vault.js";
 
 export interface DshProfileCredentialProviderOptions {
   /** DSH env-shaped aliases mapped to hob canonical SecretRefs. */

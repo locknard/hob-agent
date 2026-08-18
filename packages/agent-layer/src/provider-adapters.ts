@@ -4,13 +4,13 @@ export type ProviderAuthMethod = "api_key" | "oauth" | "external_cli";
 export interface ProviderAdapter {
   id: SupportedModelProvider;
   authMethods: ProviderAuthMethod[];
-  /** OAuth is exposed only when the selected pi provider implements it. */
-  oauth?: { status: "pi_supported" };
+  /** OAuth remains unavailable until a provider-specific DSH adapter is mounted. */
+  oauth?: { status: "dsh_adapter_required" };
 }
 
 const ADAPTERS: Record<SupportedModelProvider, ProviderAdapter> = {
   gpt: { id: "gpt", authMethods: ["api_key"] },
-  claude: { id: "claude", authMethods: ["api_key", "oauth", "external_cli"], oauth: { status: "pi_supported" } },
+  claude: { id: "claude", authMethods: ["api_key", "oauth", "external_cli"], oauth: { status: "dsh_adapter_required" } },
   deepseek: { id: "deepseek", authMethods: ["api_key"] },
   kimi: { id: "kimi", authMethods: ["api_key"] },
   glm: { id: "glm", authMethods: ["api_key"] },

@@ -6,7 +6,7 @@ import type { AuthProfile } from "./auth-profiles.js";
 import { DshHomeAgentService } from "./dsh-home-agent-service.js";
 import { DshProfileCredentialProvider } from "./dsh-profile-credential-provider.js";
 import { providerSetup, type SupportedModelProvider } from "./model-providers.js";
-import type { SecretVault } from "./pi-credential-store.js";
+import type { SecretVault } from "./secret-vault.js";
 
 export interface DshPiHomeAgentOptions {
   readonly provider: SupportedModelProvider;

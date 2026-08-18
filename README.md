@@ -58,9 +58,9 @@ Home Product Bundle currently contributes only the read-only
 `get_home_snapshot` tool. Device actions, configuration writes, and proposal
 application are deliberately not implemented in this first slice.
 
-`pi-agent-core` is not part of the architecture. `pi-ai` may remain behind a
-DSH LLM adapter as a provider SDK, but it must not own an Agent, session, tool
-registry, or runtime lifecycle.
+`pi-agent-core` is not part of the architecture. `pi-ai` exists only as a
+transitive implementation detail of the official DSH LLM adapter; hob-agent
+does not declare or import it, and it owns no product API or runtime lifecycle.
 
 The intended user journey is documented in
 [`docs/ha-onboarding.md`](docs/ha-onboarding.md).

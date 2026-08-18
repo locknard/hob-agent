@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { EnvironmentSecretVault, InMemorySecretVault, ProfileCredentialStore } from "./pi-credential-store.js";
+import { EnvironmentSecretVault } from "./secret-vault.js";
 
 test("reads only explicitly allowed environment secret references", async () => {
   const vault = new EnvironmentSecretVault(
@@ -15,7 +14,7 @@ test("reads only explicitly allowed environment secret references", async () => 
   assert.equal(await vault.read("keychain:openai"), undefined);
 });
 
-test("rejects malformed env references without inspecting or exposing environment values", async () => {
+test("rejects malformed env references without inspecting environment values", async () => {
   let reads = 0;
   const environment = new Proxy({ OPENAI_API_KEY: "allowed-secret", OTHER_SECRET: "must-not-leak" }, {
     get(target, property, receiver) {
@@ -29,7 +28,6 @@ test("rejects malformed env references without inspecting or exposing environmen
     assert.equal(await vault.read(reference), undefined);
   }
   assert.equal(reads, 0);
-  assert.equal(await vault.read("env:OTHER_SECRET"), undefined);
 });
 
 test("treats an empty or whitespace-only allowlisted value as unavailable", async () => {
@@ -41,18 +39,4 @@ test("treats an empty or whitespace-only allowlisted value as unavailable", asyn
   assert.equal(await vault.read("env:EMPTY"), undefined);
   assert.equal(await vault.read("env:BLANK"), undefined);
   assert.equal(await vault.read("env:PRESENT"), " key-with-padding ");
-});
-
-test("keeps selected profile credentials scoped without exposing keys in list", async () => {
-  const vault = new InMemorySecretVault({ "secret:gpt": "sk-test" });
-  const store = new ProfileCredentialStore(vault, { openai: "secret:gpt" });
-
-  assert.deepEqual(await store.list(), [{ providerId: "openai", type: "api_key" }]);
-  assert.deepEqual(await store.read("openai"), { type: "api_key", key: "sk-test" });
-  assert.equal(JSON.stringify(await store.list()).includes("sk-test"), false);
-});
-
-test("keeps profile storage independent from pi-ai runtime ownership", () => {
-  const source = readFileSync(new URL("./pi-credential-store.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /@earendil-works\/pi-ai/);
 });

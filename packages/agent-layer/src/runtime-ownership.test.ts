@@ -8,6 +8,7 @@ const packageJson = JSON.parse(
 
 test("DSH is the only Agent Runtime dependency and implementation", () => {
   assert.equal(packageJson.dependencies?.["@earendil-works/pi-agent-core"], undefined);
+  assert.equal(packageJson.dependencies?.["@earendil-works/pi-ai"], undefined);
 
   const sourceDirectory = new URL("./", import.meta.url);
   const forbiddenFiles = new Set([
@@ -15,6 +16,10 @@ test("DSH is the only Agent Runtime dependency and implementation", () => {
     "read-only-agent-service.ts",
     "read-only-agent.test.ts",
     "read-only-agent.ts",
+    "provider-login.test.ts",
+    "provider-login.ts",
+    "pi-credential-store.test.ts",
+    "pi-credential-store.ts",
   ]);
   const present = readdirSync(sourceDirectory)
     .filter((file) => forbiddenFiles.has(file))
@@ -27,5 +32,6 @@ test("DSH is the only Agent Runtime dependency and implementation", () => {
   for (const file of productionSources) {
     const source = readFileSync(new URL(file, sourceDirectory), "utf8");
     assert.doesNotMatch(source, /@earendil-works\/pi-agent-core/, file);
+    assert.doesNotMatch(source, /@earendil-works\/pi-ai/, file);
   }
 });

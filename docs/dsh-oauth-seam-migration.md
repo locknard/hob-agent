@@ -1,6 +1,6 @@
 # DSH OAuth seam migration report
 
-状态：已完成本分支迁移；真实 provider OAuth adapter 仍未接入。
+状态：产品边界迁移完成；真实 provider OAuth adapter 仍未接入。
 
 ## 结论
 
@@ -42,22 +42,13 @@ anthropic`）；锁身份仍使用产品 profile identity，避免把 provider r
 - `oauth-profile-login.ts`、`oauth-profile-logout.ts`、`oauth-profile-lifecycle.ts` 不再
   直接 import `@earendil-works/pi-ai`；
 - 相关测试改为验证 DSH seam、SecretVault 写回、错误隔离和无 pi-ai 直接依赖；
-- 未修改 `package.json`、lockfile、credential store、probe 或 model-provider 文件。
+- hob-agent manifest 已删除显式 `pi-ai` 依赖；它只由官方 DSH adapter 传递引入。
 
 ## 验证
 
-本分支目标测试：12/12 通过。
+迁移目标与全仓验收由仓库标准命令覆盖：
 
 ```text
-node node_modules/.pnpm/tsx@4.23.12/node_modules/tsx/dist/cli.mjs --test \
-  packages/agent-layer/src/dsh-oauth-seam.test.ts \
-  packages/agent-layer/src/oauth-profile-login.test.ts \
-  packages/agent-layer/src/oauth-profile-logout.test.ts \
-  packages/agent-layer/src/oauth-profile-lifecycle.test.ts
+pnpm test
+pnpm check
 ```
-
-`pnpm check` 通过（TypeScript 与 instruction synchronization）。当时全仓
-`pnpm test` 为 153/155；剩余两项属于其他并行迁移：profile probe 的 throttle 测试
-时序，以及 runtime ownership 测试等待 package.json 删除显式 `pi-ai` 依赖。
-
-提交：`3bc1b7a move OAuth lifecycle behind DSH seam`

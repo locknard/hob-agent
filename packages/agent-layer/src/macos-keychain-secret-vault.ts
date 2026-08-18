@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import type { SecretVault } from "./pi-credential-store.js";
+import type { SecretVault } from "./secret-vault.js";
 import { parseSecretRef } from "./secret-ref.js";
 
 export interface WritableSecretVault extends SecretVault {

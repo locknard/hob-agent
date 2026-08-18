@@ -57,6 +57,17 @@ test("classifies a DSH terminal failure without retaining provider details", asy
   assert.deepEqual(result, { model: "claude/claude-sonnet-4-6", status: "auth", latencyMs: 0 });
 });
 
+test("accepts max-tokens as a successful provider connection", async () => {
+  const result = await probeLiveProvider("deepseek", "deepseek-v4-flash", async () => ({
+    resolveModelInfo: async () => ({ provider: "deepseek", id: "deepseek-v4-flash", name: "DeepSeek" }),
+    stream: () => (async function* (): AsyncIterable<StreamChunk> {
+      yield { type: "finish", reason: { kind: "max-tokens" } };
+    })(),
+  }), () => 20);
+
+  assert.deepEqual(result, { model: "deepseek/deepseek-v4-flash", status: "ok", latencyMs: 0 });
+});
+
 test("forwards cancellation to DSH model resolution and request", async () => {
   const controller = new AbortController();
   const receivedSignals: (AbortSignal | undefined)[] = [];
