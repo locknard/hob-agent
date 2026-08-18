@@ -39,6 +39,7 @@ test("mounts the official DSH pi-ai adapter for a product provider route", async
   assert.deepEqual(ctx.llm.listProviders().map((provider) => provider.id), ["deepseek"]);
   assert.equal(String(ctx.homeAgent.agent.id), "home-provider-test");
   assert.equal((await ctx.llm.listModels("deepseek")).some((model) => model.id === "deepseek-v4-flash"), true);
+  assert.ok((await ctx.llm.resolveModelInfo("deepseek", "deepseek-v4-flash")).context?.contextWindow);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

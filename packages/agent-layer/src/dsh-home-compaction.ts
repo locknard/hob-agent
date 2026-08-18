@@ -139,7 +139,7 @@ export class HomeCompactionEngine extends BasicCompactionEngine {
     super(ctx, {
       thresholdRatio: 0.8,
       retainRatio: 0.16,
-      maxTokens: 4_096,
+      maxTokens: 8_192,
       compactionRetries: 1,
       maxOverflowRetries: 1,
       auto: true,
