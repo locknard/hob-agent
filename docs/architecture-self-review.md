@@ -94,9 +94,11 @@ apply an artifact or control a device.
   the production HomeWorld paths before autonomous observation is enabled. It
   emits no household identities, values, URLs, credentials, or raw errors.
 - The DSH Agent can inspect the existing neutral `foreignRules@1` catalog
-  through bounded `get_home_rules` pages before proposing an automation. The
-  Hub still owns the authoritative proposal-time conflict check, and no rule
-  body or mutation path crosses the tool boundary.
+  through bounded `get_home_rules` pages before proposing an automation. An
+  autonomous runtime gate requires a complete stable cursor sequence rather
+  than trusting prompt compliance. The Hub still owns the authoritative
+  proposal-time conflict check, and no rule body or mutation path crosses the
+  tool boundary.
 - Authoritative conflict coverage is scoped to every bridge binding of the
   selected devices. An unrelated bridge without a rule catalog cannot block a
   proposal, while a selected or merged cross-bridge device still fails closed

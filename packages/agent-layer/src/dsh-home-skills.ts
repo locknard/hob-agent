@@ -16,7 +16,7 @@ export function apply(ctx: Context): void {
       "2. Read get_home_activity for bounded post-baseline candidate triage. Treat activity as possible noise, never as proof of a routine.",
       "3. Select a small materially useful candidate set, then read only its bounded detailed snapshot pages.",
       "4. For any claim about behavior over time, read post-baseline evidence for the selected capabilities and reject incomplete, noisy, or uncorroborated patterns.",
-      "5. Read existing household rule metadata before proposing an automation. Treat this as a heuristic overlap screen, not proof of non-interference.",
+      "5. Read every page of existing household rule metadata in stable cursor order before proposing an automation. Treat this as a heuristic overlap screen, not proof of non-interference.",
       "6. Before proposing, state the concrete household value, why the suggestion is timely now, and at least one uncertainty that still requires household judgment or more observation.",
       "7. Create at most one review-only proposal. If evidence, coverage, benefit, timing, uncertainty, or rollback clarity is insufficient, create none.",
       "8. When you create no proposal, call report_home_observation exactly once with the best bounded disposition. This is Agent-authored calibration metadata, not Hub evidence.",

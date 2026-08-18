@@ -28,6 +28,7 @@ import * as HomeActivityTool from "./dsh-home-activity-tool.js";
 import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
 import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
+import { HomeRulesCoverageService } from "./dsh-home-rules-tool.js";
 import * as HomeProposalTool from "./dsh-home-proposal-tool.js";
 import { HomeObservationBudgetService } from "./dsh-home-observation-budget.js";
 import {
@@ -103,6 +104,8 @@ export class DshHomeAgentService extends Service {
     if (signal?.aborted) throw new Error("Home observation was cancelled");
     const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
     if (inventoryCoverage === undefined) throw new Error("Home inventory coverage gate is unavailable");
+    const rulesCoverage = this.ctx.get("homeRulesCoverage");
+    if (rulesCoverage === undefined) throw new Error("Home rule coverage gate is unavailable");
     const observationBudget = this.ctx.get("homeObservationBudget");
     if (observationBudget === undefined) throw new Error("Home observation budget is unavailable");
     const observationReport = this.ctx.get("homeObservationReport");
@@ -117,6 +120,7 @@ export class DshHomeAgentService extends Service {
     observationBudget.begin(this.agent, HOME_OBSERVATION_MAX_TOOL_CALLS);
     observationReport.begin(this.agent);
     inventoryCoverage.beginObservation();
+    rulesCoverage.beginObservation();
     let task: Promise<void> | undefined;
     let budgetOutcome: ReturnType<HomeObservationBudgetService["end"]>;
     let disposition: HomeObservationDisposition | undefined;
@@ -145,6 +149,7 @@ export class DshHomeAgentService extends Service {
       budgetOutcome = observationBudget.end();
       disposition = observationReport.end();
       inventoryCoverage.endObservation();
+      rulesCoverage.endObservation();
       observationDeadline.signal.removeEventListener("abort", cancel);
       observationDeadline[Symbol.dispose]();
       if (task !== undefined && this.observationTask === task) this.observationTask = undefined;
@@ -220,6 +225,7 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(HomeActivityTool);
     await this.ctx.plugin(HomeSnapshotTool);
     await this.ctx.plugin(HomeEvidenceTool);
+    await this.ctx.plugin(HomeRulesCoverageService);
     await this.ctx.plugin(HomeRulesTool);
     await this.ctx.plugin(HomeProposalTool);
     await this.ctx.plugin(HomeObservationReportService);

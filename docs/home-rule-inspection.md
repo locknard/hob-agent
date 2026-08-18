@@ -17,6 +17,11 @@ The tool reads the existing optional `foreignRules@1` extension through
 `HomeWorldService`. It does not change the frozen bridge core contract or add a
 Home Assistant-specific API.
 
+Autonomous observations must read every page in stable cursor order before
+`create_home_proposal` is allowed. The catalog version covers the ordered
+metadata projection, so a mid-read change fails closed and requires a fresh
+first page. See [existing-rule coverage gate](existing-rule-coverage-gate.md).
+
 Each result contains only:
 
 - the neutral bridge identifier and catalog availability;

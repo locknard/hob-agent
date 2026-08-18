@@ -178,11 +178,14 @@ exact epoch/sequence references plus coverage in the local proposal; the model
 cannot author journal provenance. See
 [`docs/proposal-evidence-binding.md`](docs/proposal-evidence-binding.md).
 
-Before proposing a new automation, the Agent can inspect bounded metadata for
-existing rules through `get_home_rules`. Missing or inconsistent catalogs stay
+Before proposing a new automation, an autonomous observation must exhaust the
+bounded metadata pages for existing rules through `get_home_rules`. A stable
+catalog version and strict cursor sequence make this a runtime gate rather than
+prompt-only guidance. Missing or inconsistent catalogs stay
 explicitly unavailable rather than looking empty; native rule IDs, YAML,
 triggers, actions, and templates are not exposed. See
-[`docs/home-rule-inspection.md`](docs/home-rule-inspection.md).
+[`docs/home-rule-inspection.md`](docs/home-rule-inspection.md) and
+[`docs/existing-rule-coverage-gate.md`](docs/existing-rule-coverage-gate.md).
 
 Periodic observation is opt-in, local, and Hub-scheduled. It runs only after a
 consistent bridge snapshot, skips a busy Agent, and stops generating new work

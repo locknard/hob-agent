@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Context } from "@deepseek-ai/cordis";
 import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
 
-import { apply, pageHomeRules } from "./dsh-home-rules-tool.js";
+import { Context } from "@deepseek-ai/cordis";
+
+import { apply, HomeRulesCoverageService, pageHomeRules } from "./dsh-home-rules-tool.js";
 
 const CATALOGS = [
   {
@@ -36,11 +37,42 @@ test("pages neutral existing-rule metadata and preserves unavailable coverage", 
   ]);
   assert.equal(first.page.returnedRules, 2);
   assert.equal(first.page.totalRules, 3);
+  assert.match(first.catalogVersion, /^[a-f0-9]{64}$/);
   assert.equal(typeof first.page.nextCursor, "string");
 
   const second = pageHomeRules(CATALOGS, { limit: 2, cursor: first.page.nextCursor });
+  assert.equal(second.catalogVersion, first.catalogVersion);
   assert.deepEqual(second.rules, [{ bridgeId: "bridge-a", ruleRef: "rule-3", enabled: false }]);
   assert.equal(second.page.nextCursor, undefined);
+
+  const reordered = pageHomeRules([
+    { ...CATALOGS[1]!, rules: [...CATALOGS[1]!.rules].reverse() },
+    CATALOGS[0]!,
+  ], { limit: 2 });
+  assert.equal(reordered.catalogVersion, first.catalogVersion);
+});
+
+test("opens autonomous proposal coverage only after a stable ordered rule catalog is exhausted", async () => {
+  const ctx = new Context();
+  await ctx.plugin(HomeRulesCoverageService);
+  ctx.homeRulesCoverage.beginObservation();
+  assert.throws(() => ctx.homeRulesCoverage.assertProposalAllowed(), /rule catalog/i);
+
+  const first = pageHomeRules(CATALOGS, { limit: 2 });
+  ctx.homeRulesCoverage.record({ limit: 2 }, first);
+  assert.throws(() => ctx.homeRulesCoverage.assertProposalAllowed(), /rule catalog/i);
+
+  const secondQuery = { limit: 2, cursor: first.page.nextCursor };
+  const second = pageHomeRules(CATALOGS, secondQuery);
+  ctx.homeRulesCoverage.record(secondQuery, second);
+  assert.doesNotThrow(() => ctx.homeRulesCoverage.assertProposalAllowed());
+
+  ctx.homeRulesCoverage.beginObservation();
+  ctx.homeRulesCoverage.record({ limit: 2 }, first);
+  ctx.homeRulesCoverage.record(secondQuery, { ...second, catalogVersion: "0".repeat(64) });
+  assert.throws(() => ctx.homeRulesCoverage.assertProposalAllowed(), /rule catalog/i);
+  ctx.homeRulesCoverage.endObservation();
+  await ctx.fiber.dispose();
 });
 
 test("rejects malformed cursors and unbounded rule queries", () => {
@@ -59,6 +91,7 @@ test("registers a bounded read-only existing-rule tool over HomeWorld", async ()
   };
   const ctx = {
     homeWorld,
+    get: () => undefined,
     tools: {
       register(definition: ToolDefinition): () => void {
         registered = definition;

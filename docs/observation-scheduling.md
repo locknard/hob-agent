@@ -36,6 +36,9 @@ the household has no pending proposal to review.
   The autonomous runtime gate rejects proposal creation after a partial,
   out-of-order, or version-changing inventory; this is not left to prompt
   compliance.
+- Existing-rule inspection must likewise exhaust a stable `get_home_rules`
+  cursor sequence before proposal creation. A skipped, reordered, or
+  version-changing catalog fails closed while the autonomous turn is active.
 - Candidate selection treats rapid software/integration status flapping,
   `unknown`/`unavailable` lifecycle transitions, and uncorroborated short
   sensor bursts as noise rather than household routine. They justify a

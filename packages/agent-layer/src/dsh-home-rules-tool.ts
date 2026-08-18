@@ -1,5 +1,6 @@
-import type { Context } from "@deepseek-ai/cordis";
+import { Service, type Context } from "@deepseek-ai/cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { createHash } from "node:crypto";
 
 export const name = "dsh-home-rules-tool";
 export const inject = ["tools", "homeWorld"] as const;
@@ -25,12 +26,13 @@ interface HomeRulesPort {
   foreignRuleCatalog(): Promise<readonly HomeRuleCatalog[]>;
 }
 
-interface HomeRulesQuery {
+export interface HomeRulesQuery {
   readonly cursor?: string;
   readonly limit?: number;
 }
 
 export interface HomeRulesPage {
+  readonly catalogVersion: string;
   readonly catalogs: {
     readonly bridgeId: string;
     readonly status: "available" | "unavailable";
@@ -48,10 +50,74 @@ export interface HomeRulesPage {
 
 type HomeRulesContext = Context & { homeWorld: HomeRulesPort };
 
+declare module "@deepseek-ai/cordis" {
+  interface Context {
+    homeRulesCoverage: HomeRulesCoverageService;
+  }
+}
+
+/** Enforces complete ordered existing-rule discovery only during autonomous observations. */
+export class HomeRulesCoverageService extends Service {
+  private active = false;
+  private complete = false;
+  private invalid = false;
+  private expectedCursor: string | undefined;
+  private totalRules: number | undefined;
+  private catalogVersion: string | undefined;
+
+  constructor(ctx: Context) {
+    super(ctx, "homeRulesCoverage");
+  }
+
+  beginObservation(): void {
+    this.active = true;
+    this.resetSequence();
+  }
+
+  endObservation(): void {
+    this.active = false;
+    this.resetSequence();
+  }
+
+  record(query: HomeRulesQuery, result: HomeRulesPage): void {
+    if (!this.active) return;
+    if (query.cursor === undefined) {
+      this.resetSequence();
+      this.totalRules = result.page.totalRules;
+      this.catalogVersion = result.catalogVersion;
+    } else if (this.invalid
+      || this.complete
+      || query.cursor !== this.expectedCursor
+      || result.page.totalRules !== this.totalRules
+      || result.catalogVersion !== this.catalogVersion) {
+      this.invalid = true;
+      this.complete = false;
+      return;
+    }
+    this.expectedCursor = result.page.nextCursor;
+    this.complete = result.page.nextCursor === undefined;
+  }
+
+  assertProposalAllowed(): void {
+    if (this.active && (!this.complete || this.invalid)) {
+      throw new Error("Autonomous observation must exhaust a stable home rule catalog before proposing");
+    }
+  }
+
+  private resetSequence(): void {
+    this.complete = false;
+    this.invalid = false;
+    this.expectedCursor = undefined;
+    this.totalRules = undefined;
+    this.catalogVersion = undefined;
+  }
+}
+
 const OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
+    catalogVersion: { type: "string", required: true },
     catalogs: {
       type: "array",
       required: true,
@@ -113,7 +179,9 @@ export function apply(ctx: Context): void {
     },
     execute: async (args) => {
       const homeWorld = (ctx as HomeRulesContext).homeWorld;
-      return pageHomeRules(await homeWorld.foreignRuleCatalog.call(homeWorld), args);
+      const result = pageHomeRules(await homeWorld.foreignRuleCatalog.call(homeWorld), args);
+      ctx.get("homeRulesCoverage")?.record(args, result);
+      return result;
     },
   }));
 }
@@ -126,7 +194,25 @@ export function pageHomeRules(
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
     throw new TypeError("home rules limit must be an integer from 1 through 50");
   }
-  const orderedCatalogs = [...catalogs].sort((left, right) => left.bridgeId.localeCompare(right.bridgeId));
+  const orderedCatalogs = [...catalogs]
+    .sort((left, right) => left.bridgeId.localeCompare(right.bridgeId))
+    .map((catalog) => ({
+      ...catalog,
+      rules: [...catalog.rules].sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)),
+    }));
+  const catalogVersion = createHash("sha256")
+    .update(JSON.stringify(orderedCatalogs.map((catalog) => [
+      catalog.bridgeId,
+      catalog.status,
+      catalog.epochId ?? null,
+      catalog.rules.map((rule) => [
+        rule.ruleRef,
+        rule.name ?? null,
+        rule.enabled ?? null,
+        rule.updatedAt ?? null,
+      ]),
+    ])))
+    .digest("hex");
   const rules = orderedCatalogs.flatMap((catalog) => catalog.status === "available"
     ? catalog.rules.map((rule) => ({ bridgeId: catalog.bridgeId, ...rule }))
     : []).sort(compareRules);
@@ -135,6 +221,7 @@ export function pageHomeRules(
   const hasMore = start + pageRules.length < rules.length;
   const last = pageRules.at(-1);
   return {
+    catalogVersion,
     catalogs: orderedCatalogs.map((catalog) => catalog.status === "available"
       ? {
           bridgeId: catalog.bridgeId,

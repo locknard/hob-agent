@@ -126,3 +126,38 @@ test("rejects an autonomous proposal while inventory coverage is incomplete", as
   }, { rootCallId: "call-incomplete" } as never), /inventory incomplete/);
   assert.equal(drafts, 0);
 });
+
+test("rejects an autonomous proposal while existing-rule coverage is incomplete", async () => {
+  let registered: ToolDefinition | undefined;
+  let drafts = 0;
+  const ctx = {
+    get(name: string) {
+      return name === "homeRulesCoverage"
+        ? { assertProposalAllowed() { throw new Error("rule catalog incomplete"); } }
+        : undefined;
+    },
+    homeProposals: { async createDraft() { drafts += 1; throw new Error("must not run"); } },
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => undefined;
+      },
+    },
+  } as unknown as Context;
+  apply(ctx);
+  await assert.rejects(() => registered!.execute({
+    kind: "automation-draft",
+    title: "Unchecked rule overlap",
+    summary: "Must not become a proposal.",
+    householdValue: "Avoid duplicating existing household behavior.",
+    whyNow: "The existing-rule scan is incomplete.",
+    uncertainties: ["Unread rules may already implement this behavior."],
+    idempotencyKey: "unchecked-rules:v1",
+    selectedHwIds: ["hw-1"],
+    riskLevel: "low",
+    riskReasons: [],
+    intentDescription: "Do not create.",
+    rollback: "No change.",
+  }, { rootCallId: "call-unchecked-rules" } as never), /rule catalog incomplete/);
+  assert.equal(drafts, 0);
+});

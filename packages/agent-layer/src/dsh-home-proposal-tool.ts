@@ -120,6 +120,7 @@ export function apply(ctx: Context): void {
     },
     execute: async (args, exec) => {
       ctx.get("homeInventoryCoverage")?.assertProposalAllowed();
+      ctx.get("homeRulesCoverage")?.assertProposalAllowed();
       const proposal = await (ctx as ProposalContext).homeProposals.createDraft({
         kind: args.kind,
         title: args.title,
