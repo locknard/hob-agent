@@ -1,24 +1,28 @@
-import { createModels, type CredentialStore } from "@earendil-works/pi-ai";
-import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
-import { moonshotaiProvider } from "@earendil-works/pi-ai/providers/moonshotai";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
+import type {
+  GenerateOptions,
+  LlmModelInfo,
+  LlmResolvedModelInfo,
+  StreamChunk,
+} from "@deepseek-ai/dsh-llm";
 
 export type SupportedModelProvider = "gpt" | "claude" | "deepseek" | "kimi" | "glm";
 
 export interface ProviderSetup {
   id: SupportedModelProvider;
-  piProviderId: "openai" | "anthropic" | "deepseek" | "moonshotai" | "zai";
+  /** Provider route registered in the DSH LlmRuntime. */
+  runtimeProviderId: "openai" | "anthropic" | "deepseek" | "moonshotai" | "zai";
+  /** @deprecated Use runtimeProviderId. Kept while OAuth lifecycle migrates. */
+  piProviderId: ProviderSetup["runtimeProviderId"];
+  /** DSH credential reference consumed by dsh-llm-pi-ai's apiKeyEnv field. */
   credentialEnv: string;
 }
 
 const PROVIDERS: Record<SupportedModelProvider, ProviderSetup> = {
-  gpt: { id: "gpt", piProviderId: "openai", credentialEnv: "OPENAI_API_KEY" },
-  claude: { id: "claude", piProviderId: "anthropic", credentialEnv: "ANTHROPIC_API_KEY" },
-  deepseek: { id: "deepseek", piProviderId: "deepseek", credentialEnv: "DEEPSEEK_API_KEY" },
-  kimi: { id: "kimi", piProviderId: "moonshotai", credentialEnv: "MOONSHOT_API_KEY" },
-  glm: { id: "glm", piProviderId: "zai", credentialEnv: "ZAI_API_KEY" },
+  gpt: { id: "gpt", runtimeProviderId: "openai", piProviderId: "openai", credentialEnv: "OPENAI_API_KEY" },
+  claude: { id: "claude", runtimeProviderId: "anthropic", piProviderId: "anthropic", credentialEnv: "ANTHROPIC_API_KEY" },
+  deepseek: { id: "deepseek", runtimeProviderId: "deepseek", piProviderId: "deepseek", credentialEnv: "DEEPSEEK_API_KEY" },
+  kimi: { id: "kimi", runtimeProviderId: "moonshotai", piProviderId: "moonshotai", credentialEnv: "MOONSHOT_API_KEY" },
+  glm: { id: "glm", runtimeProviderId: "zai", piProviderId: "zai", credentialEnv: "ZAI_API_KEY" },
 };
 
 export function providerSetup(id: SupportedModelProvider): ProviderSetup {
@@ -27,12 +31,17 @@ export function providerSetup(id: SupportedModelProvider): ProviderSetup {
   return setup;
 }
 
-export function createProviderModels(options: { credentials?: CredentialStore } = {}) {
-  const models = createModels({ credentials: options.credentials });
-  models.setProvider(openaiProvider());
-  models.setProvider(anthropicProvider());
-  models.setProvider(deepseekProvider());
-  models.setProvider(moonshotaiProvider());
-  models.setProvider(zaiProvider());
-  return models;
+/**
+ * The only model boundary owned by the product is the DSH LlmRuntime. Keeping
+ * this narrow structural type lets callers depend on the DSH seam without
+ * importing a provider SDK or constructing a second model registry.
+ */
+export interface DshLlmRuntime {
+  resolveModelInfo(
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<LlmResolvedModelInfo>;
+  listModels(provider: string): Promise<readonly LlmModelInfo[]>;
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
 }

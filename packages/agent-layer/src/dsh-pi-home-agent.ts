@@ -42,11 +42,11 @@ class DshPiHomeAgentComposition extends Service {
     await this.ctx.plugin(LlmRuntime);
     await this.ctx.plugin(PiAiPlugin, {
       providers: {
-        [setup.piProviderId]: { apiKeyEnv: setup.credentialEnv },
+        [setup.runtimeProviderId]: { apiKeyEnv: setup.credentialEnv },
       },
     });
     await this.ctx.plugin(DshHomeAgentService, {
-      provider: setup.piProviderId,
+      provider: setup.runtimeProviderId,
       model: this.options.model,
       ...(this.options.sessionId === undefined ? {} : { sessionId: this.options.sessionId }),
       ...(this.options.systemPrompt === undefined ? {} : { systemPrompt: this.options.systemPrompt }),
