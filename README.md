@@ -66,6 +66,17 @@ export HOB_HOME_DIR='/absolute/path/to/private-home'
 pnpm start
 ```
 
+Before enabling the Agent or observation schedule, the same bridge and data
+configuration can be validated without `HOB_MODEL` or a model API key:
+
+```sh
+pnpm validate:home
+```
+
+The command mounts only HomeWorld and prints aggregate readiness and counts; it
+never prints household names, IDs, state values, URLs, credentials, or raw
+errors. See [`docs/home-validation.md`](docs/home-validation.md).
+
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
 Home Product Bundle contributes the bounded, paginated, read-only

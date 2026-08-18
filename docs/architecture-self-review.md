@@ -53,6 +53,9 @@ apply an artifact or control a device.
   observation through trusted Hub evidence binding into the Inbox. The Home
   Agent retains its trace service explicitly so cross-plugin Inbox reads do not
   bypass Cordis injection ownership.
+- `pnpm validate:home` provides a model-free, aggregate-only readiness cut over
+  the production HomeWorld paths before autonomous observation is enabled. It
+  emits no household identities, values, URLs, credentials, or raw errors.
 - Optional Inbox HTTP is disabled without an explicit credential, binds only to
   `127.0.0.1`, stores only a derived verifier, authenticates every request, and
   requires exact same-origin bounded review POSTs.

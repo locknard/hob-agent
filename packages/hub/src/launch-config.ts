@@ -61,14 +61,39 @@ export interface HomeHubLaunchConfig {
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
 }
 
+export interface HomeWorldLaunchConfig {
+  readonly dataDirectory: string;
+  readonly journalDirectory: string;
+  readonly registryPath: string;
+  readonly worldModelPath: string;
+  readonly bridges: readonly BridgeConfigEntry<unknown>[];
+  readonly bridgeCredentialSource: BridgeAwareCredentialSource;
+  readonly catalog: BridgeCatalog;
+}
+
+/** Reads only the neutral HomeWorld launch slice; no model credential is required. */
+export function readHomeWorldLaunchConfig(environment: LaunchEnvironment): HomeWorldLaunchConfig {
+  const dataDirectory = requiredDataDirectory(environment);
+  const bridgeEntries = parseBridgeEntries(requiredValue(environment, "HOB_BRIDGES"));
+  const refsByBridge = new Map(bridgeEntries.map((entry) => [entry.bridgeId, entry.credentialRefs]));
+  return {
+    dataDirectory,
+    journalDirectory: dataDirectory,
+    registryPath: join(dataDirectory, "bridge-registry.sqlite"),
+    worldModelPath: join(dataDirectory, "world-model.sqlite"),
+    bridges: bridgeEntries.map(({ bridgeId, adapterType, config }) => ({ bridgeId, adapterType, config })),
+    bridgeCredentialSource: createBridgeCredentialSource(environment, refsByBridge),
+    catalog: createBuiltinBridgeCatalog(),
+  };
+}
+
 /**
  * Reads the neutral executable launch contract. HOB_BRIDGES contains only
  * bridge identity, adapter type, non-secret config, and env-name references;
  * the referenced values are resolved later through the bridge-scoped provider.
  */
 export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHubLaunchConfig {
-  const dataDirectory = requiredDataDirectory(environment);
-  const bridges = parseBridgeEntries(requiredValue(environment, "HOB_BRIDGES"));
+  const world = readHomeWorldLaunchConfig(environment);
   const modelReference = requiredValue(environment, "HOB_MODEL");
 
   let model: ReturnType<typeof parseModelReference>;
@@ -90,19 +115,12 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
     source: "process",
     values: { [credentialEnv]: apiKey },
   }]);
-  const refsByBridge = new Map(bridges.map((entry) => [entry.bridgeId, entry.credentialRefs]));
 
   return {
-    dataDirectory,
-    journalDirectory: dataDirectory,
-    registryPath: join(dataDirectory, "bridge-registry.sqlite"),
-    worldModelPath: join(dataDirectory, "world-model.sqlite"),
-    proposalPath: join(dataDirectory, "proposals.sqlite"),
-    sessionPath: join(dataDirectory, "dsh-sessions.sqlite"),
+    ...world,
+    proposalPath: join(world.dataDirectory, "proposals.sqlite"),
+    sessionPath: join(world.dataDirectory, "dsh-sessions.sqlite"),
     ...(householdDirectory === undefined ? {} : { householdDirectory }),
-    bridges: bridges.map(({ bridgeId, adapterType, config }) => ({ bridgeId, adapterType, config })),
-    bridgeCredentialSource: createBridgeCredentialSource(environment, refsByBridge),
-    catalog: createBuiltinBridgeCatalog(),
     agent: { provider: model.provider, model: model.modelId },
     ...(inboxHttp === undefined ? {} : { inboxHttp }),
     ...(observation === undefined ? {} : { observation }),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readHomeHubLaunchConfig } from "./launch-config.js";
+import { readHomeHubLaunchConfig, readHomeWorldLaunchConfig } from "./launch-config.js";
 
 const BRIDGES = JSON.stringify([{
   bridgeId: "ha-main",
@@ -49,6 +49,21 @@ test("reads neutral bridge entries and selected model credential without putting
     await config.bridgeCredentialSource.resolveForBridge("ha-main", "access-token"),
     { kind: "secret_text", value: "home-assistant-secret" },
   );
+});
+
+test("reads the HomeWorld validation slice without a model or provider credential", async () => {
+  const config = readHomeWorldLaunchConfig({
+    HOB_DATA_DIR: BASE_ENV.HOB_DATA_DIR,
+    HOB_BRIDGES: BASE_ENV.HOB_BRIDGES,
+    HOB_HA_TOKEN: BASE_ENV.HOB_HA_TOKEN,
+  });
+  assert.equal(config.bridges.length, 1);
+  assert.equal(config.catalog.hasAdapter("home-assistant"), true);
+  assert.deepEqual(await config.bridgeCredentialSource.resolveForBridge("ha-main", "access-token"), {
+    kind: "secret_text",
+    value: "home-assistant-secret",
+  });
+  assert.equal("agent" in config, false);
 });
 
 test("accepts only an explicit absolute household context directory", () => {

@@ -125,6 +125,7 @@ test("mounts the opt-in Hub observation scheduler after the DSH Home Agent", asy
 
   await runtime.start();
   assert.equal(runtime.context.homeObservationScheduler.name, "homeObservationScheduler");
+  assert.match(runtime.context.homeInbox.renderList(), /Observation: waiting/);
   await runtime.stop();
   assert.equal(runtime.context.homeObservationScheduler, undefined);
 });
