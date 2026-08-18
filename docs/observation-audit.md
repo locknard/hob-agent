@@ -6,7 +6,9 @@ that is separate from DSH session persistence and diagnostic traces.
 
 Each attempt records only a generated run id, its trigger (`startup`,
 `scheduled`, `manual`, or `one_shot`), start and completion timestamps, and the
-closed product outcome. It must not persist prompts, model responses, tool
+closed product outcome. A `no_proposal` attempt may additionally retain one
+bounded, explicitly Agent-reported disposition; see
+[`observation-disposition.md`](observation-disposition.md). It must not persist prompts, model responses, tool
 arguments or results, native bridge identifiers, device names, capability
 values, credentials, or arbitrary exception text.
 

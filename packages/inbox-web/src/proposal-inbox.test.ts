@@ -97,7 +97,11 @@ test("lists and renders untrusted proposal content without creating an applicati
     intervalMinutes: 360,
     runOnStart: false,
     state: "waiting",
-    lastAttempt: { at: "2026-08-19T00:00:00.000Z", outcome: "no_proposal" },
+    lastAttempt: {
+      at: "2026-08-19T00:00:00.000Z",
+      outcome: "no_proposal",
+      disposition: "insufficient_evidence",
+    },
     recentAttempts: [{
       id: "observation-2",
       trigger: "scheduled",
@@ -105,6 +109,7 @@ test("lists and renders untrusted proposal content without creating an applicati
       completedAt: "2026-08-19T00:00:02.000Z",
       status: "completed",
       outcome: "no_proposal",
+      disposition: "insufficient_evidence",
     }, {
       id: "observation-1",
       trigger: "startup",
@@ -119,9 +124,9 @@ test("lists and renders untrusted proposal content without creating an applicati
   });
   assert.equal(listHtml.includes("<script>"), false);
   assert.match(listHtml, /&lt;script&gt;Unsafe title&lt;\/script&gt;/);
-  assert.match(listHtml, /no useful proposal/i);
+  assert.match(listHtml, /no proposal · Agent reported: insufficient evidence/i);
   assert.match(listHtml, /Recent observations/i);
-  assert.match(listHtml, /scheduled · no useful proposal/i);
+  assert.match(listHtml, /scheduled · no proposal · Agent reported: insufficient evidence/i);
   assert.match(listHtml, /startup · interrupted safely/i);
   assert.match(listHtml, /manual · running/i);
 

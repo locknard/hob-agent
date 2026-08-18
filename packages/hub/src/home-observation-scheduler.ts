@@ -1,4 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
+import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
 
 import type { ObservationTrigger } from "./observation-audit-store.js";
 
@@ -27,7 +28,16 @@ export interface HomeObservationStatus {
   readonly intervalMinutes: number;
   readonly runOnStart: boolean;
   readonly state: "waiting" | "running" | "stopped";
-  readonly lastAttempt?: { readonly at: string; readonly outcome: HomeObservationOutcome };
+  readonly lastAttempt?: {
+    readonly at: string;
+    readonly outcome: HomeObservationOutcome;
+    readonly disposition?: HomeObservationDisposition;
+  };
+}
+
+export interface HomeObservationResult {
+  readonly outcome: HomeObservationOutcome;
+  readonly disposition?: HomeObservationDisposition;
 }
 
 export interface ObservationPorts {
@@ -43,7 +53,7 @@ export interface ObservationPorts {
   };
   homeAgent: {
     readonly observationStatus: "idle" | "running";
-    requestObservation(signal?: AbortSignal): Promise<void>;
+    requestObservation(signal?: AbortSignal): Promise<HomeObservationDisposition | undefined>;
   };
 }
 
@@ -129,16 +139,16 @@ export class HomeObservationSchedulerService extends Service {
       return "failed";
     }
     this.state = "running";
-    let outcome: HomeObservationOutcome = "failed";
+    let result: HomeObservationResult = { outcome: "failed" };
     try {
-      outcome = await requestGovernedHomeObservation(this.ctx as unknown as ObservationPorts, signal);
-      return outcome;
+      result = await requestGovernedHomeObservation(this.ctx as unknown as ObservationPorts, signal);
+      return result.outcome;
     } finally {
       const completedAt = observationTimestamp(this.clock);
       try {
-        this.ctx.homeObservationAudit.complete({ id: auditId, completedAt, outcome });
+        this.ctx.homeObservationAudit.complete({ id: auditId, completedAt, ...result });
       } finally {
-        this.lastAttempt = { at: completedAt, outcome };
+        this.lastAttempt = { at: completedAt, ...result };
         this.state = this.stopped ? "stopped" : "waiting";
       }
     }
@@ -186,20 +196,20 @@ export class HomeObservationSchedulerService extends Service {
 export async function requestGovernedHomeObservation(
   ctx: ObservationPorts,
   signal: AbortSignal = new AbortController().signal,
-): Promise<HomeObservationOutcome> {
+): Promise<HomeObservationResult> {
   try {
-    if (signal.aborted) return "failed";
-    if (!isHomeWorldReady(ctx.homeWorld.snapshot())) return "world_not_ready";
+    if (signal.aborted) return { outcome: "failed" };
+    if (!isHomeWorldReady(ctx.homeWorld.snapshot())) return { outcome: "world_not_ready" };
     if (ctx.homeProposals.list({ status: "pending_review", limit: 1 }).length > 0) {
-      return "proposal_pending";
+      return { outcome: "proposal_pending" };
     }
-    if (ctx.homeAgent.observationStatus !== "idle") return "agent_busy";
-    await ctx.homeAgent.requestObservation(signal);
+    if (ctx.homeAgent.observationStatus !== "idle") return { outcome: "agent_busy" };
+    const disposition = await ctx.homeAgent.requestObservation(signal);
     return ctx.homeProposals.list({ status: "pending_review", limit: 1 }).length > 0
-      ? "proposal_created"
-      : "no_proposal";
+      ? { outcome: "proposal_created" }
+      : { outcome: "no_proposal", ...(disposition === undefined ? {} : { disposition }) };
   } catch {
-    return "failed";
+    return { outcome: "failed" };
   }
 }
 

@@ -106,6 +106,7 @@ export interface InboxObservationStatus {
   readonly lastAttempt?: {
     readonly at: string;
     readonly outcome: "proposal_created" | "no_proposal" | "world_not_ready" | "proposal_pending" | "agent_busy" | "failed";
+    readonly disposition?: InboxObservationDisposition;
   };
   readonly recentAttempts?: readonly InboxObservationAttempt[];
 }
@@ -121,8 +122,16 @@ export type InboxObservationAttempt = {
       readonly status: "completed";
       readonly completedAt: string;
       readonly outcome: NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"];
+      readonly disposition?: InboxObservationDisposition;
     }
 );
+
+export type InboxObservationDisposition =
+  | "no_material_value"
+  | "insufficient_evidence"
+  | "existing_rule_overlap"
+  | "mapping_uncertain"
+  | "other_uncertainty";
 
 export interface InboxProposalDetail {
   readonly proposal: InboxProposal;
@@ -207,7 +216,7 @@ export function renderProposalList(
   </li>`).join("");
   const observationStatus = observation === undefined
     ? "<p class=\"observation-status\">Observation schedule is disabled.</p>"
-    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome))} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
+    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome, observation.lastAttempt.disposition))} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
   const attempts = observation?.recentAttempts ?? persistedAttempts;
   const observationHistory = attempts.length === 0
     ? ""
@@ -220,7 +229,7 @@ export function renderProposalList(
 function observationAttemptLabel(attempt: InboxObservationAttempt): string {
   if (attempt.status === "running") return "running";
   if (attempt.status === "interrupted") return "interrupted safely";
-  return escapeHtml(observationOutcomeLabel(attempt.outcome));
+  return escapeHtml(observationOutcomeLabel(attempt.outcome, attempt.disposition));
 }
 
 function observationTriggerLabel(trigger: InboxObservationAttempt["trigger"]): string {
@@ -291,14 +300,27 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
 
 function observationOutcomeLabel(
   outcome: NonNullable<InboxObservationStatus["lastAttempt"]>["outcome"],
+  disposition?: InboxObservationDisposition,
 ): string {
   switch (outcome) {
     case "proposal_created": return "proposal created";
-    case "no_proposal": return "no useful proposal";
+    case "no_proposal": return disposition === undefined
+      ? "no proposal · Agent disposition not reported"
+      : `no proposal · Agent reported: ${observationDispositionLabel(disposition)}`;
     case "world_not_ready": return "home not ready";
     case "proposal_pending": return "review already pending";
     case "agent_busy": return "agent busy";
     case "failed": return "failed safely";
+  }
+}
+
+function observationDispositionLabel(disposition: InboxObservationDisposition): string {
+  switch (disposition) {
+    case "no_material_value": return "no material household value";
+    case "insufficient_evidence": return "insufficient evidence";
+    case "existing_rule_overlap": return "existing rule overlap";
+    case "mapping_uncertain": return "home mapping uncertain";
+    case "other_uncertainty": return "other uncertainty";
   }
 }
 

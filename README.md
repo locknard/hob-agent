@@ -87,9 +87,11 @@ pnpm observe:home
 ```
 
 It uses the same Hub gates, creates at most one review-only proposal, prints
-only a metadata outcome, records a metadata-only observation attempt under
+only a metadata outcome (including an optional bounded Agent-reported reason
+when it creates no proposal), records a metadata-only observation attempt under
 `HOB_DATA_DIR`, and then exits. See
-[`docs/one-shot-observation.md`](docs/one-shot-observation.md).
+[`docs/one-shot-observation.md`](docs/one-shot-observation.md) and
+[`docs/observation-disposition.md`](docs/observation-disposition.md).
 
 To review persisted proposals afterward without reconnecting HA or starting
 DSH, keep only `HOB_DATA_DIR` and `HOB_INBOX_AUTH_TOKEN` set and run:

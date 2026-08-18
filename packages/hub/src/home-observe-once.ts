@@ -15,6 +15,7 @@ import {
 } from "./home-observation-scheduler.js";
 import type { LaunchEnvironment } from "./launch-config.js";
 import type { ObservationAuditStore } from "./observation-audit-store.js";
+import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
 
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_READY_POLL_MS = 250;
@@ -38,7 +39,11 @@ export interface ObserveHomeOptions {
 }
 
 export type ObserveHomeReport =
-  | { readonly outcome: "completed"; readonly proposal: "created" | "none" }
+  | {
+      readonly outcome: "completed";
+      readonly proposal: "created" | "none";
+      readonly disposition?: HomeObservationDisposition;
+    }
   | {
       readonly outcome: "not_run";
       readonly reason: Exclude<HomeObservationOutcome, "proposal_created" | "no_proposal">;
@@ -70,6 +75,7 @@ export async function observeHomeEnvironment(
       startedAt: new Date().toISOString(),
     });
     let auditOutcome: HomeObservationOutcome = "failed";
+    let auditDisposition: HomeObservationDisposition | undefined;
     try {
       const readyDeadline = Date.now() + readyTimeoutMs;
       while (!isHomeWorldReady(runtime.context.homeWorld.snapshot())) {
@@ -83,25 +89,31 @@ export async function observeHomeEnvironment(
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), observationTimeoutMs);
-      let outcome: HomeObservationOutcome;
+      let result: Awaited<ReturnType<typeof requestGovernedHomeObservation>>;
       try {
-        outcome = await requestGovernedHomeObservation(runtime.context, controller.signal);
+        result = await requestGovernedHomeObservation(runtime.context, controller.signal);
       } finally {
         clearTimeout(timeout);
       }
-      auditOutcome = outcome;
-      if (outcome === "proposal_created") return { outcome: "completed", proposal: "created" };
-      if (outcome === "no_proposal") return { outcome: "completed", proposal: "none" };
+      auditOutcome = result.outcome;
+      auditDisposition = result.disposition;
+      if (result.outcome === "proposal_created") return { outcome: "completed", proposal: "created" };
+      if (result.outcome === "no_proposal") return {
+        outcome: "completed",
+        proposal: "none",
+        ...(result.disposition === undefined ? {} : { disposition: result.disposition }),
+      };
       return {
         outcome: "not_run",
-        reason: outcome,
-        proposal: outcome === "proposal_pending" ? "already_pending" : "none",
+        reason: result.outcome,
+        proposal: result.outcome === "proposal_pending" ? "already_pending" : "none",
       };
     } finally {
       runtime.context.homeObservationAudit.complete({
         id: auditId,
         completedAt: new Date().toISOString(),
         outcome: auditOutcome,
+        ...(auditDisposition === undefined ? {} : { disposition: auditDisposition }),
       });
     }
   } finally {

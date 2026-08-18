@@ -11,6 +11,7 @@
     "./home-evidence-tool": "./src/dsh-home-evidence-tool.ts",
     "./home-inventory-tool": "./src/dsh-home-inventory-tool.ts",
     "./home-observation-budget": "./src/dsh-home-observation-budget.ts",
+    "./home-observation-report": "./src/dsh-home-observation-report.ts",
     "./home-rules-tool": "./src/dsh-home-rules-tool.ts",
     "./home-snapshot-tool": "./src/dsh-home-snapshot-tool.ts",
     "./model-reference": "./src/model-reference.ts",

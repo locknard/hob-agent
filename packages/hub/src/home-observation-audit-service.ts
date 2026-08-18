@@ -8,6 +8,7 @@ import {
   type SqliteObservationAuditStoreOptions,
 } from "./observation-audit-store.js";
 import type { HomeObservationOutcome } from "./home-observation-scheduler.js";
+import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
@@ -41,6 +42,7 @@ export class HomeObservationAuditService extends Service {
     readonly id: string;
     readonly completedAt: string;
     readonly outcome: HomeObservationOutcome;
+    readonly disposition?: HomeObservationDisposition;
   }): void {
     this.store.complete(input);
   }

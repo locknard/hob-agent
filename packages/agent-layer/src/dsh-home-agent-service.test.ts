@@ -60,6 +60,43 @@ class RepeatingToolAdapter extends LlmAdapter {
   }
 }
 
+class ObservationReportingAdapter extends LlmAdapter {
+  requests = 0;
+
+  async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests += 1;
+    if (this.requests === 1) {
+      const args = JSON.stringify({ disposition: "insufficient_evidence" });
+      yield { type: "block-start", index: 0, blockType: "tool-call" };
+      yield {
+        type: "tool-call-delta",
+        index: 0,
+        id: "observation-report-1",
+        name: "report_home_observation",
+        argumentsDelta: args,
+      };
+      yield {
+        type: "block-end",
+        index: 0,
+        block: {
+          type: "tool-call",
+          id: "observation-report-1",
+          name: "report_home_observation",
+          arguments: args,
+        },
+      };
+      yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish", reason: { kind: "tool-calls" } };
+      return;
+    }
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "text-delta", index: 0, text: "No proposal created." };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "No proposal created." } };
+    yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }
+}
+
 class HangingAdapter extends LlmAdapter {
   requests = 0;
 
@@ -120,6 +157,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "get_home_evidence",
     "get_home_rules",
     "create_home_proposal",
+    "report_home_observation",
     "skill",
   ]);
   const skills = ctx.get("skills") as unknown as { list(): Promise<readonly { name: string }[]> };
@@ -204,6 +242,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(ctx.get("agents"), undefined);
   assert.equal(ctx.get("tools"), undefined);
   assert.equal(ctx.get("homeObservationBudget"), undefined);
+  assert.equal(ctx.get("homeObservationReport"), undefined);
   assert.equal(ctx.get("skills"), undefined);
   assert.equal(ctx.get("llm"), undefined);
   await ctx.fiber.dispose();
@@ -296,6 +335,25 @@ test("cancels an autonomous observation that exceeds its product tool budget", a
       JSON.stringify(message).includes("repeating the exact same tool call"))),
     true,
   );
+  assert.equal(ctx.homeAgent.observationStatus, "idle");
+
+  await ctx.fiber.dispose();
+});
+
+test("returns the bounded disposition reported by one canonical DSH observation turn", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  const adapter = new ObservationReportingAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter,
+    sessionId: "reported-home",
+  });
+
+  assert.equal(await ctx.homeAgent.requestObservation(), "insufficient_evidence");
+  assert.equal(adapter.requests, 2);
   assert.equal(ctx.homeAgent.observationStatus, "idle");
 
   await ctx.fiber.dispose();

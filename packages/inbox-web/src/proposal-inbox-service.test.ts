@@ -28,6 +28,7 @@ class StubObservationAudit extends Service {
       completedAt: "2026-08-19T04:00:01.000Z",
       status: "completed",
       outcome: "no_proposal",
+      disposition: "existing_rule_overlap",
     }];
   }
 }
@@ -53,7 +54,7 @@ test("renders bounded persisted observation history without DSH trace content", 
   await ctx.plugin(StubObservationAudit);
   const fiber = await ctx.plugin(ProposalInboxService);
 
-  assert.match(ctx.homeInbox.renderList(), /one shot · no useful proposal/i);
+  assert.match(ctx.homeInbox.renderList(), /one shot · no proposal · Agent reported: existing rule overlap/i);
   assert.equal(ctx.homeInbox.renderList().includes("observation-1"), false);
 
   await fiber.dispose();

@@ -35,6 +35,7 @@ model and completes it with the same closed product outcome. A process restart
 marks an unfinished attempt as interrupted rather than success.
 
 The JSON result contains only the stable outcome and whether a new proposal was
-created, no proposal identity or content. A successful turn that found no
-materially useful change reports `completed` with `proposal: "none"`; it is not
-reported as a failure or as merely started.
+created, no proposal identity or content. A successful turn that creates none
+reports `completed` with `proposal: "none"` and may include one bounded
+Agent-reported `disposition`. The Hub does not infer a missing disposition or
+treat the Agent's category as trusted evidence.

@@ -29,6 +29,10 @@ import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
 import * as HomeProposalTool from "./dsh-home-proposal-tool.js";
 import { HomeObservationBudgetService } from "./dsh-home-observation-budget.js";
+import {
+  HomeObservationReportService,
+  type HomeObservationDisposition,
+} from "./dsh-home-observation-report.js";
 import * as HomeSkills from "./dsh-home-skills.js";
 import {
   AgentLoopTraceService,
@@ -93,13 +97,15 @@ export class DshHomeAgentService extends Service {
   }
 
   /** Starts one trusted product observation turn through the canonical DSH loop. */
-  async requestObservation(signal?: AbortSignal): Promise<void> {
+  async requestObservation(signal?: AbortSignal): Promise<HomeObservationDisposition | undefined> {
     if (this.observationStatus !== "idle") throw new Error("Home Agent is busy");
     if (signal?.aborted) throw new Error("Home observation was cancelled");
     const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
     if (inventoryCoverage === undefined) throw new Error("Home inventory coverage gate is unavailable");
     const observationBudget = this.ctx.get("homeObservationBudget");
     if (observationBudget === undefined) throw new Error("Home observation budget is unavailable");
+    const observationReport = this.ctx.get("homeObservationReport");
+    if (observationReport === undefined) throw new Error("Home observation report is unavailable");
     const timeoutMs = this.options.observationTimeoutMs ?? HOME_OBSERVATION_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
       throw new TypeError("Home observation timeout must be from 1 to 300000 milliseconds");
@@ -108,9 +114,11 @@ export class DshHomeAgentService extends Service {
     const cancel = () => this.agent.cancel({ kind: "parent" }, { keepInbox: true });
     observationDeadline.signal.addEventListener("abort", cancel, { once: true });
     observationBudget.begin(this.agent, HOME_OBSERVATION_MAX_TOOL_CALLS);
+    observationReport.begin(this.agent);
     inventoryCoverage.beginObservation();
     let task: Promise<void> | undefined;
     let budgetOutcome: ReturnType<HomeObservationBudgetService["end"]>;
+    let disposition: HomeObservationDisposition | undefined;
     try {
       if (observationDeadline.signal.aborted) throw new Error("Home observation was cancelled");
       this.agent.followup(createUserMessage({
@@ -124,7 +132,7 @@ export class DshHomeAgentService extends Service {
             "Treat rapidly flapping software or integration status, unknown/unavailable lifecycle changes, and uncorroborated short sensor bursts as noise rather than household routine.",
             "Use them only when persistent or corroborated and materially relevant to household safety, comfort, resources, or reliability.",
             "Create at most one materially useful proposal, only when its evidence and coverage support review.",
-            "If evidence is insufficient or no useful change is warranted, do not create a proposal.",
+            "If you create no proposal, call report_home_observation exactly once with the best bounded disposition before ending the turn.",
           ].join(" "),
         }],
         source: { kind: "user" },
@@ -134,6 +142,7 @@ export class DshHomeAgentService extends Service {
       await task;
     } finally {
       budgetOutcome = observationBudget.end();
+      disposition = observationReport.end();
       inventoryCoverage.endObservation();
       observationDeadline.signal.removeEventListener("abort", cancel);
       observationDeadline[Symbol.dispose]();
@@ -146,6 +155,7 @@ export class DshHomeAgentService extends Service {
       throw new Error("Home observation timed out");
     }
     if (observationDeadline.signal.aborted) throw new Error("Home observation was cancelled");
+    return disposition;
   }
 
   traceSnapshot(): AgentLoopTrace | undefined {
@@ -210,6 +220,7 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(HomeEvidenceTool);
     await this.ctx.plugin(HomeRulesTool);
     await this.ctx.plugin(HomeProposalTool);
+    await this.ctx.plugin(HomeObservationReportService);
     await this.ctx.plugin(SkillRegistry);
     await this.ctx.plugin(HomeSkills);
     await this.ctx.plugin(AgentRegistry);

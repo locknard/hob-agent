@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { HomeObservationOutcome } from "./home-observation-scheduler.js";
+import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
 import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
 
 export type ObservationTrigger = "startup" | "scheduled" | "manual" | "one_shot";
@@ -19,6 +20,7 @@ export type ObservationAuditRecord = {
       readonly status: "completed";
       readonly completedAt: string;
       readonly outcome: HomeObservationOutcome;
+      readonly disposition?: HomeObservationDisposition;
     }
 );
 
@@ -28,6 +30,7 @@ export interface ObservationAuditStore {
     readonly id: string;
     readonly completedAt: string;
     readonly outcome: HomeObservationOutcome;
+    readonly disposition?: HomeObservationDisposition;
   }): void;
   list(query?: { readonly limit?: number }): readonly ObservationAuditRecord[];
 }
@@ -47,6 +50,13 @@ const OUTCOMES = new Set<HomeObservationOutcome>([
   "proposal_pending",
   "agent_busy",
   "failed",
+]);
+const DISPOSITIONS = new Set<HomeObservationDisposition>([
+  "no_material_value",
+  "insufficient_evidence",
+  "existing_rule_overlap",
+  "mapping_uncertain",
+  "other_uncertainty",
 ]);
 
 export class ObservationAuditError extends Error {
@@ -82,12 +92,19 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
         status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted')),
         completed_at TEXT,
         outcome TEXT,
+        disposition TEXT,
         CHECK ((status IN ('running', 'interrupted') AND completed_at IS NULL AND outcome IS NULL)
-          OR (status = 'completed' AND completed_at IS NOT NULL AND outcome IS NOT NULL))
+          OR (status = 'completed' AND completed_at IS NOT NULL AND outcome IS NOT NULL)),
+        CHECK (disposition IS NULL OR (outcome = 'no_proposal' AND disposition IN
+          ('no_material_value', 'insufficient_evidence', 'existing_rule_overlap', 'mapping_uncertain', 'other_uncertainty')))
       ) STRICT;
       CREATE INDEX IF NOT EXISTS observation_attempts_started
         ON observation_attempts (started_at DESC, observation_id DESC);
     `);
+    const columns = this.db.prepare("PRAGMA table_info(observation_attempts)").all() as ObservationRow[];
+    if (!columns.some((column) => column.name === "disposition")) {
+      this.db.exec("ALTER TABLE observation_attempts ADD COLUMN disposition TEXT");
+    }
     this.db.prepare(`UPDATE observation_attempts SET status = 'interrupted'
       WHERE status = 'running'`).run();
     this.ensurePrivateFiles();
@@ -120,11 +137,14 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
     readonly id: string;
     readonly completedAt: string;
     readonly outcome: HomeObservationOutcome;
+    readonly disposition?: HomeObservationDisposition;
   }): void {
     if (!input
       || !isBoundedId(input.id)
       || !isIsoTimestamp(input.completedAt)
-      || !OUTCOMES.has(input.outcome)) {
+      || !OUTCOMES.has(input.outcome)
+      || (input.disposition !== undefined
+        && (input.outcome !== "no_proposal" || !DISPOSITIONS.has(input.disposition)))) {
       throw new ObservationAuditError("invalid", "Invalid observation audit completion");
     }
     const row = this.db.prepare(`SELECT started_at, status
@@ -137,10 +157,11 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
       throw new ObservationAuditError("invalid", "Invalid observation audit completion time");
     }
     const result = this.db.prepare(`UPDATE observation_attempts
-      SET status = 'completed', completed_at = ?, outcome = ?
+      SET status = 'completed', completed_at = ?, outcome = ?, disposition = ?
       WHERE observation_id = ? AND status = 'running'`).run(
       input.completedAt,
       input.outcome,
+      input.disposition ?? null,
       input.id,
     );
     this.ensurePrivateFiles();
@@ -154,7 +175,7 @@ export class SqliteObservationAuditStore implements ObservationAuditStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new TypeError("Invalid observation audit query limit");
     }
-    const rows = this.db.prepare(`SELECT observation_id, trigger, started_at, status, completed_at, outcome
+    const rows = this.db.prepare(`SELECT observation_id, trigger, started_at, status, completed_at, outcome, disposition
       FROM observation_attempts
       ORDER BY started_at DESC, observation_id DESC LIMIT ?`).all(limit) as ObservationRow[];
     return rows.map(fromRow);
@@ -185,13 +206,25 @@ function fromRow(row: ObservationRow): ObservationAuditRecord {
   }
   const completedAt = String(row.completed_at);
   const outcome = String(row.outcome) as HomeObservationOutcome;
+  const disposition = row.disposition === null || row.disposition === undefined
+    ? undefined
+    : String(row.disposition) as HomeObservationDisposition;
   if (row.status !== "completed"
     || !isIsoTimestamp(completedAt)
     || Date.parse(completedAt) < Date.parse(startedAt)
-    || !OUTCOMES.has(outcome)) {
+    || !OUTCOMES.has(outcome)
+    || (disposition !== undefined && (outcome !== "no_proposal" || !DISPOSITIONS.has(disposition)))) {
     throw new ObservationAuditError("corrupt", "Observation audit row is corrupt");
   }
-  return { id, trigger, startedAt, completedAt, status: "completed", outcome };
+  return {
+    id,
+    trigger,
+    startedAt,
+    completedAt,
+    status: "completed",
+    outcome,
+    ...(disposition === undefined ? {} : { disposition }),
+  };
 }
 
 function isIsoTimestamp(value: unknown): value is string {

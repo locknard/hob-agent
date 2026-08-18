@@ -99,6 +99,7 @@ test("does not call the model when a proposal is already pending", async () => {
 });
 
 test("reports a completed observation that intentionally creates no proposal", async () => {
+  const audit = createAuditStub();
   const report = await observeHomeEnvironment(ENV, {
     createRuntime() {
       return {
@@ -113,9 +114,9 @@ test("reports a completed observation that intentionally creates no proposal", a
           homeProposals: { list: () => [] },
           homeAgent: {
             observationStatus: "idle" as const,
-            async requestObservation() {},
+            async requestObservation() { return "mapping_uncertain" as const; },
           },
-          homeObservationAudit: createAuditStub(),
+          homeObservationAudit: audit,
         } as never,
         async start() {},
         async stop() {},
@@ -123,12 +124,13 @@ test("reports a completed observation that intentionally creates no proposal", a
     },
   });
 
-  assert.deepEqual(report, { outcome: "completed", proposal: "none" });
+  assert.deepEqual(report, { outcome: "completed", proposal: "none", disposition: "mapping_uncertain" });
+  assert.equal(audit.completions[0]?.disposition, "mapping_uncertain");
 });
 
 function createAuditStub() {
   const starts: { id: string; trigger: string; startedAt: string }[] = [];
-  const completions: { id: string; completedAt: string; outcome: string }[] = [];
+  const completions: { id: string; completedAt: string; outcome: string; disposition?: string }[] = [];
   return {
     starts,
     completions,
@@ -137,7 +139,7 @@ function createAuditStub() {
       starts.push({ id, ...input });
       return id;
     },
-    complete(input: { id: string; completedAt: string; outcome: string }) {
+    complete(input: { id: string; completedAt: string; outcome: string; disposition?: string }) {
       completions.push(input);
     },
     list() { return []; },

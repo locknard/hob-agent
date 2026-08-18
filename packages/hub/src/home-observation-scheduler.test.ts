@@ -37,6 +37,7 @@ class StubAgent extends Service {
   observationStatus: "idle" | "running" = "idle";
   observations = 0;
   onObservation: (() => void) | undefined;
+  disposition: "insufficient_evidence" | undefined;
 
   constructor(ctx: Context) {
     super(ctx, "homeAgent");
@@ -45,12 +46,13 @@ class StubAgent extends Service {
   async requestObservation() {
     this.observations += 1;
     this.onObservation?.();
+    return this.disposition;
   }
 }
 
 class StubObservationAudit extends Service {
   readonly starts: { id: string; trigger: string; startedAt: string }[] = [];
-  readonly completions: { id: string; completedAt: string; outcome: string }[] = [];
+  readonly completions: { id: string; completedAt: string; outcome: string; disposition?: string }[] = [];
   failBegin = false;
   failCompletion = false;
 
@@ -65,7 +67,7 @@ class StubObservationAudit extends Service {
     return id;
   }
 
-  complete(input: { id: string; completedAt: string; outcome: string }) {
+  complete(input: { id: string; completedAt: string; outcome: string; disposition?: string }) {
     if (this.failCompletion) throw new Error("audit completion unavailable");
     this.completions.push(input);
   }
@@ -91,10 +93,15 @@ async function setup() {
 
 test("starts one explicit observation only for a ready idle home with an empty Inbox", async () => {
   const { ctx, fiber } = await setup();
+  ctx.homeAgent.disposition = "insufficient_evidence";
 
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "no_proposal");
   assert.equal(ctx.homeAgent.observations, 1);
-  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "no_proposal");
+  assert.deepEqual(ctx.homeObservationScheduler.snapshot().lastAttempt, {
+    at: "2026-08-19T04:00:00.000Z",
+    outcome: "no_proposal",
+    disposition: "insufficient_evidence",
+  });
 
   ctx.homeAgent.onObservation = () => { ctx.homeProposals.pending = true; };
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "proposal_created");
@@ -129,6 +136,8 @@ test("starts one explicit observation only for a ready idle home with an empty I
     "proposal_pending",
     "agent_busy",
   ]);
+  assert.equal(ctx.homeObservationAudit.completions[0]?.disposition, "insufficient_evidence");
+  assert.equal(ctx.homeObservationAudit.completions[1]?.disposition, undefined);
 
   await fiber.dispose();
   await ctx.fiber.dispose();
