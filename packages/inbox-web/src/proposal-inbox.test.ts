@@ -79,9 +79,16 @@ test("lists and renders untrusted proposal content without creating an applicati
 
   const list = controller.list();
   assert.equal(list[0]?.existingAutomationCount, 15);
-  const listHtml = renderProposalList(list);
+  const listHtml = renderProposalList(list, {
+    enabled: true,
+    intervalMinutes: 360,
+    runOnStart: false,
+    state: "waiting",
+    lastAttempt: { at: "2026-08-19T00:00:00.000Z", outcome: "proposal_pending" },
+  });
   assert.equal(listHtml.includes("<script>"), false);
   assert.match(listHtml, /&lt;script&gt;Unsafe title&lt;\/script&gt;/);
+  assert.match(listHtml, /proposal_pending/);
 
   const detail = controller.detail("proposal-1");
   assert.equal(detail?.trace?.sessionId, "home-main");

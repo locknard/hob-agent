@@ -8,6 +8,7 @@ import {
   type InboxProposalDetail,
   type InboxProposalStatus,
   type InboxProposalSummary,
+  type InboxObservationStatus,
   type InboxReviewInput,
   type ProposalInboxPort,
   type ProposalTracePort,
@@ -24,6 +25,7 @@ export class ProposalInboxService extends Service {
   static inject = ["homeProposals", "homeAgent"];
 
   private readonly controller: ProposalInboxController;
+  private readonly observation?: { snapshot(): InboxObservationStatus };
 
   constructor(ctx: Context) {
     super(ctx, "homeInbox");
@@ -31,6 +33,7 @@ export class ProposalInboxService extends Service {
       proposals: ctx.homeProposals as unknown as ProposalInboxPort,
       traces: ctx.homeAgent as unknown as ProposalTracePort,
     });
+    this.observation = ctx.get("homeObservationScheduler") as unknown as { snapshot(): InboxObservationStatus } | undefined;
   }
 
   list(query?: { status?: InboxProposalStatus; limit?: number }): readonly InboxProposalSummary[] {
@@ -46,7 +49,7 @@ export class ProposalInboxService extends Service {
   }
 
   renderList(query?: { status?: InboxProposalStatus; limit?: number }): string {
-    return renderProposalList(this.list(query));
+    return renderProposalList(this.list(query), this.observation?.snapshot());
   }
 
   renderDetail(proposalId: string): string | undefined {

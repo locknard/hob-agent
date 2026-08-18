@@ -9,6 +9,7 @@ export interface HomeObservationSchedulerOptions {
   readonly runOnStart?: boolean;
   readonly readinessPollMs?: number;
   readonly scheduler?: HomeObservationSchedulerLike;
+  readonly clock?: () => string;
 }
 
 export type HomeObservationOutcome =
@@ -17,6 +18,14 @@ export type HomeObservationOutcome =
   | "proposal_pending"
   | "agent_busy"
   | "failed";
+
+export interface HomeObservationStatus {
+  readonly enabled: true;
+  readonly intervalMinutes: number;
+  readonly runOnStart: boolean;
+  readonly state: "waiting" | "running" | "stopped";
+  readonly lastAttempt?: { readonly at: string; readonly outcome: HomeObservationOutcome };
+}
 
 interface ObservationPorts {
   homeWorld: {
@@ -50,9 +59,14 @@ export class HomeObservationSchedulerService extends Service {
   static inject = ["homeWorld", "homeProposals", "homeAgent"];
 
   private readonly scheduler: HomeObservationSchedulerLike;
+  private readonly clock: () => string;
+  private readonly intervalMinutes: number;
   private readonly intervalMs: number;
   private readonly readinessPollMs: number;
   private readonly runOnStart: boolean;
+  private state: HomeObservationStatus["state"] = "waiting";
+  private lastAttempt: HomeObservationStatus["lastAttempt"];
+  private stopped = false;
 
   constructor(ctx: Context, options: HomeObservationSchedulerOptions) {
     super(ctx, "homeObservationScheduler");
@@ -66,42 +80,69 @@ export class HomeObservationSchedulerService extends Service {
     if (!Number.isSafeInteger(readinessPollMs) || readinessPollMs < 1_000 || readinessPollMs > 300_000) {
       throw new TypeError("observation readiness poll must be from 1000 to 300000 milliseconds");
     }
+    this.intervalMinutes = options.intervalMinutes;
     this.intervalMs = options.intervalMinutes * 60_000;
     this.readinessPollMs = readinessPollMs;
     this.runOnStart = options.runOnStart ?? false;
     this.scheduler = options.scheduler ?? defaultScheduler;
+    this.clock = options.clock ?? (() => new Date().toISOString());
   }
 
   protected [Service.init](): void {
     const controller = new AbortController();
     const task = this.run(controller.signal).catch(() => undefined);
     this.ctx.effect(() => async () => {
+      this.stopped = true;
+      this.state = "stopped";
       controller.abort();
       await task;
     }, "home-observation-scheduler.stop");
   }
 
   async observeNow(signal: AbortSignal = new AbortController().signal): Promise<HomeObservationOutcome> {
-    if (signal.aborted) return "failed";
+    if (this.state === "running") return "agent_busy";
+    if (this.stopped) return "failed";
+    this.state = "running";
+    let outcome: HomeObservationOutcome = "failed";
     const ctx = this.ctx as unknown as ObservationPorts;
     try {
+      if (signal.aborted) return outcome;
       const snapshot = ctx.homeWorld.snapshot();
       const bridgeIds = Object.keys(snapshot.bridges);
       const watermarks = new Set(snapshot.bridgeWatermarks.map((item) => item.bridgeId));
       const diagnostics = new Map(snapshot.diagnostics.map((item) => [item.bridgeId, item.connectionState]));
       if (bridgeIds.length === 0
         || bridgeIds.some((bridgeId) => diagnostics.get(bridgeId) !== "ready" || !watermarks.has(bridgeId))) {
-        return "world_not_ready";
+        outcome = "world_not_ready";
+        return outcome;
       }
       if (ctx.homeProposals.list({ status: "pending_review", limit: 1 }).length > 0) {
-        return "proposal_pending";
+        outcome = "proposal_pending";
+        return outcome;
       }
-      if (ctx.homeAgent.observationStatus !== "idle") return "agent_busy";
+      if (ctx.homeAgent.observationStatus !== "idle") {
+        outcome = "agent_busy";
+        return outcome;
+      }
       await ctx.homeAgent.requestObservation(signal);
-      return "started";
+      outcome = "started";
+      return outcome;
     } catch {
-      return "failed";
+      return outcome;
+    } finally {
+      this.lastAttempt = { at: observationTimestamp(this.clock), outcome };
+      this.state = this.stopped ? "stopped" : "waiting";
     }
+  }
+
+  snapshot(): HomeObservationStatus {
+    return {
+      enabled: true,
+      intervalMinutes: this.intervalMinutes,
+      runOnStart: this.runOnStart,
+      state: this.state,
+      ...(this.lastAttempt === undefined ? {} : { lastAttempt: { ...this.lastAttempt } }),
+    };
   }
 
   private async run(signal: AbortSignal): Promise<void> {
@@ -133,3 +174,11 @@ const defaultScheduler: HomeObservationSchedulerLike = {
     });
   },
 };
+
+function observationTimestamp(clock: () => string): string {
+  const value = clock();
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new TypeError("observation clock must return an ISO timestamp");
+  }
+  return value;
+}

@@ -56,6 +56,7 @@ async function setup() {
     scheduler: { wait: (_delay: number, signal: AbortSignal) => new Promise<void>((resolve) => {
       signal.addEventListener("abort", () => resolve(), { once: true });
     }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
   });
   return { ctx, fiber };
 }
@@ -65,6 +66,7 @@ test("starts one explicit observation only for a ready idle home with an empty I
 
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "started");
   assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "started");
 
   ctx.homeWorld.ready = false;
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "world_not_ready");
@@ -75,6 +77,13 @@ test("starts one explicit observation only for a ready idle home with an empty I
   ctx.homeAgent.observationStatus = "running";
   assert.equal(await ctx.homeObservationScheduler.observeNow(), "agent_busy");
   assert.equal(ctx.homeAgent.observations, 1);
+  assert.deepEqual(ctx.homeObservationScheduler.snapshot(), {
+    enabled: true,
+    intervalMinutes: 60,
+    runOnStart: false,
+    state: "waiting",
+    lastAttempt: { at: "2026-08-19T04:00:00.000Z", outcome: "agent_busy" },
+  });
 
   await fiber.dispose();
   await ctx.fiber.dispose();
@@ -96,6 +105,7 @@ test("runs on the configured boundary and keeps scheduling after a successful tu
       waits.push({ delay, release });
       signal.addEventListener("abort", release, { once: true });
     }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
   });
 
   assert.equal(waits[0]?.delay, 60 * 60_000);

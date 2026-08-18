@@ -32,6 +32,10 @@ the household has no pending proposal to review.
 - Provider failures do not crash the HomeWorld process and are retried only on
   the next scheduled boundary. Shutdown cancels an observation through DSH's
   canonical cancellation path.
+- The scheduler exposes only metadata-safe local status: waiting/running/stopped,
+  configured cadence, startup mode, and the last attempt time/outcome. The
+  Inbox may render this status, but never the observation prompt, tool inputs,
+  tool results, household state, or provider error text.
 
 ## Non-goals
 

@@ -31,6 +31,7 @@ test("mounts a local review facade over proposal state and the DSH trace", async
 
   assert.deepEqual(ctx.homeInbox.list(), []);
   assert.match(ctx.homeInbox.renderList(), /Proposal inbox/);
+  assert.match(ctx.homeInbox.renderList(), /Observation schedule is disabled/);
   assert.equal("apply" in ctx.homeInbox, false);
 
   await fiber.dispose();

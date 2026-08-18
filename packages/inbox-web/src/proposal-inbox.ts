@@ -64,6 +64,17 @@ export interface InboxProposalSummary {
   readonly conflictMatchCount: number;
 }
 
+export interface InboxObservationStatus {
+  readonly enabled: true;
+  readonly intervalMinutes: number;
+  readonly runOnStart: boolean;
+  readonly state: "waiting" | "running" | "stopped";
+  readonly lastAttempt?: {
+    readonly at: string;
+    readonly outcome: "started" | "world_not_ready" | "proposal_pending" | "agent_busy" | "failed";
+  };
+}
+
 export interface InboxProposalDetail {
   readonly proposal: InboxProposal;
   readonly trace?: AgentLoopTrace;
@@ -129,13 +140,19 @@ export class ProposalInboxController {
   }
 }
 
-export function renderProposalList(proposals: readonly InboxProposalSummary[]): string {
+export function renderProposalList(
+  proposals: readonly InboxProposalSummary[],
+  observation?: InboxObservationStatus,
+): string {
   const items = proposals.map((proposal) => `<li class="proposal-card" data-status="${escapeHtml(proposal.status)}">
     <a href="/proposals/${encodeURIComponent(proposal.id)}"><h2>${escapeHtml(proposal.title)}</h2></a>
     <p>${escapeHtml(proposal.summary)}</p>
     <dl><dt>Risk</dt><dd>${escapeHtml(proposal.riskLevel)}</dd><dt>Existing automations</dt><dd>${proposal.existingAutomationCount}</dd><dt>Possible overlaps</dt><dd>${proposal.conflictMatchCount}</dd></dl>
   </li>`).join("");
-  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p></header><ol>${items}</ol></main>`;
+  const observationStatus = observation === undefined
+    ? "<p class=\"observation-status\">Observation schedule is disabled.</p>"
+    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observation.lastAttempt.outcome)} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
+  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header><ol>${items}</ol></main>`;
 }
 
 export function renderProposalDetail(detail: InboxProposalDetail): string {
