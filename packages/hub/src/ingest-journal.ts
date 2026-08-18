@@ -29,6 +29,27 @@ export interface SqliteIngestJournalOptions {
   minimumRetentionRecords?: number;
 }
 
+export interface JournalLiveStateBinding {
+  readonly nativeId: string;
+  readonly nativeInstanceId: string;
+}
+
+export interface JournalLiveStateQuery {
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly afterSeq: number;
+  readonly since: string;
+  readonly until: string;
+  readonly bindings: readonly JournalLiveStateBinding[];
+  readonly limit: number;
+}
+
+export interface JournalLiveStatePage {
+  /** Most recent bounded page, returned in ascending sequence order. */
+  readonly records: readonly IngestRecord[];
+  readonly truncated: boolean;
+}
+
 export interface IngestJournal {
   appendAtomic(record: IngestRecord): void;
   append?(record: IngestRecord): void;
@@ -43,6 +64,8 @@ export interface IngestJournal {
   /** Last sync-complete whose manifest was verified and world exchanged. */
   consistentWatermark?(bridgeId: string): JournalWatermark | undefined;
   markConsistent?(bridgeId: string, watermark: JournalWatermark): void;
+  /** Optional bounded evidence seam; production SQLite journals implement it. */
+  queryLiveStateRecords?(query: JournalLiveStateQuery): JournalLiveStatePage;
   records(bridgeId?: string): IngestRecord[];
   rejections(bridgeId?: string): RejectionRecord[];
   historyGaps(bridgeId?: string): HistoryGapRecord[];
@@ -258,6 +281,37 @@ export class SqliteIngestJournal implements IngestJournal {
     }));
   }
 
+  queryLiveStateRecords(query: JournalLiveStateQuery): JournalLiveStatePage {
+    validateLiveStateQuery(query);
+    const bindingClauses = query.bindings.map(() => `(
+      json_extract(envelope_json, '$.event.state.nativeId') = ?
+      AND json_extract(envelope_json, '$.event.state.nativeInstanceId') = ?
+    )`);
+    const bindingParams = query.bindings.flatMap((binding) => [binding.nativeId, binding.nativeInstanceId]);
+    const rows = this.db.prepare(`SELECT bridge_id, received_at, envelope_json
+      FROM ingest_events
+      WHERE bridge_id = ? AND epoch_id = ? AND seq > ? AND kind = 'state'
+        AND julianday(received_at) >= julianday(?)
+        AND julianday(received_at) <= julianday(?)
+        AND (${bindingClauses.join(" OR ")})
+      ORDER BY seq DESC LIMIT ?`).all(
+        query.bridgeId,
+        query.epochId,
+        query.afterSeq,
+        query.since,
+        query.until,
+        ...bindingParams,
+        query.limit + 1,
+      ) as SqlRow[];
+    const truncated = rows.length > query.limit;
+    const page = rows.slice(0, query.limit).map((row) => ({
+      bridgeId: String(row.bridge_id),
+      receivedAt: String(row.received_at),
+      envelope: JSON.parse(String(row.envelope_json)) as Envelope,
+    })).reverse();
+    return { records: page, truncated };
+  }
+
   rejections(bridgeId?: string): RejectionRecord[] {
     const rows = (bridgeId === undefined
       ? this.db.prepare("SELECT bridge_id, epoch_id, seq, reason, native_id FROM ingest_rejections ORDER BY id").all()
@@ -351,6 +405,28 @@ export class SqliteIngestJournal implements IngestJournal {
 
   private ensurePrivateFile(): void {
     ensurePrivateSqliteFiles(this.path);
+  }
+}
+
+function validateLiveStateQuery(query: JournalLiveStateQuery): void {
+  const validTimestamp = (value: unknown): value is string => (
+    typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value))
+  );
+  if (!query || typeof query !== "object"
+    || typeof query.bridgeId !== "string" || query.bridgeId.length === 0 || query.bridgeId.length > 200
+    || typeof query.epochId !== "string" || query.epochId.length === 0 || query.epochId.length > 200
+    || !Number.isSafeInteger(query.afterSeq) || query.afterSeq < 0
+    || !validTimestamp(query.since) || !validTimestamp(query.until)
+    || Date.parse(query.since) > Date.parse(query.until)
+    || !Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 200
+    || !Array.isArray(query.bindings) || query.bindings.length < 1 || query.bindings.length > 50
+    || query.bindings.some((binding) => (
+      !binding || typeof binding !== "object"
+      || typeof binding.nativeId !== "string" || binding.nativeId.length === 0 || binding.nativeId.length > 512
+      || typeof binding.nativeInstanceId !== "string" || binding.nativeInstanceId.length === 0
+      || binding.nativeInstanceId.length > 512
+    ))) {
+    throw new TypeError("live state query is invalid or unbounded");
   }
 }
 

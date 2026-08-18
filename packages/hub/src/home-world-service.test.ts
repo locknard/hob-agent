@@ -152,6 +152,119 @@ test("mounts as homeWorld, consumes every configured bridge once, and aggregates
   await fiber.dispose();
 });
 
+test("returns only selected post-baseline live changes as bounded neutral evidence", async () => {
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge("bridge-evidence", "remote-evidence", snapshotFor("bridge-evidence", "remote-evidence"));
+  catalog.register(registration(() => bridge));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  let currentTime = "2026-08-19T00:00:00.000Z";
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-evidence")],
+    new Map([["bridge-evidence", bridge]]),
+    { clock: () => currentTime },
+  ));
+  await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-evidence"]?.diagnostics.connectionState === "ready");
+  const capability = ctx.homeWorld.snapshot().devices[0]!.capabilities[0]!;
+  ctx.homeWorld.journal("bridge-evidence")!.appendAtomic({
+    bridgeId: "bridge-evidence",
+    receivedAt: "2026-08-19T03:00:00.000Z",
+    envelope: eventEnvelope("bridge-evidence-epoch", 5, {
+      kind: "state",
+      state: {
+        nativeId: "bridge-evidence-lamp",
+        nativeInstanceId: "bridge-evidence-lamp:main",
+        attrs: { state: "off", unbounded: { ignored: true } },
+        time: { sourceTs: "2026-08-19T02:59:59.000Z", sourceTsQuality: "platform" },
+        origin: "observed",
+      },
+    }),
+  });
+  currentTime = "2026-08-19T04:00:00.000Z";
+
+  const evidence = ctx.homeWorld.queryRecentEvidence({
+    hwCapabilityIds: [capability.hwCapabilityId],
+    lookbackHours: 2,
+    limit: 20,
+  });
+
+  assert.equal(evidence.events.length, 1);
+  assert.deepEqual(evidence.events[0], {
+    hwId: capability.hwId,
+    hwCapabilityId: capability.hwCapabilityId,
+    semanticKind: "light",
+    value: "off",
+    observedAt: "2026-08-19T03:00:00.000Z",
+    sourceTs: "2026-08-19T02:59:59.000Z",
+    sourceTsQuality: "platform",
+    origin: "observed",
+    provenance: { bridgeId: "bridge-evidence", epochId: "bridge-evidence-epoch", seq: 5 },
+  });
+  assert.deepEqual(evidence.coverage, [{
+    bridgeId: "bridge-evidence",
+    epochId: "bridge-evidence-epoch",
+    baselineSeq: 4,
+    baselineAt: "2026-08-19T00:00:00.000Z",
+    status: "complete",
+    reasons: [],
+  }]);
+  assert.equal(evidence.truncated, false);
+
+  ctx.homeWorld.journal("bridge-evidence")!.appendAtomic({
+    bridgeId: "bridge-evidence",
+    receivedAt: "2026-08-19T03:30:00.000Z",
+    envelope: eventEnvelope("bridge-evidence-epoch", 6, {
+      kind: "state",
+      state: {
+        nativeId: "bridge-evidence-lamp",
+        nativeInstanceId: "bridge-evidence-lamp:main",
+        attrs: { state: "on" },
+        time: { sourceTsQuality: "none" },
+        origin: "observed",
+      },
+    }),
+  });
+  const bounded = ctx.homeWorld.queryRecentEvidence({
+    hwCapabilityIds: [capability.hwCapabilityId],
+    lookbackHours: 2,
+    limit: 1,
+  });
+  assert.deepEqual(bounded.events.map((item) => item.provenance.seq), [6]);
+  assert.equal(bounded.truncated, true);
+  assert.equal(bounded.coverage[0]?.status, "partial");
+  assert.deepEqual(bounded.coverage[0]?.reasons, ["query_truncated"]);
+  await fiber.dispose();
+});
+
+test("rejects unknown capability ids and unbounded evidence requests", async () => {
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge("bridge-evidence-bounds", "remote-evidence-bounds", snapshotFor("bridge-evidence-bounds", "remote-evidence-bounds"));
+  catalog.register(registration(() => bridge));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-evidence-bounds")],
+    new Map([["bridge-evidence-bounds", bridge]]),
+  ));
+  await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-evidence-bounds"]?.diagnostics.connectionState === "ready");
+
+  assert.throws(() => ctx.homeWorld.queryRecentEvidence({
+    hwCapabilityIds: ["unknown-capability"],
+    lookbackHours: 24,
+    limit: 20,
+  }));
+  assert.throws(() => ctx.homeWorld.queryRecentEvidence({
+    hwCapabilityIds: ctx.homeWorld.snapshot().devices[0]!.capabilities.map((item) => item.hwCapabilityId),
+    lookbackHours: 24 * 30,
+    limit: 20,
+  }));
+  await fiber.dispose();
+});
+
 test("disposes an adapter when bridge startup fails before runtime registration", async () => {
   const catalog = new BridgeCatalog();
   let disposeCalls = 0;

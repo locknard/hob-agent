@@ -66,7 +66,8 @@ pnpm start
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
 Home Product Bundle contributes the read-only `get_home_snapshot` tool and the
-review-only `create_home_proposal` tool. Hub-owned evidence and
+bounded read-only `get_home_evidence` tool plus the review-only
+`create_home_proposal` tool. Hub-owned evidence and
 `foreignRules@1` conflict checks are attached before a proposal enters the
 Inbox. Device actions, configuration writes, and proposal application remain
 deliberately unavailable.
@@ -75,6 +76,11 @@ The v6.4 read path also carries an optional closed `semanticKind` per
 capability so the Agent can group lights, switches, sensors, and other reviewed
 families without importing HA or MIoT vocabulary. The hint preserves its source
 schema/binding and grants no equivalence or action authority.
+
+`get_home_evidence` accepts only current hub capability IDs and returns at most
+200 locally observed post-baseline state changes from the last seven days.
+Bootstrap state is excluded, and incomplete bridge coverage or truncation is
+reported explicitly. See [`docs/temporal-evidence.md`](docs/temporal-evidence.md).
 
 Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
 When enabled it binds only to `127.0.0.1`, requires authentication on every
@@ -105,8 +111,8 @@ The OpenClaw-derived provider adaptation audit is tracked in
 
 The repository now has one executable Cordis composition root for the neutral
 HomeWorld bridge runtime and DSH agent. The production Home Agent creates or
-resumes its stable session through the official DSH SQLite provider; household
-prompt/Skill loading remains open. See
+resumes its stable session through the official DSH SQLite provider and loads
+bounded household prompt context; governed filesystem Skills remain deferred. See
 [`docs/architecture-self-review.md`](docs/architecture-self-review.md) for the
 verified boundaries and prioritized gaps.
 The intended provider authorization and model-selection journey is documented

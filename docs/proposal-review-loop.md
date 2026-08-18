@@ -77,10 +77,14 @@ and simulator may emit `passed` or `failed`.
 
 ## Evidence and privacy rules
 
-Evidence queries are served from the hub-owned world model, not directly from a
-vendor API. Queries and results are bounded by count and time window. Evidence
-records use neutral bridge/device/capability identities, include bridge epoch
-and sequence watermarks, and expose missing/gapped/stale status.
+Evidence queries are served from Hub-owned local state, not directly from a
+vendor API. Current-state references come from the world model. Temporal
+evidence comes from a SQL-bounded journal query over selected current hub
+capability bindings and only includes state changes after the current epoch's
+verified `sync-complete`; bootstrap rows never count as behavior. Queries and
+results are bounded by count and time window. Evidence records use neutral
+bridge/device/capability identities, include bridge epoch and sequence
+provenance, and expose missing, gapped, baseline-limited, or truncated coverage.
 
 Existing platform rules arrive only through the optional neutral
 `foreignRules@1` extension. Its catalog declares the replay epoch that produced

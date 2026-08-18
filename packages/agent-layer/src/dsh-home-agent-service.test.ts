@@ -63,7 +63,11 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   });
 
   assert.equal(String(ctx.homeAgent.agent.id), "home-main");
-  assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), ["get_home_snapshot", "create_home_proposal"]);
+  assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), [
+    "get_home_snapshot",
+    "get_home_evidence",
+    "create_home_proposal",
+  ]);
 
   ctx.homeAgent.agent.followup(createUserMessage({
     content: [{ type: "text", text: "What can you see?" }],

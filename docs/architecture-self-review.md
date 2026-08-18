@@ -30,8 +30,13 @@ apply an artifact or control a device.
 
 ## Verified boundaries
 
-- The Home Agent exposes `get_home_snapshot` plus review-only
-  `create_home_proposal`; neither tool has device or configuration authority.
+- The Home Agent exposes `get_home_snapshot`, bounded read-only
+  `get_home_evidence`, and review-only `create_home_proposal`; none has device
+  or configuration authority.
+- Temporal evidence reads only selected current hub capability IDs and
+  post-`sync-complete` state changes in the current epoch. Bootstrap rows are
+  excluded, raw attributes/native identifiers stay in the Hub, and partial
+  coverage is explicit.
 - Proposal evidence, bridge watermarks, history gaps, and existing-rule
   conflicts are hub-produced. `foreignRules@1` catalogs are accepted only when
   their epoch matches the committed bridge watermark.
