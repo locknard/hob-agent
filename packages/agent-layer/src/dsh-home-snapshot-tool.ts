@@ -170,7 +170,35 @@ export interface HomeSnapshotQuery {
   readonly semanticKinds?: readonly HomeWorldCapabilitySemanticKind[];
 }
 
-export interface HomeSnapshotPageValue extends HomeSnapshotToolValue {
+export interface HomeSnapshotPageValue {
+  readonly spaces: { readonly hwSpaceId: string; readonly name?: string }[];
+  readonly devices: {
+    readonly hwId: string;
+    readonly name?: string;
+    readonly validity: HomeWorldDeviceValidity;
+    readonly bridgeIds: string[];
+    readonly hwSpaceIds: string[];
+    readonly capabilities: {
+      readonly hwCapabilityId: string;
+      readonly hwId: string;
+      readonly semanticKind?: HomeWorldCapabilitySemanticKind;
+      readonly bridgeIds: string[];
+      readonly hwSpaceIds: string[];
+    }[];
+    readonly states: {
+      readonly hwCapabilityId: string;
+      readonly bridgeId: string;
+      readonly attrs: Record<string, JsonValue>;
+      readonly time: {
+        readonly sourceTs?: string;
+        readonly sourceTsQuality: "device" | "platform" | "none";
+      };
+      readonly origin: "observed" | "imported";
+    }[];
+  }[];
+  readonly bridgeWatermarks: HomeWorldWatermark[];
+  readonly metrics: HomeSnapshotToolValue["metrics"];
+  readonly topology: HomeSnapshotToolValue["topology"];
   readonly page: {
     readonly limit: number;
     readonly returnedDevices: number;
@@ -226,18 +254,6 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
         properties: {
           hwSpaceId: { type: "string", required: true },
           name: { type: "string" },
-          bindings: {
-            type: "array",
-            required: true,
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                bridgeId: { type: "string", required: true },
-                nativeSpaceId: { type: "string", required: true },
-              },
-            },
-          },
         },
       },
     },
@@ -248,28 +264,15 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
         type: "object",
         additionalProperties: false,
         properties: {
-          bridgeId: { type: "string" },
           hwId: { type: "string", required: true },
-          bindings: {
-            type: "array",
-            required: true,
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                bridgeId: { type: "string", required: true },
-                nativeId: { type: "string", required: true },
-                nativeInstanceId: { type: "string", required: true },
-                hwSpaceId: { type: "string" },
-              },
-            },
-          },
           name: { type: "string" },
           validity: {
             type: "string",
             required: true,
             enum: ["valid", "stale", "invalid-source", "present-but-invalid"],
           },
+          bridgeIds: { type: "array", required: true, items: { type: "string" } },
+          hwSpaceIds: { type: "array", required: true, items: { type: "string" } },
           capabilities: {
             type: "array",
             required: true,
@@ -279,23 +282,9 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
               properties: {
                 hwCapabilityId: { type: "string", required: true },
                 hwId: { type: "string", required: true },
-                schema: { type: "string", required: true },
-                schemaVersion: { type: "string", required: true },
                 semanticKind: { type: "string", enum: HOME_WORLD_CAPABILITY_SEMANTIC_KINDS },
-                bindings: {
-                  type: "array",
-                  required: true,
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    properties: {
-                      bridgeId: { type: "string", required: true },
-                      nativeId: { type: "string", required: true },
-                      nativeInstanceId: { type: "string", required: true },
-                      hwSpaceId: { type: "string" },
-                    },
-                  },
-                },
+                bridgeIds: { type: "array", required: true, items: { type: "string" } },
+                hwSpaceIds: { type: "array", required: true, items: { type: "string" } },
               },
             },
           },
@@ -306,8 +295,8 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
               type: "object",
               additionalProperties: false,
               properties: {
-                nativeId: { type: "string", required: true },
-                nativeInstanceId: { type: "string", required: true },
+                hwCapabilityId: { type: "string", required: true },
+                bridgeId: { type: "string", required: true },
                 attrs: { type: "object", required: true, additionalProperties: true },
                 time: {
                   type: "object",
@@ -436,24 +425,71 @@ export function pageHomeSnapshot(
     ? 0
     : matchedDevices.findIndex((device) => compareStrings(device.hwId, afterHwId) > 0);
   const pageStart = start < 0 ? matchedDevices.length : start;
-  const devices = matchedDevices.slice(pageStart, pageStart + limit);
-  const hasNextPage = pageStart + devices.length < matchedDevices.length;
-  const referencedSpaceIds = new Set(devices.flatMap((device) =>
+  const pageDevices = matchedDevices.slice(pageStart, pageStart + limit);
+  const hasNextPage = pageStart + pageDevices.length < matchedDevices.length;
+  const referencedSpaceIds = new Set(pageDevices.flatMap((device) =>
     device.bindings.flatMap((binding) => binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId])));
 
   return {
-    spaces: snapshot.spaces.filter((space) => referencedSpaceIds.has(space.hwSpaceId)),
-    devices,
+    spaces: snapshot.spaces.filter((space) => referencedSpaceIds.has(space.hwSpaceId))
+      .map(({ hwSpaceId, name }) => ({ hwSpaceId, ...(name === undefined ? {} : { name }) })),
+    devices: pageDevices.map(projectModelDevice),
     bridgeWatermarks: snapshot.bridgeWatermarks,
     metrics: snapshot.metrics,
     topology: snapshot.topology,
     page: {
       limit,
-      returnedDevices: devices.length,
+      returnedDevices: pageDevices.length,
       totalMatchedDevices: matchedDevices.length,
-      ...(hasNextPage && devices.length > 0 ? { nextAfterHwId: devices.at(-1)!.hwId } : {}),
+      ...(hasNextPage && pageDevices.length > 0 ? { nextAfterHwId: pageDevices.at(-1)!.hwId } : {}),
     },
   };
+}
+
+function projectModelDevice(
+  device: HomeSnapshotToolValue["devices"][number],
+): HomeSnapshotPageValue["devices"][number] {
+  const bridgeIds = uniqueSorted(device.bindings.map((binding) => binding.bridgeId));
+  const hwSpaceIds = uniqueSorted(device.bindings.flatMap((binding) =>
+    binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId]));
+  const statesByBinding = new Map(device.states.map((state) =>
+    [`${state.nativeId}\u0000${state.nativeInstanceId}`, state] as const));
+  const states = new Map<string, HomeSnapshotPageValue["devices"][number]["states"][number]>();
+  for (const capability of device.capabilities) {
+    for (const binding of capability.bindings) {
+      const state = statesByBinding.get(`${binding.nativeId}\u0000${binding.nativeInstanceId}`);
+      if (state === undefined) continue;
+      const key = `${capability.hwCapabilityId}\u0000${binding.bridgeId}`;
+      if (states.has(key)) continue;
+      states.set(key, {
+        hwCapabilityId: capability.hwCapabilityId,
+        bridgeId: binding.bridgeId,
+        attrs: state.attrs,
+        time: state.time,
+        origin: state.origin,
+      });
+    }
+  }
+  return {
+    hwId: device.hwId,
+    ...(device.name === undefined ? {} : { name: device.name }),
+    validity: device.validity,
+    bridgeIds,
+    hwSpaceIds,
+    capabilities: device.capabilities.map((capability) => ({
+      hwCapabilityId: capability.hwCapabilityId,
+      hwId: capability.hwId,
+      ...(capability.semanticKind === undefined ? {} : { semanticKind: capability.semanticKind }),
+      bridgeIds: uniqueSorted(capability.bindings.map((binding) => binding.bridgeId)),
+      hwSpaceIds: uniqueSorted(capability.bindings.flatMap((binding) =>
+        binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId])),
+    })),
+    states: [...states.values()],
+  };
+}
+
+function uniqueSorted(values: readonly string[]): string[] {
+  return [...new Set(values)].sort(compareStrings);
 }
 
 function filterDevice(

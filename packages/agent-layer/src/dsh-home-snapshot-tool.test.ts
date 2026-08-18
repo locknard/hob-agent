@@ -99,6 +99,21 @@ test("pages a normalized snapshot deterministically with an exclusive cursor", (
   });
 });
 
+test("removes adapter-native identities from the model-facing snapshot page", () => {
+  const page = pageHomeSnapshot(queryFixture(), { limit: 1 });
+  const serialized = JSON.stringify(page);
+  assert.equal(serialized.includes("native-a"), false);
+  assert.equal(serialized.includes("nativeInstanceId"), false);
+  assert.equal(serialized.includes("nativeSpaceId"), false);
+  assert.deepEqual(page.devices[0]?.states, [{
+    hwCapabilityId: "hw-a-capability",
+    bridgeId: "bridge-a",
+    attrs: { state: "on" },
+    time: { sourceTsQuality: "none" },
+    origin: "observed",
+  }]);
+});
+
 test("filters capability bindings and removes unrelated states and spaces", () => {
   const value = pageHomeSnapshot(queryFixture(), {
     hwSpaceIds: ["hws-a"],
@@ -108,7 +123,7 @@ test("filters capability bindings and removes unrelated states and spaces", () =
 
   assert.deepEqual(value.devices.map((device) => device.hwId), ["hw-a", "hw-c"]);
   assert.deepEqual(value.spaces.map((space) => space.hwSpaceId), ["hws-a"]);
-  assert.equal(value.devices.every((device) => device.bindings.every((item) => item.hwSpaceId === "hws-a")), true);
+  assert.equal(value.devices.every((device) => device.hwSpaceIds.every((item) => item === "hws-a")), true);
   assert.equal(value.devices.every((device) => device.capabilities.every((item) => item.semanticKind === "light")), true);
   assert.equal(value.devices.every((device) => device.states.length === 1), true);
   assert.equal(value.page.totalMatchedDevices, 2);
@@ -280,32 +295,32 @@ test("projects homeWorld into neutral devices, bridge watermarks, and three metr
     devices: [
       {
         hwId: "hw-a",
-        bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "cap-a" }],
         validity: "valid",
+        bridgeIds: ["bridge-a"],
+        hwSpaceIds: [],
         capabilities: [{
           hwCapabilityId: "hc-a",
           hwId: "hw-a",
-          schema: "hob.sensor",
-          schemaVersion: "1.0.0",
-          bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "cap-a" }],
+          bridgeIds: ["bridge-a"],
+          hwSpaceIds: [],
         }],
         states: [],
       },
       {
         hwId: "hw-b",
-        bindings: [{ bridgeId: "bridge-b", nativeId: "native-b", nativeInstanceId: "cap-b" }],
         name: "Beta",
         validity: "stale",
+        bridgeIds: ["bridge-b"],
+        hwSpaceIds: [],
         capabilities: [{
           hwCapabilityId: "hc-b",
           hwId: "hw-b",
-          schema: "hob.light",
-          schemaVersion: "1.0.0",
-          bindings: [{ bridgeId: "bridge-b", nativeId: "native-b", nativeInstanceId: "cap-b" }],
+          bridgeIds: ["bridge-b"],
+          hwSpaceIds: [],
         }],
         states: [{
-          nativeId: "native-b",
-          nativeInstanceId: "cap-b",
+          hwCapabilityId: "hc-b",
+          bridgeId: "bridge-b",
           attrs: { a: "first", z: "last" },
           time: { sourceTs: "2026-08-18T00:00:00.000Z", sourceTsQuality: "device" },
           origin: "observed",
@@ -420,21 +435,20 @@ test("projects the neutral home-world service snapshot shape without ecosystem k
   assert.deepEqual(value, {
     spaces: [],
     devices: [{
-      bridgeId: "bridge-a",
       hwId: "hw-a",
-      bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "cap-a" }],
       name: "Kitchen lamp",
       validity: "valid",
+      bridgeIds: ["bridge-a"],
+      hwSpaceIds: [],
       capabilities: [{
         hwCapabilityId: "hc-a",
         hwId: "hw-a",
-        schema: "hob.light",
-        schemaVersion: "1.0.0",
-        bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "cap-a" }],
+        bridgeIds: ["bridge-a"],
+        hwSpaceIds: [],
       }],
       states: [{
-        nativeId: "native-a",
-        nativeInstanceId: "cap-a",
+        hwCapabilityId: "hc-a",
+        bridgeId: "bridge-a",
         attrs: { state: "on" },
         time: { sourceTsQuality: "none" },
         origin: "observed",

@@ -60,6 +60,10 @@ apply an artifact or control a device.
   through bounded `get_home_rules` pages before proposing an automation. The
   Hub still owns the authoritative proposal-time conflict check, and no rule
   body or mutation path crosses the tool boundary.
+- The paginated DSH snapshot boundary strips adapter-native device,
+  capability-instance, space, and schema identifiers. Model-visible states are
+  correlated only by opaque Hub capability ID and neutral bridge ID; the full
+  native binding projection remains Hub-internal for indexing and evidence.
 - `pnpm observe:home` provides an explicit one-shot real-household acceptance
   path. It shares the scheduler's Hub-owned readiness, pending-proposal, and
   Agent-idle gates but mounts neither recurring scheduling nor Inbox HTTP.

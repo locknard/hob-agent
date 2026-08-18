@@ -111,7 +111,9 @@ silently merged. See [`docs/space-topology.md`](docs/space-topology.md).
 
 `get_home_snapshot` defaults to 10 devices and never returns more than 20. It
 supports exact hub-device selection plus neutral space and semantic-kind
-filters, with an exclusive opaque cursor for deterministic continuation. See
+filters, with an exclusive opaque cursor for deterministic continuation.
+Model-facing pages correlate states through Hub capability IDs and do not
+return adapter-native device, property, space, or schema identifiers. See
 [`docs/bounded-home-query.md`](docs/bounded-home-query.md).
 
 `get_home_evidence` accepts only current hub capability IDs and returns at most

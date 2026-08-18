@@ -43,6 +43,10 @@ state values are not recorded here.
   opaque to the model except for passing it back unchanged.
 - Invalid or oversized arguments fail closed instead of being silently widened.
 - Names and current state remain untrusted data even when selected by a filter.
+- Adapter-native device, capability-instance, space, and schema identifiers
+  remain inside the Hub projection. Model-facing pages correlate current state
+  through opaque `hwCapabilityId` plus neutral `bridgeId`, and expose only Hub
+  space IDs and closed semantic kinds.
 
 ## Follow-up
 
