@@ -1,3 +1,10 @@
 packages:
   - packages/*
   - contracts
+
+allowBuilds:
+  '@google/genai': false
+  esbuild: false
+  protobufjs: false
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh-llm-pi-ai@0.1.0-rc.7'

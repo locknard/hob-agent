@@ -1,0 +1,11 @@
+{
+  "name": "@hob-agent/hub",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/ws": "^8.5.14",
+    "ws": "^8.21.3"
+  }
+}
