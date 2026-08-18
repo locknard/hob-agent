@@ -34,17 +34,36 @@ const candidate: CreateProposalInput = {
 
 class StubHomeWorld extends Service {
   evidenceQueries: unknown[] = [];
+  includeUnavailableBridge = false;
+  includeUnavailableDevice = false;
 
   constructor(ctx: Context) {
     super(ctx, "homeWorld");
   }
 
   snapshot() {
+    const unavailableDevice = {
+      hwId: "hw-2",
+      bindings: [{ bridgeId: "bridge-b", nativeId: "native-2", nativeInstanceId: "entity-2" }],
+      capabilities: [],
+      states: [],
+    };
     return {
       generatedAt: "2026-08-19T01:00:00.000Z",
-      bridges: { "bridge-a": { diagnostics: { historyGapCount: 0 } } },
-      bridgeWatermarks: [{ bridgeId: "bridge-a", epochId: "epoch-a", lastSeq: 8 }],
-      diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready", historyGapCount: 0 }],
+      bridges: {
+        "bridge-a": { diagnostics: { historyGapCount: 0 } },
+        ...(this.includeUnavailableBridge ? { "bridge-b": { diagnostics: { historyGapCount: 0 } } } : {}),
+      },
+      bridgeWatermarks: [
+        { bridgeId: "bridge-a", epochId: "epoch-a", lastSeq: 8 },
+        ...(this.includeUnavailableBridge ? [{ bridgeId: "bridge-b", epochId: "epoch-b", lastSeq: 4 }] : []),
+      ],
+      diagnostics: [
+        { bridgeId: "bridge-a", connectionState: "ready", historyGapCount: 0 },
+        ...(this.includeUnavailableBridge
+          ? [{ bridgeId: "bridge-b", connectionState: "ready", historyGapCount: 0 }]
+          : []),
+      ],
       devices: [{
         hwId: "hw-1",
         bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
@@ -57,7 +76,7 @@ class StubHomeWorld extends Service {
           nativeInstanceId: "entity-1",
           time: { sourceTs: "2026-08-19T00:59:00.000Z" },
         }],
-      }],
+      }, ...(this.includeUnavailableDevice ? [unavailableDevice] : [])],
     };
   }
 
@@ -67,7 +86,11 @@ class StubHomeWorld extends Service {
       status: "available" as const,
       epochId: "epoch-a",
       rules: [{ ruleRef: "rule-1", name: "Arrival light", enabled: true }],
-    }];
+    }, ...(this.includeUnavailableBridge ? [{
+      bridgeId: "bridge-b",
+      status: "unavailable" as const,
+      rules: [],
+    }] : [])];
   }
 
   queryRecentEvidence(input: unknown) {
@@ -96,6 +119,48 @@ class StubHomeWorld extends Service {
     };
   }
 }
+
+test("scopes authoritative rule coverage to every bridge bound to selected devices", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.includeUnavailableBridge = true;
+  world.includeUnavailableDevice = true;
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const draft = {
+    kind: "household-insight" as const,
+    title: "Review bridge-local behavior",
+    summary: "Only the selected bridge should determine rule coverage.",
+    idempotencyKey: "bridge-local-coverage:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    risk: { level: "low" as const, reasons: [] },
+    intent: {
+      type: "household-insight",
+      description: "Review a bridge-local observation.",
+      rollback: "Reject the proposal.",
+    },
+  };
+
+  const proposal = await ctx.homeProposals.createDraft(draft);
+  assert.equal(proposal.conflictCheck.status, "checked");
+  assert.equal(proposal.conflictCheck.existingAutomationCount, 1);
+  ctx.homeProposals.review({
+    proposalId: proposal.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+  });
+
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    ...draft,
+    idempotencyKey: "cross-bridge-coverage:v1",
+    selectedHwIds: ["hw-1", "hw-2"],
+  }), /conflict check is required/i);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
 
 test("exposes the hub-owned proposal lifecycle as a Cordis service", async () => {
   const ctx = new Context();

@@ -33,6 +33,11 @@ uses an exclusive opaque rule-reference cursor.
 
 Names and other bridge content remain untrusted household data. They can inform
 deduplication but cannot grant tool authority or prove semantic equivalence.
+The authoritative coverage gate is scoped to every bridge binding of the
+devices selected by a proposal, not to every configured household bridge. An
+unrelated bridge without `foreignRules@1` therefore cannot block a proposal;
+selecting a device that is bound to that bridge does fail closed. A merged
+cross-bridge device requires available catalogs from every one of its bindings.
 The Inbox labels this as a metadata-only overlap screen and explicitly warns
 that zero name matches does not prove non-interference. Full rule IR remains a
 Phase 1 decision rather than an implied capability of `foreignRules@1`.

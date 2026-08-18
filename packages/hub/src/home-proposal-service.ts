@@ -51,9 +51,17 @@ export class HomeProposalService extends Service {
     if (selectedDevices.length !== selected.size) {
       throw new TypeError("home proposal selected devices are unavailable");
     }
+    const relevantBridgeIds = new Set(selectedDevices.flatMap((device) => [
+      ...device.bindings.map((binding) => binding.bridgeId),
+      ...device.capabilities.flatMap((capability) =>
+        capability.bindings.map((binding) => binding.bridgeId)),
+    ]));
     const catalogs = await world.foreignRuleCatalog();
-    const conflictAvailable = catalogs.every((catalog) => catalog.status === "available");
-    const rules = catalogs.flatMap((catalog) => catalog.rules);
+    const catalogsByBridge = new Map(catalogs.map((catalog) => [catalog.bridgeId, catalog]));
+    const conflictAvailable = relevantBridgeIds.size > 0
+      && [...relevantBridgeIds].every((bridgeId) => catalogsByBridge.get(bridgeId)?.status === "available");
+    const rules = catalogs.flatMap((catalog) =>
+      relevantBridgeIds.has(catalog.bridgeId) && catalog.status === "available" ? catalog.rules : []);
     const proposalText = `${input.title} ${input.summary} ${input.intent.description}`;
     const matches = conflictAvailable
       ? rules.filter((rule) => rule.name !== undefined && overlaps(proposalText, rule.name))
