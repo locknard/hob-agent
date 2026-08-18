@@ -131,7 +131,10 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
   }]);
   assert.equal(proposal.conflictCheck.existingAutomationCount, 1);
   assert.deepEqual(proposal.conflictCheck.matches, [{ identity: "rule-1", relation: "possible_overlap" }]);
-  assert.equal(proposal.dryRun.status, "passed");
+  assert.deepEqual(proposal.dryRun, {
+    status: "not_run",
+    summary: "No automation artifact exists yet; execution simulation was not run.",
+  });
   assert.equal(proposal.applicationStatus, "not_available");
 
   await fiber.dispose();

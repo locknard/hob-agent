@@ -89,7 +89,10 @@ export class HomeProposalService extends Service {
         existingAutomationCount: rules.length,
         matches,
       },
-      dryRun: { status: "passed", summary: "Review-only proposal; no device or automation was changed." },
+      dryRun: {
+        status: "not_run",
+        summary: "No automation artifact exists yet; execution simulation was not run.",
+      },
       risk: { ...input.risk, requiresHumanApproval: true },
       intent: input.intent,
     });

@@ -70,6 +70,11 @@ prevent stale tabs or concurrent agents from winning silently. Repeating the
 same producer/idempotency key returns the existing proposal instead of filling
 the Inbox with equivalent suggestions.
 
+M3a does not yet have an automation artifact to simulate. Hub-created drafts
+therefore report dry-run status `not_run`; “nothing was applied” must never be
+misreported as a passed simulation. Only a later Hub-owned artifact compiler
+and simulator may emit `passed` or `failed`.
+
 ## Evidence and privacy rules
 
 Evidence queries are served from the hub-owned world model, not directly from a
