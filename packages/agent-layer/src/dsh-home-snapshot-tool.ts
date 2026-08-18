@@ -60,6 +60,7 @@ export interface HomeWorldDevice {
   readonly capabilities: readonly HomeWorldCapability[];
   readonly states: readonly HomeWorldState[];
   readonly validity: HomeWorldDeviceValidity;
+  readonly spatialDisposition?: "non_spatial";
 }
 
 /** Neutral device record emitted by the home-world service's bridge reducer. */
@@ -71,6 +72,7 @@ export interface HomeWorldDeviceRecord {
   readonly capabilities: readonly HomeWorldCapability[];
   readonly states: readonly HomeWorldState[] | Readonly<Record<string, HomeWorldState>>;
   readonly validity: HomeWorldDeviceValidity;
+  readonly spatialDisposition?: "non_spatial";
 }
 
 export interface HomeWorldWatermark {
@@ -125,6 +127,7 @@ export interface HomeSnapshotToolValue {
     readonly bindings: HomeWorldBinding[];
     readonly name?: string;
     readonly validity: HomeWorldDeviceValidity;
+    readonly spatialDisposition?: "non_spatial";
     readonly capabilities: HomeWorldCapability[];
     readonly states: {
       readonly nativeId: string;
@@ -177,6 +180,7 @@ export interface HomeSnapshotPageValue {
     readonly hwId: string;
     readonly name?: string;
     readonly validity: HomeWorldDeviceValidity;
+    readonly spatialDisposition?: "non_spatial";
     readonly bridgeIds: string[];
     readonly hwSpaceIds: string[];
     readonly capabilities: {
@@ -272,6 +276,7 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
             required: true,
             enum: ["valid", "stale", "invalid-source", "present-but-invalid"],
           },
+          spatialDisposition: { type: "string", enum: ["non_spatial"] },
           bridgeIds: { type: "array", required: true, items: { type: "string" } },
           hwSpaceIds: { type: "array", required: true, items: { type: "string" } },
           capabilities: {
@@ -476,6 +481,7 @@ function projectModelDevice(
     hwId: device.hwId,
     ...(device.name === undefined ? {} : { name: device.name }),
     validity: device.validity,
+    ...(device.spatialDisposition === undefined ? {} : { spatialDisposition: device.spatialDisposition }),
     bridgeIds,
     hwSpaceIds,
     capabilities: device.capabilities.map((capability) => ({
@@ -665,6 +671,7 @@ function normalizeDevice(
     .sort(compareStates);
   const name = safeString(device.name);
   const validity = isValidity(device.validity) ? device.validity : "invalid-source";
+  const spatialDisposition = device.spatialDisposition === "non_spatial" ? "non_spatial" as const : undefined;
   const bridgeId = safeString(device.bridgeId);
   return {
     ...(bridgeId === undefined ? {} : { bridgeId }),
@@ -672,6 +679,7 @@ function normalizeDevice(
     bindings,
     ...(name === undefined ? {} : { name }),
     validity,
+    ...(spatialDisposition === undefined ? {} : { spatialDisposition }),
     capabilities,
     states,
   };
@@ -842,6 +850,9 @@ function mergeDevices(
     hwId: left.hwId,
     ...((left.name ?? right.name) === undefined ? {} : { name: left.name ?? right.name }),
     validity: left.validity === "valid" || right.validity === "valid" ? "valid" : left.validity,
+    ...(left.spatialDisposition === "non_spatial" && right.spatialDisposition === "non_spatial"
+      ? { spatialDisposition: "non_spatial" as const }
+      : {}),
     bindings,
     capabilities: [...capabilitiesByKey.values()].sort(compareCapabilities),
     states: [...statesByKey.values()].sort(compareStates),

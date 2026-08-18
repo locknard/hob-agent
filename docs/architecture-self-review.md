@@ -142,6 +142,8 @@ apply an artifact or control a device.
   committed replay epoch; names never drive this classification, and merged
   devices fail back to unknown unless every source agrees. This keeps service
   objects out of room-review work without making HA vocabulary part of core.
+  Inventory and snapshot tools expose only the resulting `non_spatial` value,
+  with prompt guidance that it proves neither physical type nor action safety.
 - `pnpm inbox:home` mounts only the durable proposal store, metadata-only
   observation audit, and authenticated localhost review surface. It requires
   no bridge or model configuration and retains the same terminal, non-applying

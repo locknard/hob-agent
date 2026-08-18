@@ -16,7 +16,9 @@ compact paginated `get_home_inventory`, metadata-only post-baseline
 parallel Agent or tool system. The read tools inject the neutral `homeWorld`
 service. Inventory discovery returns up to 50 compact device summaries without
 current values or capability/native identities, so an observation can exhaust
-discovery before requesting detailed state. The snapshot tool returns
+discovery before requesting detailed state. Both device projections may carry
+the closed neutral `non_spatial` disposition; absence remains unknown and the
+hint grants no authority. The snapshot tool returns
 deterministic pages
 of at most 20 devices and can narrow them by hub device ID, per-binding neutral
 space, or closed semantic kind. Its device, capability, state, space,

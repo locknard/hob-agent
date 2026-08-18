@@ -27,10 +27,14 @@ room.
 - The Hub validates, journals, and binds the hint to the committed epoch before
   projecting it onto a Hub device. A cross-bridge merged device is non-spatial
   only when every contributing binding says so and none has a space.
+- The Home Agent's inventory and detailed snapshot receive only the closed
+  neutral disposition. It may use the hint to avoid demanding a room for a
+  service object, but cannot treat it as proof of physical kind, safety, or
+  action authority.
 - The home-map draft separates explicitly non-spatial objects from genuine
   placement questions. The hint remains reviewable and cannot grant action
   authority, alter identity, or become behavioral evidence.
 
 This is an additive bridge extension, not a Home Assistant field in HomeWorld
-or the Agent API. It follows the `orgHints` seam already reserved by the v6
-bridge design.
+or the Agent API. The projected Agent value is the neutral disposition only.
+It follows the `orgHints` seam already reserved by the v6 bridge design.

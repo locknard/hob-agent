@@ -151,6 +151,19 @@ test("reports single, missing, and multiple accepted spaces as exclusive topolog
   });
 });
 
+test("projects only the closed neutral non-spatial disposition", () => {
+  const snapshot = structuredClone(queryFixture()) as typeof queryFixture extends () => infer T ? T : never;
+  (snapshot.devices[1] as typeof snapshot.devices[number] & { spatialDisposition?: string }).spatialDisposition = "non_spatial";
+  (snapshot.devices[2] as typeof snapshot.devices[number] & { spatialDisposition?: string }).spatialDisposition = "untrusted-value";
+
+  const projected = projectHomeSnapshot(snapshot);
+  assert.equal(projected.devices.find((device) => device.hwId === "hw-b")?.spatialDisposition, "non_spatial");
+  assert.equal(projected.devices.find((device) => device.hwId === "hw-c")?.spatialDisposition, undefined);
+  const page = pageHomeSnapshot(snapshot, { hwIds: ["hw-b"], limit: 1 });
+  assert.equal(page.devices[0]?.spatialDisposition, "non_spatial");
+  assert.equal(JSON.stringify(page).includes("untrusted-value"), false);
+});
+
 test("fails closed for invalid or oversized snapshot query arguments", () => {
   assert.throws(() => pageHomeSnapshot(queryFixture(), { limit: 21 }), /limit/);
   assert.throws(() => pageHomeSnapshot(queryFixture(), { hwIds: Array.from({ length: 21 }, (_, index) => `hw-${index}`) }), /hwIds/);

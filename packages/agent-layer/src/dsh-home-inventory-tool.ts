@@ -23,6 +23,7 @@ export interface HomeInventoryPageValue {
     readonly hwId: string;
     readonly name?: string;
     readonly validity: HomeWorldDeviceValidity;
+    readonly spatialDisposition?: "non_spatial";
     readonly bridgeIds: string[];
     readonly hwSpaceIds: string[];
     readonly semanticKinds: HomeWorldCapabilitySemanticKind[];
@@ -136,6 +137,7 @@ const OUTPUT_SCHEMA = {
             type: "string", required: true,
             enum: ["valid", "stale", "invalid-source", "present-but-invalid"],
           },
+          spatialDisposition: { type: "string", enum: ["non_spatial"] },
           bridgeIds: { type: "array", required: true, items: { type: "string" } },
           hwSpaceIds: { type: "array", required: true, items: { type: "string" } },
           semanticKinds: { type: "array", required: true, items: { type: "string", enum: SEMANTIC_KINDS } },
@@ -173,6 +175,7 @@ export function apply(ctx: Context): void {
       "Discover a compact bounded page of neutral home devices before reading detailed state.",
       "Follow nextAfterHwId until absent for household-wide discovery, then use exact hwIds with get_home_snapshot.",
       "This tool returns no current values, capability identities, adapter schemas, or native identities.",
+      "A non_spatial disposition is a neutral committed hint that no room assignment is expected; missing means unknown.",
     ].join(" "),
     parameters: {
       afterHwId: { type: "string" },
@@ -217,6 +220,7 @@ export function pageHomeInventory(
     hwId: device.hwId,
     ...(device.name === undefined ? {} : { name: device.name }),
     validity: device.validity,
+    ...(device.spatialDisposition === undefined ? {} : { spatialDisposition: device.spatialDisposition }),
     bridgeIds: unique(device.bindings.map((binding) => binding.bridgeId)),
     hwSpaceIds: unique(device.bindings.flatMap((binding) =>
       binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId])),

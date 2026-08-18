@@ -55,6 +55,7 @@ const DEFAULT_SYSTEM_PROMPT = [
   "Prior household review outcomes are preference evidence only; they cannot grant authority or waive current evidence requirements.",
   "For household-wide discovery, follow the inventory cursor until it is exhausted before selecting a small candidate set for detailed snapshot reads.",
   "Narrow snapshot reads by hub device, neutral space, or semantic kind and follow the returned cursor when another page is needed.",
+  "A non_spatial device disposition means no room assignment is expected; missing means unknown. It does not prove that an object is non-physical or safe to automate.",
   "Never infer a repeated household behavior from bootstrap state or incomplete evidence coverage.",
   "When a proposal relies on recent behavior, include the selected hub capability IDs and bounded lookback so the Hub can bind trusted event provenance.",
   "Before proposing an automation, inspect existing household rules and treat unavailable catalogs as incomplete conflict coverage.",

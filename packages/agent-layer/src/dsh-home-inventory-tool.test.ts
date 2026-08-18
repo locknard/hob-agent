@@ -103,6 +103,13 @@ test("inventory omits current values, capability identities, schemas, and native
   ]) assert.equal(serialized.includes(secret), false);
 });
 
+test("retains the neutral non-spatial disposition in compact discovery", () => {
+  const snapshot = structuredClone(fixture());
+  (snapshot.devices[1] as typeof snapshot.devices[number] & { spatialDisposition?: "non_spatial" }).spatialDisposition = "non_spatial";
+
+  assert.equal(pageHomeInventory(snapshot, {}).devices.find((device) => device.hwId === "hw-b")?.spatialDisposition, "non_spatial");
+});
+
 test("autonomous proposal coverage opens only after a stable ordered inventory is exhausted", async () => {
   const ctx = new Context();
   const fiber = await ctx.plugin(HomeInventoryCoverageService);
