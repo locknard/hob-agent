@@ -141,7 +141,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     title: "Arrival light follow-up",
     summary: "Review a possible arrival light automation.",
     idempotencyKey: "arrival-light:v1",
-    provenance: { producer: "dsh-home-agent", sessionId: "home-main", turnId: "turn-1" },
+    provenance: { producer: "dsh-home-agent", sessionId: "home-main", toolCallId: "call-1" },
     selectedHwIds: ["hw-1"],
     selectedHwCapabilityIds: ["hwc-1"],
     evidenceLookbackHours: 24,
@@ -217,7 +217,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     title: "Review current light state",
     summary: "A current-state-only observation for review.",
     idempotencyKey: "current-light:v1",
-    provenance: { producer: "dsh-home-agent", sessionId: "home-main", turnId: "turn-2" },
+    provenance: { producer: "dsh-home-agent", sessionId: "home-main", toolCallId: "call-2" },
     selectedHwIds: ["hw-1"],
     risk: { level: "low", reasons: [] },
     intent: {

@@ -57,7 +57,7 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
   assert.deepEqual((draft?.provenance), {
     producer: "dsh-home-agent",
     sessionId: "home-main",
-    turnId: "call-7",
+    toolCallId: "call-7",
   });
   assert.equal("conflictCheck" in (draft ?? {}), false);
   assert.deepEqual(draft?.selectedHwCapabilityIds, ["hwc-1"]);

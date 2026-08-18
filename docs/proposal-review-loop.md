@@ -49,7 +49,7 @@ Every proposal is a bounded, versioned envelope with:
   status;
 - a bounded kind, title, summary, and structured intended change;
 - immutable provenance identifying the producer and, when applicable, the DSH
-  session and turn;
+  session and root tool call;
 - evidence references and per-bridge watermarks rather than copied raw events;
 - freshness and gap declarations so missing evidence cannot look conclusive;
 - a stable idempotency key and explicit duplicate/conflict findings;
@@ -74,6 +74,10 @@ M3a does not yet have an automation artifact to simulate. Hub-created drafts
 therefore report dry-run status `not_run`; “nothing was applied” must never be
 misreported as a passed simulation. Only a later Hub-owned artifact compiler
 and simulator may emit `passed` or `failed`.
+
+`toolCallId` stores DSH's `rootCallId` for exact trace correlation. Early local
+v1 rows mislabeled that value as `turnId`; readers retain that optional legacy
+field, but new proposals never claim a tool-call identity is a turn number.
 
 ## Evidence and privacy rules
 

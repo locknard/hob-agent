@@ -14,7 +14,13 @@ export interface InboxProposal {
   readonly summary: string;
   readonly createdAt: string;
   readonly updatedAt: string;
-  readonly provenance: { readonly producer: string; readonly sessionId?: string; readonly turnId?: string };
+  readonly provenance: {
+    readonly producer: string;
+    readonly sessionId?: string;
+    readonly toolCallId?: string;
+    /** Legacy v1 field containing a root tool call id, not a DSH turn number. */
+    readonly turnId?: string;
+  };
   readonly evidence: {
     readonly references: readonly {
       readonly bridgeId: string;
@@ -124,12 +130,13 @@ export class ProposalInboxController {
     const proposal = this.ports.proposals.get(proposalId);
     if (proposal === undefined) return undefined;
     const trace = this.ports.traces?.traceSnapshot();
+    const toolCallId = proposal.provenance.toolCallId ?? proposal.provenance.turnId;
     return {
       proposal,
       ...(trace !== undefined
         && trace.sessionId === proposal.provenance.sessionId
-        && proposal.provenance.turnId !== undefined
-        && trace.tools.some((tool) => tool.id === proposal.provenance.turnId)
+        && toolCallId !== undefined
+        && trace.tools.some((tool) => tool.id === toolCallId)
         ? { trace }
         : {}),
     };

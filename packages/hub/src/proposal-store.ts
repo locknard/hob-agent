@@ -14,6 +14,8 @@ const isoTimestamp = z.iso.datetime({ offset: true });
 const provenanceSchema = z.object({
   producer: boundedId,
   sessionId: boundedId.optional(),
+  toolCallId: boundedId.optional(),
+  /** Legacy v1 field: early rows stored a DSH root call id under this name. */
   turnId: boundedId.optional(),
 }).strict();
 

@@ -10,7 +10,7 @@ interface HomeProposalPort {
     title: string;
     summary: string;
     idempotencyKey: string;
-    provenance: { producer: string; sessionId?: string; turnId?: string };
+    provenance: { producer: string; sessionId?: string; toolCallId?: string; turnId?: string };
     selectedHwIds: readonly string[];
     selectedHwCapabilityIds?: readonly string[];
     evidenceLookbackHours?: number;
@@ -103,7 +103,7 @@ export function apply(ctx: Context): void {
         provenance: {
           producer: "dsh-home-agent",
           ...(exec.agent === undefined ? {} : { sessionId: String(exec.agent.id) }),
-          turnId: String(exec.rootCallId),
+          toolCallId: String(exec.rootCallId),
         },
         selectedHwIds: args.selectedHwIds,
         ...(args.selectedHwCapabilityIds === undefined ? {} : { selectedHwCapabilityIds: args.selectedHwCapabilityIds }),

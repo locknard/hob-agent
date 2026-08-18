@@ -18,7 +18,7 @@ const proposal: InboxProposal = {
   summary: "Review an arrival-light draft.",
   createdAt: "2026-08-19T01:00:00.000Z",
   updatedAt: "2026-08-19T01:00:00.000Z",
-  provenance: { producer: "dsh-home-agent", sessionId: "home-main", turnId: "call-7" },
+  provenance: { producer: "dsh-home-agent", sessionId: "home-main", toolCallId: "call-7" },
   evidence: {
     references: [{
       bridgeId: "ha-main",
