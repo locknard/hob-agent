@@ -71,9 +71,19 @@ export function renderHomeMapDraft(
   generatedAt: string,
 ): string {
   if (!Number.isFinite(Date.parse(generatedAt))) throw new TypeError("home map draft timestamp is invalid");
-  const spaces = [...snapshot.spaces].sort((left, right) => left.hwSpaceId.localeCompare(right.hwSpaceId));
+  const spaces = [...snapshot.spaces].sort((left, right) => compareDisplay(
+    left.name ?? "Unnamed space",
+    left.hwSpaceId,
+    right.name ?? "Unnamed space",
+    right.hwSpaceId,
+  ));
   const knownSpaceIds = new Set(spaces.map((space) => space.hwSpaceId));
-  const devices = [...snapshot.devices].sort((left, right) => left.hwId.localeCompare(right.hwId));
+  const devices = [...snapshot.devices].sort((left, right) => compareDisplay(
+    left.name ?? "Unnamed device",
+    left.hwId,
+    right.name ?? "Unnamed device",
+    right.hwId,
+  ));
   const placements = classifyPlacements(devices, knownSpaceIds);
   const singleSpace = placements.filter((placement) => placement.spaceIds.length === 1);
   const nonSpatial = placements.filter((placement) => placement.spaceIds.length === 0
@@ -330,6 +340,12 @@ function safeHubId(value: string): string {
     throw new Error("Home map contains an invalid Hub identity");
   }
   return value;
+}
+
+function compareDisplay(leftName: string, leftId: string, rightName: string, rightId: string): number {
+  const leftKey = leftName.normalize("NFKC").toLocaleLowerCase("en-US");
+  const rightKey = rightName.normalize("NFKC").toLocaleLowerCase("en-US");
+  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : leftId.localeCompare(rightId);
 }
 
 function boundedInteger(value: number, minimum: number, maximum: number): number {

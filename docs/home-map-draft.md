@@ -38,6 +38,11 @@ punctuation is escaped rather than treated as links, formatting, or
 instructions. The result is bounded to the existing 32 KiB `HOME.md` loader
 limit.
 
+For human review only, spaces and devices are ordered by their normalized
+display names with opaque Hub identity as the deterministic tie-breaker. This
+ordering grants names no identity, placement, equivalence, or action authority;
+it only makes the private checklist easier to scan.
+
 ## Review boundary
 
 `HOME.import.md` is never loaded automatically. The household must inspect,

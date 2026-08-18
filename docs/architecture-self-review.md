@@ -142,6 +142,9 @@ apply an artifact or control a device.
   only display names, opaque Hub IDs, and closed source provenance. It omits
   claims and evidence, and remains record-only: no draft edit approves or
   applies an identity merge.
+- Private map review order is human-oriented by display name with Hub identity
+  only as a stable tie-breaker. Names remain untrusted presentation data and
+  cannot influence identity, placement, or authority.
 - The neutral `orgHints@1` stream extension can mark a device explicitly
   non-spatial from structured adapter evidence. The Hub accepts it only in the
   committed replay epoch; names never drive this classification, and merged
