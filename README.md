@@ -65,8 +65,8 @@ pnpm start
 
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
-Home Product Bundle contributes the read-only `get_home_snapshot` tool and the
-bounded read-only `get_home_evidence` tool plus the review-only
+Home Product Bundle contributes the bounded, paginated, read-only
+`get_home_snapshot` tool and the bounded read-only `get_home_evidence` tool plus the review-only
 `create_home_proposal` tool. Hub-owned evidence and
 `foreignRules@1` conflict checks are attached before a proposal enters the
 Inbox. Device actions, configuration writes, and proposal application remain
@@ -81,6 +81,11 @@ The additive v6.5 topology path preserves per-binding room provenance through
 opaque Hub space IDs and a neutral space catalog. HA and authorized Xiaomi
 transports use the same shape; equal room names across bridges are never
 silently merged. See [`docs/space-topology.md`](docs/space-topology.md).
+
+`get_home_snapshot` defaults to 10 devices and never returns more than 20. It
+supports exact hub-device selection plus neutral space and semantic-kind
+filters, with an exclusive opaque cursor for deterministic continuation. See
+[`docs/bounded-home-query.md`](docs/bounded-home-query.md).
 
 `get_home_evidence` accepts only current hub capability IDs and returns at most
 200 locally observed post-baseline state changes from the last seven days.

@@ -156,6 +156,23 @@ export interface HomeSnapshotToolValue {
   };
 }
 
+export interface HomeSnapshotQuery {
+  readonly afterHwId?: string;
+  readonly limit?: number;
+  readonly hwIds?: readonly string[];
+  readonly hwSpaceIds?: readonly string[];
+  readonly semanticKinds?: readonly HomeWorldCapabilitySemanticKind[];
+}
+
+export interface HomeSnapshotPageValue extends HomeSnapshotToolValue {
+  readonly page: {
+    readonly limit: number;
+    readonly returnedDevices: number;
+    readonly totalMatchedDevices: number;
+    readonly nextAfterHwId?: string;
+  };
+}
+
 type HomeWorldContext = Context & { homeWorld: HomeWorldService };
 
 export const name = "dsh-home-snapshot-tool";
@@ -330,20 +347,156 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
         connectionActivity: { type: "array", required: true, items: metricConnectionSchema },
       },
     },
+    page: {
+      type: "object",
+      required: true,
+      additionalProperties: false,
+      properties: {
+        limit: { type: "number", required: true },
+        returnedDevices: { type: "number", required: true },
+        totalMatchedDevices: { type: "number", required: true },
+        nextAfterHwId: { type: "string" },
+      },
+    },
   },
 } as const;
 
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: "get_home_snapshot",
-    description: "Read the current neutral home-world snapshot. This tool is read-only.",
-    parameters: {},
+    description: [
+      "Read a bounded page of the current neutral home-world snapshot.",
+      "Use exact hub IDs, neutral spaces, or semantic kinds to narrow the result.",
+      "Pass nextAfterHwId back as afterHwId to continue pagination.",
+      "This tool is read-only.",
+    ].join(" "),
+    parameters: {
+      afterHwId: { type: "string" },
+      limit: { type: "integer" },
+      hwIds: { type: "array", items: { type: "string" } },
+      hwSpaceIds: { type: "array", items: { type: "string" } },
+      semanticKinds: { type: "array", items: { type: "string", enum: HOME_WORLD_CAPABILITY_SEMANTIC_KINDS } },
+    },
     output: {
       schema: HOME_SNAPSHOT_OUTPUT_SCHEMA,
       render: (_args, value) => [{ type: "text" as const, text: JSON.stringify(value) }],
     },
-    execute: async () => projectHomeSnapshot(await readHomeWorld((ctx as HomeWorldContext).homeWorld)),
+    execute: async (args) => pageHomeSnapshot(
+      projectHomeSnapshot(await readHomeWorld((ctx as HomeWorldContext).homeWorld)),
+      args,
+    ),
   }));
+}
+
+const DEFAULT_PAGE_LIMIT = 10;
+const MAX_PAGE_LIMIT = 20;
+const MAX_HW_IDS = 20;
+const MAX_SPACE_IDS = 10;
+const MAX_ID_LENGTH = 256;
+
+/** Applies the bounded model-facing query to an already normalized snapshot. */
+export function pageHomeSnapshot(
+  snapshot: HomeSnapshotToolValue,
+  query: HomeSnapshotQuery,
+): HomeSnapshotPageValue {
+  const limit = query.limit ?? DEFAULT_PAGE_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT) {
+    throw new RangeError(`limit must be an integer from 1 to ${MAX_PAGE_LIMIT}`);
+  }
+  const afterHwId = validateOptionalId(query.afterHwId, "afterHwId");
+  const hwIds = validateIdSelection(query.hwIds, "hwIds", MAX_HW_IDS);
+  const hwSpaceIds = validateIdSelection(query.hwSpaceIds, "hwSpaceIds", MAX_SPACE_IDS);
+  const semanticKinds = validateSemanticKinds(query.semanticKinds);
+  const selectedHwIds = hwIds === undefined ? undefined : new Set(hwIds);
+  const selectedSpaceIds = hwSpaceIds === undefined ? undefined : new Set(hwSpaceIds);
+  const selectedSemanticKinds = semanticKinds === undefined ? undefined : new Set(semanticKinds);
+
+  const matchedDevices = snapshot.devices
+    .filter((device) => selectedHwIds === undefined || selectedHwIds.has(device.hwId))
+    .map((device) => filterDevice(device, selectedSpaceIds, selectedSemanticKinds))
+    .filter((device): device is HomeSnapshotToolValue["devices"][number] => device !== undefined);
+  const start = afterHwId === undefined
+    ? 0
+    : matchedDevices.findIndex((device) => compareStrings(device.hwId, afterHwId) > 0);
+  const pageStart = start < 0 ? matchedDevices.length : start;
+  const devices = matchedDevices.slice(pageStart, pageStart + limit);
+  const hasNextPage = pageStart + devices.length < matchedDevices.length;
+  const referencedSpaceIds = new Set(devices.flatMap((device) =>
+    device.bindings.flatMap((binding) => binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId])));
+
+  return {
+    spaces: snapshot.spaces.filter((space) => referencedSpaceIds.has(space.hwSpaceId)),
+    devices,
+    bridgeWatermarks: snapshot.bridgeWatermarks,
+    metrics: snapshot.metrics,
+    page: {
+      limit,
+      returnedDevices: devices.length,
+      totalMatchedDevices: matchedDevices.length,
+      ...(hasNextPage && devices.length > 0 ? { nextAfterHwId: devices.at(-1)!.hwId } : {}),
+    },
+  };
+}
+
+function filterDevice(
+  device: HomeSnapshotToolValue["devices"][number],
+  selectedSpaceIds: ReadonlySet<string> | undefined,
+  selectedSemanticKinds: ReadonlySet<HomeWorldCapabilitySemanticKind> | undefined,
+): HomeSnapshotToolValue["devices"][number] | undefined {
+  if (selectedSpaceIds === undefined && selectedSemanticKinds === undefined) return device;
+  const capabilities = device.capabilities.flatMap((capability) => {
+    if (selectedSemanticKinds !== undefined
+      && (capability.semanticKind === undefined || !selectedSemanticKinds.has(capability.semanticKind))) return [];
+    const bindings = selectedSpaceIds === undefined
+      ? capability.bindings
+      : capability.bindings.filter((binding) => binding.hwSpaceId !== undefined && selectedSpaceIds.has(binding.hwSpaceId));
+    return bindings.length === 0 ? [] : [{ ...capability, bindings: [...bindings] }];
+  });
+  if (capabilities.length === 0) return undefined;
+  const bindingKeys = new Set(capabilities.flatMap((capability) => capability.bindings.map(bindingKey)));
+  const stateKeys = new Set(capabilities.flatMap((capability) => capability.bindings
+    .map((binding) => `${binding.nativeId}\u0000${binding.nativeInstanceId}`)));
+  return {
+    ...device,
+    bindings: device.bindings.filter((binding) => bindingKeys.has(bindingKey(binding))),
+    capabilities,
+    states: device.states.filter((state) => stateKeys.has(`${state.nativeId}\u0000${state.nativeInstanceId}`)),
+  };
+}
+
+function validateOptionalId(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_ID_LENGTH) {
+    throw new TypeError(`${field} must be a non-empty bounded string`);
+  }
+  return value;
+}
+
+function validateIdSelection(
+  value: readonly string[] | undefined,
+  field: string,
+  maximum: number,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length < 1 || value.length > maximum) {
+    throw new RangeError(`${field} must contain from 1 to ${maximum} IDs`);
+  }
+  const ids = value.map((item) => validateOptionalId(item, field)!);
+  if (new Set(ids).size !== ids.length) throw new TypeError(`${field} must not contain duplicate IDs`);
+  return ids;
+}
+
+function validateSemanticKinds(
+  value: readonly HomeWorldCapabilitySemanticKind[] | undefined,
+): HomeWorldCapabilitySemanticKind[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length < 1 || value.length > HOME_WORLD_CAPABILITY_SEMANTIC_KINDS.length) {
+    throw new RangeError("semanticKinds must be a non-empty bounded selection");
+  }
+  if (value.some((item) => safeSemanticKind(item) === undefined) || new Set(value).size !== value.length) {
+    throw new TypeError("semanticKinds must contain unique supported values");
+  }
+  return [...value];
 }
 
 export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): HomeSnapshotToolValue {

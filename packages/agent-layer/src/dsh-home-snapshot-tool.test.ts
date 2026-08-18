@@ -8,7 +8,13 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime, { type ToolDefinition } from "@deepseek-ai/dsh-tools";
 
-import { apply, inject, name } from "./dsh-home-snapshot-tool.js";
+import {
+  apply,
+  inject,
+  name,
+  pageHomeSnapshot,
+  type HomeSnapshotToolValue,
+} from "./dsh-home-snapshot-tool.js";
 
 class StubWorldService extends Service {
   readonly snapshot = {
@@ -21,6 +27,98 @@ class StubWorldService extends Service {
     super(ctx, "homeWorld");
   }
 }
+
+function queryFixture(): HomeSnapshotToolValue {
+  const binding = (nativeId: string, hwSpaceId: string) => ({
+    bridgeId: "bridge-a",
+    nativeId,
+    nativeInstanceId: `${nativeId}-instance`,
+    hwSpaceId,
+  });
+  const device = (
+    hwId: string,
+    nativeId: string,
+    hwSpaceId: string,
+    semanticKind: "light" | "sensor",
+  ): HomeSnapshotToolValue["devices"][number] => ({
+    hwId,
+    bindings: [binding(nativeId, hwSpaceId)],
+    validity: "valid",
+    capabilities: [{
+      hwCapabilityId: `${hwId}-capability`,
+      hwId,
+      schema: `hob.${semanticKind}`,
+      schemaVersion: "1.0.0",
+      semanticKind,
+      bindings: [binding(nativeId, hwSpaceId)],
+    }],
+    states: [{
+      nativeId,
+      nativeInstanceId: `${nativeId}-instance`,
+      attrs: { state: semanticKind === "light" ? "on" : 21 },
+      time: { sourceTsQuality: "none" },
+      origin: "observed",
+    }],
+  });
+  return {
+    spaces: [
+      { hwSpaceId: "hws-a", name: "A", bindings: [{ bridgeId: "bridge-a", nativeSpaceId: "space-a" }] },
+      { hwSpaceId: "hws-b", name: "B", bindings: [{ bridgeId: "bridge-a", nativeSpaceId: "space-b" }] },
+    ],
+    devices: [
+      device("hw-a", "native-a", "hws-a", "light"),
+      device("hw-b", "native-b", "hws-b", "sensor"),
+      device("hw-c", "native-c", "hws-a", "light"),
+    ],
+    bridgeWatermarks: [{ bridgeId: "bridge-a", epochId: "epoch-a", lastSeq: 3 }],
+    metrics: {
+      consistency: [{ bridgeId: "bridge-a", state: "ready" }],
+      eventActivity: [{ bridgeId: "bridge-a" }],
+      connectionActivity: [{ bridgeId: "bridge-a", state: "ready" }],
+    },
+  };
+}
+
+test("pages a normalized snapshot deterministically with an exclusive cursor", () => {
+  const first = pageHomeSnapshot(queryFixture(), { limit: 2 });
+  assert.deepEqual(first.devices.map((device) => device.hwId), ["hw-a", "hw-b"]);
+  assert.deepEqual(first.page, {
+    limit: 2,
+    returnedDevices: 2,
+    totalMatchedDevices: 3,
+    nextAfterHwId: "hw-b",
+  });
+
+  const second = pageHomeSnapshot(queryFixture(), { limit: 2, afterHwId: "hw-b" });
+  assert.deepEqual(second.devices.map((device) => device.hwId), ["hw-c"]);
+  assert.deepEqual(second.page, {
+    limit: 2,
+    returnedDevices: 1,
+    totalMatchedDevices: 3,
+  });
+});
+
+test("filters capability bindings and removes unrelated states and spaces", () => {
+  const value = pageHomeSnapshot(queryFixture(), {
+    hwSpaceIds: ["hws-a"],
+    semanticKinds: ["light"],
+    limit: 10,
+  });
+
+  assert.deepEqual(value.devices.map((device) => device.hwId), ["hw-a", "hw-c"]);
+  assert.deepEqual(value.spaces.map((space) => space.hwSpaceId), ["hws-a"]);
+  assert.equal(value.devices.every((device) => device.bindings.every((item) => item.hwSpaceId === "hws-a")), true);
+  assert.equal(value.devices.every((device) => device.capabilities.every((item) => item.semanticKind === "light")), true);
+  assert.equal(value.devices.every((device) => device.states.length === 1), true);
+  assert.equal(value.page.totalMatchedDevices, 2);
+});
+
+test("fails closed for invalid or oversized snapshot query arguments", () => {
+  assert.throws(() => pageHomeSnapshot(queryFixture(), { limit: 21 }), /limit/);
+  assert.throws(() => pageHomeSnapshot(queryFixture(), { hwIds: Array.from({ length: 21 }, (_, index) => `hw-${index}`) }), /hwIds/);
+  assert.throws(() => pageHomeSnapshot(queryFixture(), { hwSpaceIds: ["hws-a", "hws-a"] }), /hwSpaceIds/);
+  assert.throws(() => pageHomeSnapshot(queryFixture(), { semanticKinds: ["not-a-kind" as "light"] }), /semanticKinds/);
+});
 
 test("mounts and unloads through the real DSH tool registry", async () => {
   const ctx = new Context();
@@ -53,7 +151,9 @@ test("registers get_home_snapshot and returns an empty neutral projection", asyn
   apply(ctx);
 
   assert.equal(registered?.name, "get_home_snapshot");
-  assert.deepEqual(registered?.parameters, { type: "object", properties: {} });
+  assert.deepEqual(Object.keys(registered?.parameters.properties ?? {}), [
+    "afterHwId", "limit", "hwIds", "hwSpaceIds", "semanticKinds",
+  ]);
   const value = await registered!.execute({}, {} as never);
 
   assert.deepEqual(value, {
@@ -61,6 +161,7 @@ test("registers get_home_snapshot and returns an empty neutral projection", asyn
     devices: [],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
+    page: { limit: 10, returnedDevices: 0, totalMatchedDevices: 0 },
   });
   assert.deepEqual(registered!.output.render({}, value as never), [
     { type: "text", text: JSON.stringify(value) },
@@ -94,6 +195,7 @@ test("invokes a method-backed HomeWorld snapshot with its service receiver", asy
     devices: [],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
+    page: { limit: 10, returnedDevices: 0, totalMatchedDevices: 0 },
   });
 });
 
@@ -224,6 +326,7 @@ test("projects homeWorld into neutral devices, bridge watermarks, and three metr
         { bridgeId: "bridge-b", state: "ready", lastSuccessfulContactAt: "2026-08-18T00:00:10.000Z" },
       ],
     },
+    page: { limit: 10, returnedDevices: 2, totalMatchedDevices: 2 },
   });
 });
 
@@ -338,6 +441,7 @@ test("projects the neutral home-world service snapshot shape without ecosystem k
       eventActivity: [{ bridgeId: "bridge-a", lastEventReceivedAt: "2026-08-18T00:00:01.000Z" }],
       connectionActivity: [{ bridgeId: "bridge-a", state: "ready", lastSuccessfulContactAt: "2026-08-18T00:00:01.000Z" }],
     },
+    page: { limit: 10, returnedDevices: 1, totalMatchedDevices: 1 },
   });
 });
 

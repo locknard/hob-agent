@@ -30,7 +30,7 @@ apply an artifact or control a device.
 
 ## Verified boundaries
 
-- The Home Agent exposes `get_home_snapshot`, bounded read-only
+- The Home Agent exposes bounded, paginated `get_home_snapshot`, bounded read-only
   `get_home_evidence`, and review-only `create_home_proposal`; none has device
   or configuration authority.
 - Temporal evidence reads only selected current hub capability IDs and

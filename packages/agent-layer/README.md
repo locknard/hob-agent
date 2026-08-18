@@ -5,13 +5,15 @@ only governed tools with audit logging and approval checks.
 
 DSH is the only Agent Runtime in this package. It owns the LLM seam, session,
 prompt, tool, agent, and loop services. The Home Product Bundle contributes the
-read-only `get_home_snapshot`, bounded read-only `get_home_evidence`, and
+bounded, paginated, read-only `get_home_snapshot`, bounded read-only `get_home_evidence`, and
 review-only `create_home_proposal` tools through DSH's registry; it does not
 create a parallel Agent or tool system. The snapshot and evidence tools inject
-the neutral `homeWorld` service. They project deterministic devices,
-capabilities, per-binding neutral spaces, states, bridge watermarks, and
-consistency/event/connection summaries. External attributes are bounded and
-JSON-normalized before they reach the model.
+the neutral `homeWorld` service. The snapshot tool returns deterministic pages
+of at most 20 devices and can narrow them by hub device ID, per-binding neutral
+space, or closed semantic kind. Its device, capability, state, space,
+watermark, and health projections remain ecosystem-neutral. External
+attributes are bounded and JSON-normalized before they reach the model. See
+`docs/bounded-home-query.md` for the query boundary.
 
 The proposal tool accepts bounded intent, risk, and selected hub identities,
 then delegates to the hub. It cannot supply its own evidence or conflict-check
