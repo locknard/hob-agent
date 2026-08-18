@@ -535,6 +535,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private bridge: HomeAssistantBridge | undefined;
   private queue: NativeStateQueue | undefined;
   private bindingsByEntityId = new Map<string, EntityBinding>();
+  private stateAttrsByNativeInstanceId = new Map<string, Readonly<Record<string, unknown>>>();
   private healthByNativeId = new Map<string, "reachable" | "unreachable" | "unknown">();
   private foreignRuleCatalog: ForeignRuleCatalog | undefined;
   private resyncInFlight = false;
@@ -627,6 +628,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         if (binding === undefined) continue;
         const state = projectNativeState(item.event, binding);
         if (state === undefined) continue;
+        if (sameScalarRecord(this.stateAttrsByNativeInstanceId.get(state.nativeInstanceId), state.attrs)) continue;
+        this.stateAttrsByNativeInstanceId.set(state.nativeInstanceId, { ...state.attrs });
         yield current.envelope({ kind: "state", state });
         const nextHealth = healthForNativeState(item.event.state);
         if (this.healthByNativeId.get(binding.nativeId) !== nextHealth) {
@@ -644,6 +647,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       this.bridge?.close();
       this.bridge = undefined;
       this.queue = undefined;
+      this.stateAttrsByNativeInstanceId.clear();
       this.healthByNativeId.clear();
       this.resyncInFlight = false;
       this.lifecycle = "disposed";
@@ -653,6 +657,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private prepareSnapshot(snapshot: HomeAssistantSnapshot): SnapshotEmission {
     const projection = projectSnapshot(snapshot);
     this.bindingsByEntityId = projection.bindingsByEntityId;
+    this.stateAttrsByNativeInstanceId = new Map(projection.devices.flatMap((device) =>
+      device.states.map((state) => [state.nativeInstanceId, { ...state.attrs }] as const)));
     this.healthByNativeId = new Map(
       projection.devices.map((device) => [device.descriptor.nativeId, device.health]),
     );
@@ -1095,6 +1101,17 @@ function isJsonScalar(value: unknown): value is string | number | boolean | null
     || typeof value === "string"
     || typeof value === "boolean"
     || (typeof value === "number" && Number.isFinite(value));
+}
+
+function sameScalarRecord(
+  left: Readonly<Record<string, unknown>> | undefined,
+  right: Readonly<Record<string, unknown>>,
+): boolean {
+  if (left === undefined) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && left[key] === right[key]);
 }
 
 function mapHomeAssistantStreamError(error: unknown): BridgeStreamError {

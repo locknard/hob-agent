@@ -81,7 +81,9 @@ available/unavailable existing-rule coverage before a model call. See
 [`docs/home-validation.md`](docs/home-validation.md).
 It also separates explicitly non-spatial service objects from genuine
 space-review gaps through the neutral, epoch-bound `orgHints@1` extension, and
-reports pending identity-governance work only as aggregate counts.
+reports pending identity-governance work only as aggregate counts. Aggregate
+logical journal capacity makes the fail-closed ingest quota visible before an
+unattended pilot; it does not silently prune evidence.
 
 After validation, one explicit paid/model-backed observation can be run without
 enabling the recurring scheduler or Inbox HTTP listener:

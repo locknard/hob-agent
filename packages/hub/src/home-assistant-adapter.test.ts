@@ -472,6 +472,49 @@ test("incremental state events stay bound to the stable registry id and emit hea
   assert.equal((await iterator.next()).done, true);
 });
 
+test("suppresses consecutive HA events whose neutral state did not change", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket);
+  await first;
+  for (let index = 0; index < 4; index += 1) await iterator.next();
+
+  const subscription = socket.sent.find((message) => message.type === "subscribe_events");
+  assert.notEqual(subscription, undefined);
+  const next = iterator.next();
+  const receiveState = (brightness: number, unknownAttributes: Record<string, unknown>) => socket.receive({
+    id: subscription!.id,
+    type: "event",
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-18T00:00:02.000Z",
+      data: {
+        entity_id: "light.kitchen",
+        new_state: {
+          state: "on",
+          attributes: { brightness, unit_of_measurement: "%", ...unknownAttributes },
+        },
+      },
+    },
+  });
+  receiveState(200, { changed_vendor_field: "different", another_unknown: true });
+  receiveState(201, { changed_vendor_field: "different", another_unknown: true });
+
+  const envelope = await next;
+  assert.equal(envelope.value?.seq, 6);
+  assert.equal(
+    (envelope.value?.event as Extract<BridgeEvent, { kind: "state" }>).state.attrs.brightness,
+    201,
+  );
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
 test("the registered HA attrs schema is strict at the neutral boundary", () => {
   const attrsSchema = HOME_ASSISTANT_ADAPTER_REGISTRATION.capabilitySchemas[0]!.attrsSchema;
   assert.equal(attrsSchema.safeParse({ state: "on", secret_attribute: "must-fail" }).success, false);

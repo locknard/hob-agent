@@ -232,6 +232,31 @@ The immediate next step is the bounded real-household pilot described in
 The pilot's review outcomes and observed run metrics should decide which gap
 below becomes product work next.
 
+### P1 — canonical ingest-journal retention
+
+The neutral ingest journal has a deterministic 16 MiB logical hard quota and
+fails closed through bridge pause/quarantine, but it has no production
+retention path. Real-household validation now reports aggregate used, maximum,
+and remaining logical bytes so exhaustion is visible before an unattended
+pilot. A first live HA run reached roughly 45% of the default quota while
+retaining no rejections or history gaps. In its first 14 post-baseline minutes,
+42% of comparable HA state events repeated the preceding neutral attributes.
+The HA adapter now suppresses those consecutive semantic duplicates before it
+allocates a canonical envelope, reducing both journal growth and false Agent
+activity without discarding a neutral state change. The continuing one-hour
+checkpoint is the remaining sizing evidence for the next decision.
+
+Do not solve this by silently deleting old epochs or by treating a larger quota
+as retention. A reviewed implementation must preserve at least the current
+manifest-verified recovery cut, the supported 168-hour temporal evidence
+window, open history gaps, and journal rows referenced by durable proposal
+evidence. It must persist an explicit retention floor/audit so a query can
+report partial coverage instead of mistaking deleted history for quiet time.
+Logical deletion must remain transactional with its byte ledger; physical
+SQLite page reclamation may be a separate bounded maintenance step. Until that
+contract exists, capacity visibility and fail-closed backpressure are the safe
+boundary.
+
 ### P2 — non-local Inbox delivery
 
 Authenticated local delivery is implemented. LAN/remote exposure is not: it

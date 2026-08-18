@@ -24,6 +24,11 @@ neutral result; it never reads SQLite or a bridge journal directly.
 - Only state events in the current verified epoch with a sequence after its
   `sync-complete` watermark qualify. Bootstrap state rows are not behavioral
   evidence.
+- An adapter may suppress a native notification only when its newly projected
+  neutral scalar attributes exactly equal the preceding neutral state for the
+  same capability. Such native metadata-only churn never becomes a canonical
+  event or Agent activity; actual neutral attribute and health changes remain
+  ordered and journaled.
 - Each event contains hub device/capability identity, optional semantic kind,
   a scalar `state` value, observation time, source-time quality, origin, and
   bridge epoch/sequence provenance. Raw attributes and native identifiers stay
