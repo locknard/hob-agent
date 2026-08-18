@@ -19,6 +19,12 @@ class StubWorldService extends Service {
   }
 }
 
+class StubProposalService extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeProposals");
+  }
+}
+
 class RecordingAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = [];
 
@@ -33,12 +39,13 @@ class RecordingAdapter extends LlmAdapter {
 }
 
 test("declares the neutral home-world service as a required production dependency", () => {
-  assert.deepEqual(DshHomeAgentService.inject, ["homeWorld"]);
+  assert.deepEqual(DshHomeAgentService.inject, ["homeWorld", "homeProposals"]);
 });
 
 test("mounts the sole production Agent through the DSH runtime", async () => {
   const ctx = new Context();
   await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
   const adapter = new RecordingAdapter();
   const fiber = await ctx.plugin(DshHomeAgentService, {
     provider: "test-provider",
@@ -48,7 +55,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   });
 
   assert.equal(String(ctx.homeAgent.agent.id), "home-main");
-  assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), ["get_home_snapshot"]);
+  assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), ["get_home_snapshot", "create_home_proposal"]);
 
   ctx.homeAgent.agent.followup(createUserMessage({
     content: [{ type: "text", text: "What can you see?" }],

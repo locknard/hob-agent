@@ -8,6 +8,9 @@ import {
   HomeWorldService,
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
+import { HomeProposalService } from "./home-proposal-service.js";
+import type { SqliteProposalStoreOptions } from "./proposal-store.js";
+import { ProposalInboxService } from "@hob-agent/inbox-web/service";
 import {
   mountDshHomeAgent,
   type DshHomeAgentCompositionOptions,
@@ -15,6 +18,7 @@ import {
 
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
+  readonly homeProposals?: SqliteProposalStoreOptions;
   readonly agent: DshHomeAgentCompositionOptions;
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
 }
@@ -48,7 +52,9 @@ export class HomeAgentRuntime {
     this.statusValue = "starting";
     try {
       await this.context.plugin(HomeWorldService, this.options.homeWorld);
+      await this.context.plugin(HomeProposalService, this.options.homeProposals ?? { path: ":memory:" });
       await mountDshHomeAgent(this.context, this.options.agent);
+      await this.context.plugin(ProposalInboxService);
       this.statusValue = "running";
     } catch (error) {
       await this.stop();

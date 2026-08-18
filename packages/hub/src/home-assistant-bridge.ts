@@ -18,6 +18,13 @@ import {
   type IdentityClaim as ContractIdentityClaim,
   type StateEvent as ContractStateEvent,
 } from "../../../contracts/bridge-contract.js";
+import {
+  FOREIGN_RULES_EXTENSION,
+  MAX_FOREIGN_RULES,
+  type ForeignRuleCatalog,
+  type ForeignRuleSummary,
+  type ForeignRulesHandle,
+} from "../../../contracts/bridge-foreign-rules.js";
 
 export interface WebSocketLike {
   send(data: string): void;
@@ -524,6 +531,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private queue: NativeStateQueue | undefined;
   private bindingsByEntityId = new Map<string, EntityBinding>();
   private healthByNativeId = new Map<string, "reachable" | "unreachable" | "unknown">();
+  private foreignRuleCatalog: ForeignRuleCatalog | undefined;
   private resyncInFlight = false;
 
   constructor(
@@ -535,7 +543,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       coreVersion: HOME_ASSISTANT_CORE_VERSION,
       ecosystem: "home-assistant",
       heartbeatIntervalMs: HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS,
-      extensions: Object.freeze([]),
+      extensions: Object.freeze([FOREIGN_RULES_EXTENSION]),
     });
     this.control = Object.freeze({
       requestResync: (signal: AbortSignal) => this.requestResync(signal),
@@ -551,8 +559,16 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     return this.runEvents(signal);
   }
 
-  extension<K extends keyof ExtensionHandleRegistry>(_name: K): ExtensionHandleRegistry[K] | undefined {
-    return undefined;
+  extension<K extends keyof ExtensionHandleRegistry>(name: K): ExtensionHandleRegistry[K] | undefined {
+    if (name !== "foreignRules@1") return undefined;
+    const handle: ForeignRulesHandle = {
+      catalog: async () => this.foreignRuleCatalog === undefined ? undefined : {
+        epochId: this.foreignRuleCatalog.epochId,
+        complete: this.foreignRuleCatalog.complete,
+        rules: this.foreignRuleCatalog.rules.map((rule) => ({ ...rule })),
+      },
+    };
+    return handle as ExtensionHandleRegistry[K];
   }
 
   private async *runEvents(signal: AbortSignal): AsyncGenerator<ContractEnvelope> {
@@ -637,6 +653,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     );
     const snapshotId = this.snapshotId();
     const epochId = `${this.context.bridgeId}:${snapshotId}:${++homeAssistantEpochCounter}`;
+    this.foreignRuleCatalog = { epochId, ...projectForeignRules(snapshot) };
     const remoteInstanceId = deriveHomeAssistantRemoteInstanceId(
       this.context.config.baseUrl,
       this.context.config.authenticationPrincipal,
@@ -702,6 +719,39 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     this.queue?.close();
     this.bridge?.close();
   }
+}
+
+function projectForeignRules(snapshot: HomeAssistantSnapshot): {
+  readonly complete: boolean;
+  readonly rules: ForeignRuleSummary[];
+} {
+  const states = new Map(snapshot.states.map((state) => [state.entity_id, state]));
+  const rules: ForeignRuleSummary[] = [];
+  let complete = true;
+  for (const raw of snapshot.entityRegistry) {
+    if (!isRecord(raw)) continue;
+    const entityId = nonEmptyString(raw.entity_id);
+    if (entityId === undefined || !entityId.startsWith("automation.")) continue;
+    if (rules.length >= MAX_FOREIGN_RULES) {
+      complete = false;
+      continue;
+    }
+    const stableId = nonEmptyString(raw.id) ?? entityId;
+    const state = states.get(entityId);
+    const stateName = state && isRecord(state.attributes)
+      ? nonEmptyString(state.attributes.friendly_name)
+      : undefined;
+    const name = nonEmptyString(raw.name) ?? nonEmptyString(raw.original_name) ?? stateName;
+    const enabled = state?.state === "on" ? true : state?.state === "off" ? false : undefined;
+    const updatedAt = state?.last_updated;
+    rules.push({
+      ruleRef: `ha-rule:${createHash("sha256").update(stableId).digest("hex")}`,
+      ...(name === undefined ? {} : { name: name.slice(0, 256) }),
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(typeof updatedAt === "string" && updatedAt.length > 0 ? { updatedAt } : {}),
+    });
+  }
+  return { complete, rules: rules.sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)) };
 }
 
 /** Short alias for callers that use the contract's adapter terminology. */

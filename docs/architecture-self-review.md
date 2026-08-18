@@ -22,9 +22,21 @@ SQLite ingest, canonical identity and authority, world-model indexing, the HA
 adapter, and the neutral agent snapshot. Actions and artifact hosting remain an
 explicit M3 boundary rather than a second runtime hidden in Phase 0.
 
+M3a now adds a review-only proposal path inside the same root: a private SQLite
+proposal store, hub-owned evidence/conflict projection, DSH proposal tool, and
+local Inbox facade. Approval remains a terminal review decision and cannot
+apply an artifact or control a device.
+
 ## Verified boundaries
 
-- The Home Agent exposes only the read-only `get_home_snapshot` tool.
+- The Home Agent exposes `get_home_snapshot` plus review-only
+  `create_home_proposal`; neither tool has device or configuration authority.
+- Proposal evidence, bridge watermarks, history gaps, and existing-rule
+  conflicts are hub-produced. `foreignRules@1` catalogs are accepted only when
+  their epoch matches the committed bridge watermark.
+- Proposal creation is idempotent per producer/key. Review uses optimistic
+  revisions, terminal decisions are immutable, and approval has
+  `applicationStatus: not_available`.
 - API-key profiles enter the official adapter through DSH `CredentialProvider`;
   the adapter resolves the selected SecretRef per operation.
 - `CredentialProvider.describe()` now reports actual current availability, in
@@ -70,6 +82,14 @@ seam. This keeps process ownership in the monolith without creating a third
 runtime or a second service.
 
 ## Open architecture gaps
+
+### P1 — authenticated Inbox delivery
+
+The Inbox controller and escaped HTML review fragments are mounted in the same
+Cordis root, but no HTTP listener is exposed yet. Before browser delivery,
+define local authentication, CSRF/origin checks, reviewer identity, body/route
+budgets, and secure bind defaults. Do not turn the current controller into an
+unauthenticated approval endpoint.
 
 ### P1 — session persistence decision
 

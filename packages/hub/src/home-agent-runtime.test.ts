@@ -43,15 +43,20 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 2), ["HomeWorldService", "DshHomeAgentComposition"]);
+  assert.deepEqual(pluginOrder.slice(0, 3), ["HomeWorldService", "HomeProposalService", "DshHomeAgentComposition"]);
   assert.equal(runtime.context.root, runtime.context);
   assert.equal(runtime.context.homeWorld.name, "homeWorld");
+  assert.equal(runtime.context.homeProposals.name, "homeProposals");
+  assert.equal(runtime.context.homeInbox.name, "homeInbox");
+  assert.equal(pluginOrder.includes("ProposalInboxService"), true);
   assert.equal(String(runtime.context.homeAgent.agent.id), "home-runtime-test");
 
   await runtime.stop();
 
   assert.equal(runtime.status, "stopped");
   assert.equal(runtime.context.homeWorld, undefined);
+  assert.equal(runtime.context.homeProposals, undefined);
+  assert.equal(runtime.context.homeInbox, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
   await runtime.stop();
 });
@@ -75,6 +80,8 @@ test("stops the already-mounted HomeWorld when DSH startup fails", async () => {
   await assert.rejects(runtime.start(), /Selected profile and SecretVault must be provided together/);
   assert.equal(runtime.status, "stopped");
   assert.equal(runtime.context.homeWorld, undefined);
+  assert.equal(runtime.context.homeProposals, undefined);
+  assert.equal(runtime.context.homeInbox, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
 });
 

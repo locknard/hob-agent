@@ -1,4 +1,4 @@
-import type { AgentLoopTrace } from "../../agent-layer/src/dsh-agent-loop-trace.js";
+import type { AgentLoopTrace } from "@hob-agent/agent-layer/agent-loop-trace";
 
 /** Render the metadata-only DSH trajectory as a review-safe timeline fragment. */
 export function renderAgentLoopTimeline(trace: AgentLoopTrace): string {

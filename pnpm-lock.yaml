@@ -101,6 +101,9 @@ importers:
       '@hob-agent/agent-layer':
         specifier: workspace:*
         version: link:../agent-layer
+      '@hob-agent/inbox-web':
+        specifier: workspace:*
+        version: link:../inbox-web
       '@types/ws':
         specifier: ^8.5.14
         version: 8.18.1
@@ -110,6 +113,15 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+
+  packages/inbox-web:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.1
+        version: 4.0.1
+      '@hob-agent/agent-layer':
+        specifier: workspace:*
+        version: link:../agent-layer
 
 packages:
 

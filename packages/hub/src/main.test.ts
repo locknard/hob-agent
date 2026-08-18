@@ -30,6 +30,7 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
     config: { baseUrl: "http://ha.local:8123", authenticationPrincipal: "owner-a" },
   }]);
   assert.equal(options.runtime.homeWorld.catalog.hasAdapter("home-assistant"), true);
+  assert.equal(options.runtime.homeProposals.path, "/tmp/hob-agent-main-test/proposals.sqlite");
   assert.deepEqual(options.runtime.agent, { provider: "gpt", model: "gpt-5.4" });
   assert.equal(options.runtime.launchEnvironment.get("OPENAI_API_KEY")?.value, "openai-secret");
   assert.equal(JSON.stringify(options.runtime.homeWorld.bridges).includes("home-assistant-secret"), false);

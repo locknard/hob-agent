@@ -3,6 +3,10 @@ import { dirname, join } from "node:path";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 import type { ZodType } from "zod";
+import {
+  foreignRuleCatalogSchema,
+  type ForeignRuleSummary,
+} from "../../../contracts/bridge-foreign-rules.js";
 
 import {
   canonicalExtensionKey,
@@ -133,6 +137,13 @@ export interface HomeWorldBridgeRuntime {
   lastTermination: "running" | "completed" | "error";
   subscriptionAbort?: AbortController;
   task?: Promise<void>;
+}
+
+export interface HomeWorldForeignRuleCatalog {
+  readonly bridgeId: string;
+  readonly status: "available" | "unavailable";
+  readonly epochId?: string;
+  readonly rules: readonly ForeignRuleSummary[];
 }
 
 export interface HomeWorldDeviceSnapshot {
@@ -410,6 +421,34 @@ export class HomeWorldService extends Service {
 
   worldModelRetentionAudits(): WorldModelRetentionAudit[] {
     return this.requireWorldModel().retentionAudits();
+  }
+
+  /** Reads metadata-only foreign rules; unsupported or invalid extensions fail closed. */
+  async foreignRuleCatalog(): Promise<readonly HomeWorldForeignRuleCatalog[]> {
+    const catalogs: HomeWorldForeignRuleCatalog[] = [];
+    for (const runtime of [...this.runtimesById.values()].sort((left, right) => left.bridgeId.localeCompare(right.bridgeId))) {
+      if (runtime.extensionAvailability["foreignRules@1"] !== "available") {
+        catalogs.push({ bridgeId: runtime.bridgeId, status: "unavailable", rules: [] });
+        continue;
+      }
+      try {
+        const handle = runtime.adapter.extension("foreignRules@1");
+        const parsed = foreignRuleCatalogSchema.safeParse(await handle?.catalog());
+        if (!parsed.success) throw new Error("Invalid foreign rule catalog");
+        if (!parsed.data.complete) throw new Error("Foreign rule catalog is incomplete");
+        const watermark = runtime.journal.consistentWatermark?.(runtime.bridgeId);
+        if (watermark?.epochId !== parsed.data.epochId) throw new Error("Foreign rule epoch is not committed");
+        catalogs.push({
+          bridgeId: runtime.bridgeId,
+          status: "available",
+          epochId: parsed.data.epochId,
+          rules: parsed.data.rules,
+        });
+      } catch {
+        catalogs.push({ bridgeId: runtime.bridgeId, status: "unavailable", rules: [] });
+      }
+    }
+    return catalogs;
   }
 
   snapshot(): HomeWorldSnapshot {

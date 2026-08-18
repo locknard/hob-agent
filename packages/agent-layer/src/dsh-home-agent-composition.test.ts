@@ -14,9 +14,16 @@ class StubWorldService extends Service {
   }
 }
 
+class StubProposalService extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeProposals");
+  }
+}
+
 test("mounts the official DSH pi-ai adapter for a product provider route", async () => {
   const ctx = new Context();
   await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
 
   const fiber = await mountDshHomeAgent(ctx, {
     provider: "deepseek",
@@ -35,6 +42,7 @@ test("mounts the official DSH pi-ai adapter for a product provider route", async
 test("bridges a selected API-key profile into the official DSH credential seam", async () => {
   const ctx = new Context();
   await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
   const reads: string[] = [];
   const fiber = await mountDshHomeAgent(ctx, {
     provider: "deepseek",

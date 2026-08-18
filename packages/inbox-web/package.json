@@ -1,0 +1,13 @@
+{
+  "name": "@hob-agent/inbox-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./service": "./src/proposal-inbox-service.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@hob-agent/agent-layer": "workspace:*"
+  }
+}

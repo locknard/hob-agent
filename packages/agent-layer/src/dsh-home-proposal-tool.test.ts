@@ -1,0 +1,63 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { Context } from "@deepseek-ai/cordis";
+import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
+
+import { apply } from "./dsh-home-proposal-tool.js";
+
+test("registers a review-only proposal tool and injects trusted DSH provenance", async () => {
+  let registered: ToolDefinition | undefined;
+  let draft: Record<string, unknown> | undefined;
+  const ctx = {
+    homeProposals: {
+      async createDraft(input: Record<string, unknown>) {
+        draft = input;
+        return {
+          id: "proposal-1",
+          revision: 1,
+          status: "pending_review",
+          applicationStatus: "not_available",
+          conflictCheck: { existingAutomationCount: 15, matches: [{ identity: "rule-1" }] },
+        };
+      },
+    },
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => undefined;
+      },
+    },
+  } as unknown as Context;
+
+  apply(ctx);
+  assert.equal(registered?.name, "create_home_proposal");
+  const value = await registered!.execute({
+    kind: "automation-draft",
+    title: "Review arrival lighting",
+    summary: "A possible rule based on observed state.",
+    idempotencyKey: "arrival-light:v1",
+    selectedHwIds: ["hw-1"],
+    riskLevel: "medium",
+    riskReasons: ["Could overlap an existing rule"],
+    intentDescription: "Prepare a draft automation for review.",
+    rollback: "Discard the draft.",
+  }, {
+    agent: { id: "home-main" },
+    rootCallId: "call-7",
+  } as never);
+
+  assert.deepEqual((draft?.provenance), {
+    producer: "dsh-home-agent",
+    sessionId: "home-main",
+    turnId: "call-7",
+  });
+  assert.equal("conflictCheck" in (draft ?? {}), false);
+  assert.deepEqual(value, {
+    proposalId: "proposal-1",
+    status: "pending_review",
+    revision: 1,
+    applicationStatus: "not_available",
+    conflictSummary: { existingAutomationCount: 15, matchCount: 1 },
+  });
+});

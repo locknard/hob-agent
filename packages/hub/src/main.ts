@@ -47,6 +47,7 @@ export function createHomeHubProcessOptions(
         registryPath: config.registryPath,
         worldModelPath: config.worldModelPath,
       },
+      homeProposals: { path: config.proposalPath },
       agent: config.agent,
       launchEnvironment: config.launchEnvironment,
     },

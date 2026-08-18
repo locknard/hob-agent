@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@hob-agent/agent-layer": "workspace:*",
+    "@hob-agent/inbox-web": "workspace:*",
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-launch-environment": "0.1.0-rc.7",
     "@types/ws": "^8.5.14",

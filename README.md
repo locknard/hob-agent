@@ -19,10 +19,10 @@ pnpm install
 pnpm check
 ```
 
-The repository is in Phase 0. The Cordis-hosted DSH read-only Home Agent, Home
-Assistant bridge, provider credential/profile foundations, and governed home
-snapshot tool now have executable tests; proposal application and device control
-remain deliberately unavailable.
+The repository is in Phase 0. The Cordis-hosted DSH Home Agent, Home Assistant
+bridge, provider credential/profile foundations, governed snapshot/proposal
+tools, durable proposal store, and local Inbox review facade have executable
+tests. Proposal application and device control remain deliberately unavailable.
 
 ## Development workflow
 
@@ -60,9 +60,11 @@ pnpm start
 
 DeepSeek Harness (DSH) is the project's only Agent Runtime. It owns the agent
 loop, session, prompt assembly, tool registry, and cancellation lifecycle. The
-Home Product Bundle currently contributes only the read-only
-`get_home_snapshot` tool. Device actions, configuration writes, and proposal
-application are deliberately not implemented in this first slice.
+Home Product Bundle contributes the read-only `get_home_snapshot` tool and the
+review-only `create_home_proposal` tool. Hub-owned evidence and
+`foreignRules@1` conflict checks are attached before a proposal enters the
+Inbox. Device actions, configuration writes, and proposal application remain
+deliberately unavailable.
 
 `pi-agent-core` is not part of the architecture. `pi-ai` exists only as a
 transitive implementation detail of the official DSH LLM adapter; hob-agent

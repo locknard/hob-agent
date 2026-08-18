@@ -6,6 +6,7 @@ import {
   type BridgeEvent,
   type Envelope,
 } from "../../../contracts/bridge-contract.js";
+import type { ForeignRulesHandle } from "../../../contracts/bridge-foreign-rules.js";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
 import {
@@ -141,10 +142,34 @@ test("factory construction is synchronous and does not resolve credentials or to
     coreVersion: "6.3.0",
     ecosystem: "home-assistant",
     heartbeatIntervalMs: 60_000,
-    extensions: [],
+    extensions: [{ id: "foreignRules", version: "1.0.0" }],
   });
   void socket;
   void socketCalls;
+});
+
+test("exposes existing automations through the bounded read-only foreignRules extension", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "automation.arrival_light");
+  await first;
+
+  const handle = adapter.extension("foreignRules@1") as ForeignRulesHandle | undefined;
+  const catalog = await handle?.catalog();
+  const rules = catalog?.rules;
+  assert.equal(typeof catalog?.epochId, "string");
+  assert.equal(catalog?.complete, true);
+  assert.equal(rules?.length, 1);
+  assert.match(rules?.[0]?.ruleRef ?? "", /^ha-rule:/);
+  assert.deepEqual(rules?.[0] && { name: rules[0].name, enabled: rules[0].enabled }, {
+    name: "Kitchen light",
+    enabled: true,
+  });
+  assert.equal(JSON.stringify(rules).includes("automation.arrival_light"), false);
+  await adapter.control.dispose();
 });
 
 test("rejects userinfo in Home Assistant URLs without echoing embedded credentials", () => {

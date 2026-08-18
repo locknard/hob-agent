@@ -5,11 +5,17 @@ only governed tools with audit logging and approval checks.
 
 DSH is the only Agent Runtime in this package. It owns the LLM seam, session,
 prompt, tool, agent, and loop services. The Home Product Bundle contributes the
-read-only `get_home_snapshot` tool through DSH's registry; it does not create a
-parallel Agent or tool system. The tool injects the neutral `homeWorld` service
+read-only `get_home_snapshot` and review-only `create_home_proposal` tools
+through DSH's registry; it does not create a parallel Agent or tool system. The
+snapshot tool injects the neutral `homeWorld` service
 and projects deterministic devices, capabilities, states, bridge watermarks,
 and consistency/event/connection summaries. External attributes are bounded and
 JSON-normalized before they reach the model.
+
+The proposal tool accepts bounded intent, risk, and selected hub identities,
+then delegates to the hub. It cannot supply its own evidence or conflict-check
+result, approve the proposal, or apply it. DSH session/call identity is injected
+as trusted provenance by the tool implementation.
 
 `AgentLoopTraceService` is a bounded, read-only projection of DSH's canonical
 `session/event` stream. It exposes turn/step/tool status, timing, and aggregate
