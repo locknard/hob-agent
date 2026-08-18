@@ -66,6 +66,35 @@ test("registers get_home_snapshot and returns an empty neutral projection", asyn
   ]);
 });
 
+test("invokes a method-backed HomeWorld snapshot with its service receiver", async () => {
+  let registered: ToolDefinition | undefined;
+  const homeWorld = {
+    marker: "bound-home-world",
+    snapshot() {
+      assert.equal(this.marker, "bound-home-world");
+      return { devices: [], bridgeWatermarks: [], diagnostics: [] };
+    },
+  };
+  const ctx = {
+    homeWorld,
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => {};
+      },
+    },
+  } as unknown as Context;
+
+  apply(ctx);
+  const value = await registered!.execute({}, {} as never);
+
+  assert.deepEqual(value, {
+    devices: [],
+    bridgeWatermarks: [],
+    metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
+  });
+});
+
 test("projects homeWorld into neutral devices, bridge watermarks, and three metric summaries", async () => {
   let registered: ToolDefinition | undefined;
   const ctx = {

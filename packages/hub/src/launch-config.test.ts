@@ -35,6 +35,7 @@ test("reads neutral bridge entries and selected model credential without putting
   }]);
   assert.equal(config.catalog.hasAdapter("home-assistant"), true);
   assert.equal(config.proposalPath, "/tmp/hob-agent-launch-test/proposals.sqlite");
+  assert.equal(config.sessionPath, "/tmp/hob-agent-launch-test/dsh-sessions.sqlite");
   assert.equal(JSON.stringify(config.bridges).includes("home-assistant-secret"), false);
   assert.deepEqual(config.agent, { provider: "gpt", model: "gpt-5.4" });
   assert.deepEqual(config.launchEnvironment.get("OPENAI_API_KEY"), {

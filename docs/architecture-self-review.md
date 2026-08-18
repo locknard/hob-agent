@@ -13,8 +13,8 @@ transitive implementation detail.
 This repository now provides an executable Phase 0 composition root. It creates
 one Cordis `Context`, mounts the neutral `HomeWorldService` before the Home
 Agent, and owns bounded process shutdown. The service is runnable but not yet
-production-complete: session persistence and household prompt/Skill loading
-remain open.
+production-complete: official DSH session persistence is composed, while
+household prompt/Skill loading remains open.
 
 The frozen neutral bridge read path is implemented through migration step 6:
 one Zod-first v6.3 contract, catalog/registry/scoped credentials, epoch-aware
@@ -59,6 +59,9 @@ apply an artifact or control a device.
   remote identity fails closed until an explicit rebind.
 - SQLite journals, registry data, world-model files, and WAL/SHM sidecars are
   private; production launch requires an explicit durable data directory.
+- The stable Home Agent session is created or resumed through the official DSH
+  SQLite provider. Raw conversation and tool events remain DSH-owned local
+  data, while Inbox trace reconstruction stays bounded and metadata-only.
 - State authority changes use a candidate resync and a new consistent watermark
   before one atomic coordinator commit. Snapshot reads cannot invoke the
   chooser as an implicit failover path.
@@ -92,11 +95,12 @@ Authenticated local delivery is implemented. LAN/remote exposure is not: it
 would require TLS, device/user identity, stronger session management, and a
 separate threat review. Do not make the bind host configurable as a shortcut.
 
-### P1 — session persistence decision
+### P1 — session retention and household reset
 
-The Home Agent mounts DSH's in-memory `SessionStore`; the declared
-`dsh-session-persistence` package is not composed. Decide and document the
-hub-owned persistence provider before treating session history as restart-safe.
+Restart-safe session history now uses the official DSH SQLite provider at the
+production data path. The provider has no retention or deletion API. Define a
+governed household reset/export policy upstream before offering either action;
+do not mutate DSH tables directly.
 
 ### P1 — household prompt and Skills
 

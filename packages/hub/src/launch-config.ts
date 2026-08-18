@@ -40,6 +40,7 @@ export interface HomeHubLaunchConfig {
   readonly registryPath: string;
   readonly worldModelPath: string;
   readonly proposalPath: string;
+  readonly sessionPath: string;
   readonly bridges: readonly BridgeConfigEntry<unknown>[];
   readonly bridgeCredentialSource: BridgeAwareCredentialSource;
   readonly catalog: BridgeCatalog;
@@ -87,6 +88,7 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
     registryPath: join(dataDirectory, "bridge-registry.sqlite"),
     worldModelPath: join(dataDirectory, "world-model.sqlite"),
     proposalPath: join(dataDirectory, "proposals.sqlite"),
+    sessionPath: join(dataDirectory, "dsh-sessions.sqlite"),
     bridges: bridges.map(({ bridgeId, adapterType, config }) => ({ bridgeId, adapterType, config })),
     bridgeCredentialSource: createBridgeCredentialSource(environment, refsByBridge),
     catalog: createBuiltinBridgeCatalog(),

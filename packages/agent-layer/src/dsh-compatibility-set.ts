@@ -22,6 +22,7 @@ export const DSH_COMPATIBILITY_SET = {
   '@deepseek-ai/dsh-scope': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-session': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-session-persistence': DSH_COMPATIBILITY_SET_VERSION,
+  '@deepseek-ai/dsh-session-persistence-sqlite': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-settings': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-system-prompt': DSH_COMPATIBILITY_SET_VERSION,
   '@deepseek-ai/dsh-timeout': DSH_COMPATIBILITY_SET_VERSION,

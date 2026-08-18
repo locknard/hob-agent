@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { Context, Service } from "@deepseek-ai/cordis";
@@ -82,4 +85,69 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(ctx.get("tools"), undefined);
   assert.equal(ctx.get("llm"), undefined);
   await ctx.fiber.dispose();
+});
+
+test("resumes the stable Home Agent session from the official private SQLite store", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-dsh-session-"));
+  const path = join(directory, "sessions.sqlite");
+  try {
+    const first = new Context();
+    await first.plugin(StubWorldService);
+    await first.plugin(StubProposalService);
+    const firstAdapter = new RecordingAdapter();
+    const firstFiber = await first.plugin(DshHomeAgentService, {
+      provider: "test-provider",
+      model: "test-model",
+      adapter: firstAdapter,
+      sessionId: "home-persisted",
+      sessionPersistencePath: path,
+    });
+    first.homeAgent.agent.followup(createUserMessage({
+      content: [{ type: "text", text: "Remember the downstairs context" }],
+      source: { kind: "user" },
+    }));
+    await first.homeAgent.agent.whenIdle();
+    const firstAsOfSeq = first.homeAgent.traceSnapshot()?.asOfSeq ?? -1;
+    await firstFiber.dispose();
+    await first.fiber.dispose();
+
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+
+    const resumed = new Context();
+    await resumed.plugin(StubWorldService);
+    await resumed.plugin(StubProposalService);
+    const resumedAdapter = new RecordingAdapter();
+    const resumedFiber = await resumed.plugin(DshHomeAgentService, {
+      provider: "test-provider",
+      model: "test-model",
+      adapter: resumedAdapter,
+      sessionId: "home-persisted",
+      sessionPersistencePath: path,
+    });
+
+    assert.equal(
+      resumed.homeAgent.agent.session.events.some((event) =>
+        event.type === "user/message"
+        && JSON.stringify(event.data).includes("Remember the downstairs context")),
+      true,
+    );
+    assert.equal((resumed.homeAgent.traceSnapshot()?.asOfSeq ?? -1) >= firstAsOfSeq, true);
+
+    resumed.homeAgent.agent.followup(createUserMessage({
+      content: [{ type: "text", text: "Continue" }],
+      source: { kind: "user" },
+    }));
+    await resumed.homeAgent.agent.whenIdle();
+    assert.equal(
+      resumedAdapter.requests[0]?.messages.some((message) =>
+        JSON.stringify(message).includes("Remember the downstairs context")),
+      true,
+    );
+
+    await resumedFiber.dispose();
+    await resumed.fiber.dispose();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

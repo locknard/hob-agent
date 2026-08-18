@@ -92,8 +92,9 @@ The OpenClaw-derived provider adaptation audit is tracked in
 [`docs/openclaw-provider-adaptation.md`](docs/openclaw-provider-adaptation.md).
 
 The repository now has one executable Cordis composition root for the neutral
-HomeWorld bridge runtime and DSH agent. Live session persistence and household
-prompt/Skill loading remain open; see
+HomeWorld bridge runtime and DSH agent. The production Home Agent creates or
+resumes its stable session through the official DSH SQLite provider; household
+prompt/Skill loading remains open. See
 [`docs/architecture-self-review.md`](docs/architecture-self-review.md) for the
 verified boundaries and prioritized gaps.
 The intended provider authorization and model-selection journey is documented

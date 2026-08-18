@@ -48,7 +48,10 @@ export function createHomeHubProcessOptions(
         worldModelPath: config.worldModelPath,
       },
       homeProposals: { path: config.proposalPath },
-      agent: config.agent,
+      agent: {
+        ...config.agent,
+        sessionPersistencePath: config.sessionPath,
+      },
       ...(config.inboxHttp === undefined ? {} : { inboxHttp: config.inboxHttp }),
       launchEnvironment: config.launchEnvironment,
     },

@@ -3,6 +3,7 @@ import AgentRegistry, { type Agent } from "@deepseek-ai/dsh-agent";
 import AgentLoop from "@deepseek-ai/dsh-agent-loop";
 import LlmRuntime, { type LlmAdapter } from "@deepseek-ai/dsh-llm";
 import SessionStore, { SessionId } from "@deepseek-ai/dsh-session";
+import SqliteSessionPersistence from "@deepseek-ai/dsh-session-persistence-sqlite";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime from "@deepseek-ai/dsh-tools";
 
@@ -35,6 +36,8 @@ export interface DshHomeAgentOptions {
   /** Test/custom adapter. Omit when a provider plugin already owns the route. */
   readonly adapter?: LlmAdapter;
   readonly sessionId?: string;
+  /** Official DSH SQLite store. Omit only for isolated in-memory tests. */
+  readonly sessionPersistencePath?: string;
   readonly systemPrompt?: string;
 }
 
@@ -60,6 +63,11 @@ export class DshHomeAgentService extends Service {
   protected async [Service.init](): Promise<void> {
     if (!this.ctx.get("llm")) await this.ctx.plugin(LlmRuntime);
     await this.ctx.plugin(SessionStore);
+    if (this.options.sessionPersistencePath !== undefined) {
+      await this.ctx.plugin(SqliteSessionPersistence, {
+        path: this.options.sessionPersistencePath,
+      });
+    }
     await this.ctx.plugin(AgentLoopTraceService);
     await this.ctx.plugin(SystemPrompt, {
       includeHarnessIdentity: false,
@@ -73,19 +81,27 @@ export class DshHomeAgentService extends Service {
 
     const llm = this.ctx.get("llm");
     const agents = this.ctx.get("agents");
+    const sessionPersistence = this.ctx.get("sessionPersistence");
     if (!llm || !agents) throw new Error("DSH runtime services did not initialize");
+    if (this.options.sessionPersistencePath !== undefined && !sessionPersistence) {
+      throw new Error("Configured DSH session persistence is unavailable");
+    }
     if (this.options.adapter) {
       llm.registerAdapter([this.options.provider], this.options.adapter);
     } else if (!llm.listProviders().some((provider) => provider.id === this.options.provider)) {
       throw new Error("Configured DSH provider route is unavailable");
     }
-    const handle = await agents.create({
-      sessionId: SessionId(this.options.sessionId ?? DEFAULT_SESSION_ID),
-      agentOptions: {
-        provider: this.options.provider,
-        model: this.options.model,
-      },
-    });
+    const sessionId = SessionId(this.options.sessionId ?? DEFAULT_SESSION_ID);
+    const agentOptions = {
+      provider: this.options.provider,
+      model: this.options.model,
+    };
+    const persisted = this.options.sessionPersistencePath === undefined
+      ? false
+      : (await sessionPersistence!.list()).some((header) => header.id === sessionId);
+    const handle = persisted
+      ? await agents.resume({ resumeSessionId: sessionId, agentOptions })
+      : await agents.create({ sessionId, agentOptions });
     this.agent = handle.agent;
     this.ctx.effect(() => () => handle.dispose(), "home-agent.dispose");
   }

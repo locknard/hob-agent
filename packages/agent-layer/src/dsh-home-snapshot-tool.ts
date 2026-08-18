@@ -371,7 +371,7 @@ export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): Ho
 
 async function readHomeWorld(service: HomeWorldService): Promise<HomeWorldSnapshot | undefined> {
   const snapshot = service?.snapshot;
-  return typeof snapshot === "function" ? await snapshot() : snapshot;
+  return typeof snapshot === "function" ? await snapshot.call(service) : snapshot;
 }
 
 function normalizeDevice(device: unknown): HomeSnapshotToolValue["devices"][number] | undefined {

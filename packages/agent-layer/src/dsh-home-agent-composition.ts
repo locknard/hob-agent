@@ -15,6 +15,7 @@ export interface DshHomeAgentCompositionOptions {
   readonly profile?: AuthProfile;
   readonly vault?: SecretVault;
   readonly sessionId?: string;
+  readonly sessionPersistencePath?: string;
   readonly systemPrompt?: string;
 }
 
@@ -49,6 +50,9 @@ class DshHomeAgentComposition extends Service {
       provider: setup.runtimeProviderId,
       model: this.options.model,
       ...(this.options.sessionId === undefined ? {} : { sessionId: this.options.sessionId }),
+      ...(this.options.sessionPersistencePath === undefined
+        ? {}
+        : { sessionPersistencePath: this.options.sessionPersistencePath }),
       ...(this.options.systemPrompt === undefined ? {} : { systemPrompt: this.options.systemPrompt }),
     });
   }

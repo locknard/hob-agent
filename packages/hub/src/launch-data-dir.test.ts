@@ -24,9 +24,11 @@ test("requires an explicit data directory and forwards durable hub paths", () =>
   assert.equal(options.runtime.homeWorld.journalDirectory, ENV.HOB_DATA_DIR);
   assert.equal(options.runtime.homeWorld.registryPath, "/tmp/hob-agent-data/bridge-registry.sqlite");
   assert.equal(options.runtime.homeWorld.worldModelPath, "/tmp/hob-agent-data/world-model.sqlite");
+  assert.equal(options.runtime.agent.sessionPersistencePath, "/tmp/hob-agent-data/dsh-sessions.sqlite");
   assert.notEqual(options.runtime.homeWorld.journalDirectory, ":memory:");
   assert.notEqual(options.runtime.homeWorld.registryPath, ":memory:");
   assert.notEqual(options.runtime.homeWorld.worldModelPath, ":memory:");
+  assert.notEqual(options.runtime.agent.sessionPersistencePath, ":memory:");
 });
 
 test("fails closed for blank or non-absolute data directories", () => {
