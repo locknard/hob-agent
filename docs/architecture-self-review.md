@@ -49,6 +49,10 @@ apply an artifact or control a device.
 - Autonomous observation is disabled by default. The Hub owns its bounded
   cadence, requires a ready world and idle DSH Agent, and permits only one
   pending household proposal at a time.
+- One-root acceptance coverage now exercises the canonical DSH tool loop from
+  observation through trusted Hub evidence binding into the Inbox. The Home
+  Agent retains its trace service explicitly so cross-plugin Inbox reads do not
+  bypass Cordis injection ownership.
 - Optional Inbox HTTP is disabled without an explicit credential, binds only to
   `127.0.0.1`, stores only a derived verifier, authenticates every request, and
   requires exact same-origin bounded review POSTs.

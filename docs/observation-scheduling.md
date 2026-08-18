@@ -40,3 +40,8 @@ automatic approval, cron syntax, a second session, or a vendor-specific
 observer. It does not guarantee that a model will find a useful proposal.
 Its purpose is to connect the existing trustworthy loop to time without
 expanding authority or silently spending model calls by default.
+
+The acceptance test drives one scripted DSH observation through bounded
+snapshot and evidence tools, Hub-owned proposal creation, and the Inbox on one
+Cordis root. It asserts exact event provenance and confirms that application
+remains unavailable.

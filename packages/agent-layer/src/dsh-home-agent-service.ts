@@ -58,6 +58,7 @@ export class DshHomeAgentService extends Service {
 
   agent!: Agent;
   private observationTask: Promise<void> | undefined;
+  private traceService: AgentLoopTraceService | undefined;
 
   get observationStatus(): "idle" | "running" {
     return this.observationTask === undefined && this.agent.status === "idle" ? "idle" : "running";
@@ -92,7 +93,7 @@ export class DshHomeAgentService extends Service {
   }
 
   traceSnapshot(): AgentLoopTrace | undefined {
-    return this.ctx.agentLoopTrace.snapshot(String(this.agent.id));
+    return this.traceService?.snapshot(String(this.agent.id));
   }
 
   constructor(ctx: Context, private readonly options: DshHomeAgentOptions) {
@@ -108,6 +109,8 @@ export class DshHomeAgentService extends Service {
       });
     }
     await this.ctx.plugin(AgentLoopTraceService);
+    this.traceService = this.ctx.get("agentLoopTrace");
+    if (this.traceService === undefined) throw new Error("DSH Agent trace service did not initialize");
     const basePersona = this.options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     await this.ctx.plugin(SystemPrompt, {
       includeHarnessIdentity: false,

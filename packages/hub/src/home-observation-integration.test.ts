@@ -1,0 +1,197 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { Context, Service } from "@deepseek-ai/cordis";
+import { DshHomeAgentService } from "@hob-agent/agent-layer/home-agent";
+import { ProposalInboxService } from "@hob-agent/inbox-web/service";
+
+import { HomeProposalService } from "./home-proposal-service.js";
+
+class AcceptanceWorld extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeWorld");
+  }
+
+  snapshot() {
+    return {
+      generatedAt: "2026-08-19T04:00:00.000Z",
+      spaces: [{
+        hwSpaceId: "hws-1",
+        name: "Shared space",
+        bindings: [{ bridgeId: "bridge-a", nativeSpaceId: "space-a" }],
+      }],
+      bridges: { "bridge-a": { diagnostics: { historyGapCount: 0 } } },
+      bridgeWatermarks: [{ bridgeId: "bridge-a", epochId: "epoch-a", lastSeq: 8 }],
+      diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready" as const, historyGapCount: 0 }],
+      devices: [{
+        hwId: "hw-1",
+        bindings: [{
+          bridgeId: "bridge-a",
+          nativeId: "native-1",
+          nativeInstanceId: "instance-1",
+          hwSpaceId: "hws-1",
+        }],
+        name: "Observed device",
+        validity: "valid" as const,
+        capabilities: [{
+          hwCapabilityId: "hwc-1",
+          hwId: "hw-1",
+          schema: "hob.light",
+          schemaVersion: "1.0.0",
+          semanticKind: "light" as const,
+          bindings: [{
+            bridgeId: "bridge-a",
+            nativeId: "native-1",
+            nativeInstanceId: "instance-1",
+            hwSpaceId: "hws-1",
+          }],
+        }],
+        states: [{
+          nativeId: "native-1",
+          nativeInstanceId: "instance-1",
+          attrs: { state: "on" },
+          time: { sourceTs: "2026-08-19T03:59:00.000Z", sourceTsQuality: "platform" as const },
+          origin: "observed" as const,
+        }],
+      }],
+    };
+  }
+
+  queryRecentEvidence() {
+    return {
+      requestedSince: "2026-08-18T04:00:00.000Z",
+      requestedUntil: "2026-08-19T04:00:00.000Z",
+      events: [{
+        hwId: "hw-1",
+        hwCapabilityId: "hwc-1",
+        semanticKind: "light" as const,
+        value: "on",
+        observedAt: "2026-08-19T03:30:00.000Z",
+        sourceTsQuality: "platform" as const,
+        origin: "observed" as const,
+        provenance: { bridgeId: "bridge-a", epochId: "epoch-a", seq: 11 },
+      }],
+      coverage: [{
+        bridgeId: "bridge-a",
+        epochId: "epoch-a",
+        baselineSeq: 8,
+        baselineAt: "2026-08-18T04:00:00.000Z",
+        status: "complete" as const,
+        reasons: [],
+      }],
+      truncated: false,
+    };
+  }
+
+  async foreignRuleCatalog() {
+    return [{ bridgeId: "bridge-a", status: "available" as const, epochId: "epoch-a", rules: [] }];
+  }
+}
+
+class ObservationScriptAdapter {
+  requests: unknown[] = [];
+
+  providerInfo(provider: string) {
+    return { id: provider, name: provider };
+  }
+
+  providerRetryPolicy() {
+    return undefined;
+  }
+
+  async listModels() {
+    return [];
+  }
+
+  async resolveModel(provider: string, model: string) {
+    return { provider, id: model, name: model };
+  }
+
+  async *stream(options: unknown) {
+    this.requests.push(options);
+    const step = this.requests.length;
+    if (step === 1) {
+      yield* toolCall("call-snapshot", "get_home_snapshot", { semanticKinds: ["light"], limit: 10 });
+      return;
+    }
+    if (step === 2) {
+      yield* toolCall("call-evidence", "get_home_evidence", {
+        hwCapabilityIds: ["hwc-1"],
+        lookbackHours: 24,
+        limit: 50,
+      });
+      return;
+    }
+    if (step === 3) {
+      yield* toolCall("call-proposal", "create_home_proposal", {
+        kind: "household-insight",
+        title: "Review repeated light activity",
+        summary: "A bounded observed light event may warrant household review.",
+        idempotencyKey: "acceptance:light-activity:v1",
+        selectedHwIds: ["hw-1"],
+        selectedHwCapabilityIds: ["hwc-1"],
+        evidenceLookbackHours: 24,
+        riskLevel: "low",
+        riskReasons: ["Observation may not represent household intent"],
+        intentDescription: "Review the observation without applying any automation.",
+        rollback: "Reject the proposal.",
+      });
+      return;
+    }
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "text-delta", index: 0, text: "One review item was created." };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "One review item was created." } };
+    yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }
+}
+
+async function* toolCall(id: string, name: string, args: unknown) {
+  const callId = id;
+  const serialized = JSON.stringify(args);
+  const block = { type: "tool-call" as const, id: callId, name, arguments: serialized };
+  yield { type: "block-start", index: 0, blockType: "tool-call" };
+  yield { type: "tool-call-delta", index: 0, id: callId, name, argumentsDelta: serialized };
+  yield { type: "block-end", index: 0, block };
+  yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+  yield { type: "finish", reason: { kind: "tool-calls" } };
+}
+
+test("runs one DSH observation through governed tools into a trusted Inbox proposal", async () => {
+  const ctx = new Context();
+  await ctx.plugin(AcceptanceWorld);
+  await ctx.plugin(HomeProposalService, { path: ":memory:", now: () => "2026-08-19T04:00:00.000Z" });
+  const adapter = new ObservationScriptAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "acceptance-provider",
+    model: "acceptance-model",
+    adapter: adapter as never,
+    sessionId: "acceptance-home",
+  });
+  await ctx.plugin(ProposalInboxService);
+
+  await ctx.homeAgent.requestObservation();
+
+  assert.equal(adapter.requests.length, 4);
+  assert.deepEqual(ctx.homeAgent.traceSnapshot()?.tools.map((tool) => tool.name), [
+    "get_home_snapshot",
+    "get_home_evidence",
+    "create_home_proposal",
+  ]);
+  const [summary] = ctx.homeInbox.list({ status: "pending_review" });
+  assert.equal(summary?.title, "Review repeated light activity");
+  const detail = ctx.homeInbox.detail(summary!.id)!;
+  assert.deepEqual(detail.proposal.evidence.references, [{
+    bridgeId: "bridge-a",
+    hwId: "hw-1",
+    capabilityId: "hwc-1",
+    observedAt: "2026-08-19T03:30:00.000Z",
+    source: "post-baseline-event",
+    epochId: "epoch-a",
+    seq: 11,
+  }]);
+  assert.equal(detail.proposal.evidence.temporal?.coverage[0]?.status, "complete");
+  assert.equal(detail.proposal.applicationStatus, "not_available");
+
+  await ctx.fiber.dispose();
+});
