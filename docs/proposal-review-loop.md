@@ -70,6 +70,14 @@ prevent stale tabs or concurrent agents from winning silently. Repeating the
 same producer/idempotency key returns the existing proposal instead of filling
 the Inbox with equivalent suggestions.
 
+New manual reviews also carry bounded decision-specific feedback. Approval
+records “useful as-is”; rejection distinguishes an already-covered suggestion,
+low value, an incorrect assumption, insufficient evidence, a household
+preference mismatch, excessive risk, or another reason with a required note.
+The code is persisted in the review and append-only audit event. Older v1 rows
+without structured feedback remain readable. Feedback never changes household
+knowledge, prompts, policy, or device authority automatically.
+
 M3a does not yet have an automation artifact to simulate. Hub-created drafts
 therefore report dry-run status `not_run`; “nothing was applied” must never be
 misreported as a passed simulation. Only a later Hub-owned artifact compiler
@@ -116,7 +124,8 @@ M3a is complete when a local run can:
    existing-automation conflict findings;
 4. restart without losing the proposal or audit history;
 5. list and inspect it in the Inbox beside its metadata-safe DSH trajectory;
-6. approve or reject it with optimistic concurrency and an audit record; and
+6. approve or reject it with optimistic concurrency, structured household
+   feedback, and an audit record; and
 7. demonstrate that approval cannot execute a device action or install an
    automation.
 

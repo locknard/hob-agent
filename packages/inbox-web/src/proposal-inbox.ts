@@ -3,6 +3,16 @@ import type { AgentLoopTrace } from "@hob-agent/agent-layer/agent-loop-trace";
 import { renderAgentLoopTimeline } from "./agent-loop-timeline.js";
 
 export type InboxProposalStatus = "pending_review" | "approved" | "rejected" | "expired";
+export type InboxApprovalFeedbackCode = "useful_as_is";
+export type InboxRejectionFeedbackCode =
+  | "already_covered"
+  | "not_useful"
+  | "incorrect_assumption"
+  | "insufficient_evidence"
+  | "household_preference"
+  | "too_risky"
+  | "other";
+export type InboxReviewFeedbackCode = InboxApprovalFeedbackCode | InboxRejectionFeedbackCode;
 
 export interface InboxProposal {
   readonly id: string;
@@ -54,7 +64,14 @@ export interface InboxProposal {
   readonly dryRun: { readonly status: string; readonly summary: string };
   readonly risk: { readonly level: string; readonly reasons: readonly string[]; readonly requiresHumanApproval: boolean };
   readonly intent: { readonly type: string; readonly description: string; readonly rollback: string };
-  readonly audit: readonly { readonly id: string; readonly at: string; readonly action: string; readonly actor: string; readonly revision: number; readonly note?: string }[];
+  readonly review?: {
+    readonly decision: "approved" | "rejected" | "expired";
+    readonly reviewer: string;
+    readonly reviewedAt: string;
+    readonly feedbackCode?: InboxReviewFeedbackCode;
+    readonly note?: string;
+  };
+  readonly audit: readonly { readonly id: string; readonly at: string; readonly action: string; readonly actor: string; readonly revision: number; readonly feedbackCode?: InboxReviewFeedbackCode; readonly note?: string }[];
 }
 
 export interface InboxProposalSummary {
@@ -107,13 +124,18 @@ export interface ProposalInboxPort {
   review(input: InboxReviewInput): InboxProposal | Promise<InboxProposal>;
 }
 
-export interface InboxReviewInput {
+interface InboxReviewInputBase {
   readonly proposalId: string;
   readonly expectedRevision: number;
-  readonly decision: "approved" | "rejected" | "expired";
   readonly reviewer: string;
   readonly note?: string;
 }
+
+export type InboxReviewInput = InboxReviewInputBase & (
+  | { readonly decision: "approved"; readonly feedbackCode: InboxApprovalFeedbackCode }
+  | { readonly decision: "rejected"; readonly feedbackCode: InboxRejectionFeedbackCode }
+  | { readonly decision: "expired"; readonly feedbackCode?: never }
+);
 
 export interface ProposalTracePort {
   traceSnapshot(): AgentLoopTrace | undefined;
@@ -213,12 +235,29 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
     : `<p>Temporal window ${escapeHtml(proposal.evidence.temporal.requestedSince)} to ${escapeHtml(proposal.evidence.temporal.requestedUntil)}${proposal.evidence.temporal.truncated ? " · truncated" : ""}</p><ul>${proposal.evidence.temporal.coverage.map((coverage) =>
       `<li><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}${coverage.reasons.length === 0 ? "" : ` · ${coverage.reasons.map(escapeHtml).join(", ")}`}</li>`,
     ).join("")}</ul>`;
-  const review = proposal.status === "pending_review" ? `<form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
+  const review = proposal.status === "pending_review" ? `<section aria-label="Household review"><h2>Household review</h2>
+  <form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
     <input type="hidden" name="expectedRevision" value="${proposal.revision}">
-    <label>Review note <textarea name="note" maxlength="1000"></textarea></label>
+    <input type="hidden" name="feedbackCode" value="useful_as_is">
+    <p>Why does this match your household? Approve only when it is useful as-is.</p>
+    <label>Approval note <textarea name="note" maxlength="1000"></textarea></label>
     <button type="submit" name="decision" value="approved">Approve</button>
+  </form>
+  <form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
+    <input type="hidden" name="expectedRevision" value="${proposal.revision}">
+    <label>Why reject this suggestion? <select name="feedbackCode" required>
+      <option value="">Choose a reason</option>
+      <option value="already_covered">Already handled</option>
+      <option value="not_useful">Not useful</option>
+      <option value="incorrect_assumption">Incorrect assumption</option>
+      <option value="insufficient_evidence">Not enough evidence</option>
+      <option value="household_preference">Does not fit our household</option>
+      <option value="too_risky">Too risky</option>
+      <option value="other">Other</option>
+    </select></label>
+    <label>Rejection note <textarea name="note" maxlength="1000"></textarea></label>
     <button type="submit" name="decision" value="rejected">Reject</button>
-  </form>` : `<p class="review-decision">Decision: ${escapeHtml(proposal.status)}</p>`;
+  </form></section>` : `<section class="review-decision" aria-label="Household review"><h2>Household review</h2><p>Decision: ${escapeHtml(proposal.status)}</p>${proposal.review?.feedbackCode === undefined ? "" : `<p>Reason: ${escapeHtml(feedbackLabel(proposal.review.feedbackCode))}</p>`}${proposal.review?.note === undefined ? "" : `<p>Note: ${escapeHtml(proposal.review.note)}</p>`}</section>`;
   const timeline = detail.trace === undefined ? "" : renderAgentLoopTimeline(detail.trace);
   return `<main class="proposal-detail" data-status="${escapeHtml(proposal.status)}">
     <header><a href="/proposals">Proposal inbox</a><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p></header>
@@ -241,6 +280,19 @@ function observationOutcomeLabel(
     case "proposal_pending": return "review already pending";
     case "agent_busy": return "agent busy";
     case "failed": return "failed safely";
+  }
+}
+
+function feedbackLabel(code: InboxReviewFeedbackCode): string {
+  switch (code) {
+    case "useful_as_is": return "Useful as-is";
+    case "already_covered": return "Already handled";
+    case "not_useful": return "Not useful";
+    case "incorrect_assumption": return "Incorrect assumption";
+    case "insufficient_evidence": return "Not enough evidence";
+    case "household_preference": return "Does not fit our household";
+    case "too_risky": return "Too risky";
+    case "other": return "Other";
   }
 }
 

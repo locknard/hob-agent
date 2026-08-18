@@ -65,7 +65,10 @@ apply an artifact or control a device.
   their epoch matches the committed bridge watermark.
 - Proposal creation is idempotent per producer/key. Review uses optimistic
   revisions, terminal decisions are immutable, and approval has
-  `applicationStatus: not_available`.
+  `applicationStatus: not_available`. New approve/reject decisions persist a
+  bounded quality-feedback code in both review state and append-only audit;
+  legacy v1 reviews remain readable and feedback cannot mutate household
+  knowledge automatically.
 - Autonomous observation is disabled by default. The Hub owns its bounded
   cadence, requires a ready world and idle DSH Agent, and permits only one
   pending household proposal at a time. Each scheduled, manual, startup, or

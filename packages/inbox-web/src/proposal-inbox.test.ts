@@ -126,12 +126,16 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(detailHtml, /create_home_proposal/);
   assert.match(detailHtml, /Approve/);
   assert.match(detailHtml, /Reject/);
+  assert.match(detailHtml, /Why does this match your household\?/i);
+  assert.match(detailHtml, /Already handled/i);
+  assert.match(detailHtml, /Does not fit our household/i);
 
   const reviewed = await controller.review({
     proposalId: "proposal-1",
     expectedRevision: 1,
     decision: "approved",
     reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
   });
   assert.equal(reviewed.status, "approved");
   assert.deepEqual(reviews, [{
@@ -139,6 +143,26 @@ test("lists and renders untrusted proposal content without creating an applicati
     expectedRevision: 1,
     decision: "approved",
     reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
   }]);
   assert.equal("apply" in controller, false);
+});
+
+test("renders the recorded structured household feedback without treating it as authority", () => {
+  const reviewed: InboxProposal = {
+    ...proposal,
+    revision: 2,
+    status: "rejected",
+    review: {
+      decision: "rejected",
+      reviewer: "household-owner",
+      reviewedAt: "2026-08-19T01:10:00.000Z",
+      feedbackCode: "insufficient_evidence",
+      note: "Observe for another week.",
+    },
+  };
+  const html = renderProposalDetail({ proposal: reviewed });
+  assert.match(html, /Not enough evidence/i);
+  assert.match(html, /Observe for another week/i);
+  assert.equal(html.includes("<form"), false);
 });

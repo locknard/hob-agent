@@ -103,6 +103,7 @@ test("reviews with optimistic concurrency and never treats approval as applicati
     expectedRevision: 1,
     decision: "approved",
     reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
     note: "Safe to prepare as an artifact later.",
   });
 
@@ -110,6 +111,8 @@ test("reviews with optimistic concurrency and never treats approval as applicati
   assert.equal(approved.revision, 2);
   assert.equal(approved.applicationStatus, "not_available");
   assert.equal(approved.review?.reviewer, "household-owner");
+  assert.equal(approved.review?.feedbackCode, "useful_as_is");
+  assert.equal(approved.audit.at(-1)?.feedbackCode, "useful_as_is");
   assert.deepEqual(approved.audit.map((event) => event.action), ["created", "approved"]);
   assert.throws(
     () => store.review({
@@ -117,6 +120,7 @@ test("reviews with optimistic concurrency and never treats approval as applicati
       expectedRevision: 1,
       decision: "rejected",
       reviewer: "stale-reviewer",
+      feedbackCode: "already_covered",
     }),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "revision_conflict",
   );
@@ -126,10 +130,125 @@ test("reviews with optimistic concurrency and never treats approval as applicati
       expectedRevision: 2,
       decision: "rejected",
       reviewer: "second-reviewer",
+      feedbackCode: "not_useful",
     }),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "terminal_status",
   );
   store.close();
+});
+
+test("requires bounded decision-specific feedback for new household reviews", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+
+  const missing = store.create(input({ idempotencyKey: "feedback:missing" }));
+  assert.throws(() => store.review({
+    proposalId: missing.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+  }), /feedback/i);
+
+  const wrongDecision = store.create(input({ idempotencyKey: "feedback:wrong-decision" }));
+  assert.throws(() => store.review({
+    proposalId: wrongDecision.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "too_risky",
+  }), /feedback/i);
+
+  const unexplainedOther = store.create(input({ idempotencyKey: "feedback:other" }));
+  assert.throws(() => store.review({
+    proposalId: unexplainedOther.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+    feedbackCode: "other",
+  }), /note/i);
+
+  const rejected = store.create(input({ idempotencyKey: "feedback:preference" }));
+  const reviewed = store.review({
+    proposalId: rejected.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+    feedbackCode: "household_preference",
+  });
+  assert.equal(reviewed.review?.feedbackCode, "household_preference");
+  assert.equal(reviewed.audit.at(-1)?.feedbackCode, "household_preference");
+  store.close();
+});
+
+test("keeps reviewed v1 rows from before structured feedback readable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-feedback-compat-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt, id: () => "legacy-id" });
+  const proposal = store.create(input());
+  store.close();
+
+  const reviewedAt = "2026-08-19T01:10:00.000Z";
+  const legacyReviewed = {
+    ...proposal,
+    revision: 2,
+    status: "approved",
+    updatedAt: reviewedAt,
+    review: {
+      decision: "approved",
+      reviewer: "household-owner",
+      reviewedAt,
+    },
+    audit: [...proposal.audit, {
+      id: "audit-legacy-review",
+      at: reviewedAt,
+      action: "approved",
+      actor: "household-owner",
+      revision: 2,
+    }],
+  };
+  const raw = new DatabaseSync(path);
+  raw.prepare("UPDATE proposals SET status = ?, revision = ?, updated_at = ?, payload_json = ? WHERE proposal_id = ?")
+    .run("approved", 2, reviewedAt, JSON.stringify(legacyReviewed), proposal.id);
+  raw.close();
+
+  const reopened = new SqliteProposalStore({ path });
+  const loaded = reopened.get(proposal.id);
+  assert.equal(loaded?.status, "approved");
+  assert.equal(loaded?.review?.feedbackCode, undefined);
+  reopened.close();
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("fails closed when persisted review feedback disagrees with its audit event", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-feedback-corrupt-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  const proposal = store.create(input());
+  const approved = store.review({
+    proposalId: proposal.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+  store.close();
+
+  const corrupt = {
+    ...approved,
+    audit: approved.audit.map((event, index) =>
+      index === approved.audit.length - 1 ? { ...event, feedbackCode: "too_risky" } : event),
+  };
+  const raw = new DatabaseSync(path);
+  raw.prepare("UPDATE proposals SET payload_json = ? WHERE proposal_id = ?")
+    .run(JSON.stringify(corrupt), proposal.id);
+  raw.close();
+
+  const reopened = new SqliteProposalStore({ path });
+  assert.throws(
+    () => reopened.get(proposal.id),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "corrupt_store",
+  );
+  reopened.close();
+  await rm(directory, { recursive: true, force: true });
 });
 
 test("rejects missing conflict checks, unsafe approval semantics, and oversized text", () => {

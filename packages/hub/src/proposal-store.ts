@@ -135,6 +135,28 @@ const createProposalInputSchema = z.object({
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
 export type ProposalStatus = "pending_review" | "approved" | "rejected" | "expired";
 export type ProposalDecision = Exclude<ProposalStatus, "pending_review">;
+export type ProposalApprovalFeedbackCode = "useful_as_is";
+export type ProposalRejectionFeedbackCode =
+  | "already_covered"
+  | "not_useful"
+  | "incorrect_assumption"
+  | "insufficient_evidence"
+  | "household_preference"
+  | "too_risky"
+  | "other";
+export type ProposalReviewFeedbackCode = ProposalApprovalFeedbackCode | ProposalRejectionFeedbackCode;
+
+const approvalFeedbackCodes = ["useful_as_is"] as const;
+const rejectionFeedbackCodes = [
+  "already_covered",
+  "not_useful",
+  "incorrect_assumption",
+  "insufficient_evidence",
+  "household_preference",
+  "too_risky",
+  "other",
+] as const;
+const reviewFeedbackCodeSchema = z.enum([...approvalFeedbackCodes, ...rejectionFeedbackCodes]);
 
 export interface ProposalAuditEvent {
   readonly id: string;
@@ -142,6 +164,7 @@ export interface ProposalAuditEvent {
   readonly action: "created" | ProposalDecision;
   readonly actor: string;
   readonly revision: number;
+  readonly feedbackCode?: ProposalReviewFeedbackCode;
   readonly note?: string;
 }
 
@@ -149,6 +172,7 @@ export interface ProposalReview {
   readonly decision: ProposalDecision;
   readonly reviewer: string;
   readonly reviewedAt: string;
+  readonly feedbackCode?: ProposalReviewFeedbackCode;
   readonly note?: string;
 }
 
@@ -171,6 +195,7 @@ const proposalAuditEventSchema = z.object({
   action: z.enum(["created", "approved", "rejected", "expired"]),
   actor: boundedId,
   revision: z.number().int().positive(),
+  feedbackCode: reviewFeedbackCodeSchema.optional(),
   note: z.string().trim().min(1).max(1_000).optional(),
 }).strict();
 
@@ -178,6 +203,7 @@ const proposalReviewSchema = z.object({
   decision: z.enum(["approved", "rejected", "expired"]),
   reviewer: boundedId,
   reviewedAt: isoTimestamp,
+  feedbackCode: reviewFeedbackCodeSchema.optional(),
   note: z.string().trim().min(1).max(1_000).optional(),
 }).strict();
 
@@ -193,13 +219,18 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   audit: z.array(proposalAuditEventSchema).min(1).max(10),
 }).strict();
 
-export interface ReviewProposalInput {
+interface ReviewProposalInputBase {
   readonly proposalId: string;
   readonly expectedRevision: number;
-  readonly decision: ProposalDecision;
   readonly reviewer: string;
   readonly note?: string;
 }
+
+export type ReviewProposalInput = ReviewProposalInputBase & (
+  | { readonly decision: "approved"; readonly feedbackCode: ProposalApprovalFeedbackCode }
+  | { readonly decision: "rejected"; readonly feedbackCode: ProposalRejectionFeedbackCode }
+  | { readonly decision: "expired"; readonly feedbackCode?: never }
+);
 
 export interface ProposalListQuery {
   readonly status?: ProposalStatus;
@@ -366,6 +397,7 @@ export class SqliteProposalStore {
       const at = this.timestamp();
       const revision = current.revision + 1;
       const note = input.note?.trim();
+      const feedbackCode = input.decision === "expired" ? undefined : input.feedbackCode;
       const reviewed: ProposalEnvelope = {
         ...current,
         revision,
@@ -375,6 +407,7 @@ export class SqliteProposalStore {
           decision: input.decision,
           reviewer: input.reviewer.trim(),
           reviewedAt: at,
+          ...(feedbackCode ? { feedbackCode } : {}),
           ...(note ? { note } : {}),
         },
         audit: [...current.audit, {
@@ -383,6 +416,7 @@ export class SqliteProposalStore {
           action: input.decision,
           actor: input.reviewer.trim(),
           revision,
+          ...(feedbackCode ? { feedbackCode } : {}),
           ...(note ? { note } : {}),
         }],
       };
@@ -451,6 +485,19 @@ function validateReviewInput(input: ReviewProposalInput): void {
   if (input.note !== undefined && (typeof input.note !== "string" || input.note.length > 1_000)) {
     throw new TypeError("proposal review note is invalid");
   }
+  const feedbackCode = (input as { feedbackCode?: unknown }).feedbackCode;
+  if (input.decision === "approved" && !approvalFeedbackCodes.includes(feedbackCode as ProposalApprovalFeedbackCode)) {
+    throw new TypeError("proposal review feedback is invalid for approval");
+  }
+  if (input.decision === "rejected" && !rejectionFeedbackCodes.includes(feedbackCode as ProposalRejectionFeedbackCode)) {
+    throw new TypeError("proposal review feedback is invalid for rejection");
+  }
+  if (input.decision === "expired" && feedbackCode !== undefined) {
+    throw new TypeError("proposal expiration cannot carry review feedback");
+  }
+  if (feedbackCode === "other" && !input.note?.trim()) {
+    throw new TypeError("proposal review note is required for other feedback");
+  }
 }
 
 function fromRow(row: ProposalRow): ProposalEnvelope {
@@ -463,12 +510,26 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
     const lifecycleValid = lastAudit?.revision === proposal.revision
       && (proposal.status === "pending_review"
         ? proposal.review === undefined && lastAudit.action === "created"
-        : proposal.review?.decision === proposal.status && lastAudit.action === proposal.status);
+        : proposal.review?.decision === proposal.status
+          && lastAudit.action === proposal.status
+          && persistedFeedbackIsConsistent(proposal.status, proposal.review.feedbackCode, lastAudit.feedbackCode));
     if (!lifecycleValid) throw new Error("invalid lifecycle");
     return proposal as ProposalEnvelope;
   } catch {
     throw new ProposalStoreError("corrupt_store", "Persisted proposal state is invalid");
   }
+}
+
+function persistedFeedbackIsConsistent(
+  status: Exclude<ProposalStatus, "pending_review">,
+  reviewCode: ProposalReviewFeedbackCode | undefined,
+  auditCode: ProposalReviewFeedbackCode | undefined,
+): boolean {
+  if (reviewCode === undefined && auditCode === undefined) return true;
+  if (reviewCode !== auditCode) return false;
+  if (status === "approved") return reviewCode === "useful_as_is";
+  if (status === "expired") return false;
+  return rejectionFeedbackCodes.includes(reviewCode as ProposalRejectionFeedbackCode);
 }
 
 function clone<T>(value: T): T {

@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { Context, Service } from "@deepseek-ai/cordis";
 
-import type { InboxReviewInput } from "./proposal-inbox.js";
+import type { InboxRejectionFeedbackCode, InboxReviewInput } from "./proposal-inbox.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_FORM_BYTES = 4 * 1024;
@@ -209,8 +209,9 @@ function isPayloadTooLarge(error: unknown): boolean {
 
 function reviewInput(proposalId: string, body: string, reviewer: string): InboxReviewInput | undefined {
   const form = new URLSearchParams(body);
-  if ([...form.keys()].some((key) => !["expectedRevision", "decision", "note"].includes(key))) return undefined;
-  if (form.getAll("expectedRevision").length !== 1 || form.getAll("decision").length !== 1 || form.getAll("note").length > 1) {
+  if ([...form.keys()].some((key) => !["expectedRevision", "decision", "feedbackCode", "note"].includes(key))) return undefined;
+  if (form.getAll("expectedRevision").length !== 1 || form.getAll("decision").length !== 1
+    || form.getAll("feedbackCode").length !== 1 || form.getAll("note").length > 1) {
     return undefined;
   }
   const revisionRaw = form.get("expectedRevision") ?? "";
@@ -219,15 +220,36 @@ function reviewInput(proposalId: string, body: string, reviewer: string): InboxR
   if (!Number.isSafeInteger(expectedRevision)) return undefined;
   const decision = form.get("decision");
   if (decision !== "approved" && decision !== "rejected") return undefined;
+  const feedbackCode = form.get("feedbackCode");
   const note = form.get("note")?.trim();
   if (note !== undefined && note.length > 1_000) return undefined;
-  return {
+  if (feedbackCode === "other" && !note) return undefined;
+  const base = {
     proposalId,
     expectedRevision,
-    decision,
     reviewer,
     ...(note ? { note } : {}),
   };
+  if (decision === "approved") {
+    return feedbackCode === "useful_as_is"
+      ? { ...base, decision, feedbackCode }
+      : undefined;
+  }
+  return isRejectionFeedbackCode(feedbackCode)
+    ? { ...base, decision, feedbackCode }
+    : undefined;
+}
+
+function isRejectionFeedbackCode(value: string | null): value is InboxRejectionFeedbackCode {
+  return value !== null && [
+    "already_covered",
+    "not_useful",
+    "incorrect_assumption",
+    "insufficient_evidence",
+    "household_preference",
+    "too_risky",
+    "other",
+  ].includes(value);
 }
 
 function errorCode(error: unknown): unknown {

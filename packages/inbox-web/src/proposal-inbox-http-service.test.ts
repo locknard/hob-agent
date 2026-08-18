@@ -64,7 +64,7 @@ test("requires exact same-origin review posts and derives reviewer identity from
     reviewer: "local-household-reviewer",
   });
   const url = `${ctx.homeInboxHttp.origin}/proposals/proposal-1/review`;
-  const form = "expectedRevision=1&decision=approved&note=Reviewed+locally";
+  const form = "expectedRevision=1&decision=approved&feedbackCode=useful_as_is&note=Reviewed+locally";
 
   const crossOrigin = await fetch(url, {
     method: "POST",
@@ -95,6 +95,7 @@ test("requires exact same-origin review posts and derives reviewer identity from
     expectedRevision: 1,
     decision: "approved",
     reviewer: "local-household-reviewer",
+    feedbackCode: "useful_as_is",
     note: "Reviewed locally",
   }]);
 
@@ -115,6 +116,18 @@ test("requires exact same-origin review posts and derives reviewer identity from
   });
   assert.equal(stale.status, 409);
   assert.equal((await stale.text()).includes("must-not-leak"), false);
+
+  const missingFeedback = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization,
+      origin: ctx.homeInboxHttp.origin,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: "expectedRevision=1&decision=rejected",
+    redirect: "manual",
+  });
+  assert.equal(missingFeedback.status, 400);
 
   const oversized = await fetch(url, {
     method: "POST",

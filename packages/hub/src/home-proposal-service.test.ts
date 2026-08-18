@@ -150,6 +150,7 @@ test("scopes authoritative rule coverage to every bridge bound to selected devic
     expectedRevision: 1,
     decision: "rejected",
     reviewer: "household-owner",
+    feedbackCode: "not_useful",
   });
 
   await assert.rejects(() => ctx.homeProposals.createDraft({
@@ -182,6 +183,7 @@ test("exposes the hub-owned proposal lifecycle as a Cordis service", async () =>
     expectedRevision: 1,
     decision: "rejected",
     reviewer: "household-owner",
+    feedbackCode: "already_covered",
   }).status, "rejected");
 
   await fiber.dispose();
@@ -275,6 +277,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     expectedRevision: 1,
     decision: "rejected",
     reviewer: "household-owner",
+    feedbackCode: "incorrect_assumption",
   });
 
   const currentStateProposal = await ctx.homeProposals.createDraft({

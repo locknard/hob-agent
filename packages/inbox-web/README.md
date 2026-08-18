@@ -2,7 +2,10 @@
 
 The minimal local review surface for household proposals: list, detail,
 evidence watermarks, conflict findings, dry-run result, risk, and optimistic
-approve/reject. Approval records intent only; this package has no apply,
+approve/reject. Reviews collect one bounded quality reason plus an optional
+note so useful, duplicate, weakly evidenced, incorrect, preference-mismatched,
+or risky suggestions can be distinguished without reinterpreting prose.
+Approval records intent only; this package has no apply,
 automation-install, or device-control method.
 
 The package also owns the pure `renderAgentLoopTimeline` fragment used to show
