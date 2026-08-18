@@ -2,11 +2,18 @@
 
 ## Evidence and product need
 
-The development Home Assistant instance reported seven areas during the
-aggregate-only 2026-08-19 read. The current neutral bridge projection discards
-that topology, so the Home Agent can classify a light and observe its changes
-but cannot know which household space the observation belongs to. No area
-names or identifiers are recorded in this document.
+The development Home Assistant instance reported seven raw areas during an
+early aggregate-only 2026-08-19 read. At that point the neutral bridge
+projection discarded topology, so the Home Agent could classify a light and
+observe its changes but could not know which household space the observation
+belonged to. No area names or identifiers are recorded in this document.
+
+After v6.5 implementation, the current committed neutral cut exposes six
+spaces, 25 unambiguous single-space devices, and no multiply assigned devices.
+Twenty-one devices still require household placement review after 29 explicit
+non-spatial objects are removed from that review queue. Raw vendor registry
+counts and accepted neutral topology are intentionally not treated as the same
+quantity.
 
 Rooms are household context, not adapter authority. The bridge contract v6.5
 therefore adds an optional adapter space reference to each capability instance

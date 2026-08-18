@@ -2,13 +2,18 @@
 
 ## Evidence and problem
 
-An aggregate-only read of the development Home Assistant instance on
+An early aggregate-only read of the development Home Assistant instance on
 2026-08-19 found 75 valid devices, 540 current states, 779 capabilities, one
-ready bridge watermark, no history gap, and 15 existing automations. Every
+ready bridge watermark, no history gap, and 15 raw automation entities. Every
 capability still used the adapter schema `ha.entity`. The largest entity-domain
 groups were sensors (420), switches (76), binary sensors (70), buttons (69),
 and numeric controls (66). No household names, identifiers, or state values are
 recorded here.
+
+The later committed neutral cut still contains 75 devices, 540 states, and 779
+capabilities. Its `foreignRules@1` catalog exposes 12 configured rules after
+unavailable restored placeholders are excluded. The difference is filtering
+semantics, not evidence that three household rules were deleted.
 
 Schema provenance is correct but insufficient for a useful cross-ecosystem
 Home Agent. It cannot reliably group a light and a sensor without importing HA

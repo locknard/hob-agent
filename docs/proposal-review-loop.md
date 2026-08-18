@@ -20,9 +20,12 @@ household outcome. The missing product proof is whether the agent can make one
 useful recommendation from real home evidence without silently expanding its
 authority.
 
-A read-only aggregate of the development Home Assistant instance on
-2026-08-19 found 606 current states, 839 registered entities, 80 devices, seven
-areas, and 15 existing automation entities. Only aggregates are recorded here;
+A pre-normalization read-only discovery aggregate on 2026-08-19 found 606
+current states, 839 registered entities, 80 device-registry rows, seven raw
+areas, and 15 automation entities. The later committed Agent-visible cut has
+75 neutral devices, 540 accepted current states, six neutral spaces, and 12
+visible configured rules after invalid/unavailable placeholders and projection
+rules are applied. Only aggregates are recorded here;
 entity names, state values, credentials, and household identifiers remain
 outside the repository. Existing automations make deduplication and conflict
 reporting release requirements rather than later enhancements.
