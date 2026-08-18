@@ -48,7 +48,11 @@ export interface ObservationPorts {
     snapshot(): {
       readonly bridges: Readonly<Record<string, unknown>>;
       readonly bridgeWatermarks: readonly { readonly bridgeId: string }[];
-      readonly diagnostics: readonly { readonly bridgeId: string; readonly connectionState: string }[];
+      readonly diagnostics: readonly {
+        readonly bridgeId: string;
+        readonly connectionState: string;
+        readonly currentProcessReadyAt?: string;
+      }[];
     };
   };
   homeProposals: {
@@ -241,8 +245,12 @@ export function isHomeWorldReady(snapshot: ReturnType<ObservationPorts["homeWorl
   const bridgeIds = Object.keys(snapshot.bridges);
   const watermarks = new Set(snapshot.bridgeWatermarks.map((item) => item.bridgeId));
   const diagnostics = new Map(snapshot.diagnostics.map((item) => [item.bridgeId, item.connectionState]));
+  const currentProcessReady = new Set(snapshot.diagnostics.flatMap((item) =>
+    item.currentProcessReadyAt === undefined ? [] : [item.bridgeId]));
   return bridgeIds.length > 0
-    && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready" && watermarks.has(bridgeId));
+    && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready"
+      && watermarks.has(bridgeId)
+      && currentProcessReady.has(bridgeId));
 }
 
 const defaultScheduler: HomeObservationSchedulerLike = {

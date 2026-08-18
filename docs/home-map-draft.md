@@ -23,6 +23,9 @@ The draft contains:
 - only unambiguous single-space device suggestions grouped beneath a space;
 - separate editable confirmation sections for unassigned and multiple-space
   devices, with one unchecked household-review item per device;
+- a separate informational section for objects explicitly marked non-spatial
+  through the committed neutral `orgHints@1` extension; these do not become
+  room-assignment tasks;
 - opaque Hub device IDs; and
 - closed neutral capability semantic kinds.
 
@@ -45,3 +48,7 @@ settled rooms: it is shown once as a conflict that requires household
 resolution. The machine-readable command report includes the same
 multiple-space count so automation cannot mistake “has some space binding” for
 “has an unambiguous household location.”
+
+A missing organization hint remains unknown. The draft never infers
+non-spatial status from a display name, integration name, or capability kind.
+See [`spatial-applicability.md`](spatial-applicability.md).

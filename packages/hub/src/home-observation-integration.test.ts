@@ -22,7 +22,7 @@ class AcceptanceWorld extends Service {
       }],
       bridges: { "bridge-a": { diagnostics: { historyGapCount: 0 } } },
       bridgeWatermarks: [{ bridgeId: "bridge-a", epochId: "epoch-a", lastSeq: 8 }],
-      diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready" as const, historyGapCount: 0 }],
+      diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready" as const, historyGapCount: 0, currentProcessReadyAt: "2026-08-19T03:59:00.000Z" }],
       devices: [{
         hwId: "hw-1",
         bindings: [{

@@ -17,6 +17,8 @@ report containing only:
 - neutral space, device, capability, and current-state counts;
 - mutually exclusive device counts with one, zero, or multiple accepted
   neutral space bindings; and
+- the zero-space split between explicitly non-spatial objects and devices that
+  still require household placement review; and
 - counts by closed capability semantic kind; and
 - available/unavailable neutral existing-rule catalog counts plus the aggregate
   number of visible rules.
@@ -24,6 +26,10 @@ report containing only:
 The report never contains bridge IDs, native IDs, hub IDs, names, state values,
 attributes, URLs, credentials, provider errors, or household prompt content.
 Rule names, opaque references, epochs, and bridge identities are also omitted.
+Every configured bridge must also have delivered traffic to the current
+process and completed a ready cut. A restored consistent SQLite cut remains
+readable but cannot make validation return before the new adapter bootstrap
+and its extension catalogs exist.
 The command does not mount DSH, call a model, create a proposal, or enable the
 observation schedule. It uses the normal private journal, registry, and world
 model paths so the validation cut is the same cut the product will later read.

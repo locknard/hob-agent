@@ -26,6 +26,10 @@ import {
   type ForeignRuleSummary,
   type ForeignRulesHandle,
 } from "../../../contracts/bridge-foreign-rules.js";
+import {
+  ORG_HINTS_EXTENSION,
+  type OrgHintPayload,
+} from "../../../contracts/bridge-org-hints.js";
 
 export interface WebSocketLike {
   send(data: string): void;
@@ -544,7 +548,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       coreVersion: HOME_ASSISTANT_CORE_VERSION,
       ecosystem: "home-assistant",
       heartbeatIntervalMs: HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS,
-      extensions: Object.freeze([FOREIGN_RULES_EXTENSION]),
+      extensions: Object.freeze([FOREIGN_RULES_EXTENSION, ORG_HINTS_EXTENSION]),
     });
     this.control = Object.freeze({
       requestResync: (signal: AbortSignal) => this.requestResync(signal),
@@ -779,6 +783,7 @@ interface ProjectedDevice {
 interface SnapshotProjection {
   readonly bindingsByEntityId: Map<string, EntityBinding>;
   readonly devices: readonly ProjectedDevice[];
+  readonly orgHints: ReadonlyMap<string, OrgHintPayload>;
 }
 
 interface SnapshotEmission {
@@ -804,6 +809,10 @@ function* snapshotEnvelopes(
   for (const device of emission.projection.devices) {
     yield emission.envelope({ kind: "device-upserted", device: device.descriptor });
     deviceEnvelopeCount += 1;
+    const orgHint = emission.projection.orgHints.get(device.descriptor.nativeId);
+    if (orgHint !== undefined) {
+      yield emission.envelope({ kind: "ext", ext: "orgHints@1", payload: orgHint });
+    }
     for (const state of device.states) {
       yield emission.envelope({ kind: "state", state });
       stateEnvelopeCount += 1;
@@ -829,6 +838,7 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
 
   const deviceNames = new Map<string, string>();
   const deviceSpaces = new Map<string, string>();
+  const orgHints = new Map<string, OrgHintPayload>();
   const identityClaimsByNativeId = new Map<string, readonly ContractIdentityClaim[]>();
   for (const raw of snapshot.deviceRegistry) {
     if (!isRecord(raw)) continue;
@@ -840,6 +850,9 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
       deviceSpaces.set(nativeId, nativeSpaceId);
     }
     if (nativeId !== undefined) {
+      if (raw.entry_type === "service") {
+        orgHints.set(nativeId, { nativeId, spatialDisposition: "non_spatial" });
+      }
       const claims = projectDeviceIdentityClaims(raw);
       if (claims.length > 0) identityClaimsByNativeId.set(nativeId, claims);
     }
@@ -940,7 +953,7 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
     });
   }
   devices.sort((left, right) => left.descriptor.nativeId.localeCompare(right.descriptor.nativeId));
-  return { bindingsByEntityId, devices };
+  return { bindingsByEntityId, devices, orgHints };
 }
 
 const HOME_ASSISTANT_SEMANTIC_KINDS: Readonly<Record<string, CapabilitySemanticKind>> = Object.freeze({

@@ -7,6 +7,7 @@ import {
   foreignRuleCatalogSchema,
   type ForeignRuleSummary,
 } from "../../../contracts/bridge-foreign-rules.js";
+import { orgHintPayloadSchema } from "../../../contracts/bridge-org-hints.js";
 
 import {
   canonicalExtensionKey,
@@ -137,6 +138,9 @@ export interface HomeWorldBridgeRuntime {
   restartCount: number;
   lastStreamError?: BridgeStreamErrorReason;
   lastTermination: "running" | "completed" | "error";
+  currentProcessReadyAt?: string;
+  pendingNonSpatialNativeIds: Set<string>;
+  committedNonSpatialNativeIds: ReadonlySet<string>;
   subscriptionAbort?: AbortController;
   task?: Promise<void>;
 }
@@ -161,6 +165,8 @@ export interface HomeWorldDeviceSnapshot {
   states: readonly StateEvent[];
   /** Latest reduced health signal, if the bridge has reported one. */
   health?: DeviceHealthStatus;
+  /** Optional committed neutral hint; never inferred from names or capabilities. */
+  spatialDisposition?: "non_spatial";
   validity: "valid" | "stale" | "invalid-source" | "present-but-invalid";
 }
 
@@ -277,6 +283,8 @@ export interface HomeWorldDiagnostics {
   lastSyncCompleteAt?: string;
   lastEventReceivedAt?: string;
   lastSuccessfulContactAt?: string;
+  /** Present only after this process accepts a live sync-complete. */
+  currentProcessReadyAt?: string;
 }
 
 export interface HomeWorldMetricSummary {
@@ -775,12 +783,12 @@ export class HomeWorldService extends Service {
         ...consistentWatermark,
         ...(diagnostics.lastSyncCompleteAt === undefined ? {} : { lastSyncCompleteAt: diagnostics.lastSyncCompleteAt }),
       } satisfies HomeWorldWatermark;
-      const bridgeDevices = worldDevices(
+      const bridgeDevices = applyCommittedOrgHints(runtime, worldDevices(
         runtime.bridgeId,
         runtime.ingest.worldSnapshot(),
         this.identityByDevice,
         (nativeId) => runtime.ingest.deviceHealth(nativeId),
-      );
+      ));
       const bridgeSnapshot: HomeWorldBridgeSnapshot = {
         bridgeId: runtime.bridgeId,
         adapterType: runtime.adapterType,
@@ -793,7 +801,11 @@ export class HomeWorldService extends Service {
       };
       bridges[runtime.bridgeId] = bridgeSnapshot;
       watermarkVector[runtime.bridgeId] = watermark;
-      diagnosticsList.push({ bridgeId: runtime.bridgeId, ...diagnostics });
+      diagnosticsList.push({
+        bridgeId: runtime.bridgeId,
+        ...diagnostics,
+        ...(runtime.currentProcessReadyAt === undefined ? {} : { currentProcessReadyAt: runtime.currentProcessReadyAt }),
+      });
       if (watermark !== null) bridgeWatermarks.push(watermark);
       devices.push(...bridgeDevices);
     }
@@ -868,7 +880,7 @@ export class HomeWorldService extends Service {
     let journal: IngestJournal | undefined;
     try {
       journal = this.createJournal(entry);
-      const extensions = negotiateExtensions(adapter);
+      const extensions = negotiateExtensions(adapter, registeredExtensionSchemas(this.options.extensionSchemas));
       const registration = this.catalog.requireAdapter(entry.adapterType);
       const registeredSchemas = new Set(registration.capabilitySchemas.map((schema) => `${schema.schema}@${schema.majorVersion}`));
       const world = new WorldState();
@@ -883,7 +895,7 @@ export class HomeWorldService extends Service {
           schema,
         ])),
         enabledExtensions: new Set(extensions.available),
-        extensionSchemas: this.options.extensionSchemas,
+        extensionSchemas: registeredExtensionSchemas(this.options.extensionSchemas),
         remoteIdentityValidator: this.registry.createRemoteIdentityValidator(entry.bridgeId),
         clock: this.options.clock,
         nowMs: this.options.nowMs,
@@ -916,6 +928,8 @@ export class HomeWorldService extends Service {
         extensionAvailability: extensions.status,
         restartCount: 0,
         lastTermination: "running",
+        pendingNonSpatialNativeIds: new Set(),
+        committedNonSpatialNativeIds: readCommittedOrgHints(journal, entry.bridgeId, consistentWatermark?.epochId),
       };
       this.materializeWorldModel(runtime);
       this.runtimesById.set(entry.bridgeId, runtime);
@@ -949,8 +963,17 @@ export class HomeWorldService extends Service {
           // A fold window is an admission optimization, never a visibility
           // stall: each adapter batch exposes its latest accepted state.
           runtime.ingest.flushStateFolding();
-          if (result.accepted && envelope.event.kind === "sync-complete") {
-            this.materializeWorldModel(runtime);
+          if (result.accepted) {
+            if (envelope.event.kind === "sync-start") runtime.pendingNonSpatialNativeIds.clear();
+            if (envelope.event.kind === "ext" && envelope.event.ext === "orgHints@1") {
+              const parsed = orgHintPayloadSchema.safeParse(envelope.event.payload);
+              if (parsed.success) runtime.pendingNonSpatialNativeIds.add(parsed.data.nativeId);
+            }
+            if (envelope.event.kind === "sync-complete") {
+              runtime.committedNonSpatialNativeIds = new Set(runtime.pendingNonSpatialNativeIds);
+              this.materializeWorldModel(runtime);
+              runtime.currentProcessReadyAt = this.clock();
+            }
           }
           // A remote identity mismatch is a security boundary failure, not a
           // transient stream fault. Stop this adapter immediately; only an
@@ -1000,7 +1023,7 @@ export class HomeWorldService extends Service {
       try {
         const next = this.registry.load(entry);
         runtime.adapter = next;
-        const extensions = negotiateExtensions(next);
+        const extensions = negotiateExtensions(next, registeredExtensionSchemas(this.options.extensionSchemas));
         runtime.extensionAvailability = extensions.status;
         runtime.ingest.setControl(next.control);
         runtime.ingest.setEnabledExtensions(new Set(extensions.available));
@@ -1216,7 +1239,10 @@ function restartDelay(
   return Number.isFinite(value) ? Math.max(0, value) : 1_000;
 }
 
-function negotiateExtensions(adapter: BridgeAdapter): {
+function negotiateExtensions(
+  adapter: BridgeAdapter,
+  streamSchemas: ReadonlyMap<string, ZodType<unknown>>,
+): {
   status: Record<string, "available" | "unavailable">;
   available: string[];
 } {
@@ -1229,14 +1255,15 @@ function negotiateExtensions(adapter: BridgeAdapter): {
     } catch {
       key = `${declaration.id}@invalid`;
     }
-    let usable = false;
+    const streamUsable = streamSchemas.has(key);
+    let usable = streamUsable;
     try {
       if (typeof adapter.extension === "function") {
         const handle = adapter.extension(key as never);
-        usable = handle !== undefined && handle !== null;
+        usable ||= handle !== undefined && handle !== null;
       }
     } catch {
-      usable = false;
+      usable = streamUsable;
     }
     status[key] = usable ? "available" : "unavailable";
     if (usable) available.push(key);
@@ -1330,11 +1357,18 @@ function aggregateWorldDevices(
     }
     const stateByKey = new Map(existing.states.map((state) => [`${state.nativeId}\u0000${state.nativeInstanceId}`, state]));
     for (const state of device.states) stateByKey.set(`${state.nativeId}\u0000${state.nativeInstanceId}`, state);
+    const { spatialDisposition: _existingSpatialDisposition, ...existingWithoutSpatialDisposition } = existing;
+    const spatialDisposition = existing.spatialDisposition === "non_spatial"
+      && device.spatialDisposition === "non_spatial"
+      && bindings.every((binding) => binding.hwSpaceId === undefined)
+      ? "non_spatial" as const
+      : undefined;
     grouped.set(device.hwId, {
-      ...existing,
+      ...existingWithoutSpatialDisposition,
       bindings,
       capabilities: [...capabilityById.values()].sort((left, right) => compareStrings(left.hwCapabilityId, right.hwCapabilityId)),
       states: [...stateByKey.values()].map((state) => cloneJson(state)),
+      ...(spatialDisposition === undefined ? {} : { spatialDisposition }),
       validity: existing.validity === "valid" || device.validity === "valid" ? "valid" : existing.validity,
     });
   }
@@ -1342,6 +1376,44 @@ function aggregateWorldDevices(
   return [...grouped.values()]
     .map((device) => ({ ...device, states: selectAuthorityStates(device, authority) }))
     .sort((left, right) => compareStrings(left.hwId, right.hwId));
+}
+
+function registeredExtensionSchemas(
+  configured: ReadonlyMap<string, ZodType<unknown>> | undefined,
+): ReadonlyMap<string, ZodType<unknown>> {
+  return new Map([
+    ...(configured?.entries() ?? []),
+    ["orgHints@1", orgHintPayloadSchema] as const,
+  ]);
+}
+
+function applyCommittedOrgHints(
+  runtime: HomeWorldBridgeRuntime,
+  devices: readonly HomeWorldDeviceSnapshot[],
+): HomeWorldDeviceSnapshot[] {
+  if (runtime.extensionAvailability["orgHints@1"] !== "available") {
+    return [...devices];
+  }
+  return devices.map((device) => runtime.committedNonSpatialNativeIds.has(device.nativeId)
+    && device.bindings.every((binding) => binding.hwSpaceId === undefined)
+    ? { ...device, spatialDisposition: "non_spatial" }
+    : device);
+}
+
+function readCommittedOrgHints(
+  journal: IngestJournal,
+  bridgeId: string,
+  epochId: string | undefined,
+): ReadonlySet<string> {
+  const nonSpatial = new Set<string>();
+  if (epochId === undefined) return nonSpatial;
+  for (const record of journal.records(bridgeId)) {
+    const { envelope } = record;
+    if (envelope.epochId !== epochId || envelope.event.kind !== "ext" || envelope.event.ext !== "orgHints@1") continue;
+    const parsed = orgHintPayloadSchema.safeParse(envelope.event.payload);
+    if (parsed.success) nonSpatial.add(parsed.data.nativeId);
+  }
+  return nonSpatial;
 }
 
 function selectAuthorityStates(

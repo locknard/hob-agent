@@ -192,10 +192,45 @@ test("factory construction is synchronous and does not resolve credentials or to
     coreVersion: "6.5.0",
     ecosystem: "home-assistant",
     heartbeatIntervalMs: 60_000,
-    extensions: [{ id: "foreignRules", version: "1.0.0" }],
+    extensions: [
+      { id: "foreignRules", version: "1.0.0" },
+      { id: "orgHints", version: "1.0.0" },
+    ],
   });
   void socket;
   void socketCalls;
+});
+
+test("emits a neutral non-spatial org hint only for an explicit HA service entry", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "sensor.supervisor", [{
+    id: "device-1",
+    name: "Supervisor",
+    entry_type: "service",
+  }], null);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+
+  assert.deepEqual(events.map((item) => item.event.kind), [
+    "sync-start",
+    "device-upserted",
+    "ext",
+    "state",
+    "device-health",
+    "sync-complete",
+  ]);
+  assert.deepEqual(events[2]?.event, {
+    kind: "ext",
+    ext: "orgHints@1",
+    payload: { nativeId: "device-1", spatialDisposition: "non_spatial" },
+  });
+  await adapter.control.dispose();
 });
 
 test("exposes existing automations through the bounded read-only foreignRules extension", async () => {

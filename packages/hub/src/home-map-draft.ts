@@ -30,6 +30,7 @@ export interface HomeMapSnapshot {
   readonly devices: readonly {
     readonly hwId: string;
     readonly name?: string;
+    readonly spatialDisposition?: "non_spatial";
     readonly bindings: readonly HomeMapBinding[];
     readonly capabilities: readonly { readonly semanticKind?: string }[];
     readonly states: readonly unknown[];
@@ -52,6 +53,8 @@ export interface HomeMapDraftReport {
   readonly devicesWithSingleSpace: number;
   readonly devicesWithoutSpace: number;
   readonly devicesWithMultipleSpaces: number;
+  readonly devicesNotRequiringSpace: number;
+  readonly devicesRequiringSpaceReview: number;
 }
 
 /** Produces a bounded private review artifact without current state values. */
@@ -62,7 +65,10 @@ export function renderHomeMapDraft(snapshot: Pick<HomeMapSnapshot, "spaces" | "d
   const devices = [...snapshot.devices].sort((left, right) => left.hwId.localeCompare(right.hwId));
   const placements = classifyPlacements(devices, knownSpaceIds);
   const singleSpace = placements.filter((placement) => placement.spaceIds.length === 1);
-  const unassigned = placements.filter((placement) => placement.spaceIds.length === 0);
+  const nonSpatial = placements.filter((placement) => placement.spaceIds.length === 0
+    && placement.device.spatialDisposition === "non_spatial");
+  const unassigned = placements.filter((placement) => placement.spaceIds.length === 0
+    && placement.device.spatialDisposition !== "non_spatial");
   const multipleSpaces = placements.filter((placement) => placement.spaceIds.length > 1);
   const spacesById = new Map(spaces.map((space) => [space.hwSpaceId, space]));
   const lines = [
@@ -75,6 +81,7 @@ export function renderHomeMapDraft(snapshot: Pick<HomeMapSnapshot, "spaces" | "d
     "",
     `- Single-space suggestions: ${singleSpace.length} of ${devices.length} devices`,
     `- Unassigned: ${unassigned.length}`,
+    `- Non-spatial: ${nonSpatial.length}`,
     `- Multiple imported spaces: ${multipleSpaces.length}`,
     "",
   ];
@@ -88,6 +95,11 @@ export function renderHomeMapDraft(snapshot: Pick<HomeMapSnapshot, "spaces" | "d
       `- [ ] Confirm ${deviceDescription(device)} — source: imported space suggestion`));
     lines.push("");
   }
+  lines.push("## Non-spatial or whole-home objects", "");
+  if (nonSpatial.length === 0) lines.push("_No explicitly non-spatial objects._");
+  else lines.push(...nonSpatial.map((placement) =>
+    `- ${deviceDescription(placement.device)} — adapter-declared non-spatial service; no room assignment required`));
+  lines.push("");
   lines.push("## Needs space confirmation", "", "### Unassigned", "");
   if (unassigned.length === 0) lines.push("_No unassigned devices._");
   else lines.push(...unassigned.map((placement) =>
@@ -204,6 +216,8 @@ function countPlacements(snapshot: Pick<HomeMapSnapshot, "spaces" | "devices">):
   readonly devicesWithSingleSpace: number;
   readonly devicesWithoutSpace: number;
   readonly devicesWithMultipleSpaces: number;
+  readonly devicesNotRequiringSpace: number;
+  readonly devicesRequiringSpaceReview: number;
 } {
   const knownSpaceIds = new Set(snapshot.spaces.map((space) => space.hwSpaceId));
   const placements = classifyPlacements(snapshot.devices, knownSpaceIds);
@@ -211,6 +225,10 @@ function countPlacements(snapshot: Pick<HomeMapSnapshot, "spaces" | "devices">):
     devicesWithSingleSpace: placements.filter((placement) => placement.spaceIds.length === 1).length,
     devicesWithoutSpace: placements.filter((placement) => placement.spaceIds.length === 0).length,
     devicesWithMultipleSpaces: placements.filter((placement) => placement.spaceIds.length > 1).length,
+    devicesNotRequiringSpace: placements.filter((placement) => placement.spaceIds.length === 0
+      && placement.device.spatialDisposition === "non_spatial").length,
+    devicesRequiringSpaceReview: placements.filter((placement) => placement.spaceIds.length === 0
+      && placement.device.spatialDisposition !== "non_spatial").length,
   };
 }
 

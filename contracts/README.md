@@ -45,6 +45,9 @@ frozen core surfaces:
   and `ExtensionHandleRegistry`, an intentionally empty interface for module
   augmentation. `canonicalExtensionKey()` produces the shared `<id>@<major>`
   key used by declarations, handles, and `ext` envelopes.
+- `bridge-org-hints.ts` defines the first closed `orgHints@1` stream payload:
+  an explicit, bounded `non_spatial` disposition that remains a hint and never
+  changes identity or authority.
 - Closed identity-claim provenance (`device_reported`,
   `independent_registry`, `platform_registry`, or `inferred`) and bridge-scoped
   credential materials (`secret_text`, `oauth`, and `certificate`). The

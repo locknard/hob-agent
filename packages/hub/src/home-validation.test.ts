@@ -9,7 +9,7 @@ test("projects only aggregate neutral readiness without household identities or 
     snapshot: {
       bridges: { "secret-bridge-id": {} },
       bridgeWatermarks: [{ bridgeId: "secret-bridge-id", epochId: "secret-epoch", lastSeq: 8 }],
-      diagnostics: [{ bridgeId: "secret-bridge-id", connectionState: "ready" }],
+      diagnostics: [{ bridgeId: "secret-bridge-id", connectionState: "ready", currentProcessReadyAt: "2026-08-19T05:00:00.000Z" }],
       spaces: [
         { hwSpaceId: "secret-space", name: "Private room" },
         { hwSpaceId: "secret-space-2", name: "Other private room" },
@@ -25,6 +25,7 @@ test("projects only aggregate neutral readiness without household identities or 
         states: [{ attrs: { state: "private-value" } }],
       }, {
         hwId: "secret-device-stale-space",
+        spatialDisposition: "non_spatial",
         bindings: [{ hwSpaceId: "missing-space" }],
         capabilities: [{ semanticKind: "sensor" }],
         states: [],
@@ -52,6 +53,8 @@ test("projects only aggregate neutral readiness without household identities or 
     devicesWithSingleSpace: 1,
     devicesWithoutSpace: 1,
     devicesWithMultipleSpaces: 1,
+    devicesNotRequiringSpace: 1,
+    devicesRequiringSpaceReview: 0,
     capabilities: 4,
     states: 1,
     semanticKinds: { light: 1, sensor: 1, switch: 1, unclassified: 1 },
@@ -73,6 +76,19 @@ test("reports not ready until every configured bridge has ready diagnostics and 
         { bridgeId: "a", connectionState: "ready" },
         { bridgeId: "b", connectionState: "degraded" },
       ],
+      spaces: [],
+      devices: [],
+    },
+  }).status, "not_ready");
+});
+
+test("does not promote a restored cut before this process receives bridge traffic", () => {
+  assert.equal(projectHomeValidation({
+    configuredBridgeCount: 1,
+    snapshot: {
+      bridges: { a: {} },
+      bridgeWatermarks: [{ bridgeId: "a" }],
+      diagnostics: [{ bridgeId: "a", connectionState: "ready" }],
       spaces: [],
       devices: [],
     },

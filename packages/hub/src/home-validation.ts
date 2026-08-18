@@ -25,9 +25,14 @@ const SEMANTIC_KINDS = [
 interface ValidationSnapshot {
   readonly bridges: Readonly<Record<string, unknown>>;
   readonly bridgeWatermarks: readonly { readonly bridgeId: string }[];
-  readonly diagnostics: readonly { readonly bridgeId: string; readonly connectionState: string }[];
+  readonly diagnostics: readonly {
+    readonly bridgeId: string;
+    readonly connectionState: string;
+    readonly currentProcessReadyAt?: string;
+  }[];
   readonly spaces: readonly { readonly hwSpaceId?: string }[];
   readonly devices: readonly {
+    readonly spatialDisposition?: "non_spatial";
     readonly bindings?: readonly { readonly hwSpaceId?: string }[];
     readonly capabilities: readonly { readonly semanticKind?: string }[];
     readonly states: readonly unknown[];
@@ -44,6 +49,8 @@ export interface HomeValidationReport {
   readonly devicesWithSingleSpace: number;
   readonly devicesWithoutSpace: number;
   readonly devicesWithMultipleSpaces: number;
+  readonly devicesNotRequiringSpace: number;
+  readonly devicesRequiringSpaceReview: number;
   readonly capabilities: number;
   readonly states: number;
   readonly semanticKinds: Readonly<Record<string, number>>;
@@ -62,6 +69,8 @@ export function projectHomeValidation(input: {
   const bridgeIds = Object.keys(input.snapshot.bridges);
   const watermarks = new Set(input.snapshot.bridgeWatermarks.map((item) => item.bridgeId));
   const diagnostics = new Map(input.snapshot.diagnostics.map((item) => [item.bridgeId, item.connectionState]));
+  const currentProcessReady = new Set(input.snapshot.diagnostics.flatMap((item) =>
+    item.currentProcessReadyAt === undefined ? [] : [item.bridgeId]));
   const bridgeStates = countClosed(
     input.snapshot.diagnostics.map((item) => item.connectionState),
     CONNECTION_STATES,
@@ -80,7 +89,9 @@ export function projectHomeValidation(input: {
       binding.hwSpaceId !== undefined && activeSpaceIds.has(binding.hwSpaceId) ? [binding.hwSpaceId] : []) ?? []).size);
   const ready = input.configuredBridgeCount > 0
     && bridgeIds.length === input.configuredBridgeCount
-    && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready" && watermarks.has(bridgeId));
+    && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready"
+      && watermarks.has(bridgeId)
+      && currentProcessReady.has(bridgeId));
   const ruleCatalogs = input.ruleCatalogs ?? [];
   return {
     status: ready ? "ready" : "not_ready",
@@ -92,6 +103,10 @@ export function projectHomeValidation(input: {
     devicesWithSingleSpace: deviceSpaceCounts.filter((count) => count === 1).length,
     devicesWithoutSpace: deviceSpaceCounts.filter((count) => count === 0).length,
     devicesWithMultipleSpaces: deviceSpaceCounts.filter((count) => count > 1).length,
+    devicesNotRequiringSpace: input.snapshot.devices.filter((device, index) =>
+      deviceSpaceCounts[index] === 0 && device.spatialDisposition === "non_spatial").length,
+    devicesRequiringSpaceReview: input.snapshot.devices.filter((device, index) =>
+      deviceSpaceCounts[index] === 0 && device.spatialDisposition !== "non_spatial").length,
     capabilities: capabilities.length,
     states: input.snapshot.devices.reduce((total, device) => total + device.states.length, 0),
     semanticKinds,

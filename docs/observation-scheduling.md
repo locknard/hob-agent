@@ -22,7 +22,9 @@ the household has no pending proposal to review.
   interval is bounded from 60 minutes to seven days; an optional explicit flag
   may request one observation after startup readiness.
 - A startup observation waits for every configured bridge represented in the
-  HomeWorld snapshot to report `ready` and a verified watermark.
+  HomeWorld snapshot to report `ready`, a verified watermark, and traffic
+  received by the current process. A restored cut alone cannot trigger a model
+  turn before the live adapter bootstrap completes.
 - At most one observation turn runs at a time. A busy Agent is skipped rather
   than interrupted.
 - Any pending Inbox proposal suppresses later observations. The household must

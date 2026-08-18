@@ -110,6 +110,10 @@ apply an artifact or control a device.
 - `pnpm validate:home` provides a model-free, aggregate-only readiness cut over
   the production HomeWorld paths before autonomous observation is enabled. It
   emits no household identities, values, URLs, credentials, or raw errors.
+- Readiness also requires bridge traffic in the current process. A restored
+  consistent cut remains readable but cannot make validation, mapping, or
+  observation race ahead of the new adapter bootstrap and its epoch-bound
+  extension catalogs.
 - The DSH Agent can inspect the existing neutral `foreignRules@1` catalog
   through bounded `get_home_rules` pages before proposing an automation. An
   autonomous runtime gate requires a complete stable cursor sequence rather
@@ -133,6 +137,11 @@ apply an artifact or control a device.
   coverage separately; ambiguous devices appear once as explicit confirmation
   tasks rather than being duplicated across apparently settled rooms. Native
   identifiers and current values remain absent.
+- The neutral `orgHints@1` stream extension can mark a device explicitly
+  non-spatial from structured adapter evidence. The Hub accepts it only in the
+  committed replay epoch; names never drive this classification, and merged
+  devices fail back to unknown unless every source agrees. This keeps service
+  objects out of room-review work without making HA vocabulary part of core.
 - `pnpm inbox:home` mounts only the durable proposal store, metadata-only
   observation audit, and authenticated localhost review surface. It requires
   no bridge or model configuration and retains the same terminal, non-applying

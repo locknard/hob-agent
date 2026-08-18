@@ -16,7 +16,11 @@ class StubWorld extends Service {
     return {
       bridges: { "bridge-a": {} },
       bridgeWatermarks: this.ready ? [{ bridgeId: "bridge-a", epochId: "epoch-a", lastSeq: 4 }] : [],
-      diagnostics: [{ bridgeId: "bridge-a", connectionState: this.ready ? "ready" : "syncing" }],
+      diagnostics: [{
+        bridgeId: "bridge-a",
+        connectionState: this.ready ? "ready" : "syncing",
+        ...(this.ready ? { currentProcessReadyAt: "2026-08-19T03:59:00.000Z" } : {}),
+      }],
     };
   }
 }

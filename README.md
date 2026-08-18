@@ -79,6 +79,8 @@ errors. Its counts include devices with and without an accepted neutral space
 binding so an incomplete household map stays visible, plus aggregate
 available/unavailable existing-rule coverage before a model call. See
 [`docs/home-validation.md`](docs/home-validation.md).
+It also separates explicitly non-spatial service objects from genuine
+space-review gaps through the neutral, epoch-bound `orgHints@1` extension.
 
 After validation, one explicit paid/model-backed observation can be run without
 enabling the recurring scheduler or Inbox HTTP listener:

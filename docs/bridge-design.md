@@ -251,7 +251,7 @@ ExtensionDeclaration 是开放数组项，不在 core 中枚举扩展名字；�
 
 扩展的逐事件数据经 `{ kind: "ext"; ext: string; payload: unknown }` 在同一流内承载(享受 epoch/seq 定序);`ext` 字段 = canonical key(`<id>@<major>`,§3);该扩展启用且 schema 已登记时按其 schema 校验,未启用/未知 ext → 丢弃 + 计数(扩展级,不算协议违规)。
 - **causality**:`payload = { refSeq: number; cause: CauseRef }`,回指同 epoch 内被注释的 state 事件。CauseRef 为判别联合(user→principalRef / foreign_rule→ruleRef / hob_artifact→artifactId / physical / unknown),平台原生 ID 不入模型。**引用完整性(v6.1)**:causality ext 必须紧随目标 state(最大 seq 距离,默认 32);只能引用已过校验、已入 journal 的 state;无效引用(目标非法/被拒/非 state/超距/跨 sync-complete)→ **extension rejection ledger**,不影响 core 高水位;reducer 折叠不删除 journal 中的因果关系;**当前世界值永不等待 cause**——cause 是事件证据,不影响状态可见性,reducer 不为其停留。
-- **orgHints**:`payload = { nativeId: string; roomHint?: string; personHints?: ... }`;一律 hint,bootstrap 核对后入工作区。
+- **orgHints**:`payload = { nativeId: string; spatialDisposition?: "non_spatial"; roomHint?: string; personHints?: ... }`;一律 hint,bootstrap 核对后入工作区。缺失 `spatialDisposition` 恒为未知；适配器只能从结构化源事实声明 `non_spatial`，不得从名称或能力类型猜测。
 
 ### 4.1 actions(M3):indeterminate 禁自动重试、高危上浮;幂等两层(homeWorld 治理/审计 + adapter 执行边缘);只发 action authority。
 ### 4.2 history:`fetchHistory(range)`,origin 恒 imported,证据降权,dry-run 声明血统。

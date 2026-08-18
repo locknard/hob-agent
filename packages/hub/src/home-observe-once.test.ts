@@ -31,7 +31,7 @@ test("runs one governed observation without mounting HTTP or recurring schedulin
       snapshot: () => ({
         bridges: { "bridge-a": {} },
         bridgeWatermarks: [{ bridgeId: "bridge-a" }],
-        diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready" }],
+        diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready", currentProcessReadyAt: "2026-08-19T03:59:00.000Z" }],
       }),
     },
     homeProposals: {
@@ -78,7 +78,7 @@ test("does not call the model when a proposal is already pending", async () => {
             snapshot: () => ({
               bridges: { "bridge-a": {} },
               bridgeWatermarks: [{ bridgeId: "bridge-a" }],
-              diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready" }],
+              diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready", currentProcessReadyAt: "2026-08-19T03:59:00.000Z" }],
             }),
           },
           homeProposals: { list: () => [{ status: "pending_review" }] },
@@ -108,7 +108,7 @@ test("reports a completed observation that intentionally creates no proposal", a
             snapshot: () => ({
               bridges: { "bridge-a": {} },
               bridgeWatermarks: [{ bridgeId: "bridge-a" }],
-              diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready" }],
+              diagnostics: [{ bridgeId: "bridge-a", connectionState: "ready", currentProcessReadyAt: "2026-08-19T03:59:00.000Z" }],
             }),
           },
           homeProposals: { list: () => [] },
