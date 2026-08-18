@@ -76,7 +76,8 @@ pnpm validate:home
 The command mounts only HomeWorld and prints aggregate readiness and counts; it
 never prints household names, IDs, state values, URLs, credentials, or raw
 errors. Its counts include devices with and without an accepted neutral space
-binding so an incomplete household map stays visible. See
+binding so an incomplete household map stays visible, plus aggregate
+available/unavailable existing-rule coverage before a model call. See
 [`docs/home-validation.md`](docs/home-validation.md).
 
 After validation, one explicit paid/model-backed observation can be run without

@@ -17,10 +17,13 @@ report containing only:
 - neutral space, device, capability, and current-state counts;
 - mutually exclusive device counts with one, zero, or multiple accepted
   neutral space bindings; and
-- counts by closed capability semantic kind.
+- counts by closed capability semantic kind; and
+- available/unavailable neutral existing-rule catalog counts plus the aggregate
+  number of visible rules.
 
 The report never contains bridge IDs, native IDs, hub IDs, names, state values,
 attributes, URLs, credentials, provider errors, or household prompt content.
+Rule names, opaque references, epochs, and bridge identities are also omitted.
 The command does not mount DSH, call a model, create a proposal, or enable the
 observation schedule. It uses the normal private journal, registry, and world
 model paths so the validation cut is the same cut the product will later read.

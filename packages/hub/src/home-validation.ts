@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 
 import { Context } from "@deepseek-ai/cordis";
 
-import { HomeWorldService } from "./home-world-service.js";
+import {
+  HomeWorldService,
+  type HomeWorldForeignRuleCatalog,
+} from "./home-world-service.js";
 import {
   readHomeWorldLaunchConfig,
   type LaunchEnvironment,
@@ -44,11 +47,17 @@ export interface HomeValidationReport {
   readonly capabilities: number;
   readonly states: number;
   readonly semanticKinds: Readonly<Record<string, number>>;
+  readonly ruleCatalogs: {
+    readonly available: number;
+    readonly unavailable: number;
+    readonly totalRules: number;
+  };
 }
 
 export function projectHomeValidation(input: {
   readonly configuredBridgeCount: number;
   readonly snapshot: ValidationSnapshot;
+  readonly ruleCatalogs?: readonly HomeWorldForeignRuleCatalog[];
 }): HomeValidationReport {
   const bridgeIds = Object.keys(input.snapshot.bridges);
   const watermarks = new Set(input.snapshot.bridgeWatermarks.map((item) => item.bridgeId));
@@ -72,6 +81,7 @@ export function projectHomeValidation(input: {
   const ready = input.configuredBridgeCount > 0
     && bridgeIds.length === input.configuredBridgeCount
     && bridgeIds.every((bridgeId) => diagnostics.get(bridgeId) === "ready" && watermarks.has(bridgeId));
+  const ruleCatalogs = input.ruleCatalogs ?? [];
   return {
     status: ready ? "ready" : "not_ready",
     configuredBridges: input.configuredBridgeCount,
@@ -85,6 +95,12 @@ export function projectHomeValidation(input: {
     capabilities: capabilities.length,
     states: input.snapshot.devices.reduce((total, device) => total + device.states.length, 0),
     semanticKinds,
+    ruleCatalogs: {
+      available: ruleCatalogs.filter((catalog) => catalog.status === "available").length,
+      unavailable: ruleCatalogs.filter((catalog) => catalog.status === "unavailable").length,
+      totalRules: ruleCatalogs.reduce((total, catalog) =>
+        total + (catalog.status === "available" ? catalog.rules.length : 0), 0),
+    },
   };
 }
 
@@ -121,7 +137,11 @@ export async function validateHomeEnvironment(
         snapshot: ctx.homeWorld.snapshot(),
       });
     }
-    return report;
+    return projectHomeValidation({
+      configuredBridgeCount: config.bridges.length,
+      snapshot: ctx.homeWorld.snapshot(),
+      ruleCatalogs: await ctx.homeWorld.foreignRuleCatalog(),
+    });
   } finally {
     await ctx.fiber.dispose();
   }

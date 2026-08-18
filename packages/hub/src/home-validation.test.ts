@@ -35,6 +35,11 @@ test("projects only aggregate neutral readiness without household identities or 
         states: [],
       }],
     },
+    ruleCatalogs: [{
+      bridgeId: "secret-bridge-id",
+      status: "available",
+      rules: [{ ruleRef: "secret-rule", name: "Private automation" }],
+    }],
   });
 
   assert.deepEqual(report, {
@@ -50,6 +55,7 @@ test("projects only aggregate neutral readiness without household identities or 
     capabilities: 4,
     states: 1,
     semanticKinds: { light: 1, sensor: 1, switch: 1, unclassified: 1 },
+    ruleCatalogs: { available: 1, unavailable: 0, totalRules: 1 },
   });
   const serialized = JSON.stringify(report);
   for (const secret of ["secret", "Private", "private-value"]) {
