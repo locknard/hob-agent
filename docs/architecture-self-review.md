@@ -46,8 +46,9 @@ apply an artifact or control a device.
 
 ## Verified boundaries
 
-- The Home Agent exposes compact paginated `get_home_inventory`, bounded
-  paginated `get_home_snapshot`, bounded read-only `get_home_evidence`, and
+- The Home Agent exposes compact paginated `get_home_inventory`, metadata-only
+  post-baseline `get_home_activity` candidate triage, bounded paginated
+  `get_home_snapshot`, bounded read-only `get_home_evidence`, and
   review-only `create_home_proposal`; none has device or configuration
   authority. Inventory discovery omits current values, capability identities,
   schemas, and native identities. During autonomous observations, a runtime

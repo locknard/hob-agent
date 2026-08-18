@@ -9,7 +9,8 @@ runtime-invariant companions protect the stateful DSH protocols, and the Home
 Product Bundle changes only the supported compaction summarizer hook to use a
 household checkpoint rather than the upstream coding template. The Home
 Product Bundle contributes
-compact paginated `get_home_inventory`, bounded paginated read-only
+compact paginated `get_home_inventory`, metadata-only post-baseline
+`get_home_activity` candidate triage, bounded paginated read-only
 `get_home_snapshot`, bounded read-only `get_home_evidence`, and review-only
 `create_home_proposal` tools through DSH's registry; it does not create a
 parallel Agent or tool system. The read tools inject the neutral `homeWorld`
@@ -21,7 +22,8 @@ of at most 20 devices and can narrow them by hub device ID, per-binding neutral
 space, or closed semantic kind. Its device, capability, state, space,
 watermark, and health projections remain ecosystem-neutral. External
 attributes are bounded and JSON-normalized before they reach the model. See
-`docs/bounded-home-inventory.md` and `docs/bounded-home-query.md` for these
+`docs/bounded-home-inventory.md`, `docs/bounded-home-activity.md`, and
+`docs/bounded-home-query.md` for these
 query boundaries.
 
 The proposal tool accepts bounded intent, risk, selected hub identities, and a

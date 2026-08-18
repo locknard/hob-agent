@@ -226,6 +226,24 @@ export interface HomeWorldEvidenceResult {
   readonly truncated: boolean;
 }
 
+export interface HomeWorldActivityQuery {
+  readonly lookbackHours: number;
+  readonly limit?: number;
+}
+
+export interface HomeWorldActivityResult {
+  readonly requestedSince: string;
+  readonly requestedUntil: string;
+  readonly devices: readonly {
+    readonly hwId: string;
+    readonly eventCount: number;
+    readonly latestObservedAt: string;
+    readonly semanticKinds: readonly CapabilitySemanticKind[];
+  }[];
+  readonly coverage: readonly HomeWorldEvidenceCoverage[];
+  readonly truncated: boolean;
+}
+
 export interface HomeWorldBridgeMetrics {
   /** Consistency indicator: only a completed manifest is ready. */
   consistency: "ready" | "not_ready" | "degraded";
@@ -627,6 +645,116 @@ export class HomeWorldService extends Service {
         : { ...item, status: "partial", reasons: [...item.reasons, "merge_truncated"] });
     }
     return { requestedSince, requestedUntil, events, coverage, truncated };
+  }
+
+  /** Returns metadata-only post-baseline activity for candidate discovery. */
+  queryRecentActivity(input: HomeWorldActivityQuery): HomeWorldActivityResult {
+    const limit = validateActivityQuery(input);
+    const requestedUntil = this.clock();
+    const requestedSince = new Date(Date.parse(requestedUntil) - input.lookbackHours * 60 * 60 * 1_000).toISOString();
+    const snapshot = this.snapshot();
+    const capabilitiesByBinding = new Map<string, HomeWorldCapabilitySnapshot>();
+    for (const device of snapshot.devices) {
+      for (const capability of device.capabilities) {
+        for (const binding of capability.bindings) {
+          capabilitiesByBinding.set(activityBindingKey(
+            binding.bridgeId,
+            binding.nativeId,
+            binding.nativeInstanceId,
+          ), capability);
+        }
+      }
+    }
+    const aggregates = new Map<string, {
+      hwId: string;
+      eventCount: number;
+      latestObservedAt: string;
+      semanticKinds: Set<CapabilitySemanticKind>;
+    }>();
+    let truncated = false;
+    let coverage: HomeWorldEvidenceCoverage[] = [];
+    for (const runtime of [...this.runtimesById.values()].sort((left, right) => left.bridgeId.localeCompare(right.bridgeId))) {
+      const bridgeId = runtime.bridgeId;
+      const watermark = runtime.journal.consistentWatermark?.(bridgeId);
+      const baselineAt = runtime.ingest.diagnostics().lastSyncCompleteAt;
+      const reasons: HomeWorldEvidenceCoverageReason[] = [];
+      if (watermark === undefined) {
+        coverage.push({ bridgeId, status: "unavailable", reasons: ["missing_consistent_baseline"] });
+        continue;
+      }
+      if (runtime.ingest.diagnostics().connectionState !== "ready") reasons.push("bridge_not_ready");
+      if (baselineAt === undefined) reasons.push("baseline_time_unknown");
+      else if (Date.parse(requestedSince) < Date.parse(baselineAt)) reasons.push("window_before_baseline");
+      if (runtime.journal.historyGaps(bridgeId).some((gap) => (
+        gap.epochId === watermark.epochId && gap.toSeq > watermark.lastSeq
+      ))) reasons.push("history_gap");
+      if (runtime.journal.queryLiveStateActivity === undefined) {
+        reasons.push("journal_query_unavailable");
+      } else {
+        try {
+          const page = runtime.journal.queryLiveStateActivity({
+            bridgeId,
+            epochId: watermark.epochId,
+            afterSeq: watermark.lastSeq,
+            since: requestedSince,
+            until: requestedUntil,
+            limit,
+          });
+          if (page.truncated) {
+            reasons.push("query_truncated");
+            truncated = true;
+          }
+          for (const item of page.activity) {
+            const capability = capabilitiesByBinding.get(activityBindingKey(
+              bridgeId,
+              item.nativeId,
+              item.nativeInstanceId,
+            ));
+            if (capability === undefined) continue;
+            const aggregate = aggregates.get(capability.hwId) ?? {
+              hwId: capability.hwId,
+              eventCount: 0,
+              latestObservedAt: item.latestObservedAt,
+              semanticKinds: new Set<CapabilitySemanticKind>(),
+            };
+            aggregate.eventCount += item.eventCount;
+            if (item.latestObservedAt > aggregate.latestObservedAt) {
+              aggregate.latestObservedAt = item.latestObservedAt;
+            }
+            if (capability.semanticKind !== undefined) aggregate.semanticKinds.add(capability.semanticKind);
+            aggregates.set(capability.hwId, aggregate);
+          }
+        } catch {
+          reasons.push("journal_query_unavailable");
+        }
+      }
+      coverage.push({
+        bridgeId,
+        epochId: watermark.epochId,
+        baselineSeq: watermark.lastSeq,
+        ...(baselineAt === undefined ? {} : { baselineAt }),
+        status: reasons.length === 0 ? "complete" : "partial",
+        reasons,
+      });
+    }
+    const devices = [...aggregates.values()]
+      .sort((left, right) => right.eventCount - left.eventCount
+        || right.latestObservedAt.localeCompare(left.latestObservedAt)
+        || left.hwId.localeCompare(right.hwId))
+      .map((item) => ({
+        hwId: item.hwId,
+        eventCount: item.eventCount,
+        latestObservedAt: item.latestObservedAt,
+        semanticKinds: [...item.semanticKinds].sort(compareStrings),
+      }));
+    if (devices.length > limit) {
+      devices.splice(limit);
+      truncated = true;
+      coverage = coverage.map((item) => item.status === "unavailable" || item.reasons.includes("merge_truncated")
+        ? item
+        : { ...item, status: "partial", reasons: [...item.reasons, "merge_truncated"] });
+    }
+    return { requestedSince, requestedUntil, devices, coverage, truncated };
   }
 
   snapshot(): HomeWorldSnapshot {
@@ -1303,8 +1431,26 @@ function validateEvidenceQuery(input: HomeWorldEvidenceQuery): number {
   return limit;
 }
 
+function validateActivityQuery(input: HomeWorldActivityQuery): number {
+  const limit = input?.limit ?? 20;
+  if (!input || typeof input !== "object"
+    || !Number.isSafeInteger(input.lookbackHours)
+    || input.lookbackHours < 1
+    || input.lookbackHours > 168
+    || !Number.isSafeInteger(limit)
+    || limit < 1
+    || limit > 50) {
+    throw new TypeError("home activity query is invalid or unbounded");
+  }
+  return limit;
+}
+
 function evidenceBindingKey(nativeId: string, nativeInstanceId: string): string {
   return `${nativeId}\u0000${nativeInstanceId}`;
+}
+
+function activityBindingKey(bridgeId: string, nativeId: string, nativeInstanceId: string): string {
+  return `${bridgeId}\u0000${nativeId}\u0000${nativeInstanceId}`;
 }
 
 function evidenceScalar(value: unknown): string | number | boolean | null | undefined {

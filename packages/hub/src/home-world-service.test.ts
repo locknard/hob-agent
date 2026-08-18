@@ -292,6 +292,63 @@ test("rejects unknown capability ids and unbounded evidence requests", async () 
   await fiber.dispose();
 });
 
+test("projects bounded post-baseline activity into neutral device aggregates", async () => {
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge("bridge-activity", "remote-activity", snapshotFor("bridge-activity", "remote-activity"));
+  catalog.register(registration(() => bridge));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  let currentTime = "2026-08-19T00:00:00.000Z";
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-activity")],
+    new Map([["bridge-activity", bridge]]),
+    { clock: () => currentTime },
+  ));
+  await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-activity"]?.diagnostics.connectionState === "ready");
+  const device = ctx.homeWorld.snapshot().devices[0]!;
+  for (const [seq, receivedAt] of [[5, "2026-08-19T02:00:00.000Z"], [6, "2026-08-19T03:00:00.000Z"]] as const) {
+    ctx.homeWorld.journal("bridge-activity")!.appendAtomic({
+      bridgeId: "bridge-activity",
+      receivedAt,
+      envelope: eventEnvelope("bridge-activity-epoch", seq, {
+        kind: "state",
+        state: {
+          nativeId: "bridge-activity-lamp",
+          nativeInstanceId: "bridge-activity-lamp:main",
+          attrs: { state: `private-${seq}` },
+          time: { sourceTsQuality: "none" },
+          origin: "observed",
+        },
+      }),
+    });
+  }
+  currentTime = "2026-08-19T04:00:00.000Z";
+
+  const activity = ctx.homeWorld.queryRecentActivity({ lookbackHours: 4, limit: 20 });
+  assert.deepEqual(activity.devices, [{
+    hwId: device.hwId,
+    eventCount: 2,
+    latestObservedAt: "2026-08-19T03:00:00.000Z",
+    semanticKinds: ["light"],
+  }]);
+  assert.deepEqual(activity.coverage, [{
+    bridgeId: "bridge-activity",
+    epochId: "bridge-activity-epoch",
+    baselineSeq: 4,
+    baselineAt: "2026-08-19T00:00:00.000Z",
+    status: "complete",
+    reasons: [],
+  }]);
+  assert.equal(activity.truncated, false);
+  assert.equal(JSON.stringify(activity).includes("private"), false);
+  assert.throws(() => ctx.homeWorld.queryRecentActivity({ lookbackHours: 0, limit: 20 }));
+  assert.throws(() => ctx.homeWorld.queryRecentActivity({ lookbackHours: 24, limit: 51 }));
+  await fiber.dispose();
+});
+
+
 test("disposes an adapter when bridge startup fails before runtime registration", async () => {
   const catalog = new BridgeCatalog();
   let disposeCalls = 0;

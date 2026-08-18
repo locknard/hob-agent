@@ -153,6 +153,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   ]);
   assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), [
     "get_home_inventory",
+    "get_home_activity",
     "get_home_snapshot",
     "get_home_evidence",
     "get_home_rules",
@@ -224,6 +225,11 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.equal(
     adapter.requests[1]?.messages.some((message) =>
       JSON.stringify(message).includes("inventory cursor until it is exhausted")),
+    true,
+  );
+  assert.equal(
+    adapter.requests[1]?.messages.some((message) =>
+      JSON.stringify(message).includes("activity for candidate triage")),
     true,
   );
   assert.equal(

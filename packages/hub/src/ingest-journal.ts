@@ -50,6 +50,25 @@ export interface JournalLiveStatePage {
   readonly truncated: boolean;
 }
 
+export interface JournalLiveStateActivityQuery {
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly afterSeq: number;
+  readonly since: string;
+  readonly until: string;
+  readonly limit: number;
+}
+
+export interface JournalLiveStateActivityPage {
+  readonly activity: readonly {
+    readonly nativeId: string;
+    readonly nativeInstanceId: string;
+    readonly eventCount: number;
+    readonly latestObservedAt: string;
+  }[];
+  readonly truncated: boolean;
+}
+
 export interface IngestJournal {
   appendAtomic(record: IngestRecord): void;
   append?(record: IngestRecord): void;
@@ -66,6 +85,8 @@ export interface IngestJournal {
   markConsistent?(bridgeId: string, watermark: JournalWatermark): void;
   /** Optional bounded evidence seam; production SQLite journals implement it. */
   queryLiveStateRecords?(query: JournalLiveStateQuery): JournalLiveStatePage;
+  /** Optional metadata-only activity seam; values never leave the journal. */
+  queryLiveStateActivity?(query: JournalLiveStateActivityQuery): JournalLiveStateActivityPage;
   records(bridgeId?: string): IngestRecord[];
   rejections(bridgeId?: string): RejectionRecord[];
   historyGaps(bridgeId?: string): HistoryGapRecord[];
@@ -312,6 +333,38 @@ export class SqliteIngestJournal implements IngestJournal {
     return { records: page, truncated };
   }
 
+  queryLiveStateActivity(query: JournalLiveStateActivityQuery): JournalLiveStateActivityPage {
+    validateLiveStateActivityQuery(query);
+    const rows = this.db.prepare(`SELECT
+        json_extract(envelope_json, '$.event.state.nativeId') AS native_id,
+        json_extract(envelope_json, '$.event.state.nativeInstanceId') AS native_instance_id,
+        COUNT(*) AS event_count,
+        MAX(received_at) AS latest_observed_at
+      FROM ingest_events
+      WHERE bridge_id = ? AND epoch_id = ? AND seq > ? AND kind = 'state'
+        AND julianday(received_at) >= julianday(?)
+        AND julianday(received_at) <= julianday(?)
+      GROUP BY native_id, native_instance_id
+      ORDER BY event_count DESC, latest_observed_at DESC, native_id ASC, native_instance_id ASC
+      LIMIT ?`).all(
+      query.bridgeId,
+      query.epochId,
+      query.afterSeq,
+      query.since,
+      query.until,
+      query.limit + 1,
+    ) as SqlRow[];
+    return {
+      activity: rows.slice(0, query.limit).map((row) => ({
+        nativeId: String(row.native_id),
+        nativeInstanceId: String(row.native_instance_id),
+        eventCount: Number(row.event_count),
+        latestObservedAt: String(row.latest_observed_at),
+      })),
+      truncated: rows.length > query.limit,
+    };
+  }
+
   rejections(bridgeId?: string): RejectionRecord[] {
     const rows = (bridgeId === undefined
       ? this.db.prepare("SELECT bridge_id, epoch_id, seq, reason, native_id FROM ingest_rejections ORDER BY id").all()
@@ -427,6 +480,21 @@ function validateLiveStateQuery(query: JournalLiveStateQuery): void {
       || binding.nativeInstanceId.length > 512
     ))) {
     throw new TypeError("live state query is invalid or unbounded");
+  }
+}
+
+function validateLiveStateActivityQuery(query: JournalLiveStateActivityQuery): void {
+  const validTimestamp = (value: unknown): value is string => (
+    typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value))
+  );
+  if (!query || typeof query !== "object"
+    || typeof query.bridgeId !== "string" || query.bridgeId.length === 0 || query.bridgeId.length > 200
+    || typeof query.epochId !== "string" || query.epochId.length === 0 || query.epochId.length > 200
+    || !Number.isSafeInteger(query.afterSeq) || query.afterSeq < 0
+    || !validTimestamp(query.since) || !validTimestamp(query.until)
+    || Date.parse(query.since) > Date.parse(query.until)
+    || !Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 50) {
+    throw new TypeError("live state activity query is invalid or unbounded");
   }
 }
 

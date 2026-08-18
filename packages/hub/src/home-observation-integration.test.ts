@@ -83,6 +83,28 @@ class AcceptanceWorld extends Service {
     };
   }
 
+  queryRecentActivity() {
+    return {
+      requestedSince: "2026-08-18T04:00:00.000Z",
+      requestedUntil: "2026-08-19T04:00:00.000Z",
+      devices: [{
+        hwId: "hw-1",
+        eventCount: 1,
+        latestObservedAt: "2026-08-19T03:30:00.000Z",
+        semanticKinds: ["light" as const],
+      }],
+      coverage: [{
+        bridgeId: "bridge-a",
+        epochId: "epoch-a",
+        baselineSeq: 8,
+        baselineAt: "2026-08-18T04:00:00.000Z",
+        status: "complete" as const,
+        reasons: [],
+      }],
+      truncated: false,
+    };
+  }
+
   async foreignRuleCatalog() {
     return [{
       bridgeId: "bridge-a",
@@ -124,10 +146,14 @@ class ObservationScriptAdapter {
       return;
     }
     if (step === 3) {
-      yield* toolCall("call-snapshot", "get_home_snapshot", { semanticKinds: ["light"], limit: 10 });
+      yield* toolCall("call-activity", "get_home_activity", { lookbackHours: 24, limit: 20 });
       return;
     }
     if (step === 4) {
+      yield* toolCall("call-snapshot", "get_home_snapshot", { semanticKinds: ["light"], limit: 10 });
+      return;
+    }
+    if (step === 5) {
       yield* toolCall("call-evidence", "get_home_evidence", {
         hwCapabilityIds: ["hwc-1"],
         lookbackHours: 24,
@@ -135,11 +161,11 @@ class ObservationScriptAdapter {
       });
       return;
     }
-    if (step === 5) {
+    if (step === 6) {
       yield* toolCall("call-rules", "get_home_rules", { limit: 20 });
       return;
     }
-    if (step === 6) {
+    if (step === 7) {
       yield* toolCall("call-proposal", "create_home_proposal", {
         kind: "automation-draft",
         title: "Review repeated light activity",
@@ -192,10 +218,11 @@ test("runs one DSH observation through governed tools into a trusted Inbox propo
 
   await ctx.homeAgent.requestObservation();
 
-  assert.equal(adapter.requests.length, 7);
+  assert.equal(adapter.requests.length, 8);
   assert.deepEqual(ctx.homeAgent.traceSnapshot()?.tools.map((tool) => tool.name), [
     "skill",
     "get_home_inventory",
+    "get_home_activity",
     "get_home_snapshot",
     "get_home_evidence",
     "get_home_rules",

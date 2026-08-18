@@ -31,6 +31,8 @@ the household has no pending proposal to review.
   household data; the Agent must use governed tools.
 - Household-wide discovery must exhaust the compact `get_home_inventory`
   cursor before selecting a small candidate set for detailed snapshot reads.
+  It then uses bounded `get_home_activity` metadata for candidate triage
+  without treating activity as proof of a household routine.
   The autonomous runtime gate rejects proposal creation after a partial,
   out-of-order, or version-changing inventory; this is not left to prompt
   compliance.

@@ -87,3 +87,61 @@ test("rejects an unbounded or malformed live-state query", () => {
   }));
   journal.close();
 });
+
+test("aggregates bounded post-baseline state activity without returning values", () => {
+  const journal = new SqliteIngestJournal(":memory:");
+  append(journal, 1, "2026-08-19T00:00:00.000Z", {
+    kind: "state",
+    state: {
+      nativeId: "baseline-lamp",
+      nativeInstanceId: "power",
+      attrs: { state: "secret-baseline" },
+      time: { sourceTsQuality: "none" },
+      origin: "observed",
+    },
+  });
+  journal.markConsistent("bridge-a", { epochId: "epoch-a", lastSeq: 1 });
+  for (const [seq, nativeId, receivedAt] of [
+    [2, "lamp", "2026-08-19T01:00:00.000Z"],
+    [3, "sensor", "2026-08-19T02:00:00.000Z"],
+    [4, "lamp", "2026-08-19T03:00:00.000Z"],
+  ] as const) {
+    append(journal, seq, receivedAt, {
+      kind: "state",
+      state: {
+        nativeId,
+        nativeInstanceId: "main",
+        attrs: { state: `secret-${seq}` },
+        time: { sourceTsQuality: "none" },
+        origin: "observed",
+      },
+    });
+  }
+
+  const page = journal.queryLiveStateActivity({
+    bridgeId: "bridge-a",
+    epochId: "epoch-a",
+    afterSeq: 1,
+    since: "2026-08-19T00:30:00.000Z",
+    until: "2026-08-19T04:00:00.000Z",
+    limit: 1,
+  });
+
+  assert.deepEqual(page.activity, [{
+    nativeId: "lamp",
+    nativeInstanceId: "main",
+    eventCount: 2,
+    latestObservedAt: "2026-08-19T03:00:00.000Z",
+  }]);
+  assert.equal(page.truncated, true);
+  assert.equal(JSON.stringify(page).includes("secret"), false);
+  assert.throws(() => journal.queryLiveStateActivity({
+    bridgeId: "bridge-a",
+    epochId: "epoch-a",
+    afterSeq: 1,
+    since: "not-a-time",
+    until: "2026-08-19T04:00:00.000Z",
+    limit: 51,
+  }));
+  journal.close();
+});

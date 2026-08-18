@@ -24,6 +24,7 @@ import * as CompactionInvariant from "@deepseek-ai/dsh-compaction/invariant";
 
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
+import * as HomeActivityTool from "./dsh-home-activity-tool.js";
 import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
 import * as HomeEvidenceTool from "./dsh-home-evidence-tool.js";
 import * as HomeRulesTool from "./dsh-home-rules-tool.js";
@@ -127,7 +128,7 @@ export class DshHomeAgentService extends Service {
           text: [
             "Perform one governed household observation.",
             "First load the review-home-observation skill and follow its workflow.",
-            "Follow the compact inventory cursor until it is exhausted, then use bounded detailed snapshot pages for a small materially useful candidate set and inspect post-baseline evidence when claiming behavior.",
+            "Follow the compact inventory cursor until it is exhausted, inspect bounded post-baseline activity for candidate triage, then use bounded detailed snapshot pages for a small materially useful candidate set and inspect post-baseline evidence when claiming behavior.",
             "Inspect existing household rules before proposing an automation so you do not repeat an obvious existing rule.",
             "Treat rapidly flapping software or integration status, unknown/unavailable lifecycle changes, and uncorroborated short sensor bursts as noise rather than household routine.",
             "Use them only when persistent or corroborated and materially relevant to household safety, comfort, resources, or reliability.",
@@ -216,6 +217,7 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(HomeObservationBudgetService);
     await this.ctx.plugin(HomeInventoryCoverageService);
     await this.ctx.plugin(HomeInventoryTool);
+    await this.ctx.plugin(HomeActivityTool);
     await this.ctx.plugin(HomeSnapshotTool);
     await this.ctx.plugin(HomeEvidenceTool);
     await this.ctx.plugin(HomeRulesTool);
