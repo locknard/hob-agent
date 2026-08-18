@@ -222,6 +222,49 @@ test("exposes existing automations through the bounded read-only foreignRules ex
   await adapter.control.dispose();
 });
 
+test("excludes restored unavailable ghost automations from the foreign-rule catalog", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  for (const command of commands) {
+    const result = command.type === "get_states"
+      ? [
+          {
+            entity_id: "automation.current_rule",
+            state: "on",
+            attributes: { friendly_name: "Current rule" },
+            last_updated: "2026-08-18T00:00:01.000Z",
+          },
+          {
+            entity_id: "automation.removed_rule",
+            state: "unavailable",
+            attributes: { friendly_name: "Removed rule", restored: true },
+            last_updated: "2026-08-18T00:00:01.000Z",
+          },
+        ]
+      : command.type === "config/entity_registry/list"
+        ? [
+            { id: "current-stable", entity_id: "automation.current_rule", name: "Current rule" },
+            { id: "removed-stable", entity_id: "automation.removed_rule", name: "Removed rule" },
+          ]
+        : [];
+    socket.receive({ id: command.id, type: "result", success: true, result });
+  }
+  await first;
+
+  const handle = adapter.extension("foreignRules@1") as ForeignRulesHandle | undefined;
+  const rules = (await handle?.catalog())?.rules ?? [];
+  assert.equal(rules.length, 1);
+  assert.equal(rules[0]?.name, "Current rule");
+  assert.equal(JSON.stringify(rules).includes("Removed rule"), false);
+  await adapter.control.dispose();
+});
+
 test("rejects userinfo in Home Assistant URLs without echoing embedded credentials", () => {
   const baseUrl = "https://alice:do-not-echo@ha.local:8123";
   const parsed = HOME_ASSISTANT_ADAPTER_REGISTRATION.configSchema.safeParse({ baseUrl });

@@ -92,6 +92,9 @@ it; the hub accepts a conflict check only when that epoch exactly matches the
 bridge's committed consistent watermark. A restart, partial replay, missing
 extension, invalid/incomplete catalog, or epoch mismatch fails closed instead
 of reporting zero conflicts.
+Home Assistant entities explicitly marked as restored placeholders while
+unavailable are excluded because they no longer represent configured rules;
+ordinary disabled rules remain in the catalog and can still overlap a draft.
 
 Proposal content is household data and remains local by default. SQLite files
 and WAL/SHM sidecars use mode `0600`. Credentials, raw bridge payloads,

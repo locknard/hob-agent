@@ -733,12 +733,15 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
     if (!isRecord(raw)) continue;
     const entityId = nonEmptyString(raw.entity_id);
     if (entityId === undefined || !entityId.startsWith("automation.")) continue;
+    const state = states.get(entityId);
+    if (state?.state === "unavailable"
+      && isRecord(state.attributes)
+      && state.attributes.restored === true) continue;
     if (rules.length >= MAX_FOREIGN_RULES) {
       complete = false;
       continue;
     }
     const stableId = nonEmptyString(raw.id) ?? entityId;
-    const state = states.get(entityId);
     const stateName = state && isRecord(state.attributes)
       ? nonEmptyString(state.attributes.friendly_name)
       : undefined;
