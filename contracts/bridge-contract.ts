@@ -1,5 +1,5 @@
 /**
- * Version 6.4 of the neutral bridge contract.
+ * Version 6.5 of the neutral bridge contract.
  *
  * This module is the contract source of truth: runtime schemas are declared
  * first and the exported TypeScript value types are inferred from those
@@ -235,8 +235,22 @@ const worldCapabilityBindingSchema = z
     bridgeId: nonEmptyString,
     nativeId: nonEmptyString,
     nativeInstanceId: nonEmptyString,
+    hwSpaceId: nonEmptyString.optional(),
   })
   .strict();
+
+const worldSpaceBindingSchema = z.object({
+  bridgeId: nonEmptyString,
+  nativeSpaceId: boundedString(256),
+}).strict();
+
+export const worldSpaceSchema = z.object({
+  hwSpaceId: nonEmptyString,
+  name: boundedString(512).optional(),
+  bindings: z.array(worldSpaceBindingSchema).min(1),
+}).strict();
+export type WorldSpace = z.infer<typeof worldSpaceSchema>;
+export type WorldSpaceBinding = z.infer<typeof worldSpaceBindingSchema>;
 
 export const worldCapabilitySchema = z
   .object({
@@ -252,12 +266,19 @@ export type WorldCapabilityBinding = z.infer<typeof worldCapabilityBindingSchema
 
 // ---- 读侧内核 -------------------------------------------------------------
 
+export const adapterSpaceRefSchema = z.object({
+  nativeSpaceId: boundedString(256),
+  name: boundedString(512).optional(),
+}).strict();
+export type AdapterSpaceRef = z.infer<typeof adapterSpaceRefSchema>;
+
 export const adapterCapabilityRefSchema = z
   .object({
     nativeInstanceId: nonEmptyString,
     schema: boundedString(256),
     schemaVersion: boundedString(64),
     semanticKind: capabilitySemanticKindSchema.optional(),
+    space: adapterSpaceRefSchema.optional(),
   })
   .strict();
 export type AdapterCapabilityRef = z.infer<typeof adapterCapabilityRefSchema>;
@@ -599,6 +620,8 @@ export const ResourceBudgetSchema = resourceBudgetSchema;
 export const SchemaRegistrationSchema = schemaRegistrationSchema;
 export const EquivalenceMappingSchema = equivalenceMappingSchema;
 export const WorldCapabilitySchema = worldCapabilitySchema;
+export const WorldSpaceSchema = worldSpaceSchema;
+export const AdapterSpaceRefSchema = adapterSpaceRefSchema;
 export const AdapterCapabilityRefSchema = adapterCapabilityRefSchema;
 export const DeviceDescriptorSchema = deviceDescriptorSchema;
 export const StateEventSchema = stateEventSchema;

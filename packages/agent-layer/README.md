@@ -9,7 +9,7 @@ read-only `get_home_snapshot`, bounded read-only `get_home_evidence`, and
 review-only `create_home_proposal` tools through DSH's registry; it does not
 create a parallel Agent or tool system. The snapshot and evidence tools inject
 the neutral `homeWorld` service. They project deterministic devices,
-capabilities, states, bridge watermarks, and
+capabilities, per-binding neutral spaces, states, bridge watermarks, and
 consistency/event/connection summaries. External attributes are bounded and
 JSON-normalized before they reach the model.
 

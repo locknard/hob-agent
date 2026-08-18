@@ -18,7 +18,7 @@ prompt context are composed, while governed Skill loading remains open.
 
 The neutral bridge read path is implemented through migration step 6: one
 Zod-first v6.3 base contract plus the additive v6.4 read-only capability
-semantic kind, catalog/registry/scoped credentials, epoch-aware
+semantic kind and v6.5 neutral space topology, catalog/registry/scoped credentials, epoch-aware
 SQLite ingest, canonical identity and authority, world-model indexing, the HA
 adapter, and the neutral agent snapshot. Actions and artifact hosting remain an
 explicit M3 boundary rather than a second runtime hidden in Phase 0.
@@ -65,6 +65,10 @@ apply an artifact or control a device.
   transport classify observations with one closed vocabulary while preserving
   source schemas and bindings. They grant no equivalence, binding, or action
   authority; unknown capabilities remain unclassified.
+- Capability bindings may carry a Hub-owned opaque space identity, and the
+  snapshot exposes a neutral space catalog. HA entity-area overrides and
+  device-area inheritance are supported; authorized Xiaomi transports may
+  supply room metadata. Equal names across bridges never auto-merge.
 - Bridge IDs and remote installation IDs are independently bound; a changed
   remote identity fails closed until an explicit rebind.
 - SQLite journals, registry data, world-model files, and WAL/SHM sidecars are

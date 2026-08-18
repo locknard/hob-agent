@@ -77,6 +77,11 @@ capability so the Agent can group lights, switches, sensors, and other reviewed
 families without importing HA or MIoT vocabulary. The hint preserves its source
 schema/binding and grants no equivalence or action authority.
 
+The additive v6.5 topology path preserves per-binding room provenance through
+opaque Hub space IDs and a neutral space catalog. HA and authorized Xiaomi
+transports use the same shape; equal room names across bridges are never
+silently merged. See [`docs/space-topology.md`](docs/space-topology.md).
+
 `get_home_evidence` accepts only current hub capability IDs and returns at most
 200 locally observed post-baseline state changes from the last seven days.
 Bootstrap state is excluded, and incomplete bridge coverage or truncation is

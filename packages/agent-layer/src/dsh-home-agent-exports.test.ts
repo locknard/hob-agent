@@ -12,6 +12,7 @@ test("exports the neutral Home Agent and snapshot tool entry points", () => {
   assert.equal(name, "dsh-home-snapshot-tool");
   assert.deepEqual(inject, ["tools", "homeWorld"]);
   assert.deepEqual(projectHomeSnapshot(undefined), {
+    spaces: [],
     devices: [],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },

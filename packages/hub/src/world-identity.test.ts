@@ -74,6 +74,60 @@ test("default hub ids stay stable across fresh managers despite observation orde
   assert.doesNotMatch(firstA.capabilities[0]?.hwCapabilityId ?? "", /bridge-a|native-a|sensor-a/);
 });
 
+test("allocates stable bridge-scoped spaces without merging equal names", () => {
+  const descriptor = (nativeId: string, nativeSpaceId: string) => ({
+    nativeId,
+    capabilities: [{
+      ...capability(`${nativeId}:power`, "hob.light"),
+      space: { nativeSpaceId, name: "Living room" },
+    }],
+  });
+  const first = new WorldIdentityManager();
+  const firstA = first.observe("bridge-a", descriptor("lamp-a", "area-a"));
+  const firstB = first.observe("bridge-b", descriptor("lamp-b", "room-b"));
+  const second = new WorldIdentityManager();
+  const secondB = second.observe("bridge-b", descriptor("lamp-b", "room-b"));
+  const secondA = second.observe("bridge-a", descriptor("lamp-a", "area-a"));
+
+  const firstSpaces = first.listWorldSpaces();
+  assert.equal(firstSpaces.length, 2);
+  assert.notEqual(firstSpaces[0]?.hwSpaceId, firstSpaces[1]?.hwSpaceId);
+  assert.equal(firstSpaces.every((space) => space.name === "Living room"), true);
+  assert.match(firstA.capabilities[0]?.bindings[0]?.hwSpaceId ?? "", /^hws-[0-9a-f]{64}$/);
+  assert.notEqual(
+    firstA.capabilities[0]?.bindings[0]?.hwSpaceId,
+    firstB.capabilities[0]?.bindings[0]?.hwSpaceId,
+  );
+  assert.equal(
+    firstA.capabilities[0]?.bindings[0]?.hwSpaceId,
+    secondA.capabilities[0]?.bindings[0]?.hwSpaceId,
+  );
+  assert.equal(
+    firstB.capabilities[0]?.bindings[0]?.hwSpaceId,
+    secondB.capabilities[0]?.bindings[0]?.hwSpaceId,
+  );
+});
+
+test("updates a capability space without changing its capability identity", () => {
+  const manager = new WorldIdentityManager();
+  const descriptor = (nativeSpaceId: string) => ({
+    nativeId: "lamp",
+    capabilities: [{
+      ...capability("lamp:power", "hob.light"),
+      space: { nativeSpaceId, name: nativeSpaceId },
+    }],
+  });
+  const before = manager.observe("bridge-a", descriptor("room-a"));
+  const after = manager.observe("bridge-a", descriptor("room-b"));
+
+  assert.equal(after.capabilities[0]?.hwCapabilityId, before.capabilities[0]?.hwCapabilityId);
+  assert.notEqual(
+    after.capabilities[0]?.bindings[0]?.hwSpaceId,
+    before.capabilities[0]?.bindings[0]?.hwSpaceId,
+  );
+  assert.equal(manager.listWorldSpaces().length, 2);
+});
+
 test("device identities do not allocate a principal", () => {
   const manager = new WorldIdentityManager();
   const result = manager.observe("bridge-a", {

@@ -57,6 +57,7 @@ test("registers get_home_snapshot and returns an empty neutral projection", asyn
   const value = await registered!.execute({}, {} as never);
 
   assert.deepEqual(value, {
+    spaces: [],
     devices: [],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
@@ -89,6 +90,7 @@ test("invokes a method-backed HomeWorld snapshot with its service receiver", asy
   const value = await registered!.execute({}, {} as never);
 
   assert.deepEqual(value, {
+    spaces: [],
     devices: [],
     bridgeWatermarks: [],
     metrics: { consistency: [], eventActivity: [], connectionActivity: [] },
@@ -168,6 +170,7 @@ test("projects homeWorld into neutral devices, bridge watermarks, and three metr
   const value = await registered!.execute({}, {} as never);
 
   assert.deepEqual(value, {
+    spaces: [],
     devices: [
       {
         hwId: "hw-a",
@@ -307,6 +310,7 @@ test("projects the neutral home-world service snapshot shape without ecosystem k
   const value = await registered!.execute({}, {} as never);
 
   assert.deepEqual(value, {
+    spaces: [],
     devices: [{
       bridgeId: "bridge-a",
       hwId: "hw-a",

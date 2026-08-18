@@ -18,6 +18,7 @@ const snapshot = {
   devices: [{
     did: "123456789",
     name: "客厅灯",
+    space: { nativeSpaceId: "room-7", name: "客厅" },
     online: true,
     properties: [
       { siid: 2, piid: 1, value: true, format: "bool", unit: "none", writable: true, semanticKind: "light" },
@@ -65,8 +66,20 @@ test("projects a bounded MIoT snapshot through the neutral bridge contract", asy
       nativeId: "123456789",
       name: "客厅灯",
       capabilities: [
-        { nativeInstanceId: "service:2/property:1", schema: "miot.property", schemaVersion: "1.0.0", semanticKind: "light" },
-        { nativeInstanceId: "service:2/property:2", schema: "miot.property", schemaVersion: "1.0.0", semanticKind: "light" },
+        {
+          nativeInstanceId: "service:2/property:1",
+          schema: "miot.property",
+          schemaVersion: "1.0.0",
+          semanticKind: "light",
+          space: { nativeSpaceId: "room-7", name: "客厅" },
+        },
+        {
+          nativeInstanceId: "service:2/property:2",
+          schema: "miot.property",
+          schemaVersion: "1.0.0",
+          semanticKind: "light",
+          space: { nativeSpaceId: "room-7", name: "客厅" },
+        },
       ],
       identityClaims: [{
         type: "miotDid",
@@ -294,6 +307,37 @@ test("rejects a transport semantic kind outside the reviewed neutral vocabulary"
             format: "bool",
             semanticKind: "vendor-magic",
           } as never],
+        }],
+      }),
+      changes: async function* () {},
+      resync: async () => ({ installationId: "fixture", devices: [] }),
+      dispose: async () => {},
+    }),
+  });
+  const adapter = registration.factory({
+    bridgeId: "xiaomi-cn-home",
+    config: { region: "cn", transport: "cloud" },
+    credentials: { resolve: async () => undefined, describe: async () => ({ configured: false }) },
+  });
+
+  await assert.rejects(
+    async () => {
+      for await (const _event of adapter.events(new AbortController().signal)) void _event;
+    },
+    (error: unknown) => error instanceof BridgeStreamError && error.reason === "protocol_error",
+  );
+});
+
+test("rejects malformed transport space metadata at the adapter boundary", async () => {
+  const registration = createXiaomiHomeAdapterRegistration({
+    credentialRequirements: [],
+    create: () => ({
+      connect: async () => ({
+        installationId: "fixture",
+        devices: [{
+          did: "device",
+          space: { nativeSpaceId: "", name: "Room" },
+          properties: [{ siid: 2, piid: 1, value: true, format: "bool" }],
         }],
       }),
       changes: async function* () {},

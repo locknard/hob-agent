@@ -8,6 +8,7 @@ import {
   JsonValueSchema,
   type AdapterFactoryContext,
   type AdapterRegistration,
+  type AdapterSpaceRef,
   type BridgeAdapter,
   type BridgeControl,
   type BridgeEvent,
@@ -24,7 +25,7 @@ import {
 export const XIAOMI_HOME_ADAPTER_TYPE = "xiaomi-home";
 export const XIAOMI_HOME_PROPERTY_SCHEMA = "miot.property";
 export const XIAOMI_HOME_PROPERTY_SCHEMA_VERSION = "1.0.0";
-const CORE_VERSION = "6.4.0";
+const CORE_VERSION = "6.5.0";
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const MAX_DEVICES = 2_048;
 const MAX_PROPERTIES_PER_DEVICE = 256;
@@ -65,6 +66,8 @@ export interface XiaomiHomeNativeProperty {
 export interface XiaomiHomeNativeDevice {
   readonly did: string;
   readonly name?: string;
+  /** Set only by an authorized transport's resolved home/room metadata. */
+  readonly space?: AdapterSpaceRef;
   readonly online?: boolean;
   readonly properties: readonly XiaomiHomeNativeProperty[];
 }
@@ -296,6 +299,7 @@ interface SnapshotEmission {
 interface ProjectedDevice {
   readonly did: string;
   readonly name?: string;
+  readonly space?: AdapterSpaceRef;
   readonly online?: boolean;
   readonly properties: readonly XiaomiHomeNativeProperty[];
 }
@@ -330,11 +334,24 @@ function validateDevice(device: XiaomiHomeNativeDevice): ProjectedDevice {
     seen.add(id);
     return property;
   }).sort((left, right) => propertyInstanceId(left).localeCompare(propertyInstanceId(right)));
+  const space = device.space === undefined ? undefined : validateSpace(device.space);
   return {
     did,
     ...(device.name === undefined ? {} : { name: boundedString(device.name, 512, "device name") }),
+    ...(space === undefined ? {} : { space }),
     ...(device.online === undefined ? {} : { online: device.online }),
     properties,
+  };
+}
+
+function validateSpace(value: unknown): AdapterSpaceRef {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new BridgeStreamError("protocol_error", "Xiaomi transport returned invalid space metadata");
+  }
+  const space = value as Record<string, unknown>;
+  return {
+    nativeSpaceId: boundedString(space.nativeSpaceId, 256, "space id"),
+    ...(space.name === undefined ? {} : { name: boundedString(space.name, 512, "space name") }),
   };
 }
 
@@ -352,6 +369,7 @@ function* snapshotEnvelopes(emission: SnapshotEmission, reason: "initial" | "res
           schema: XIAOMI_HOME_PROPERTY_SCHEMA,
           schemaVersion: XIAOMI_HOME_PROPERTY_SCHEMA_VERSION,
           ...(property.semanticKind === undefined ? {} : { semanticKind: property.semanticKind }),
+          ...(device.space === undefined ? {} : { space: { ...device.space } }),
         })),
         identityClaims: [{
           type: "miotDid",

@@ -16,6 +16,13 @@ export interface HomeWorldBinding {
   readonly bridgeId: string;
   readonly nativeId: string;
   readonly nativeInstanceId: string;
+  readonly hwSpaceId?: string;
+}
+
+export interface HomeWorldSpace {
+  readonly hwSpaceId: string;
+  readonly name?: string;
+  readonly bindings: { readonly bridgeId: string; readonly nativeSpaceId: string }[];
 }
 
 export interface HomeWorldCapability {
@@ -96,6 +103,7 @@ export interface HomeWorldBridgeSnapshot {
 }
 
 export interface HomeWorldSnapshot {
+  readonly spaces?: readonly HomeWorldSpace[];
   readonly devices?: readonly (HomeWorldDevice | HomeWorldDeviceRecord)[];
   /** `watermarks` is accepted as the internal facade name; output is canonicalized. */
   readonly bridgeWatermarks?: readonly HomeWorldWatermark[];
@@ -110,6 +118,7 @@ export interface HomeWorldService {
 }
 
 export interface HomeSnapshotToolValue {
+  readonly spaces: HomeWorldSpace[];
   readonly devices: {
     readonly bridgeId?: string;
     readonly hwId: string;
@@ -185,6 +194,30 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
+    spaces: {
+      type: "array",
+      required: true,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          hwSpaceId: { type: "string", required: true },
+          name: { type: "string" },
+          bindings: {
+            type: "array",
+            required: true,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                bridgeId: { type: "string", required: true },
+                nativeSpaceId: { type: "string", required: true },
+              },
+            },
+          },
+        },
+      },
+    },
     devices: {
       type: "array",
       required: true,
@@ -204,6 +237,7 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
                 bridgeId: { type: "string", required: true },
                 nativeId: { type: "string", required: true },
                 nativeInstanceId: { type: "string", required: true },
+                hwSpaceId: { type: "string" },
               },
             },
           },
@@ -235,6 +269,7 @@ const HOME_SNAPSHOT_OUTPUT_SCHEMA = {
                       bridgeId: { type: "string", required: true },
                       nativeId: { type: "string", required: true },
                       nativeInstanceId: { type: "string", required: true },
+                      hwSpaceId: { type: "string" },
                     },
                   },
                 },
@@ -313,13 +348,15 @@ export function apply(ctx: Context): void {
 
 export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): HomeSnapshotToolValue {
   const bridges = Object.entries(snapshot?.bridges ?? {}).sort(([left], [right]) => compareStrings(left, right));
+  const spaces = normalizeSpaces(snapshot?.spaces);
+  const activeSpaceIds = new Set(spaces.map((space) => space.hwSpaceId));
   const deviceInputs = [
     ...normalizeArray(snapshot?.devices),
     ...bridges.flatMap(([bridgeId, bridge]) => normalizeArray<HomeWorldDeviceRecord>(bridge.devices).map((device) => ({ ...device, bridgeId }))),
   ];
   const devicesByKey = new Map<string, HomeSnapshotToolValue["devices"][number]>();
   for (const input of deviceInputs) {
-    const device = normalizeDevice(input);
+    const device = normalizeDevice(input, activeSpaceIds);
     if (device === undefined) continue;
     const key = `hw\u0000${device.hwId}`;
     const existing = devicesByKey.get(key);
@@ -358,6 +395,7 @@ export function projectHomeSnapshot(snapshot: HomeWorldSnapshot | undefined): Ho
   const diagnostics = [...diagnosticsByBridge.values()].sort((left, right) => compareStrings(left.bridgeId, right.bridgeId));
 
   return {
+    spaces,
     devices,
     bridgeWatermarks,
     metrics: {
@@ -384,15 +422,18 @@ async function readHomeWorld(service: HomeWorldService): Promise<HomeWorldSnapsh
   return typeof snapshot === "function" ? await snapshot.call(service) : snapshot;
 }
 
-function normalizeDevice(device: unknown): HomeSnapshotToolValue["devices"][number] | undefined {
+function normalizeDevice(
+  device: unknown,
+  activeSpaceIds: ReadonlySet<string>,
+): HomeSnapshotToolValue["devices"][number] | undefined {
   if (!isRecord(device)) return undefined;
   const hwId = safeString(device.hwId);
-  const bindings = normalizeBindings(device.bindings);
+  const bindings = normalizeBindings(device.bindings, activeSpaceIds);
   if (hwId === undefined || bindings.length === 0) return undefined;
   if (!isArray(device.capabilities) || device.capabilities.length === 0) return undefined;
   const rawCapabilities = device.capabilities;
   const capabilities = normalizeArray(rawCapabilities)
-    .map(normalizeCapability)
+    .map((capability) => normalizeCapability(capability, activeSpaceIds))
     .filter((capability): capability is HomeWorldCapability => capability !== undefined)
     .sort(compareCapabilities);
   const deviceBindingKeys = new Set(bindings.map((binding) => bindingKey(binding)));
@@ -430,14 +471,17 @@ function normalizeStates(
   return values.map((state) => normalizeState(state, nativeId, allowedNativeIds));
 }
 
-function normalizeCapability(capability: unknown): HomeWorldCapability | undefined {
+function normalizeCapability(
+  capability: unknown,
+  activeSpaceIds: ReadonlySet<string>,
+): HomeWorldCapability | undefined {
   if (!isRecord(capability)) return undefined;
   const hwCapabilityId = safeString(capability?.hwCapabilityId);
   const hwId = safeString(capability?.hwId);
   const schema = safeString(capability?.schema);
   const schemaVersion = safeString(capability?.schemaVersion);
   if (hwCapabilityId === undefined || hwId === undefined || schema === undefined || schemaVersion === undefined) return undefined;
-  const bindings = normalizeBindings(capability.bindings);
+  const bindings = normalizeBindings(capability.bindings, activeSpaceIds);
   if (bindings.length === 0) return undefined;
   const semanticKind = safeSemanticKind(capability.semanticKind);
   return {
@@ -485,15 +529,25 @@ function normalizeState(
   };
 }
 
-function normalizeBindings(value: unknown): HomeWorldBinding[] {
+function normalizeBindings(value: unknown, activeSpaceIds?: ReadonlySet<string>): HomeWorldBinding[] {
   const bindings = normalizeArray(value)
     .map((binding): HomeWorldBinding | undefined => {
       if (!isRecord(binding)) return undefined;
       const bridgeId = safeString(binding.bridgeId);
       const nativeId = safeString(binding.nativeId);
       const nativeInstanceId = safeString(binding.nativeInstanceId);
+      const candidateSpaceId = safeString(binding.hwSpaceId);
+      const hwSpaceId = candidateSpaceId !== undefined
+          && (activeSpaceIds === undefined || activeSpaceIds.has(candidateSpaceId))
+        ? candidateSpaceId
+        : undefined;
       if (bridgeId === undefined || nativeId === undefined || nativeInstanceId === undefined) return undefined;
-      return { bridgeId, nativeId, nativeInstanceId };
+      return {
+        bridgeId,
+        nativeId,
+        nativeInstanceId,
+        ...(hwSpaceId === undefined ? {} : { hwSpaceId }),
+      };
     })
     .filter((binding): binding is HomeWorldBinding => binding !== undefined)
     .sort((left, right) => compareStrings(left.bridgeId, right.bridgeId)
@@ -504,6 +558,35 @@ function normalizeBindings(value: unknown): HomeWorldBinding[] {
     const key = `${binding.bridgeId}\u0000${binding.nativeId}\u0000${binding.nativeInstanceId}`;
     if (!unique.has(key)) unique.set(key, binding);
   }
+  return [...unique.values()];
+}
+
+function normalizeSpaces(value: unknown): HomeWorldSpace[] {
+  const spaces = normalizeArray(value)
+    .map((space): HomeWorldSpace | undefined => {
+      if (!isRecord(space)) return undefined;
+      const hwSpaceId = safeString(space.hwSpaceId);
+      if (hwSpaceId === undefined) return undefined;
+      const bindings = normalizeArray(space.bindings)
+        .map((binding): { bridgeId: string; nativeSpaceId: string } | undefined => {
+          if (!isRecord(binding)) return undefined;
+          const bridgeId = safeString(binding.bridgeId);
+          const nativeSpaceId = safeString(binding.nativeSpaceId);
+          return bridgeId === undefined || nativeSpaceId === undefined
+            ? undefined
+            : { bridgeId, nativeSpaceId };
+        })
+        .filter((binding): binding is { bridgeId: string; nativeSpaceId: string } => binding !== undefined)
+        .sort((left, right) => compareStrings(left.bridgeId, right.bridgeId)
+          || compareStrings(left.nativeSpaceId, right.nativeSpaceId));
+      if (bindings.length === 0) return undefined;
+      const name = safeString(space.name);
+      return { hwSpaceId, ...(name === undefined ? {} : { name }), bindings };
+    })
+    .filter((space): space is HomeWorldSpace => space !== undefined)
+    .sort((left, right) => compareStrings(left.hwSpaceId, right.hwSpaceId));
+  const unique = new Map<string, HomeWorldSpace>();
+  for (const space of spaces) if (!unique.has(space.hwSpaceId)) unique.set(space.hwSpaceId, space);
   return [...unique.values()];
 }
 

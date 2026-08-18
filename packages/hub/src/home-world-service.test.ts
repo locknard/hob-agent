@@ -71,6 +71,7 @@ function snapshotFor(bridgeId: string, remoteInstanceId: string): Envelope[] {
           schema: "synthetic.light",
           schemaVersion: "1.0.0",
           semanticKind: "light",
+          space: { nativeSpaceId: `${bridgeId}-living`, name: "Living room" },
         }],
       },
     }),
@@ -148,6 +149,32 @@ test("mounts as homeWorld, consumes every configured bridge once, and aggregates
   assert.equal(snapshot.bridges["bridge-a"]?.metrics.connection, "up");
   assert.deepEqual(snapshot.devices.map((device) => device.nativeId).sort(), ["bridge-a-lamp", "bridge-b-lamp"]);
   assert.equal(snapshot.devices[0]?.bridgeId, "bridge-a");
+  assert.equal(snapshot.spaces.length, 2);
+  assert.equal(snapshot.spaces.every((space) => space.name === "Living room"), true);
+  assert.equal(typeof snapshot.devices[0]?.capabilities[0]?.bindings[0]?.hwSpaceId, "string");
+  const priorBridgeASpace = snapshot.devices.find((device) => device.bridgeId === "bridge-a")
+    ?.capabilities[0]?.bindings[0]?.hwSpaceId;
+  await service.runtime("bridge-a")!.ingest.ingest(eventEnvelope("bridge-a-epoch", 5, {
+    kind: "device-upserted",
+    device: {
+      nativeId: "bridge-a-lamp",
+      name: "bridge-a lamp",
+      capabilities: [{
+        nativeInstanceId: "bridge-a-lamp:main",
+        schema: "synthetic.light",
+        schemaVersion: "1.0.0",
+        semanticKind: "light",
+        space: { nativeSpaceId: "bridge-a-dining", name: "Dining room" },
+      }],
+    },
+  }));
+  const moved = service.snapshot();
+  assert.equal(moved.spaces.length, 2);
+  assert.deepEqual(moved.spaces.map((space) => space.name).sort(), ["Dining room", "Living room"]);
+  assert.notEqual(
+    moved.devices.find((device) => device.bridgeId === "bridge-a")?.capabilities[0]?.bindings[0]?.hwSpaceId,
+    priorBridgeASpace,
+  );
 
   await fiber.dispose();
 });

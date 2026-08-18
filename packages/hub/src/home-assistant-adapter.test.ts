@@ -99,7 +99,13 @@ function createAdapter(
 function respondToBootstrap(
   socket: FakeSocket,
   entityId = "light.kitchen",
-  deviceRegistry: readonly unknown[] = [{ id: "device-1", name: "Kitchen", identifiers: [["ha", "secret-id"]] }],
+  deviceRegistry: readonly unknown[] = [{
+    id: "device-1",
+    name: "Kitchen",
+    area_id: "area-device",
+    identifiers: [["ha", "secret-id"]],
+  }],
+  entityAreaId: string | null = "area-entity",
 ): void {
   socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
   socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
@@ -118,24 +124,55 @@ function respondToBootstrap(
           last_updated: "2026-08-18T00:00:01.000Z",
         }]
         : command.type === "config/entity_registry/list"
-          ? [{ id: "entity-stable-1", entity_id: entityId, device_id: "device-1", name: "Kitchen light" }]
+          ? [{
+              id: "entity-stable-1",
+              entity_id: entityId,
+              device_id: "device-1",
+              name: "Kitchen light",
+              ...(entityAreaId === null ? {} : { area_id: entityAreaId }),
+            }]
         : command.type === "config/device_registry/list"
           ? deviceRegistry
-          : [];
+          : command.type === "config/area_registry/list"
+            ? [
+                { area_id: "area-device", name: "Kitchen" },
+                { area_id: "area-entity", name: "Counter" },
+              ]
+            : [];
     socket.receive({ id: command.id, type: "result", success: true, result });
   }
 }
 
-async function readSnapshot(adapter: HomeAssistantBridgeAdapter, socket: FakeSocket): Promise<Envelope[]> {
+async function readSnapshot(
+  adapter: HomeAssistantBridgeAdapter,
+  socket: FakeSocket,
+  respond: () => void = () => respondToBootstrap(socket),
+): Promise<Envelope[]> {
   const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
   const first = iterator.next();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  respondToBootstrap(socket);
+  respond();
   const events: Envelope[] = [(await first).value!];
   for (let index = 0; index < 4; index += 1) events.push((await iterator.next()).value!);
   await adapter.control.dispose();
   return events;
 }
+
+test("inherits the device area when an HA entity has no area override", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const events = await readSnapshot(adapter, socket, () => respondToBootstrap(
+    socket,
+    "light.kitchen",
+    [{ id: "device-1", name: "Kitchen", area_id: "area-device" }],
+    null,
+  ));
+  const descriptor = (events[1]!.event as Extract<BridgeEvent, { kind: "device-upserted" }>).device;
+  assert.deepEqual(descriptor.capabilities[0]?.space, {
+    nativeSpaceId: "area-device",
+    name: "Kitchen",
+  });
+});
 
 test("factory construction is synchronous and does not resolve credentials or touch the socket", () => {
   const socket = new FakeSocket();
@@ -152,7 +189,7 @@ test("factory construction is synchronous and does not resolve credentials or to
   assert.deepEqual(scoped.calls, []);
   assert.deepEqual(adapter.info, {
     bridgeId: "bridge-ha",
-    coreVersion: "6.4.0",
+    coreVersion: "6.5.0",
     ecosystem: "home-assistant",
     heartbeatIntervalMs: 60_000,
     extensions: [{ id: "foreignRules", version: "1.0.0" }],
@@ -238,6 +275,7 @@ test("events resolve the scoped token and emit a neutral snapshot in the frozen 
     schema: "ha.entity",
     schemaVersion: "1.0.0",
     semanticKind: "light",
+    space: { nativeSpaceId: "area-entity", name: "Counter" },
   }]);
 
   const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;

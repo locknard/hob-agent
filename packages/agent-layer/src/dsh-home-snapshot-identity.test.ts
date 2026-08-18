@@ -5,17 +5,32 @@ import { projectHomeSnapshot, type HomeWorldSnapshot } from "./dsh-home-snapshot
 
 test("projects accepted world devices with hw ids and controlled provenance bindings", () => {
   const snapshot = {
+    spaces: [{
+      hwSpaceId: "hws-1",
+      name: "Kitchen",
+      bindings: [{ bridgeId: "bridge-a", nativeSpaceId: "area-kitchen" }],
+    }],
     devices: [{
       hwId: "hw-1",
       name: "Kitchen lamp",
-      bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "native-a:main" }],
+      bindings: [{
+        bridgeId: "bridge-a",
+        nativeId: "native-a",
+        nativeInstanceId: "native-a:main",
+        hwSpaceId: "hws-1",
+      }],
       capabilities: [{
         hwCapabilityId: "hc-1",
         hwId: "hw-1",
         schema: "synthetic.light",
         schemaVersion: "1.0.0",
         semanticKind: "light",
-        bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "native-a:main" }],
+        bindings: [{
+          bridgeId: "bridge-a",
+          nativeId: "native-a",
+          nativeInstanceId: "native-a:main",
+          hwSpaceId: "hws-1",
+        }],
       }],
       states: [{
         nativeId: "native-a",
@@ -31,18 +46,33 @@ test("projects accepted world devices with hw ids and controlled provenance bind
   } as unknown as HomeWorldSnapshot;
 
   const value = projectHomeSnapshot(snapshot);
+  assert.deepEqual(value.spaces, [{
+    hwSpaceId: "hws-1",
+    name: "Kitchen",
+    bindings: [{ bridgeId: "bridge-a", nativeSpaceId: "area-kitchen" }],
+  }]);
   assert.deepEqual(value.devices, [{
     hwId: "hw-1",
     name: "Kitchen lamp",
     validity: "valid",
-    bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "native-a:main" }],
+    bindings: [{
+      bridgeId: "bridge-a",
+      nativeId: "native-a",
+      nativeInstanceId: "native-a:main",
+      hwSpaceId: "hws-1",
+    }],
     capabilities: [{
       hwCapabilityId: "hc-1",
       hwId: "hw-1",
       schema: "synthetic.light",
       schemaVersion: "1.0.0",
       semanticKind: "light",
-      bindings: [{ bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "native-a:main" }],
+      bindings: [{
+        bridgeId: "bridge-a",
+        nativeId: "native-a",
+        nativeInstanceId: "native-a:main",
+        hwSpaceId: "hws-1",
+      }],
     }],
     states: [{
       nativeId: "native-a",

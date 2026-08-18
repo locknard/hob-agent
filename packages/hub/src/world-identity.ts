@@ -5,6 +5,7 @@ import type {
   DeviceDescriptor,
   IdentityClaim,
   WorldCapability,
+  WorldSpace,
 } from "../../../contracts/bridge-contract.js";
 
 export type IdentityClaimSourceKind = IdentityClaim["source"]["kind"];
@@ -61,7 +62,7 @@ export interface IdentityObservation {
   readonly audit: readonly GovernanceAuditRecord[];
 }
 
-export type IdentityIdKind = "hw" | "hwCapability" | "proposal" | "audit";
+export type IdentityIdKind = "hw" | "hwCapability" | "hwSpace" | "proposal" | "audit";
 
 export interface WorldIdentityManagerOptions {
   readonly now?: () => string | Date;
@@ -97,6 +98,8 @@ export class WorldIdentityManager {
   private readonly identities = new Map<string, MutableIdentity>();
   private readonly devices = new Map<string, DeviceRegistration>();
   private readonly capabilities = new Map<string, WorldCapability>();
+  private readonly spaces = new Map<string, WorldSpace>();
+  private readonly spaceIdsByBinding = new Map<string, string>();
   private readonly claimIndex = new Map<string, Set<string>>();
   private readonly proposalsById = new Map<string, GovernanceProposal>();
   private readonly audit: GovernanceAuditRecord[] = [];
@@ -175,6 +178,12 @@ export class WorldIdentityManager {
       .map(cloneCapability);
   }
 
+  listWorldSpaces(): readonly WorldSpace[] {
+    return [...this.spaces.values()]
+      .sort((left, right) => compare(left.hwSpaceId, right.hwSpaceId))
+      .map(cloneSpace);
+  }
+
   proposals(): readonly GovernanceProposal[] {
     return [...this.proposalsById.values()].map((proposal) => ({ ...proposal }));
   }
@@ -242,10 +251,28 @@ export class WorldIdentityManager {
       const nativeId = registration.key.slice(registration.key.indexOf("\u0000") + 1);
       const bindingKey = stableBindingKey(bridgeId, nativeId, ref);
       const capabilityKey = bindingKey;
+      const hwSpaceId = ref.space === undefined ? undefined : this.allocateSpace(bridgeId, ref.space);
       const existingId = registration.capabilityIdsByKey.get(capabilityKey);
       if (existingId !== undefined) {
         const existing = this.requireCapability(existingId);
-        allocated.push(cloneCapability(existing));
+        const updated: WorldCapability = {
+          ...existing,
+          ...(ref.semanticKind === undefined ? {} : { semanticKind: ref.semanticKind }),
+          bindings: existing.bindings.map((binding) => (
+            binding.bridgeId === bridgeId
+              && binding.nativeId === nativeId
+              && binding.nativeInstanceId === ref.nativeInstanceId
+              ? {
+                  bridgeId,
+                  nativeId,
+                  nativeInstanceId: ref.nativeInstanceId,
+                  ...(hwSpaceId === undefined ? {} : { hwSpaceId }),
+                }
+              : { ...binding }
+          )),
+        };
+        this.capabilities.set(existingId, updated);
+        allocated.push(cloneCapability(updated));
         continue;
       }
       const capability: WorldCapability = {
@@ -257,6 +284,7 @@ export class WorldIdentityManager {
           bridgeId,
           nativeId,
           nativeInstanceId: ref.nativeInstanceId,
+          ...(hwSpaceId === undefined ? {} : { hwSpaceId }),
         }],
       };
       registration.capabilityIdsByKey.set(capabilityKey, capability.hwCapabilityId);
@@ -265,6 +293,32 @@ export class WorldIdentityManager {
       this.proposeSameSchemaBindings(capability, proposals);
     }
     return allocated;
+  }
+
+  private allocateSpace(
+    bridgeId: string,
+    ref: NonNullable<AdapterCapabilityRef["space"]>,
+  ): string {
+    const bindingKey = JSON.stringify([bridgeId, ref.nativeSpaceId]);
+    const existingId = this.spaceIdsByBinding.get(bindingKey);
+    if (existingId !== undefined) {
+      const existing = this.spaces.get(existingId);
+      if (existing === undefined) throw new WorldIdentityError(`Unknown hwSpaceId "${existingId}"`);
+      this.spaces.set(existingId, {
+        hwSpaceId: existing.hwSpaceId,
+        ...(ref.name === undefined ? {} : { name: ref.name }),
+        bindings: existing.bindings.map((binding) => ({ ...binding })),
+      });
+      return existingId;
+    }
+    const hwSpaceId = this.hubId("hwSpace", bindingKey);
+    this.spaceIdsByBinding.set(bindingKey, hwSpaceId);
+    this.spaces.set(hwSpaceId, {
+      hwSpaceId,
+      ...(ref.name === undefined ? {} : { name: ref.name }),
+      bindings: [{ bridgeId, nativeSpaceId: ref.nativeSpaceId }],
+    });
+    return hwSpaceId;
   }
 
   private proposeSameSchemaBindings(capability: WorldCapability, proposals: GovernanceProposal[]): void {
@@ -381,7 +435,7 @@ export class WorldIdentityManager {
     this.audit.push({ ...fields, id: this.generatedId("audit") });
   }
 
-  private hubId(kind: "hw" | "hwCapability", material: string): string {
+  private hubId(kind: "hw" | "hwCapability" | "hwSpace", material: string): string {
     if (this.idFactory !== undefined) return this.idFactory(kind);
     return stableOpaqueId(kind, material);
   }
@@ -462,12 +516,15 @@ function stableBindingKey(
   return JSON.stringify([bridgeId, nativeId, ref.nativeInstanceId, ref.schema]);
 }
 
-function stableOpaqueId(kind: "hw" | "hwCapability", material: string): string {
-  const domain = kind === "hwCapability" ? "home-world/hw-capability/v1" : "home-world/hw/v1";
+function stableOpaqueId(kind: "hw" | "hwCapability" | "hwSpace", material: string): string {
+  const domain = kind === "hwCapability"
+    ? "home-world/hw-capability/v1"
+    : kind === "hwSpace" ? "home-world/hw-space/v1" : "home-world/hw/v1";
   const digest = createHash("sha256")
     .update(`${domain}\u0000${material}`, "utf8")
     .digest("hex");
-  return `${kind === "hwCapability" ? "hwc" : "hw"}-${digest}`;
+  const prefix = kind === "hwCapability" ? "hwc" : kind === "hwSpace" ? "hws" : "hw";
+  return `${prefix}-${digest}`;
 }
 
 function mergeClaims(existing: readonly IdentityClaim[], incoming: readonly IdentityClaim[]): IdentityClaim[] {
@@ -493,6 +550,10 @@ function cloneIdentity(identity: MutableIdentity): WorldIdentity {
 
 function cloneCapability(capability: WorldCapability): WorldCapability {
   return { ...capability, bindings: capability.bindings.map((binding) => ({ ...binding })) };
+}
+
+function cloneSpace(space: WorldSpace): WorldSpace {
+  return { ...space, bindings: space.bindings.map((binding) => ({ ...binding })) };
 }
 
 function requireText(value: unknown, name: string): asserts value is string {

@@ -392,7 +392,7 @@ export const HOME_ASSISTANT_ADAPTER_TYPE = "home-assistant";
 export const HOME_ASSISTANT_ACCESS_TOKEN_ALIAS = "access-token";
 export const HOME_ASSISTANT_ENTITY_SCHEMA = "ha.entity";
 export const HOME_ASSISTANT_ENTITY_SCHEMA_VERSION = "1.0.0";
-export const HOME_ASSISTANT_CORE_VERSION = "6.4.0";
+export const HOME_ASSISTANT_CORE_VERSION = "6.5.0";
 export const HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS = 60_000;
 
 let homeAssistantEpochCounter = 0;
@@ -763,6 +763,8 @@ interface EntityBinding {
   readonly entityId: string;
   readonly nativeId: string;
   readonly name?: string;
+  readonly nativeSpaceId?: string;
+  readonly spaceName?: string;
 }
 
 interface ProjectedDevice {
@@ -812,6 +814,34 @@ function* snapshotEnvelopes(
 }
 
 function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
+  const areaNames = new Map<string, string>();
+  for (const raw of snapshot.areaRegistry) {
+    if (!isRecord(raw)) continue;
+    const nativeSpaceId = boundedRegistryText(raw.area_id, 256) ?? boundedRegistryText(raw.id, 256);
+    const name = boundedRegistryText(raw.name, 512);
+    if (nativeSpaceId !== undefined && name !== undefined && !areaNames.has(nativeSpaceId)) {
+      areaNames.set(nativeSpaceId, name);
+    }
+  }
+
+  const deviceNames = new Map<string, string>();
+  const deviceSpaces = new Map<string, string>();
+  const identityClaimsByNativeId = new Map<string, readonly ContractIdentityClaim[]>();
+  for (const raw of snapshot.deviceRegistry) {
+    if (!isRecord(raw)) continue;
+    const nativeId = nonEmptyString(raw.id);
+    const name = nonEmptyString(raw.name);
+    const nativeSpaceId = boundedRegistryText(raw.area_id, 256);
+    if (nativeId !== undefined && name !== undefined && !deviceNames.has(nativeId)) deviceNames.set(nativeId, name);
+    if (nativeId !== undefined && nativeSpaceId !== undefined && !deviceSpaces.has(nativeId)) {
+      deviceSpaces.set(nativeId, nativeSpaceId);
+    }
+    if (nativeId !== undefined) {
+      const claims = projectDeviceIdentityClaims(raw);
+      if (claims.length > 0) identityClaimsByNativeId.set(nativeId, claims);
+    }
+  }
+
   const bindingsByEntityId = new Map<string, EntityBinding>();
   const bindingsByNativeInstanceId = new Set<string>();
   for (const raw of snapshot.entityRegistry) {
@@ -819,6 +849,8 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
     const nativeInstanceId = nonEmptyString(raw.id);
     const entityId = nonEmptyString(raw.entity_id);
     const nativeId = nonEmptyString(raw.device_id);
+    const nativeSpaceId = boundedRegistryText(raw.area_id, 256)
+      ?? (nativeId === undefined ? undefined : deviceSpaces.get(nativeId));
     if (nativeInstanceId === undefined || entityId === undefined || nativeId === undefined) continue;
     if (bindingsByEntityId.has(entityId) || bindingsByNativeInstanceId.has(nativeInstanceId)) continue;
     bindingsByEntityId.set(entityId, {
@@ -826,21 +858,14 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
       entityId,
       nativeId,
       ...(nonEmptyString(raw.name) !== undefined ? { name: nonEmptyString(raw.name) } : {}),
+      ...(nativeSpaceId === undefined
+        ? {}
+        : {
+            nativeSpaceId,
+            ...(areaNames.get(nativeSpaceId) === undefined ? {} : { spaceName: areaNames.get(nativeSpaceId) }),
+          }),
     });
     bindingsByNativeInstanceId.add(nativeInstanceId);
-  }
-
-  const deviceNames = new Map<string, string>();
-  const identityClaimsByNativeId = new Map<string, readonly ContractIdentityClaim[]>();
-  for (const raw of snapshot.deviceRegistry) {
-    if (!isRecord(raw)) continue;
-    const nativeId = nonEmptyString(raw.id);
-    const name = nonEmptyString(raw.name);
-    if (nativeId !== undefined && name !== undefined && !deviceNames.has(nativeId)) deviceNames.set(nativeId, name);
-    if (nativeId !== undefined) {
-      const claims = projectDeviceIdentityClaims(raw);
-      if (claims.length > 0) identityClaimsByNativeId.set(nativeId, claims);
-    }
   }
 
   const statesByNativeId = new Map<string, ContractStateEvent[]>();
@@ -884,6 +909,14 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
         schema: HOME_ASSISTANT_ENTITY_SCHEMA,
         schemaVersion: HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
         ...(semanticKind === undefined ? {} : { semanticKind }),
+        ...(binding.nativeSpaceId === undefined
+          ? {}
+          : {
+              space: {
+                nativeSpaceId: binding.nativeSpaceId,
+                ...(binding.spaceName === undefined ? {} : { name: binding.spaceName }),
+              },
+            }),
       };
     });
     const states = (statesByNativeId.get(nativeId) ?? []).sort((left, right) =>
@@ -1178,6 +1211,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function boundedRegistryText(value: unknown, maxLength: number): string | undefined {
+  const text = nonEmptyString(value);
+  return text === undefined || text.length > maxLength ? undefined : text;
 }
 
 function createNodeSocket(url: string): WebSocketLike {

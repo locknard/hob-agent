@@ -20,6 +20,7 @@ import {
   resourceBudgetSchema,
   schemaRegistrationSchema,
   worldCapabilitySchema,
+  worldSpaceSchema,
   BridgeStreamError,
   type ExtensionHandleRegistry,
 } from "./bridge-contract.js";
@@ -153,6 +154,7 @@ test("validates descriptor capabilities, state, and manifest event shapes", () =
       schema: "hob.light",
       schemaVersion: "1.0.0",
       semanticKind: "light",
+      space: { nativeSpaceId: "area-1", name: "Living room" },
     }],
     identityClaims: [
       {
@@ -165,6 +167,7 @@ test("validates descriptor capabilities, state, and manifest event shapes", () =
   });
   assert.equal(descriptor.capabilities[0]?.schema, "hob.light");
   assert.equal(descriptor.capabilities[0]?.semanticKind, "light");
+  assert.equal(descriptor.capabilities[0]?.space?.nativeSpaceId, "area-1");
   assert.throws(() => deviceDescriptorSchema.parse({
     nativeId: "unknown-device",
     capabilities: [{
@@ -244,9 +247,19 @@ test("keeps catalog registrations, budgets, and world capabilities structurally 
       hwCapabilityId: "hwc-1",
       hwId: "hw-1",
       schema: "hob.light",
-      bindings: [{ bridgeId: "bridge-ha", nativeId: "light.living_room", nativeInstanceId: "entity-1" }],
+      bindings: [{
+        bridgeId: "bridge-ha",
+        nativeId: "light.living_room",
+        nativeInstanceId: "entity-1",
+        hwSpaceId: "hws-1",
+      }],
     }),
   );
+  assert.ok(worldSpaceSchema.parse({
+    hwSpaceId: "hws-1",
+    name: "Living room",
+    bindings: [{ bridgeId: "bridge-ha", nativeSpaceId: "area-1" }],
+  }));
   assert.ok(
     schemaRegistrationSchema.parse({
       schema: "hob.light",

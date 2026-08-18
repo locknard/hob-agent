@@ -17,6 +17,7 @@ import {
   type CapabilitySemanticKind,
   type DeviceDescriptor,
   type StateEvent,
+  type WorldSpace,
 } from "../../../contracts/bridge-contract.js";
 import {
   BridgeCatalog,
@@ -167,6 +168,7 @@ export interface HomeWorldBinding {
   readonly bridgeId: string;
   readonly nativeId: string;
   readonly nativeInstanceId: string;
+  readonly hwSpaceId?: string;
 }
 
 export interface HomeWorldCapabilitySnapshot {
@@ -286,6 +288,7 @@ export interface HomeWorldSnapshot {
   watermarks: readonly HomeWorldWatermark[];
   diagnostics: readonly HomeWorldDiagnostics[];
   metrics: HomeWorldMetricSummary;
+  spaces: readonly WorldSpace[];
   devices: readonly HomeWorldDeviceSnapshot[];
 }
 
@@ -668,6 +671,10 @@ export class HomeWorldService extends Service {
     }
     diagnosticsList.sort((left, right) => left.bridgeId.localeCompare(right.bridgeId));
     bridgeWatermarks.sort((left, right) => left.bridgeId.localeCompare(right.bridgeId));
+    const aggregatedDevices = aggregateWorldDevices(devices, this.authority);
+    const activeSpaceIds = new Set(aggregatedDevices.flatMap((device) => device.capabilities)
+      .flatMap((capability) => capability.bindings)
+      .flatMap((binding) => binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId]));
     return {
       generatedAt: this.clock(),
       bridges,
@@ -676,7 +683,8 @@ export class HomeWorldService extends Service {
       watermarks: bridgeWatermarks,
       diagnostics: diagnosticsList,
       metrics: metricSummary(diagnosticsList),
-      devices: aggregateWorldDevices(devices, this.authority),
+      spaces: this.identity.listWorldSpaces().filter((space) => activeSpaceIds.has(space.hwSpaceId)),
+      devices: aggregatedDevices,
     };
   }
 

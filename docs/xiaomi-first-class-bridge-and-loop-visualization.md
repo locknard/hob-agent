@@ -168,7 +168,9 @@ into model context.
 ## Implemented first slice
 
 - `XiaomiHomeBridgeAdapter` projects authorized native transport snapshots,
-  property changes, reachability, resync and lifecycle into Bridge v6.3.
+  property changes, reachability, resync and lifecycle into the v6 base. The
+  additive v6.5 path also accepts validated device-space metadata from that
+  transport and applies it to property bindings without inferring rooms.
 - `createBuiltinBridgeProductBundle({ xiaomi })` registers Xiaomi beside HA;
   the default executable catalog omits it and therefore rejects Xiaomi configs
   until a live authorized transport is installed.
