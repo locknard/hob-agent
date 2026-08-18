@@ -23,7 +23,9 @@ report containing only:
 - available/unavailable neutral existing-rule catalog counts plus the aggregate
   number of visible rules; and
 - aggregate counts of proposed device-identity links and capability bindings
-  that still require governance review.
+  that still require governance review; and
+- aggregate logical ingest-journal bytes used, maximum bytes, remaining bytes,
+  utilization percentage, and the number of bridges that reported capacity.
 
 The report never contains bridge IDs, native IDs, hub IDs, names, state values,
 attributes, URLs, credentials, provider errors, or household prompt content.
@@ -31,6 +33,11 @@ Rule names, opaque references, epochs, and bridge identities are also omitted.
 Identity proposal IDs, participating Hub IDs, identity claims, evidence, and
 reasons are omitted as well; these counts indicate review work, not accepted
 equivalence or authority.
+Journal capacity contains no records or values. It is operational evidence:
+the Phase 0 journal has a hard quota and fails closed at that boundary. The
+report makes approaching exhaustion visible, but does not silently delete or
+compress canonical evidence; retention still requires an explicit reviewed
+policy.
 Every configured bridge must also have delivered traffic to the current
 process and completed a ready cut. A restored consistent SQLite cut remains
 readable but cannot make validation return before the new adapter bootstrap

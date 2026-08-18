@@ -69,6 +69,12 @@ export interface JournalLiveStateActivityPage {
   readonly truncated: boolean;
 }
 
+export interface JournalCapacityStatus {
+  readonly usedBytes: number;
+  readonly maxBytes: number;
+  readonly remainingBytes: number;
+}
+
 export interface IngestJournal {
   appendAtomic(record: IngestRecord): void;
   append?(record: IngestRecord): void;
@@ -91,6 +97,8 @@ export interface IngestJournal {
   rejections(bridgeId?: string): RejectionRecord[];
   historyGaps(bridgeId?: string): HistoryGapRecord[];
   heartbeatIntervals(bridgeId?: string): HeartbeatIntervalRecord[];
+  /** Aggregate logical quota only; never returns journal records or household values. */
+  capacity?(): JournalCapacityStatus;
   assertWithinQuota(): void;
   contains(text: string): boolean;
   close(): void;
@@ -387,6 +395,14 @@ export class SqliteIngestJournal implements IngestJournal {
       ? this.db.prepare("SELECT bridge_id, epoch_id, from_seq, to_seq, count FROM ingest_heartbeats ORDER BY rowid").all()
       : this.db.prepare("SELECT bridge_id, epoch_id, from_seq, to_seq, count FROM ingest_heartbeats WHERE bridge_id = ? ORDER BY rowid").all(bridgeId)) as SqlRow[];
     return rows.map((row) => ({ bridgeId: String(row.bridge_id), epochId: String(row.epoch_id), fromSeq: Number(row.from_seq), toSeq: Number(row.to_seq), count: Number(row.count) }));
+  }
+
+  capacity(): JournalCapacityStatus {
+    return {
+      usedBytes: this.usedBytes,
+      maxBytes: this.maxBytes,
+      remainingBytes: Math.max(0, this.maxBytes - this.usedBytes),
+    };
   }
 
   assertWithinQuota(): void {

@@ -88,6 +88,29 @@ test("rejects an unbounded or malformed live-state query", () => {
   journal.close();
 });
 
+test("reports aggregate logical capacity without exposing journal contents", () => {
+  const journal = new SqliteIngestJournal(":memory:", { maxBytes: 4_096 });
+  append(journal, 1, "2026-08-19T00:00:00.000Z", {
+    kind: "state",
+    state: {
+      nativeId: "private-device",
+      nativeInstanceId: "private-capability",
+      attrs: { state: "private-value" },
+      time: { sourceTsQuality: "none" },
+      origin: "observed",
+    },
+  });
+
+  const capacity = journal.capacity();
+
+  assert.equal(capacity.maxBytes, 4_096);
+  assert.equal(capacity.usedBytes > 0, true);
+  assert.equal(capacity.remainingBytes, capacity.maxBytes - capacity.usedBytes);
+  assert.deepEqual(Object.keys(capacity).sort(), ["maxBytes", "remainingBytes", "usedBytes"]);
+  assert.equal(JSON.stringify(capacity).includes("private"), false);
+  journal.close();
+});
+
 test("aggregates bounded post-baseline state activity without returning values", () => {
   const journal = new SqliteIngestJournal(":memory:");
   append(journal, 1, "2026-08-19T00:00:00.000Z", {

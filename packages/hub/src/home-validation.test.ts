@@ -9,7 +9,12 @@ test("projects only aggregate neutral readiness without household identities or 
     snapshot: {
       bridges: { "secret-bridge-id": {} },
       bridgeWatermarks: [{ bridgeId: "secret-bridge-id", epochId: "secret-epoch", lastSeq: 8 }],
-      diagnostics: [{ bridgeId: "secret-bridge-id", connectionState: "ready", currentProcessReadyAt: "2026-08-19T05:00:00.000Z" }],
+      diagnostics: [{
+        bridgeId: "secret-bridge-id",
+        connectionState: "ready",
+        currentProcessReadyAt: "2026-08-19T05:00:00.000Z",
+        journalCapacity: { usedBytes: 3_000, maxBytes: 10_000, remainingBytes: 7_000 },
+      }],
       spaces: [
         { hwSpaceId: "secret-space", name: "Private room" },
         { hwSpaceId: "secret-space-2", name: "Other private room" },
@@ -63,6 +68,13 @@ test("projects only aggregate neutral readiness without household identities or 
     capabilities: 4,
     states: 1,
     semanticKinds: { light: 1, sensor: 1, switch: 1, unclassified: 1 },
+    journalCapacity: {
+      reportedBridges: 1,
+      usedBytes: 3_000,
+      maxBytes: 10_000,
+      remainingBytes: 7_000,
+      utilizationPercent: 30,
+    },
     ruleCatalogs: { available: 1, unavailable: 0, totalRules: 1 },
     identityGovernance: { proposedIdentityLinks: 1, proposedCapabilityBindings: 1 },
   });

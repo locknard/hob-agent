@@ -29,6 +29,11 @@ interface ValidationSnapshot {
     readonly bridgeId: string;
     readonly connectionState: string;
     readonly currentProcessReadyAt?: string;
+    readonly journalCapacity?: {
+      readonly usedBytes: number;
+      readonly maxBytes: number;
+      readonly remainingBytes: number;
+    };
   }[];
   readonly spaces: readonly { readonly hwSpaceId?: string }[];
   readonly devices: readonly {
@@ -54,6 +59,13 @@ export interface HomeValidationReport {
   readonly capabilities: number;
   readonly states: number;
   readonly semanticKinds: Readonly<Record<string, number>>;
+  readonly journalCapacity: {
+    readonly reportedBridges: number;
+    readonly usedBytes: number;
+    readonly maxBytes: number;
+    readonly remainingBytes: number;
+    readonly utilizationPercent: number;
+  };
   readonly ruleCatalogs: {
     readonly available: number;
     readonly unavailable: number;
@@ -102,6 +114,10 @@ export function projectHomeValidation(input: {
       && currentProcessReady.has(bridgeId));
   const ruleCatalogs = input.ruleCatalogs ?? [];
   const identityProposals = input.identityProposals ?? [];
+  const journalCapacities = input.snapshot.diagnostics.flatMap((item) =>
+    item.journalCapacity === undefined ? [] : [item.journalCapacity]);
+  const journalUsedBytes = journalCapacities.reduce((total, item) => total + item.usedBytes, 0);
+  const journalMaxBytes = journalCapacities.reduce((total, item) => total + item.maxBytes, 0);
   return {
     status: ready ? "ready" : "not_ready",
     configuredBridges: input.configuredBridgeCount,
@@ -119,6 +135,13 @@ export function projectHomeValidation(input: {
     capabilities: capabilities.length,
     states: input.snapshot.devices.reduce((total, device) => total + device.states.length, 0),
     semanticKinds,
+    journalCapacity: {
+      reportedBridges: journalCapacities.length,
+      usedBytes: journalUsedBytes,
+      maxBytes: journalMaxBytes,
+      remainingBytes: journalCapacities.reduce((total, item) => total + item.remainingBytes, 0),
+      utilizationPercent: journalMaxBytes === 0 ? 0 : Math.round((journalUsedBytes / journalMaxBytes) * 100),
+    },
     ruleCatalogs: {
       available: ruleCatalogs.filter((catalog) => catalog.status === "available").length,
       unavailable: ruleCatalogs.filter((catalog) => catalog.status === "unavailable").length,

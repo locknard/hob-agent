@@ -18,9 +18,12 @@ continues to record household judgment only.
 1. Run `pnpm validate:home` with the private bridge/data configuration.
 2. Require a ready HomeWorld cut. Investigate unavailable bridges or missing
    watermarks before spending a model call.
-3. Run `pnpm draft:home-map`, review the private `HOME.import.md`, and manually
+3. Check `journalCapacity` in the same aggregate report. Do not begin an
+   unattended pilot when the hard quota is close to exhaustion. Phase 0 fails
+   closed at the quota and does not silently prune canonical evidence.
+4. Run `pnpm draft:home-map`, review the private `HOME.import.md`, and manually
    merge only accepted facts into `HOME.md`.
-4. Treat unassigned and multiply assigned devices as known context gaps. A
+5. Treat unassigned and multiply assigned devices as known context gaps. A
    perfect map is not required, but the gaps must not be hidden.
 
 No arbitrary 24-hour release age is required. Bootstrap state never counts as

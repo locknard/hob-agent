@@ -150,6 +150,8 @@ test("mounts as homeWorld, consumes every configured bridge once, and aggregates
   assert.deepEqual(snapshot.devices.map((device) => device.nativeId).sort(), ["bridge-a-lamp", "bridge-b-lamp"]);
   assert.equal(snapshot.devices[0]?.bridgeId, "bridge-a");
   assert.equal(snapshot.spaces.length, 2);
+  assert.equal(snapshot.diagnostics.every((item) => item.journalCapacity !== undefined), true);
+  assert.equal(snapshot.diagnostics.every((item) => (item.journalCapacity?.usedBytes ?? 0) > 0), true);
   assert.equal(snapshot.spaces.every((space) => space.name === "Living room"), true);
   assert.equal(typeof snapshot.devices[0]?.capabilities[0]?.bindings[0]?.hwSpaceId, "string");
   const priorBridgeASpace = snapshot.devices.find((device) => device.bridgeId === "bridge-a")

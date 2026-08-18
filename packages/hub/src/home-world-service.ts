@@ -285,6 +285,12 @@ export interface HomeWorldDiagnostics {
   lastSuccessfulContactAt?: string;
   /** Present only after this process accepts a live sync-complete. */
   currentProcessReadyAt?: string;
+  /** Aggregate logical ingest quota; contains no event payloads or identities. */
+  journalCapacity?: {
+    readonly usedBytes: number;
+    readonly maxBytes: number;
+    readonly remainingBytes: number;
+  };
 }
 
 export interface HomeWorldMetricSummary {
@@ -801,10 +807,12 @@ export class HomeWorldService extends Service {
       };
       bridges[runtime.bridgeId] = bridgeSnapshot;
       watermarkVector[runtime.bridgeId] = watermark;
+      const journalCapacity = runtime.journal.capacity?.();
       diagnosticsList.push({
         bridgeId: runtime.bridgeId,
         ...diagnostics,
         ...(runtime.currentProcessReadyAt === undefined ? {} : { currentProcessReadyAt: runtime.currentProcessReadyAt }),
+        ...(journalCapacity === undefined ? {} : { journalCapacity }),
       });
       if (watermark !== null) bridgeWatermarks.push(watermark);
       devices.push(...bridgeDevices);
