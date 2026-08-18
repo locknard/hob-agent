@@ -181,3 +181,41 @@ test("fails closed before the Agent when audit start is unavailable and resets a
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
+
+test("keeps recurring scheduling alive after one audit failure without calling the Agent", async () => {
+  const waits: { release: () => void }[] = [];
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  ctx.homeObservationAudit.failBegin = true;
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    intervalMinutes: 60,
+    scheduler: { wait: (_delay, signal) => new Promise<void>((resolve) => {
+      const release = () => {
+        signal.removeEventListener("abort", release);
+        resolve();
+      };
+      waits.push({ release });
+      signal.addEventListener("abort", release, { once: true });
+    }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+
+  waits[0]?.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ctx.homeAgent.observations, 0);
+  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "failed");
+  assert.equal(waits.length, 2);
+
+  ctx.homeObservationAudit.failBegin = false;
+  waits[1]?.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "no_proposal");
+  assert.equal(waits.length, 3);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});

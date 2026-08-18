@@ -17,6 +17,12 @@ as success or retried. Failure to start the audit row prevents the autonomous
 operation. Failure to complete it is surfaced as an audit failure rather than
 being hidden by an in-memory status.
 
+An explicit manual observation propagates either audit failure to its caller.
+The recurring scheduler additionally records an in-memory `failed` last
+attempt and continues at the next configured boundary; one local SQLite error
+must not silently terminate scheduling while the Inbox still says it is
+enabled. This recovery never runs the model when the audit start itself failed.
+
 The Inbox may read the bounded recent ledger to explain whether observation is
 working when no proposal exists. DSH traces remain optional debugging material;
 they are not the household governance record and are never copied into this

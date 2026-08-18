@@ -154,17 +154,30 @@ export class HomeObservationSchedulerService extends Service {
     };
   }
 
+  private async observeRecurring(
+    trigger: Exclude<ObservationTrigger, "manual" | "one_shot">,
+    signal: AbortSignal,
+  ): Promise<HomeObservationOutcome> {
+    try {
+      return await this.observeTriggered(trigger, signal);
+    } catch {
+      this.lastAttempt = { at: observationTimestamp(this.clock), outcome: "failed" };
+      this.state = this.stopped ? "stopped" : "waiting";
+      return "failed";
+    }
+  }
+
   private async run(signal: AbortSignal): Promise<void> {
     if (this.runOnStart) {
       while (!signal.aborted) {
-        const outcome = await this.observeTriggered("startup", signal);
+        const outcome = await this.observeRecurring("startup", signal);
         if (outcome !== "world_not_ready") break;
         await this.scheduler.wait(this.readinessPollMs, signal);
       }
     }
     while (!signal.aborted) {
       await this.scheduler.wait(this.intervalMs, signal);
-      if (!signal.aborted) await this.observeTriggered("scheduled", signal);
+      if (!signal.aborted) await this.observeRecurring("scheduled", signal);
     }
   }
 }
