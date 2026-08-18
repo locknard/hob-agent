@@ -71,6 +71,24 @@ export interface HomeWorldLaunchConfig {
   readonly catalog: BridgeCatalog;
 }
 
+export interface HomeInboxLaunchConfig {
+  readonly proposalPath: string;
+  readonly inboxHttp: NonNullable<HomeHubLaunchConfig["inboxHttp"]>;
+}
+
+/** Reads only the persisted local Inbox slice; no bridge or model is loaded. */
+export function readHomeInboxLaunchConfig(environment: LaunchEnvironment): HomeInboxLaunchConfig {
+  const dataDirectory = requiredDataDirectory(environment);
+  const inboxHttp = parseInboxHttp(environment.HOB_INBOX_AUTH_TOKEN, environment.HOB_INBOX_PORT);
+  if (inboxHttp === undefined) {
+    throw new Error("HOB_INBOX_AUTH_TOKEN is required for the standalone Inbox");
+  }
+  return {
+    proposalPath: join(dataDirectory, "proposals.sqlite"),
+    inboxHttp,
+  };
+}
+
 /** Reads only the neutral HomeWorld launch slice; no model credential is required. */
 export function readHomeWorldLaunchConfig(environment: LaunchEnvironment): HomeWorldLaunchConfig {
   const dataDirectory = requiredDataDirectory(environment);

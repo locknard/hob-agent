@@ -22,16 +22,17 @@ declare module "@deepseek-ai/cordis" {
 
 /** Local review composition over hub proposal state and metadata-safe DSH traces. */
 export class ProposalInboxService extends Service {
-  static inject = ["homeProposals", "homeAgent"];
+  static inject = ["homeProposals"];
 
   private readonly controller: ProposalInboxController;
   private readonly observation?: { snapshot(): InboxObservationStatus };
 
   constructor(ctx: Context) {
     super(ctx, "homeInbox");
+    const trace = ctx.get("homeAgent") as unknown as ProposalTracePort | undefined;
     this.controller = new ProposalInboxController({
       proposals: ctx.homeProposals as unknown as ProposalInboxPort,
-      traces: ctx.homeAgent as unknown as ProposalTracePort,
+      ...(trace === undefined ? {} : { traces: trace }),
     });
     this.observation = ctx.get("homeObservationScheduler") as unknown as { snapshot(): InboxObservationStatus } | undefined;
   }

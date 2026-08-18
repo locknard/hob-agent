@@ -70,6 +70,9 @@ apply an artifact or control a device.
 - `pnpm draft:home-map` turns a ready neutral snapshot into a bounded private
   `HOME.import.md` review artifact without calling a model or overwriting
   household knowledge. Native identifiers and current values remain absent.
+- `pnpm inbox:home` mounts only the durable proposal store and authenticated
+  localhost review surface. It requires no bridge or model configuration and
+  retains the same terminal, non-applying approval semantics.
 - Optional Inbox HTTP is disabled without an explicit credential, binds only to
   `127.0.0.1`, stores only a derived verifier, authenticates every request, and
   requires exact same-origin bounded review POSTs.

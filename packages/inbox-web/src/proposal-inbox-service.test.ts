@@ -15,18 +15,9 @@ class StubProposals extends Service {
   review() { throw new Error("not used"); }
 }
 
-class StubAgent extends Service {
-  constructor(ctx: Context) {
-    super(ctx, "homeAgent");
-  }
-
-  traceSnapshot() { return undefined; }
-}
-
-test("mounts a local review facade over proposal state and the DSH trace", async () => {
+test("mounts a local review facade when the optional DSH trace is absent", async () => {
   const ctx = new Context();
   await ctx.plugin(StubProposals);
-  await ctx.plugin(StubAgent);
   const fiber = await ctx.plugin(ProposalInboxService);
 
   assert.deepEqual(ctx.homeInbox.list(), []);

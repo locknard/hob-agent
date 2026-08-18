@@ -90,6 +90,17 @@ It uses the same Hub gates, creates at most one review-only proposal, prints
 only a metadata outcome, and then exits. See
 [`docs/one-shot-observation.md`](docs/one-shot-observation.md).
 
+To review persisted proposals afterward without reconnecting HA or starting
+DSH, keep only `HOB_DATA_DIR` and `HOB_INBOX_AUTH_TOKEN` set and run:
+
+```sh
+pnpm inbox:home
+```
+
+The command prints its authenticated `127.0.0.1` URL. It can record an approval
+or rejection, but approval still cannot apply an automation or control a
+device. See [`docs/standalone-inbox.md`](docs/standalone-inbox.md).
+
 To create a private review draft of the neutral room/device map without calling
 a model or replacing `HOME.md`, set an explicit private `HOB_HOME_DIR` and run:
 

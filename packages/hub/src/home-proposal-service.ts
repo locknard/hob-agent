@@ -18,8 +18,6 @@ declare module "@deepseek-ai/cordis" {
 
 /** Hub-owned review state. It deliberately exposes no application method. */
 export class HomeProposalService extends Service {
-  static inject = ["homeWorld"];
-
   private readonly store: SqliteProposalStore;
 
   constructor(ctx: Context, options: SqliteProposalStoreOptions) {
@@ -43,7 +41,10 @@ export class HomeProposalService extends Service {
         && pending.idempotencyKey === input.idempotencyKey) return pending;
       throw new Error("A household proposal is already pending review");
     }
-    const world = this.ctx.homeWorld as HomeWorldService;
+    const world = this.ctx.get("homeWorld") as HomeWorldService | undefined;
+    if (world === undefined) {
+      throw new Error("HomeWorld is required to create a proposal draft");
+    }
     const snapshot = world.snapshot();
     const selected = new Set(input.selectedHwIds);
     const selectedDevices = snapshot.devices.filter((device) => selected.has(device.hwId));

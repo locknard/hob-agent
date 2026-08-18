@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readHomeHubLaunchConfig, readHomeWorldLaunchConfig } from "./launch-config.js";
+import {
+  readHomeHubLaunchConfig,
+  readHomeInboxLaunchConfig,
+  readHomeWorldLaunchConfig,
+} from "./launch-config.js";
 
 const BRIDGES = JSON.stringify([{
   bridgeId: "ha-main",
@@ -63,6 +67,20 @@ test("reads the HomeWorld validation slice without a model or provider credentia
     kind: "secret_text",
     value: "home-assistant-secret",
   });
+  assert.equal("agent" in config, false);
+});
+
+test("reads the standalone Inbox slice without bridge or model configuration", () => {
+  const config = readHomeInboxLaunchConfig({
+    HOB_DATA_DIR: "/tmp/hob-agent-inbox-test",
+    HOB_INBOX_AUTH_TOKEN: "i".repeat(32),
+    HOB_INBOX_PORT: "9876",
+  });
+  assert.equal(config.proposalPath, "/tmp/hob-agent-inbox-test/proposals.sqlite");
+  assert.equal(config.inboxHttp.port, 9876);
+  const authorization = `Basic ${Buffer.from(`home:${"i".repeat(32)}`).toString("base64")}`;
+  assert.equal(config.inboxHttp.authenticate(authorization), true);
+  assert.equal("bridges" in config, false);
   assert.equal("agent" in config, false);
 });
 
