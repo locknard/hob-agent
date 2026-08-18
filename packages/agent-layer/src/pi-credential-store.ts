@@ -1,6 +1,45 @@
-import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-
 import { parseSecretRef } from "./secret-ref.js";
+
+/**
+ * Compatibility credential shapes for the still provider-owned OAuth flow.
+ *
+ * The production model path does not expose these types: API-key profiles are
+ * mounted through DSH's `CredentialProvider` (see
+ * `dsh-profile-credential-provider.ts`). They remain here only so the pending
+ * provider-owned login/logout seam can be migrated independently without
+ * importing pi-ai from profile storage.
+ */
+export interface ApiKeyCredential {
+  readonly type: "api_key";
+  readonly key?: string;
+  readonly env?: Readonly<Record<string, string>>;
+}
+
+export interface OAuthCredential {
+  readonly type: "oauth";
+  readonly access: string;
+  readonly refresh: string;
+  readonly expires: number;
+  readonly [key: string]: unknown;
+}
+
+export type Credential = ApiKeyCredential | OAuthCredential;
+
+export interface CredentialInfo {
+  readonly providerId: string;
+  readonly type: Credential["type"];
+}
+
+export interface CredentialStore {
+  read(providerId: string, options?: { signal?: AbortSignal }): Promise<Credential | undefined>;
+  list(options?: { signal?: AbortSignal }): Promise<readonly CredentialInfo[]>;
+  modify(
+    providerId: string,
+    fn: (current: Credential | undefined) => Promise<Credential | undefined>,
+    options?: { signal?: AbortSignal },
+  ): Promise<Credential | undefined>;
+  delete(providerId: string, options?: { signal?: AbortSignal }): Promise<void>;
+}
 
 export interface SecretVault {
   read(reference: string): Promise<string | undefined>;
@@ -40,7 +79,12 @@ export class InMemorySecretVault implements SecretVault {
   async read(reference: string): Promise<string | undefined> { return this.values[reference]; }
 }
 
-/** Bridges selected non-secret profile references into pi-ai's credential API. */
+/**
+ * Compatibility store for the provider-owned OAuth/probe adapters.
+ *
+ * DSH production requests use `DshProfileCredentialProvider` instead; this
+ * class is intentionally not mounted into the Agent Runtime.
+ */
 export class ProfileCredentialStore implements CredentialStore {
   constructor(private readonly vault: SecretVault, private readonly selected: Record<string, string>) {}
 

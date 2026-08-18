@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -189,4 +189,9 @@ test("surfaces a stable redacted timeout when the refresh lock is held", async (
     },
   );
   await held.release();
+});
+
+test("keeps OAuth profile persistence independent from pi-ai runtime ownership", async () => {
+  const source = await readFile(new URL("./oauth-profile-credential-store.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /@earendil-works\/pi-ai/);
 });

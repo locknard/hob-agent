@@ -1,5 +1,3 @@
-import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-
 import type { AuthProfile } from "./auth-profiles.js";
 import type { WritableSecretVault } from "./macos-keychain-secret-vault.js";
 import { providerSetup, type SupportedModelProvider } from "./model-providers.js";
@@ -7,6 +5,7 @@ import {
   withOAuthRefreshLock,
   type OAuthRefreshLockOptions,
 } from "./oauth-refresh-lock.js";
+import type { Credential, CredentialInfo, CredentialStore } from "./pi-credential-store.js";
 
 type StoredOAuthCredential = Extract<Credential, { type: "oauth" }>;
 
@@ -18,9 +17,12 @@ export interface OAuthProfileCredentialStoreOptions {
 }
 
 /**
- * A writeable pi credential store for exactly one selected OAuth profile.
+ * A writeable compatibility credential store for exactly one selected OAuth profile.
  * Tokens live as one JSON value in SecretVault; profile/status persistence
- * never receives their contents.
+ * never receives their contents. DSH's current credential seam only carries a
+ * single opaque string and the official LLM adapter accepts API keys only, so
+ * this provider-owned OAuth store stays outside the DSH model path until DSH
+ * exposes a structured OAuth credential contract.
  */
 export class OAuthProfileCredentialStore implements CredentialStore {
   private chain: Promise<void> = Promise.resolve();

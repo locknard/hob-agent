@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { EnvironmentSecretVault, InMemorySecretVault, ProfileCredentialStore } from "./pi-credential-store.js";
@@ -42,11 +43,16 @@ test("treats an empty or whitespace-only allowlisted value as unavailable", asyn
   assert.equal(await vault.read("env:PRESENT"), " key-with-padding ");
 });
 
-test("adapts selected profile credentials to pi-ai without exposing keys in list", async () => {
+test("keeps selected profile credentials scoped without exposing keys in list", async () => {
   const vault = new InMemorySecretVault({ "secret:gpt": "sk-test" });
   const store = new ProfileCredentialStore(vault, { openai: "secret:gpt" });
 
   assert.deepEqual(await store.list(), [{ providerId: "openai", type: "api_key" }]);
   assert.deepEqual(await store.read("openai"), { type: "api_key", key: "sk-test" });
   assert.equal(JSON.stringify(await store.list()).includes("sk-test"), false);
+});
+
+test("keeps profile storage independent from pi-ai runtime ownership", () => {
+  const source = readFileSync(new URL("./pi-credential-store.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /@earendil-works\/pi-ai/);
 });
