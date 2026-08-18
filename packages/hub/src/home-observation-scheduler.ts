@@ -9,7 +9,7 @@ export interface HomeObservationSchedulerLike {
 }
 
 export interface HomeObservationSchedulerOptions {
-  readonly intervalMinutes: number;
+  readonly intervalMinutes?: number;
   readonly runOnStart?: boolean;
   readonly readinessPollMs?: number;
   readonly scheduler?: HomeObservationSchedulerLike;
@@ -25,8 +25,8 @@ export type HomeObservationOutcome =
   | "failed";
 
 export interface HomeObservationStatus {
-  readonly enabled: true;
-  readonly intervalMinutes: number;
+  readonly enabled: boolean;
+  readonly intervalMinutes?: number;
   readonly runOnStart: boolean;
   readonly state: "waiting" | "running" | "stopped";
   readonly lastAttempt?: {
@@ -77,28 +77,31 @@ export class HomeObservationSchedulerService extends Service {
 
   private readonly scheduler: HomeObservationSchedulerLike;
   private readonly clock: () => string;
-  private readonly intervalMinutes: number;
-  private readonly intervalMs: number;
+  private readonly intervalMinutes: number | undefined;
+  private readonly intervalMs: number | undefined;
   private readonly readinessPollMs: number;
   private readonly runOnStart: boolean;
   private state: HomeObservationStatus["state"] = "waiting";
   private lastAttempt: HomeObservationStatus["lastAttempt"];
   private stopped = false;
 
-  constructor(ctx: Context, options: HomeObservationSchedulerOptions) {
+  constructor(ctx: Context, options: HomeObservationSchedulerOptions = {}) {
     super(ctx, "homeObservationScheduler");
-    if (!options
-      || !Number.isSafeInteger(options.intervalMinutes)
-      || options.intervalMinutes < MIN_INTERVAL_MINUTES
-      || options.intervalMinutes > MAX_INTERVAL_MINUTES) {
+    if (options.intervalMinutes !== undefined
+      && (!Number.isSafeInteger(options.intervalMinutes)
+        || options.intervalMinutes < MIN_INTERVAL_MINUTES
+        || options.intervalMinutes > MAX_INTERVAL_MINUTES)) {
       throw new TypeError(`observation interval must be from ${MIN_INTERVAL_MINUTES} to ${MAX_INTERVAL_MINUTES} minutes`);
+    }
+    if (options.runOnStart === true && options.intervalMinutes === undefined) {
+      throw new TypeError("observation run-on-start requires a recurring interval");
     }
     const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
     if (!Number.isSafeInteger(readinessPollMs) || readinessPollMs < 1_000 || readinessPollMs > 300_000) {
       throw new TypeError("observation readiness poll must be from 1000 to 300000 milliseconds");
     }
     this.intervalMinutes = options.intervalMinutes;
-    this.intervalMs = options.intervalMinutes * 60_000;
+    this.intervalMs = options.intervalMinutes === undefined ? undefined : options.intervalMinutes * 60_000;
     this.readinessPollMs = readinessPollMs;
     this.runOnStart = options.runOnStart ?? false;
     this.scheduler = options.scheduler ?? defaultScheduler;
@@ -106,6 +109,13 @@ export class HomeObservationSchedulerService extends Service {
   }
 
   protected [Service.init](): void {
+    if (this.intervalMs === undefined) {
+      this.ctx.effect(() => () => {
+        this.stopped = true;
+        this.state = "stopped";
+      }, "home-observation-controller.stop");
+      return;
+    }
     const controller = new AbortController();
     const task = this.run(controller.signal).catch(() => undefined);
     this.ctx.effect(() => async () => {
@@ -160,8 +170,8 @@ export class HomeObservationSchedulerService extends Service {
 
   snapshot(): HomeObservationStatus {
     return {
-      enabled: true,
-      intervalMinutes: this.intervalMinutes,
+      enabled: this.intervalMinutes !== undefined,
+      ...(this.intervalMinutes === undefined ? {} : { intervalMinutes: this.intervalMinutes }),
       runOnStart: this.runOnStart,
       state: this.state,
       ...(this.lastAttempt === undefined ? {} : { lastAttempt: { ...this.lastAttempt } }),
@@ -182,6 +192,8 @@ export class HomeObservationSchedulerService extends Service {
   }
 
   private async run(signal: AbortSignal): Promise<void> {
+    const intervalMs = this.intervalMs;
+    if (intervalMs === undefined) return;
     if (this.runOnStart) {
       while (!signal.aborted) {
         const outcome = await this.observeRecurring("startup", signal);
@@ -190,7 +202,7 @@ export class HomeObservationSchedulerService extends Service {
       }
     }
     while (!signal.aborted) {
-      await this.scheduler.wait(this.intervalMs, signal);
+      await this.scheduler.wait(intervalMs, signal);
       if (!signal.aborted) await this.observeRecurring("scheduled", signal);
     }
   }

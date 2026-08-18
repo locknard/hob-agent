@@ -84,6 +84,23 @@ class StubObservationAudit extends Service {
   }
 }
 
+class StubObservation extends Service {
+  runs = 0;
+
+  constructor(ctx: Context) {
+    super(ctx, "homeObservationScheduler");
+  }
+
+  snapshot() {
+    return { enabled: false, runOnStart: false, state: "waiting" as const };
+  }
+
+  async observeNow() {
+    this.runs += 1;
+    return "no_proposal" as const;
+  }
+}
+
 test("mounts a local review facade when the optional DSH trace is absent", async () => {
   const ctx = new Context();
   await ctx.plugin(StubProposals);
@@ -92,10 +109,26 @@ test("mounts a local review facade when the optional DSH trace is absent", async
   assert.deepEqual(ctx.homeInbox.list(), []);
   assert.match(ctx.homeInbox.renderList(), /Proposal inbox/);
   assert.match(ctx.homeInbox.renderList(), /Observation schedule is disabled/);
+  assert.equal(ctx.homeInbox.renderList().includes("Observe now"), false);
   assert.equal("apply" in ctx.homeInbox, false);
 
   await fiber.dispose();
   assert.equal(ctx.homeInbox, undefined);
+  await ctx.fiber.dispose();
+});
+
+test("exposes explicit observation only when the full runtime supplies the Hub controller", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubObservation);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  assert.equal(ctx.homeInbox.canObserveNow(), true);
+  assert.match(ctx.homeInbox.renderList(), /Observe now/i);
+  assert.equal(await ctx.homeInbox.observeNow(), "no_proposal");
+  assert.equal(ctx.homeObservationScheduler.runs, 1);
+
+  await fiber.dispose();
   await ctx.fiber.dispose();
 });
 

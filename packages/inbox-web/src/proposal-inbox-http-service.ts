@@ -28,6 +28,8 @@ interface InboxHttpPort {
   renderList(): string;
   renderDetail(proposalId: string): string | undefined;
   review(input: InboxReviewInput): Promise<unknown>;
+  canObserveNow(): boolean;
+  observeNow(): Promise<unknown>;
 }
 
 declare module "@deepseek-ai/cordis" {
@@ -102,6 +104,30 @@ export class ProposalInboxHttpService extends Service {
         return html === undefined
           ? send(response, 404, "Proposal not found")
           : sendHtml(response, 200, document(html), method === "HEAD");
+      }
+      if (method === "POST" && url.pathname === "/observations/run") {
+        if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
+        if (!this.inbox.canObserveNow()) return send(response, 404, "Observation unavailable");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported observation content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid observation request");
+        }
+        if (body.length !== 0) return send(response, 400, "Invalid observation request");
+        try {
+          await this.inbox.observeNow();
+        } catch {
+          return send(response, 500, "Observation failed");
+        }
+        response.statusCode = 303;
+        applySecurityHeaders(response);
+        response.setHeader("location", "/proposals");
+        response.end();
+        return;
       }
       const review = /^\/proposals\/([^/]+)\/review$/.exec(url.pathname);
       if (method === "POST" && review) {

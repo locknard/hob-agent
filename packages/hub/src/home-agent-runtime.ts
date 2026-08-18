@@ -73,9 +73,7 @@ export class HomeAgentRuntime {
       );
       await this.context.plugin(HomeProposalService, this.options.homeProposals ?? { path: ":memory:" });
       await mountDshHomeAgent(this.context, this.options.agent);
-      if (this.options.observation !== undefined) {
-        await this.context.plugin(HomeObservationSchedulerService, this.options.observation);
-      }
+      await this.context.plugin(HomeObservationSchedulerService, this.options.observation ?? {});
       await this.context.plugin(ProposalInboxService);
       if (this.options.inboxHttp !== undefined) {
         await this.context.plugin(ProposalInboxHttpService, this.options.inboxHttp);

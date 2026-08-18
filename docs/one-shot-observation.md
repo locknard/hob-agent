@@ -8,6 +8,12 @@ store, metadata-only observation audit, and DSH Home Agent, performs at most
 one governed observation, reports a metadata-only outcome, and disposes the
 runtime.
 
+Every invocation creates a fresh bridge evidence epoch and disposes it after
+the attempt. The command can validate the static/current-state path, but its
+separate invocations cannot accumulate cross-day behavioral evidence. Use a
+long-running full runtime and its authenticated **Observe now** control for
+that pilot.
+
 Invoking the command is an explicit request to call the configured model. The
 model may receive the same bounded household snapshot, evidence, existing-rule
 metadata, and household prompt context available to the production Home Agent;

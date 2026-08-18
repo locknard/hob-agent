@@ -113,6 +113,12 @@ See [`docs/standalone-inbox.md`](docs/standalone-inbox.md) and
 The recommended sequence for a real-home trial is documented in
 [`docs/household-pilot.md`](docs/household-pilot.md).
 
+For behavioral evidence, keep the full runtime connected and use **Observe
+now** in its authenticated Inbox. This starts one paid turn through the same
+readiness, pending-proposal, Agent-idle, and audit gates as periodic
+observation, without enabling a recurring cadence. The standalone
+`pnpm inbox:home` review process cannot start observations.
+
 To create a private review draft of the neutral room/device map without calling
 a model or replacing `HOME.md`, set an explicit private `HOB_HOME_DIR` and run:
 
@@ -199,8 +205,8 @@ hour through seven days. See
 
 Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
 When enabled it binds only to `127.0.0.1`, requires authentication on every
-request, and enforces same-origin review POSTs. The launch config retains only a
-credential verifier, not the raw token.
+request, and enforces same-origin review and observation POSTs. The launch
+config retains only a credential verifier, not the raw token.
 
 When `HOB_HOME_DIR` is set, the three household Markdown files are loaded as a
 bounded startup snapshot through DSH's prompt/context registry. They personalize

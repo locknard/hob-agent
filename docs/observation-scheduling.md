@@ -15,6 +15,9 @@ the household has no pending proposal to review.
 - `packages/hub` owns the clock and trigger policy.
 - The existing DSH Home Agent owns the resulting turn. No second loop, worker,
   or proposal engine is introduced.
+- The full runtime always mounts the same Hub observation controller. Its
+  authenticated Inbox may explicitly request one governed turn even when no
+  recurring interval is configured.
 - Scheduling is disabled unless an explicit interval is configured. The
   interval is bounded from 60 minutes to seven days; an optional explicit flag
   may request one observation after startup readiness.
@@ -55,6 +58,9 @@ the household has no pending proposal to review.
   configured cadence, startup mode, and the last attempt time/outcome. The
   Inbox may render this status, but never the observation prompt, tool inputs,
   tool results, household state, or provider error text.
+- The manual Inbox POST requires authentication, an exact same-origin request,
+  and an empty bounded form body. It reuses every scheduler gate and audit path;
+  it does not create a parallel Agent loop.
 
 ## Non-goals
 

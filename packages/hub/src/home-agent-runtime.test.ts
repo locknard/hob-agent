@@ -109,6 +109,8 @@ test("mounts authenticated Inbox HTTP only when explicitly configured", async ()
 
   await runtime.start();
   assert.match(runtime.context.homeInboxHttp.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.equal(runtime.context.homeObservationScheduler.snapshot().enabled, false);
+  assert.match(runtime.context.homeInbox.renderList(), /Observe now/i);
   await runtime.stop();
   assert.equal(runtime.context.homeInboxHttp, undefined);
 });

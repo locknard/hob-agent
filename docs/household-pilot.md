@@ -30,13 +30,19 @@ a current-state insight, but not a claimed routine.
 
 ## Stage 2 — explicit observations
 
-Start with `pnpm observe:home`; leave recurring observation disabled. Run a
-small number of observations across ordinary household conditions rather than
-repeating calls immediately against the same evidence.
+Use `pnpm observe:home` once to verify the current-state path. Each invocation
+starts a new bridge evidence epoch, so repeated one-shot processes cannot
+establish a cross-run behavioral history.
+
+For the actual pilot, start the full runtime with Inbox authentication enabled
+and leave recurring observation disabled. Keep that process connected while
+ordinary household activity accumulates, then use **Observe now** in its Inbox
+at a few meaningful times. This preserves one evidence epoch while still
+making every paid model turn an explicit household action.
 
 After every run:
 
-- open the persisted Inbox with `pnpm inbox:home`;
+- return to the full runtime Inbox;
 - review the proposal, if any, before another observation;
 - approve only when useful as-is;
 - otherwise select the most accurate structured rejection reason and add a

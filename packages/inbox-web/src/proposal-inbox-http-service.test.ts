@@ -10,6 +10,7 @@ import {
 
 class StubInbox extends Service {
   readonly reviews: unknown[] = [];
+  observations = 0;
 
   constructor(ctx: Context) {
     super(ctx, "homeInbox");
@@ -21,6 +22,8 @@ class StubInbox extends Service {
     this.reviews.push(input);
     return { status: "approved" };
   }
+  canObserveNow() { return true; }
+  async observeNow() { this.observations += 1; return "no_proposal"; }
 }
 
 const token = "a-secure-local-inbox-token-1234567890";
@@ -140,6 +143,46 @@ test("requires exact same-origin review posts and derives reviewer identity from
     redirect: "manual",
   });
   assert.equal(oversized.status, 413);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("requires authentication and exact origin for an explicit observation", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+  });
+  const url = `${ctx.homeInboxHttp.origin}/observations/run`;
+
+  const rejected = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization,
+      origin: "http://attacker.invalid",
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: "",
+    redirect: "manual",
+  });
+  assert.equal(rejected.status, 403);
+
+  const accepted = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization,
+      origin: ctx.homeInboxHttp.origin,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: "",
+    redirect: "manual",
+  });
+  assert.equal(accepted.status, 303);
+  assert.equal(accepted.headers.get("location"), "/proposals");
+  assert.equal((ctx.homeInbox as unknown as StubInbox).observations, 1);
 
   await fiber.dispose();
   await inboxFiber.dispose();

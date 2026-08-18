@@ -102,6 +102,32 @@ async function setup() {
   return { ctx, fiber };
 }
 
+test("supports explicit observation while recurring scheduling is disabled", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  let waits = 0;
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    scheduler: { wait: async () => { waits += 1; } },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+
+  assert.deepEqual(ctx.homeObservationScheduler.snapshot(), {
+    enabled: false,
+    runOnStart: false,
+    state: "waiting",
+  });
+  assert.equal(waits, 0);
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "no_proposal");
+  assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeObservationAudit.starts[0]?.trigger, "manual");
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("starts one explicit observation only for a ready idle home with an empty Inbox", async () => {
   const { ctx, fiber } = await setup();
   ctx.homeAgent.disposition = "insufficient_evidence";

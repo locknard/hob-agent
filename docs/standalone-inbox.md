@@ -15,6 +15,10 @@ It requires an explicit absolute `HOB_DATA_DIR` and the same explicit
 `HOB_INBOX_AUTH_TOKEN`; `HOB_MODEL`, provider credentials, `HOB_BRIDGES`, and
 bridge credentials are neither required nor read.
 
+Because this composition deliberately has no bridge, DSH Agent, or Hub
+observation controller, it never renders **Observe now**. Manual observation is
+available only in the authenticated Inbox of the long-running full runtime.
+
 ## Safety boundary
 
 - HTTP remains fixed to `127.0.0.1`, authenticated on every request, protected

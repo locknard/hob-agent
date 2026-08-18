@@ -93,6 +93,10 @@ apply an artifact or control a device.
   pending household proposal at a time. Each scheduled, manual, startup, or
   one-shot attempt also enters a separate metadata-only Hub audit ledger before
   the model can run; unfinished rows become interrupted on restart.
+- The long-running full runtime also exposes an authenticated, same-origin
+  **Observe now** action. It invokes the same Hub controller, readiness gates,
+  DSH Agent turn, proposal boundary, and audit ledger as scheduled observation;
+  the standalone review composition cannot invoke it. This adds no second loop.
 - Completed audit attempts may retain only turn duration, token counters, and
   tool success/failure counts from the exact observation turn. This makes
   no-proposal cost visible without persisting prompts, tool payloads, provider

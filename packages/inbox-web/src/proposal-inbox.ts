@@ -102,8 +102,8 @@ export interface InboxProposalSummary {
 }
 
 export interface InboxObservationStatus {
-  readonly enabled: true;
-  readonly intervalMinutes: number;
+  readonly enabled: boolean;
+  readonly intervalMinutes?: number;
   readonly runOnStart: boolean;
   readonly state: "waiting" | "running" | "stopped";
   readonly lastAttempt?: {
@@ -255,7 +255,8 @@ export function renderProposalList(
   </li>`).join("");
   const observationStatus = observation === undefined
     ? "<p class=\"observation-status\">Observation schedule is disabled.</p>"
-    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome, observation.lastAttempt.disposition))}${observationMetricsLabel(observation.lastAttempt.metrics)} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
+    : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · ${observation.enabled ? `every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}` : "recurring schedule disabled · manual observation available"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome, observation.lastAttempt.disposition))}${observationMetricsLabel(observation.lastAttempt.metrics)} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
+  const observationControl = observation === undefined ? "" : `<section aria-label="Home observation"><h2>Home observation</h2><p>Starts one paid, governed Agent observation against evidence from this running home session.</p><form method="post" action="/observations/run"><button type="submit"${observation.state === "running" || observation.state === "stopped" ? " disabled" : ""}>Observe now</button></form></section>`;
   const attempts = observation?.recentAttempts ?? persistedAttempts;
   const observationHistory = attempts.length === 0
     ? ""
@@ -263,7 +264,7 @@ export function renderProposalList(
       `<li>${escapeHtml(observationTriggerLabel(attempt.trigger))} · ${observationAttemptLabel(attempt)}${observationMetricsLabel(attempt.status === "completed" ? attempt.metrics : undefined)} · ${escapeHtml(attempt.startedAt)}</li>`,
     ).join("")}</ol></section>`;
   const calibrationSection = calibration === undefined ? "" : renderCalibrationSummary(calibration);
-  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header>${calibrationSection}${observationHistory}<ol>${items}</ol></main>`;
+  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header>${observationControl}${calibrationSection}${observationHistory}<ol>${items}</ol></main>`;
 }
 
 function renderCalibrationSummary(summary: InboxCalibrationSummary): string {

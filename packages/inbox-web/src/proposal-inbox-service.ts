@@ -28,7 +28,10 @@ export class ProposalInboxService extends Service {
   static inject = ["homeProposals"];
 
   private readonly controller: ProposalInboxController;
-  private readonly observation?: { snapshot(): InboxObservationStatus };
+  private readonly observation?: {
+    snapshot(): InboxObservationStatus;
+    observeNow(): Promise<string>;
+  };
   private readonly proposalQuality: { qualitySummary(): InboxProposalQualitySummary };
   private readonly observationAudit?: {
     list(query: { limit: number }): readonly InboxObservationAttempt[];
@@ -43,7 +46,10 @@ export class ProposalInboxService extends Service {
       ...(trace === undefined ? {} : { traces: trace }),
     });
     this.proposalQuality = ctx.homeProposals as unknown as { qualitySummary(): InboxProposalQualitySummary };
-    this.observation = ctx.get("homeObservationScheduler") as unknown as { snapshot(): InboxObservationStatus } | undefined;
+    this.observation = ctx.get("homeObservationScheduler") as unknown as {
+      snapshot(): InboxObservationStatus;
+      observeNow(): Promise<string>;
+    } | undefined;
     this.observationAudit = ctx.get("homeObservationAudit") as unknown as {
       list(query: { limit: number }): readonly InboxObservationAttempt[];
       summary(): InboxObservationQualitySummary;
@@ -60,6 +66,15 @@ export class ProposalInboxService extends Service {
 
   review(input: InboxReviewInput): Promise<InboxProposal> {
     return this.controller.review(input);
+  }
+
+  canObserveNow(): boolean {
+    return this.observation !== undefined;
+  }
+
+  async observeNow(): Promise<string> {
+    if (this.observation === undefined) throw new Error("Home observation is unavailable");
+    return this.observation.observeNow();
   }
 
   renderList(query?: { status?: InboxProposalStatus; limit?: number }): string {
