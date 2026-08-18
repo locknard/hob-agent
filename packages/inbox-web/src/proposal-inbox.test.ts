@@ -96,6 +96,8 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(detailHtml, /606/);
   assert.match(detailHtml, /partial/);
   assert.match(detailHtml, /window_before_baseline/);
+  assert.match(detailHtml, /metadata-only overlap screen/i);
+  assert.match(detailHtml, /does not prove non-interference/i);
   assert.match(detailHtml, /seq 607/);
   assert.match(detailHtml, /create_home_proposal/);
   assert.match(detailHtml, /Approve/);

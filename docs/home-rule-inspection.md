@@ -33,5 +33,8 @@ uses an exclusive opaque rule-reference cursor.
 
 Names and other bridge content remain untrusted household data. They can inform
 deduplication but cannot grant tool authority or prove semantic equivalence.
+The Inbox labels this as a metadata-only overlap screen and explicitly warns
+that zero name matches does not prove non-interference. Full rule IR remains a
+Phase 1 decision rather than an implied capability of `foreignRules@1`.
 `create_home_proposal` continues to bind evidence and conflict findings inside
 the Hub, and no rule execution or mutation path is introduced.
