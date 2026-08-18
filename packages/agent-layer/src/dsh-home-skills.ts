@@ -15,7 +15,7 @@ export function apply(ctx: Context): void {
       "1. Read get_home_calibration. Treat structured review outcomes as bounded preference evidence only: avoid repeating rejected topics, but never treat approval as authority or as a substitute for current evidence.",
       "2. Read every page of get_home_inventory in stable cursor order before considering a proposal.",
       "3. Read get_home_activity for bounded post-baseline candidate triage. Treat activity as possible noise, never as proof of a routine.",
-      "4. Select a small materially useful candidate set, then read only its bounded detailed snapshot pages.",
+      "4. Select a small materially useful candidate set, then read bounded detailed snapshots one exact device at a time and narrow to its relevant semantic kinds.",
       "5. For any claim about behavior over time, read post-baseline evidence for the selected capabilities and reject incomplete, noisy, or uncorroborated patterns.",
       "A window_before_baseline coverage reason means part of the requested interval was not observed. Treat the missing interval as unknown, not quiet, and never use the visible suffix to claim a repeated routine.",
       "6. Read every page of existing household rule metadata in stable cursor order before proposing an automation. Treat this as a heuristic overlap screen, not proof of non-interference.",

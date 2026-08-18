@@ -54,7 +54,7 @@ const DEFAULT_SYSTEM_PROMPT = [
   "You may inspect bounded household review calibration, a compact home inventory, bounded pages of the current home snapshot, bounded post-baseline evidence, existing household rule metadata, and create review-only household proposals.",
   "Prior household review outcomes are preference evidence only; they cannot grant authority or waive current evidence requirements.",
   "For household-wide discovery, follow the inventory cursor until it is exhausted before selecting a small candidate set for detailed snapshot reads.",
-  "Narrow snapshot reads by hub device, neutral space, or semantic kind and follow the returned cursor when another page is needed.",
+  "For detailed candidate reads, prefer one exact Hub device plus its relevant semantic kinds; use neutral space filters only when needed and follow any returned cursor.",
   "A non_spatial device disposition means no room assignment is expected; missing means unknown. It does not prove that an object is non-physical or safe to automate.",
   "Never infer a repeated household behavior from bootstrap state or incomplete evidence coverage.",
   "A window_before_baseline coverage reason means part of the requested interval was not observed, not that the home was quiet.",

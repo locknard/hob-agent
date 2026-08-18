@@ -29,6 +29,14 @@ projection in one model tool result is needlessly expensive and makes relevant
 household context harder to identify. A bounded query lets the agent first
 locate a space or semantic class and then inspect only the relevant slice.
 
+A 2026-08-19 model-free measurement found that exact one-device pages had a
+2.8 KiB median, while nine of 75 exceeded 8 KiB and the largest was about 69
+KiB. Narrowing those same devices by one accepted semantic kind reduced the
+95th percentile to about 7.4 KiB, though nine device/kind pairs still exceeded
+8 KiB. The observation workflow therefore prefers one exact device plus its
+relevant semantic kinds. This is a query discipline, not proof that every
+detailed result fits the compaction-pruner threshold.
+
 Only aggregate counts informed this decision. Household names, native IDs, and
 state values are not recorded here.
 
@@ -50,6 +58,9 @@ state values are not recorded here.
 
 ## Follow-up
 
-After bounded discovery is available, proposal creation should attach trusted
-evidence provenance selected by the Hub rather than accepting model-authored
-journal sequence identifiers.
+Trusted proposal evidence binding is now implemented by the Hub. During the
+real-household pilot, inspect DSH prune metadata and failed-tool counts before
+adding capability-level snapshot pagination. Add that cursor only if real
+model traces show that exact-device plus semantic-kind filtering still hides
+needed current state; do not increase the global DSH pruning threshold merely
+to accommodate broad snapshot requests.
