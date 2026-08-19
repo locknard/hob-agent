@@ -152,6 +152,10 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(listHtml, /6 tools · 120 input \/ 18 output \/ 7 reasoning tokens · 2500 ms/i);
   assert.match(listHtml, /startup · interrupted safely/i);
   assert.match(listHtml, /manual · running/i);
+  assert.match(listHtml, /id="main-content"/);
+  assert.match(listHtml, /id="reviews"/);
+  assert.match(listHtml, /id="observations"/);
+  assert.match(listHtml, /Review ideas for your home/i);
 
   const detail = controller.detail("proposal-1");
   assert.equal(detail?.trace?.sessionId, "home-main");
@@ -178,6 +182,11 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(detailHtml, /Why does this match your household\?/i);
   assert.match(detailHtml, /Already handled/i);
   assert.match(detailHtml, /Does not fit our household/i);
+  assert.match(detailHtml, /class="proposal-detail review-desk"/);
+  assert.match(detailHtml, /class="evidence-ledger"/);
+  assert.match(detailHtml, /Approval records intent only/i);
+  assert.match(detailHtml, /<details class="agent-details">/);
+  assert.match(detailHtml, /<summary>How the Agent reached this<\/summary>/);
 
   const reviewed = await controller.review({
     proposalId: "proposal-1",

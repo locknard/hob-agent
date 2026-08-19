@@ -4,12 +4,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import type { InboxRejectionFeedbackCode, InboxReviewInput } from "./proposal-inbox.js";
+import { INBOX_CSS } from "./inbox-styles.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_FORM_BYTES = 4 * 1024;
 const SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store",
-  "content-security-policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+  "content-security-policy": "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
@@ -94,6 +95,9 @@ export class ProposalInboxHttpService extends Service {
       }
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", this.origin);
+      if ((method === "GET" || method === "HEAD") && url.pathname === "/assets/inbox.css") {
+        return sendCss(response, 200, INBOX_CSS, method === "HEAD");
+      }
       if ((method === "GET" || method === "HEAD") && url.pathname === "/proposals") {
         return sendHtml(response, 200, document(this.inbox.renderList()), method === "HEAD");
       }
@@ -194,8 +198,15 @@ function sendHtml(response: ServerResponse, status: number, html: string, head: 
   response.end(head ? undefined : html);
 }
 
+function sendCss(response: ServerResponse, status: number, css: string, head: boolean): void {
+  applySecurityHeaders(response);
+  response.statusCode = status;
+  response.setHeader("content-type", "text/css; charset=utf-8");
+  response.end(head ? undefined : css);
+}
+
 function document(content: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>hob-agent Inbox</title></head><body>${content}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f3f7f2"><title>Reviews · hob-agent</title><link rel="stylesheet" href="/assets/inbox.css"></head><body><a class="skip-link" href="#main-content">Skip to main content</a><div class="app-shell"><header class="app-topbar"><a class="brand" href="/proposals"><strong>hob-agent</strong><span>Household agent</span></a><span class="topbar-note">Local review</span></header><div class="app-body"><nav class="app-nav" aria-label="Primary"><a href="/proposals#overview"><span class="nav-mark" aria-hidden="true">O</span>Overview</a><a href="/proposals#reviews" aria-current="page"><span class="nav-mark" aria-hidden="true">R</span>Reviews</a><a href="/proposals#observations"><span class="nav-mark" aria-hidden="true">A</span>Observations</a><a href="/proposals#home"><span class="nav-mark" aria-hidden="true">H</span>Home</a><a href="/proposals#settings"><span class="nav-mark" aria-hidden="true">S</span>Settings</a></nav><div class="app-content">${content}</div></div></div></body></html>`;
 }
 
 function mediaType(value: string | undefined): string | undefined {

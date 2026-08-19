@@ -47,7 +47,7 @@ test("mounts the persisted Inbox without HomeWorld or DSH", async () => {
     assert.match(runtime.context.homeInboxHttp.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
     const response = await fetch(`${runtime.context.homeInboxHttp.origin}/proposals`);
     assert.equal(response.status, 200);
-    assert.match(await response.text(), /Proposal inbox/);
+    assert.match(await response.text(), /Review ideas for your home/);
   } finally {
     await runtime.stop();
     await rm(directory, { recursive: true, force: true });

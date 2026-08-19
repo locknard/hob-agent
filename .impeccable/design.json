@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-19T02:00:00.000Z",
+  "title": "Design System: hob-agent",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Decision Blue", "canonical": "oklch(55% 0.17 252)", "tonalRamp": ["oklch(18% 0.05 252)", "oklch(28% 0.09 252)", "oklch(38% 0.13 252)", "oklch(48% 0.17 252)", "oklch(58% 0.16 252)", "oklch(70% 0.12 252)", "oklch(84% 0.07 252)", "oklch(95% 0.02 252)"] },
+      "verified": { "role": "success", "displayName": "Verified Evergreen", "canonical": "oklch(48% 0.09 145)", "tonalRamp": ["oklch(18% 0.03 145)", "oklch(28% 0.05 145)", "oklch(38% 0.075 145)", "oklch(48% 0.09 145)", "oklch(60% 0.08 145)", "oklch(72% 0.065 145)", "oklch(84% 0.045 145)", "oklch(95% 0.015 145)"] },
+      "uncertain": { "role": "warning", "displayName": "Candid Clay", "canonical": "oklch(60% 0.12 55)", "tonalRamp": ["oklch(18% 0.035 55)", "oklch(28% 0.06 55)", "oklch(40% 0.09 55)", "oklch(52% 0.115 55)", "oklch(64% 0.11 55)", "oklch(74% 0.08 55)", "oklch(85% 0.05 55)", "oklch(95% 0.018 55)"] }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Household headline", "purpose": "Proposal and page titles only." },
+      "body": { "displayName": "Household body", "purpose": "Plain-language explanations and evidence." },
+      "label": { "displayName": "Provenance label", "purpose": "Short section provenance and status labels." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "state-change", "value": "180ms cubic-bezier(0.25, 1, 0.5, 1)", "purpose": "Color feedback on interactive state changes only." }
+    ],
+    "breakpoints": [
+      { "name": "content-wide", "value": "44rem" },
+      { "name": "navigation-rail", "value": "64rem" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Approve idea",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single primary household decision.",
+      "html": "<button class=\"ds-btn-primary\">Approve idea</button>",
+      "css": ".ds-btn-primary { min-height: 44px; padding: 8px 24px; border: 1px solid transparent; border-radius: 6px; background: var(--color-primary); color: var(--color-surface); font: 750 16px/1.5 system-ui; } .ds-btn-primary:hover { background: var(--color-primary-hover); } .ds-btn-primary:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }"
+    },
+    {
+      "name": "Reject",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A clear secondary decision without false visual equivalence.",
+      "html": "<button class=\"ds-btn-reject\">Reject</button>",
+      "css": ".ds-btn-reject { min-height: 44px; padding: 8px 24px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-surface); color: var(--color-danger); font: 750 16px/1.5 system-ui; } .ds-btn-reject:hover { background: var(--color-uncertain-soft); } .ds-btn-reject:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }"
+    },
+    {
+      "name": "Review navigation",
+      "kind": "nav",
+      "description": "Familiar navigation with a written active location.",
+      "html": "<nav class=\"ds-nav\"><a href=\"#\" aria-current=\"page\">Reviews</a><a href=\"#\">Observations</a></nav>",
+      "css": ".ds-nav { display: grid; gap: 4px; width: 220px; padding: 16px; background: var(--color-canvas); } .ds-nav a { min-height: 44px; display: flex; align-items: center; padding: 8px 12px; border-radius: 6px; color: var(--color-ink-muted); text-decoration: none; font: 650 14px/1.5 system-ui; } .ds-nav a[aria-current=page] { background: var(--color-verified-soft); color: var(--color-ink); } .ds-nav a:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }"
+    },
+    {
+      "name": "Evidence marker",
+      "kind": "custom",
+      "description": "A compact source and time entry in the household evidence ledger.",
+      "html": "<div class=\"ds-evidence\"><span aria-hidden=\"true\"></span><div><strong>Hallway motion</strong><small>Home Assistant · 11:45 PM</small></div></div>",
+      "css": ".ds-evidence { display: grid; grid-template-columns: 16px 1fr; gap: 12px; color: var(--color-ink); font: 400 16px/1.5 system-ui; } .ds-evidence > span { width: 15px; height: 15px; margin-top: 4px; border: 3px solid var(--color-surface); border-radius: 50%; background: var(--color-verified); box-shadow: 0 0 0 1px var(--color-verified); } .ds-evidence strong, .ds-evidence small { display: block; } .ds-evidence small { color: var(--color-ink-muted); font-size: 14px; }"
+    },
+    {
+      "name": "Household field",
+      "kind": "input",
+      "description": "A visible label and resizable note field.",
+      "html": "<label class=\"ds-field\">Household note<textarea></textarea></label>",
+      "css": ".ds-field { display: grid; gap: 8px; color: var(--color-ink); font: 650 16px/1.5 system-ui; } .ds-field textarea { min-height: 96px; padding: 12px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-surface); color: var(--color-ink); font: 400 16px/1.5 system-ui; resize: vertical; } .ds-field textarea:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Household Evidence Desk",
+    "overview": "A quiet place to examine one consequential idea. Familiar navigation provides orientation while a continuous review sheet separates Agent-authored claims, Hub evidence, and household judgment.",
+    "keyCharacteristics": ["Familiar navigation", "Decision-first hierarchy", "Continuous ruled surfaces", "Restrained semantic color", "Mobile-first review flow"],
+    "rules": [
+      { "name": "The Rare Blue Rule", "body": "Primary blue appears only for active location, focus, links, and the main approval action.", "section": "colors" },
+      { "name": "The Continuous Sheet Rule", "body": "A review is one document, never a stack of nested cards.", "section": "elevation" }
+    ],
+    "dos": ["Lead with the household decision.", "Retain the evidence ledger as the signature review pattern."],
+    "donts": ["Do not build a wall of device toggles.", "Do not expose secrets or raw Agent internals in the primary workflow."]
+  }
+}

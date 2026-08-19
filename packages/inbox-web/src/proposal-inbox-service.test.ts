@@ -107,9 +107,10 @@ test("mounts a local review facade when the optional DSH trace is absent", async
   const fiber = await ctx.plugin(ProposalInboxService);
 
   assert.deepEqual(ctx.homeInbox.list(), []);
-  assert.match(ctx.homeInbox.renderList(), /Proposal inbox/);
+  assert.match(ctx.homeInbox.renderList(), /Review ideas for your home/);
   assert.match(ctx.homeInbox.renderList(), /Observation schedule is disabled/);
   assert.equal(ctx.homeInbox.renderList().includes("Observe now"), false);
+  assert.match(ctx.homeInbox.renderList(), /full home runtime/i);
   assert.equal("apply" in ctx.homeInbox, false);
 
   await fiber.dispose();

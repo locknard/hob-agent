@@ -50,8 +50,26 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.match(await response.text(), /Inbox list/);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /style-src 'self'/);
   assert.equal(response.headers.get("x-frame-options"), "DENY");
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+
+  const stylesheet = await fetch(`${ctx.homeInboxHttp.origin}/assets/inbox.css`, {
+    headers: { authorization },
+  });
+  assert.equal(stylesheet.status, 200);
+  assert.equal(stylesheet.headers.get("content-type"), "text/css; charset=utf-8");
+  const stylesheetText = await stylesheet.text();
+  assert.match(stylesheetText, /--color-ink:/);
+  assert.match(stylesheetText, /\.brand\s*\{[^}]*min-height:\s*2\.75rem/s);
+
+  const html = await fetch(`${ctx.homeInboxHttp.origin}/proposals`, {
+    headers: { authorization },
+  }).then((page) => page.text());
+  assert.match(html, /viewport-fit=cover/);
+  assert.match(html, /href="\/assets\/inbox.css"/);
+  assert.match(html, /class="skip-link"/);
+  assert.match(html, /aria-label="Primary"/);
 
   await fiber.dispose();
   assert.equal(ctx.homeInboxHttp, undefined);

@@ -248,23 +248,26 @@ export function renderProposalList(
   persistedAttempts: readonly InboxObservationAttempt[] = [],
   calibration?: InboxCalibrationSummary,
 ): string {
-  const items = proposals.map((proposal) => `<li class="proposal-card" data-status="${escapeHtml(proposal.status)}">
+  const items = proposals.map((proposal) => `<li class="proposal-row" data-status="${escapeHtml(proposal.status)}">
     <a href="/proposals/${encodeURIComponent(proposal.id)}"><h2>${escapeHtml(proposal.title)}</h2></a>
     <p>${escapeHtml(proposal.summary)}</p>
-    <dl><dt>Risk</dt><dd>${escapeHtml(proposal.riskLevel)}</dd><dt>Existing automations</dt><dd>${proposal.existingAutomationCount}</dd><dt>Possible overlaps</dt><dd>${proposal.conflictMatchCount}</dd></dl>
+    <dl class="proposal-meta"><div><dt>Risk</dt><dd>${escapeHtml(proposal.riskLevel)}</dd></div><div><dt>Existing rules</dt><dd>${proposal.existingAutomationCount}</dd></div><div><dt>Possible overlaps</dt><dd>${proposal.conflictMatchCount}</dd></div></dl>
   </li>`).join("");
   const observationStatus = observation === undefined
     ? "<p class=\"observation-status\">Observation schedule is disabled.</p>"
     : `<p class="observation-status">Observation: ${escapeHtml(observation.state)} · ${observation.enabled ? `every ${observation.intervalMinutes} minutes · startup ${observation.runOnStart ? "enabled" : "disabled"}` : "recurring schedule disabled · manual observation available"}${observation.lastAttempt === undefined ? "" : ` · last ${escapeHtml(observationOutcomeLabel(observation.lastAttempt.outcome, observation.lastAttempt.disposition))}${observationMetricsLabel(observation.lastAttempt.metrics)} at ${escapeHtml(observation.lastAttempt.at)}`}</p>`;
-  const observationControl = observation === undefined ? "" : `<section aria-label="Home observation"><h2>Home observation</h2><p>Starts one paid, governed Agent observation against evidence from this running home session.</p><form method="post" action="/observations/run"><button type="submit"${observation.state === "running" || observation.state === "stopped" ? " disabled" : ""}>Observe now</button></form></section>`;
+  const observationControl = observation === undefined
+    ? "<div><h2>Observe your home</h2><p>Open the full home runtime to start a governed observation. This standalone review process never connects a bridge or calls a model.</p></div>"
+    : `<div><h2>Observe your home</h2><p>Ask the Agent to examine bounded evidence from this running home session. It may create one review item, but it cannot apply a change.</p></div><form method="post" action="/observations/run"><button type="submit"${observation.state === "running" || observation.state === "stopped" ? " disabled" : ""}>Observe now</button></form>`;
   const attempts = observation?.recentAttempts ?? persistedAttempts;
   const observationHistory = attempts.length === 0
     ? ""
-    : `<section aria-label="Recent observations"><h2>Recent observations</h2><ol>${attempts.slice(0, 5).map((attempt) =>
+    : `<ol class="observation-list">${attempts.slice(0, 5).map((attempt) =>
       `<li>${escapeHtml(observationTriggerLabel(attempt.trigger))} · ${observationAttemptLabel(attempt)}${observationMetricsLabel(attempt.status === "completed" ? attempt.metrics : undefined)} · ${escapeHtml(attempt.startedAt)}</li>`,
-    ).join("")}</ol></section>`;
-  const calibrationSection = calibration === undefined ? "" : renderCalibrationSummary(calibration);
-  return `<main class="proposal-inbox"><header><h1>Proposal inbox</h1><p>${proposals.length} review item${proposals.length === 1 ? "" : "s"}</p>${observationStatus}</header>${observationControl}${calibrationSection}${observationHistory}<ol>${items}</ol></main>`;
+    ).join("")}</ol>`;
+  const calibrationSection = calibration === undefined ? "" : `<details class="quiet-section">${renderCalibrationSummary(calibration)}</details>`;
+  const empty = proposals.length === 0 ? `<div class="empty-state"><h2>No ideas need review</h2><p>When the Agent finds a useful pattern with enough evidence, it will appear here before anything can change.</p></div>` : `<ol class="proposal-list">${items}</ol>`;
+  return `<main id="main-content" class="proposal-inbox"><header id="overview" class="page-header"><p class="eyebrow">Household review</p><h1>Review ideas for your home</h1><p class="muted">The Agent can suggest persistent behavior, but your household decides what is useful.</p></header><section id="home" class="inbox-overview" aria-label="Home status">${observationStatus}</section><section id="observations" class="observation-panel" aria-label="Home observation">${observationControl}</section><section class="quiet-section" aria-label="Recent observations"><details><summary>Recent observations</summary>${observationHistory || "<p>No observations have been recorded yet.</p>"}</details></section><section id="reviews" class="quiet-section" aria-labelledby="reviews-heading"><div class="section-heading"><div><p class="eyebrow">Decision queue</p><h2 id="reviews-heading">Reviews</h2></div><p>${proposals.length} item${proposals.length === 1 ? "" : "s"}</p></div>${empty}</section>${calibrationSection}<section id="settings" class="quiet-section" aria-labelledby="settings-heading"><h2 id="settings-heading">Connections and access</h2><p>Secrets are kept outside household files and are never shown in proposal evidence or Agent traces.</p></section></main>`;
 }
 
 function renderCalibrationSummary(summary: InboxCalibrationSummary): string {
@@ -295,7 +298,7 @@ function renderCalibrationSummary(summary: InboxCalibrationSummary): string {
     <dt>Cumulative tools</dt><dd>${observation.metrics.toolCalls} tool calls / ${observation.metrics.failedToolCalls} failed</dd>
     <dt>Cumulative turn duration</dt><dd>${observation.metrics.durationMs} ms</dd>
   </dl>`;
-  return `<section aria-label="Household calibration"><h2>Household calibration</h2><p>All local records · descriptive only</p>
+  return `<summary>Household calibration</summary><div aria-label="Household calibration"><p>All local records · descriptive only</p>
     <h3>Proposals</h3><dl>
       <dt>Total</dt><dd>${proposal.total}</dd>
       <dt>Pending review</dt><dd>${proposal.statuses.pending_review}</dd>
@@ -304,7 +307,7 @@ function renderCalibrationSummary(summary: InboxCalibrationSummary): string {
       <dt>Expired</dt><dd>${proposal.statuses.expired}</dd>
       ${feedback}
       <dt>Legacy review without feedback</dt><dd>${proposal.reviewedWithoutFeedback}</dd>
-    </dl>${observationSummary}</section>`;
+    </dl>${observationSummary}</div>`;
 }
 
 function observationAttemptLabel(attempt: InboxObservationAttempt): string {
@@ -343,18 +346,17 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
       `<li><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}${coverage.reasons.length === 0 ? "" : ` · ${coverage.reasons.map(escapeHtml).join(", ")}`}</li>`,
     ).join("")}</ul>`;
   const rationale = proposal.rationale === undefined
-    ? "<section aria-label=\"Agent proposal rationale\"><h2>Agent proposal rationale</h2><p>Not recorded in this legacy proposal.</p></section>"
-    : `<section aria-label="Agent proposal rationale"><h2>Agent proposal rationale</h2><p>These model-authored statements explain the Agent's case; they do not replace Hub evidence or household judgment.</p><h3>Expected household value</h3><p>${escapeHtml(proposal.rationale.householdValue)}</p><h3>Why now</h3><p>${escapeHtml(proposal.rationale.whyNow)}</p><h3>Agent-declared uncertainties</h3><ul>${proposal.rationale.uncertainties.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`;
+    ? "<section class=\"agent-authored\" aria-label=\"Agent proposal rationale\"><h2>Why this may help</h2><p>Agent reasoning was not recorded for this legacy proposal.</p></section>"
+    : `<section class="agent-authored" aria-label="Agent proposal rationale"><p class="eyebrow">Agent-authored</p><h2>Why this may help</h2><p>These model-authored statements explain the Agent's case; they do not replace Hub evidence or household judgment.</p><h3>Expected household value</h3><p>${escapeHtml(proposal.rationale.householdValue)}</p><h3>Why now</h3><p>${escapeHtml(proposal.rationale.whyNow)}</p><h3>Agent-declared uncertainties</h3><ul class="uncertainty-list">${proposal.rationale.uncertainties.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`;
   const spaceCoverage = proposal.spaceCoverage === undefined
     ? "<section aria-label=\"Selected-device space coverage\"><h2>Selected-device space coverage</h2><p>Not recorded in this legacy proposal.</p></section>"
     : `<section aria-label="Selected-device space coverage"><h2>Selected-device space coverage</h2><p>Hub-produced mapping coverage; this is separate from the Agent's rationale.</p><dl><dt>Selected devices</dt><dd>${proposal.spaceCoverage.selectedDevices}</dd><dt>Single-space suggestions</dt><dd>${proposal.spaceCoverage.devicesWithSingleSpace}</dd><dt>Unassigned</dt><dd>${proposal.spaceCoverage.devicesWithoutSpace}</dd><dt>Multiple spaces</dt><dd>${proposal.spaceCoverage.devicesWithMultipleSpaces}</dd></dl></section>`;
-  const review = proposal.status === "pending_review" ? `<section aria-label="Household review"><h2>Household review</h2>
-  <form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
+  const review = proposal.status === "pending_review" ? `<section class="review-boundary" aria-label="Household review"><p>Approval records intent only</p><p>Approving tells the Agent this idea fits your household. It does not install automation or control a device.</p><div class="review-forms"><form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
     <input type="hidden" name="expectedRevision" value="${proposal.revision}">
     <input type="hidden" name="feedbackCode" value="useful_as_is">
     <p>Why does this match your household? Approve only when it is useful as-is.</p>
     <label>Approval note <textarea name="note" maxlength="1000"></textarea></label>
-    <button type="submit" name="decision" value="approved">Approve</button>
+    <button type="submit" name="decision" value="approved">Approve idea</button>
   </form>
   <form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/review">
     <input type="hidden" name="expectedRevision" value="${proposal.revision}">
@@ -369,19 +371,22 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
       <option value="other">Other</option>
     </select></label>
     <label>Rejection note <textarea name="note" maxlength="1000"></textarea></label>
-    <button type="submit" name="decision" value="rejected">Reject</button>
-  </form></section>` : `<section class="review-decision" aria-label="Household review"><h2>Household review</h2><p>Decision: ${escapeHtml(proposal.status)}</p>${proposal.review?.feedbackCode === undefined ? "" : `<p>Reason: ${escapeHtml(feedbackLabel(proposal.review.feedbackCode))}</p>`}${proposal.review?.note === undefined ? "" : `<p>Note: ${escapeHtml(proposal.review.note)}</p>`}</section>`;
-  const timeline = detail.trace === undefined ? "" : renderAgentLoopTimeline(detail.trace);
-  return `<main class="proposal-detail" data-status="${escapeHtml(proposal.status)}">
-    <header><a href="/proposals">Proposal inbox</a><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p></header>
-    ${rationale}
-    ${spaceCoverage}
+    <button class="reject-button" type="submit" name="decision" value="rejected">Reject</button>
+  </form></div></section>` : `<section class="review-decision" aria-label="Household review"><h2>Household review</h2><p>Decision: ${escapeHtml(proposal.status)}</p>${proposal.review?.feedbackCode === undefined ? "" : `<p>Reason: ${escapeHtml(feedbackLabel(proposal.review.feedbackCode))}</p>`}${proposal.review?.note === undefined ? "" : `<p>Note: ${escapeHtml(proposal.review.note)}</p>`}</section>`;
+  const timeline = detail.trace === undefined ? "" : `<details class="agent-details"><summary>How the Agent reached this</summary>${renderAgentLoopTimeline(detail.trace)}</details>`;
+  const ledgerReferences = proposal.evidence.references.map((reference) => `<li class="ledger-item"><span class="ledger-marker" aria-hidden="true"></span><div><p><strong>${escapeHtml(reference.capabilityId ?? reference.hwId ?? reference.bridgeId)}</strong></p><p class="ledger-meta">${escapeHtml(reference.source ?? "legacy-reference")} · ${escapeHtml(reference.observedAt)}${reference.seq === undefined ? "" : ` · seq ${reference.seq}`}</p></div></li>`).join("");
+  const ledgerCoverage = proposal.evidence.temporal?.coverage.map((coverage) => `<li class="ledger-item" data-coverage="${escapeHtml(coverage.status)}"><span class="ledger-marker" aria-hidden="true"></span><div><p><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}</p><p class="ledger-meta">${coverage.reasons.length === 0 ? "No recorded coverage warnings" : coverage.reasons.map(escapeHtml).join(", ")}</p></div></li>`).join("") ?? "";
+  return `<main id="main-content" class="proposal-detail review-desk" data-status="${escapeHtml(proposal.status)}">
+    <header><a class="back-link" href="/proposals">← Back to reviews</a><p class="eyebrow">Household proposal</p><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p><div class="status-line"><span class="status-chip">Risk: ${escapeHtml(proposal.risk.level)}</span><span class="muted">Updated ${escapeHtml(proposal.updatedAt)}</span></div></header>
+    <div class="review-columns"><div class="proposal-case">${rationale}
     <section aria-label="Intent"><h2>Intended change</h2><p>${escapeHtml(proposal.intent.description)}</p><h3>Rollback</h3><p>${escapeHtml(proposal.intent.rollback)}</p></section>
-    <section aria-label="Evidence"><h2>Evidence</h2><p>${proposal.evidence.references.length} bounded references</p><h3>References</h3><ul>${references}</ul><h3>Coverage</h3>${temporalCoverage}<h3>Bridge watermarks</h3><ul>${watermarks}</ul></section>
-    <section aria-label="Existing-rule overlap screen"><h2>Existing-rule overlap screen</h2><p>${proposal.conflictCheck.existingAutomationCount} existing automations · ${proposal.conflictCheck.matches.length} possible name overlaps</p><p>Metadata-only overlap screen; zero matches does not prove non-interference. Review existing rule logic before implementation.</p></section>
     <section aria-label="Dry run"><h2>Dry run: ${escapeHtml(proposal.dryRun.status)}</h2><p>${escapeHtml(proposal.dryRun.summary)}</p></section>
-    <section aria-label="Risk"><h2>Risk: ${escapeHtml(proposal.risk.level)}</h2><ul>${risks}</ul></section>
-    ${review}${timeline}
+    <section aria-label="Risk"><h2>Risk: ${escapeHtml(proposal.risk.level)}</h2><ul class="risk-list">${risks}</ul></section>
+    ${review}</div><aside class="evidence-ledger" aria-label="Evidence from your home"><h2>Evidence from your home</h2><p>${proposal.evidence.references.length} bounded references from the Hub</p><ul class="ledger-list">${ledgerReferences}${ledgerCoverage}</ul>
+    <section aria-label="Evidence"><h3>Coverage details</h3>${temporalCoverage}<h3>Bridge watermarks</h3><ul>${watermarks}</ul></section>
+    ${spaceCoverage}
+    <section aria-label="Existing-rule overlap screen"><h2>Existing-rule overlap screen</h2><p>${proposal.conflictCheck.existingAutomationCount} existing automations · ${proposal.conflictCheck.matches.length} possible name overlaps</p><p>Metadata-only overlap screen; zero matches does not prove non-interference. Review existing rule logic before implementation.</p></section>
+    ${timeline}</aside></div>
   </main>`;
 }
 
