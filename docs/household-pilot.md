@@ -104,6 +104,25 @@ and reported about 3% quota use. Both runs retained zero rejections and zero
 history gaps. The larger quota supports the observed seven-day evidence rate;
 it is not a substitute for the still-required governed retention policy.
 
+## Next household action after this checkpoint
+
+The next product proof is one real reviewed model observation, not another
+runtime migration. It requires explicit household input that the repository
+must not discover on its own:
+
+1. select a supported model route and provide its scoped credential;
+2. create a local Inbox authentication token;
+3. review the most consequential items among the 21 remaining placement gaps
+   in the private home-map draft, while leaving uncertain items explicitly
+   unresolved; and
+4. start the updated full runtime with recurring observation disabled, keep one
+   evidence epoch connected for at least an hour, then use **Observe now** and
+   record one structured household review.
+
+That outcome—not another synthetic loop—should decide the next product change.
+Governed canonical-journal retention remains P1 before a longer unattended
+deployment, but the new bounded quota is sufficient for this manual pilot.
+
 After every run:
 
 - return to the full runtime Inbox;
