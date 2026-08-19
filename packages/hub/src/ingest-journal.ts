@@ -107,6 +107,7 @@ export interface IngestJournal {
 type SqlRow = Record<string, unknown>;
 
 const serializedBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
 
 /**
  * The Phase 0 journal deliberately exposes a small SQLite seam. Every legal
@@ -121,7 +122,7 @@ export class SqliteIngestJournal implements IngestJournal {
   private usedBytes: number;
 
   constructor(readonly path: string, options: SqliteIngestJournalOptions = {}) {
-    this.maxBytes = options.maxBytes ?? 16 * 1024 * 1024;
+    this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
     if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes <= 0) {
       throw new RangeError("journal maxBytes must be a positive safe integer");
     }

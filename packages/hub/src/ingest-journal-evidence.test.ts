@@ -111,6 +111,12 @@ test("reports aggregate logical capacity without exposing journal contents", () 
   journal.close();
 });
 
+test("default quota covers the measured seven-day household evidence rate", () => {
+  const journal = new SqliteIngestJournal(":memory:");
+  assert.equal(journal.capacity().maxBytes, 256 * 1024 * 1024);
+  journal.close();
+});
+
 test("aggregates bounded post-baseline state activity without returning values", () => {
   const journal = new SqliteIngestJournal(":memory:");
   append(journal, 1, "2026-08-19T00:00:00.000Z", {

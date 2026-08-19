@@ -234,20 +234,25 @@ below becomes product work next.
 
 ### P1 — canonical ingest-journal retention
 
-The neutral ingest journal has a deterministic 16 MiB logical hard quota and
-fails closed through bridge pause/quarantine, but it has no production
-retention path. Real-household validation now reports aggregate used, maximum,
-and remaining logical bytes so exhaustion is visible before an unattended
-pilot. A first live HA run reached roughly 45% of the default quota while
-retaining no rejections or history gaps. In its first 14 post-baseline minutes,
-42% of comparable HA state events repeated the preceding neutral attributes.
+The neutral ingest journal has a deterministic logical hard quota and fails
+closed through bridge pause/quarantine, but it has no production retention
+path. Real-household validation now reports aggregate used, maximum, and
+remaining logical bytes so exhaustion is visible before an unattended pilot.
+A first live HA run reached 48% of the former 16 MiB default in roughly half an
+hour while retaining no rejections or history gaps. That measured rate could
+not support the product's bounded 168-hour evidence window. The default is now
+256 MiB per bridge: enough headroom for the observed seven-day rate after the
+semantic de-noising below, while remaining a finite fail-closed quota.
+
+In the run's first 14 post-baseline minutes, 42% of comparable HA state events
+repeated the preceding neutral attributes.
 The HA adapter now suppresses those consecutive semantic duplicates before it
 allocates a canonical envelope, reducing both journal growth and false Agent
 activity without discarding a neutral state change. The continuing one-hour
 checkpoint is the remaining sizing evidence for the next decision.
 
-Do not solve this by silently deleting old epochs or by treating a larger quota
-as retention. A reviewed implementation must preserve at least the current
+The larger sizing floor is not retention. Do not silently delete old epochs.
+A reviewed implementation must preserve at least the current
 manifest-verified recovery cut, the supported 168-hour temporal evidence
 window, open history gaps, and journal rows referenced by durable proposal
 evidence. It must persist an explicit retention floor/audit so a query can
