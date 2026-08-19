@@ -80,6 +80,30 @@ the fixed 12-call observation budget without weakening the no-proposal path;
 it does not claim that a real provider/model will choose the same sequence or
 produce a useful suggestion.
 
+The same household then completed a continuous 61-minute epoch. At 30 minutes,
+the old activity query reported 12 neutral devices and 1,415 events, but marked
+the result truncated because its 50-row SQL limit incorrectly counted active
+capabilities rather than devices. At 61 minutes, the requested one-hour window
+no longer preceded the verified baseline; the remaining activity partial was
+only that same query-shape defect. A read-only replay through the corrected
+device-level grouping found 21 active bridge devices and 2,569 events in the
+last hour without reaching the 50-device ceiling. The selected 20-capability
+evidence page reached its intentional 200-event output cap, so it remained
+honestly partial rather than being mistaken for complete history.
+
+This long run also exposed two ingest sizing issues. The former 16 MiB logical
+quota reached 48% in roughly half an hour. During an early 14-minute sample,
+42% of comparable HA notifications repeated the preceding projected neutral
+state, predominantly metadata churn rather than a new household observation.
+The HA adapter now suppresses only consecutive equal neutral scalar states,
+the journal defaults to a finite 256 MiB per-bridge quota, and aggregate
+capacity is visible in `validate:home`. A fresh updated 10-minute epoch stayed
+ready for all 75 devices, returned 13 active neutral devices and 291 events
+without activity truncation, retained zero consecutive semantic duplicates,
+and reported about 3% quota use. Both runs retained zero rejections and zero
+history gaps. The larger quota supports the observed seven-day evidence rate;
+it is not a substitute for the still-required governed retention policy.
+
 After every run:
 
 - return to the full runtime Inbox;

@@ -248,8 +248,10 @@ In the run's first 14 post-baseline minutes, 42% of comparable HA state events
 repeated the preceding neutral attributes.
 The HA adapter now suppresses those consecutive semantic duplicates before it
 allocates a canonical envelope, reducing both journal growth and false Agent
-activity without discarding a neutral state change. The continuing one-hour
-checkpoint is the remaining sizing evidence for the next decision.
+activity without discarding a neutral state change. A fresh 10-minute run on
+the updated path retained 291 post-baseline state events with zero consecutive
+semantic duplicates, zero rejections, and zero history gaps; the aggregate
+capacity report showed roughly 3% of the new quota in use.
 
 The larger sizing floor is not retention. Do not silently delete old epochs.
 A reviewed implementation must preserve at least the current
