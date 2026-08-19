@@ -17,6 +17,8 @@
     "./home-rules-tool": "./src/dsh-home-rules-tool.ts",
     "./home-snapshot-tool": "./src/dsh-home-snapshot-tool.ts",
     "./model-reference": "./src/model-reference.ts",
+    "./model-credentials": "./src/model-credentials.ts",
+    "./model-credential-probe": "./src/model-credential-probe.ts",
     "./model-providers": "./src/model-providers.ts"
   },
   "dependencies": {

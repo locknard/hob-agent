@@ -172,6 +172,30 @@ test("selects the corresponding standard model credential and never copies the p
   assert.equal(config.launchEnvironment.get("OPENAI_API_KEY"), undefined);
 });
 
+test("uses an explicit Keychain profile without requiring or snapshotting an environment API key", () => {
+  const vault = { read: async () => "keychain-secret" };
+  const profile = {
+    id: "deepseek:primary",
+    provider: "deepseek",
+    kind: "api_key" as const,
+    secretRef: "keychain:hob-agent/deepseek:primary",
+  };
+  const config = readHomeHubLaunchConfig({
+    HOB_DATA_DIR: "/tmp/hob-agent-launch-test-keychain",
+    HOB_BRIDGES: BRIDGES,
+    HOB_HA_TOKEN: "home-assistant-secret",
+    HOB_MODEL: "deepseek/deepseek-v4-flash",
+  }, { profile, vault });
+
+  assert.deepEqual(config.agent, {
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    profile,
+    vault,
+  });
+  assert.equal(config.launchEnvironment.get("DEEPSEEK_API_KEY"), undefined);
+});
+
 test("fails closed for missing or blank required neutral launch values without echoing values", () => {
   for (const name of ["HOB_DATA_DIR", "HOB_BRIDGES", "HOB_MODEL", "OPENAI_API_KEY"] as const) {
     const env = { ...BASE_ENV, [name]: "   " };

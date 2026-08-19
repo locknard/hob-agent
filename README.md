@@ -53,7 +53,8 @@ export HOB_DATA_DIR="/var/lib/hob-agent"
 export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","config":{"baseUrl":"http://homeassistant.local:8123","authenticationPrincipal":"home-owner"},"credentialRefs":{"access-token":"HOB_HA_TOKEN"}}]'
 export HOB_HA_TOKEN='long-lived-access-token'
 export HOB_MODEL=deepseek/deepseek-v4-flash
-export DEEPSEEK_API_KEY='...'
+# Preferred on macOS: enter without echo; the key is stored in Keychain.
+pnpm credentials:model
 # Optional local review UI (HTTP Basic user is `home`):
 export HOB_INBOX_AUTH_TOKEN='at-least-32-random-characters-kept-local'
 export HOB_INBOX_PORT=8787
@@ -62,9 +63,26 @@ export HOB_OBSERVATION_INTERVAL_MINUTES=360
 export HOB_OBSERVE_ON_START=false
 # Optional bounded SOUL.md, HOME.md, and MEMORY.md household context:
 export HOB_HOME_DIR='/absolute/path/to/private-home'
-# or select the matching OPENAI_API_KEY / ANTHROPIC_API_KEY / MOONSHOT_API_KEY / ZAI_API_KEY
+# Legacy/development fallback: set the matching DEEPSEEK_API_KEY,
+# OPENAI_API_KEY, ANTHROPIC_API_KEY, MOONSHOT_API_KEY, or ZAI_API_KEY.
 pnpm start
 ```
+
+`credentials:model` uses `HOB_DATA_DIR` and the provider selected by
+`HOB_MODEL`. Re-running it safely rotates that provider's primary key. Only a
+non-secret profile locator and selection order are written to the private
+`auth-profiles.json` (`0600`); the key itself is sent through no-echo stdin to
+macOS Keychain and is never placed in command arguments or repository files.
+The selected Keychain profile takes precedence over ambient API-key variables.
+An explicit paid connection check can then be run without starting a bridge or
+persisting model content:
+
+```sh
+pnpm credentials:test
+```
+
+It sends the minimal DSH request and prints only model, classified status, and
+latency metadata.
 
 Before enabling the Agent or observation schedule, the same bridge and data
 configuration can be validated without `HOB_MODEL` or a model API key:

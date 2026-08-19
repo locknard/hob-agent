@@ -1,5 +1,8 @@
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+
+import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
+import type { SecretVault } from "@hob-agent/agent-layer/model-credentials";
 
 import {
   startHomeAgentProcess,
@@ -13,6 +16,10 @@ import {
   readHomeHubLaunchConfig,
   type LaunchEnvironment,
 } from "./launch-config.js";
+import {
+  loadSelectedModelCredential,
+  type SelectedModelCredential,
+} from "./model-credential-profile.js";
 
 export interface HomeHubMainOptions {
   readonly env?: LaunchEnvironment;
@@ -22,6 +29,8 @@ export interface HomeHubMainOptions {
   readonly shutdownTimeoutMs?: number;
   /** Test seam; production uses the repository's DSH composition root. */
   readonly createRuntime?: StartHomeHubProcessOptions["createRuntime"];
+  /** Test seam; production resolves selected profiles from macOS Keychain. */
+  readonly modelCredentialVault?: SecretVault;
 }
 
 export interface HomeHubProcessOptions {
@@ -35,8 +44,9 @@ export interface HomeHubProcessOptions {
 /** Converts the explicit launch environment into the root composition input. */
 export function createHomeHubProcessOptions(
   environment: LaunchEnvironment,
+  selectedCredential?: SelectedModelCredential,
 ): HomeHubProcessOptions {
-  const config = readHomeHubLaunchConfig(environment);
+  const config = readHomeHubLaunchConfig(environment, selectedCredential);
   return {
     runtime: {
       homeWorld: {
@@ -63,9 +73,32 @@ export function createHomeHubProcessOptions(
   };
 }
 
+/** Resolves the private selected profile, with env credentials as legacy fallback. */
+export async function resolveHomeHubProcessOptions(
+  environment: LaunchEnvironment,
+  vault?: SecretVault,
+): Promise<HomeHubProcessOptions> {
+  const dataDirectory = environment.HOB_DATA_DIR?.trim();
+  const modelReference = environment.HOB_MODEL?.trim();
+  if (dataDirectory === undefined || !isAbsolute(dataDirectory) || !modelReference) {
+    return createHomeHubProcessOptions(environment);
+  }
+  let provider;
+  try {
+    provider = parseModelReference(modelReference).provider;
+  } catch {
+    return createHomeHubProcessOptions(environment);
+  }
+  const selectedCredential = await loadSelectedModelCredential(dataDirectory, provider, vault);
+  return createHomeHubProcessOptions(environment, selectedCredential);
+}
+
 /** Starts the one executable Home Hub process after validating its launch env. */
 export async function main(options: HomeHubMainOptions = {}): Promise<RunningHomeHubProcess> {
-  const processOptions = createHomeHubProcessOptions(options.env ?? process.env);
+  const processOptions = await resolveHomeHubProcessOptions(
+    options.env ?? process.env,
+    options.modelCredentialVault,
+  );
   const lifecycle = {
     signalProcess: options.signalProcess,
     forceExit: options.forceExit,

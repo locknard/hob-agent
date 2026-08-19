@@ -35,11 +35,24 @@ replay、取消和应用归因头；hob-agent 的 `mountDshHomeAgent` 只负责�
 
 ## 凭据与诊断
 
-选中的 API-key profile 通过 `DshProfileCredentialProvider` 将标准 credential alias 映射
-到唯一 SecretRef，并在每次操作重新读取。API-key profile 可引用显式 allowlist 的
-`env:NAME`，或 macOS
-`keychain:service/account`；其 locator/order 位于权限 `0600` 的本地配置，SQLite 只保存
-非 secret 的状态与健康信息。
+正式启动入口会从 `HOB_DATA_DIR/auth-profiles.json` 加载该 provider 显式排序中的第一个
+profile；存在有效选择时不读取相应的环境 API key，不存在选择时才兼容旧的环境变量路径。
+在 macOS 上设置或轮换当前 `HOB_MODEL` 对应的 primary key：
+
+```sh
+pnpm credentials:model
+```
+
+该命令交互输入不回显，secret 通过 stdin 写入 Keychain；命令参数、JSON 配置和日志中都
+不包含 key。选中的 API-key profile 通过 `DshProfileCredentialProvider` 将标准 credential alias 映射
+到唯一 SecretRef，并在每次操作重新读取。底层 API-key profile contract 仍可表达显式
+allowlist 的 `env:NAME`，但正式持久化选择只接受 macOS
+`keychain:service/account`；环境变量只作为未配置 profile 时的兼容回退。locator/order 位于
+权限 `0600` 的本地配置，SQLite 只保存非 secret 的状态与健康信息。
+
+`pnpm credentials:test` 通过相同的 profile-scoped DSH runtime 发起一次最小付费请求，
+立即销毁临时 Cordis fiber，只输出 model、归类后的 status 与 latency；不保存 prompt、
+response 或 secret。
 
 Claude OAuth 的 provider-neutral login/logout seam、Keychain token store 和生命周期元数据
 已有代码路径。OAuth adapter 与 probe 必须注入 `PersistedAuthProfileCoordinator`（或

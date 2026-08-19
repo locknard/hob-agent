@@ -19,6 +19,7 @@ import type { BridgeAwareCredentialSource } from "./bridge-credentials.js";
 import { createBuiltinBridgeCatalog } from "./bridge-bundle.js";
 import type { BridgeCatalog } from "./bridge-catalog.js";
 import type { BridgeConfigEntry } from "./bridge-registry.js";
+import type { SelectedModelCredential } from "./model-credential-profile.js";
 
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const SECRET_CONFIG_KEY_PATTERN = /token|secret|password|private.?key|credential/i;
@@ -49,6 +50,8 @@ export interface HomeHubLaunchConfig {
   readonly agent: {
     readonly provider: SupportedModelProvider;
     readonly model: string;
+    readonly profile?: SelectedModelCredential["profile"];
+    readonly vault?: SelectedModelCredential["vault"];
   };
   readonly inboxHttp?: {
     readonly port: number;
@@ -113,7 +116,10 @@ export function readHomeWorldLaunchConfig(environment: LaunchEnvironment): HomeW
  * bridge identity, adapter type, non-secret config, and env-name references;
  * the referenced values are resolved later through the bridge-scoped provider.
  */
-export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHubLaunchConfig {
+export function readHomeHubLaunchConfig(
+  environment: LaunchEnvironment,
+  selectedCredential?: SelectedModelCredential,
+): HomeHubLaunchConfig {
   const world = readHomeWorldLaunchConfig(environment);
   const modelReference = requiredValue(environment, "HOB_MODEL");
 
@@ -124,26 +130,33 @@ export function readHomeHubLaunchConfig(environment: LaunchEnvironment): HomeHub
     throw new Error("Invalid HOB_MODEL; expected a supported provider/model reference");
   }
 
+  if (selectedCredential !== undefined && selectedCredential.profile.provider !== model.provider) {
+    throw new Error("Selected credential profile does not match HOB_MODEL provider");
+  }
   const credentialEnv = providerSetup(model.provider).credentialEnv;
-  const apiKey = requiredValue(environment, credentialEnv).trim();
+  const launchEnvironment = selectedCredential === undefined
+    ? createLaunchEnvironmentSnapshot([{
+        source: "process",
+        values: { [credentialEnv]: requiredValue(environment, credentialEnv).trim() },
+      }])
+    : createLaunchEnvironmentSnapshot([]);
   const inboxHttp = parseInboxHttp(environment.HOB_INBOX_AUTH_TOKEN, environment.HOB_INBOX_PORT);
   const householdDirectory = parseHouseholdDirectory(environment.HOB_HOME_DIR);
   const observation = parseObservationSchedule(
     environment.HOB_OBSERVATION_INTERVAL_MINUTES,
     environment.HOB_OBSERVE_ON_START,
   );
-  const launchEnvironment = createLaunchEnvironmentSnapshot([{
-    source: "process",
-    values: { [credentialEnv]: apiKey },
-  }]);
-
   return {
     ...world,
     proposalPath: join(world.dataDirectory, "proposals.sqlite"),
     observationAuditPath: join(world.dataDirectory, "observation-audit.sqlite"),
     sessionPath: join(world.dataDirectory, "dsh-sessions.sqlite"),
     ...(householdDirectory === undefined ? {} : { householdDirectory }),
-    agent: { provider: model.provider, model: model.modelId },
+    agent: {
+      provider: model.provider,
+      model: model.modelId,
+      ...(selectedCredential === undefined ? {} : selectedCredential),
+    },
     ...(inboxHttp === undefined ? {} : { inboxHttp }),
     ...(observation === undefined ? {} : { observation }),
     launchEnvironment,

@@ -7,6 +7,8 @@
     "start": "tsx packages/hub/src/main.ts",
     "validate:home": "tsx packages/hub/src/home-validation.ts",
     "observe:home": "tsx packages/hub/src/home-observe-once.ts",
+    "credentials:model": "tsx packages/hub/src/model-credential-setup.ts",
+    "credentials:test": "tsx packages/hub/src/model-credential-probe.ts",
     "draft:home-map": "tsx packages/hub/src/home-map-draft.ts",
     "inbox:home": "tsx packages/hub/src/home-inbox.ts",
     "check": "pnpm check:types && pnpm check:instructions",

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import type { SecretVault } from "./secret-vault.js";
 import { parseSecretRef } from "./secret-ref.js";
@@ -53,6 +54,21 @@ export async function runMacOSSecurityCommand(
   args: readonly string[],
   options?: { input?: string },
 ): Promise<KeychainCommandResult> {
+  const operation = args[0] === "add-generic-password"
+    ? "write"
+    : args[0] === "find-generic-password" && args.includes("-w")
+      ? "read"
+      : args[0] === "delete-generic-password"
+        ? "delete"
+        : undefined;
+  if (operation !== undefined) {
+    const service = optionValue(args, "-s");
+    const account = optionValue(args, "-a");
+    if (service === undefined || account === undefined || (operation === "write" && options?.input === undefined)) {
+      return { ok: false, stdout: "" };
+    }
+    return runKeychainHelper(operation, service, account, options?.input);
+  }
   return new Promise((resolve) => {
     let stdout = "";
     const child = spawn("security", [...args], {
@@ -66,6 +82,50 @@ export async function runMacOSSecurityCommand(
     child.once("close", (code) => resolve({ ok: code === 0, stdout: code === 0 ? stdout : "" }));
     child.stdin.end(options?.input === undefined ? undefined : `${options.input}\n`);
   });
+}
+
+function runKeychainHelper(
+  operation: "read" | "write" | "delete",
+  service: string,
+  account: string,
+  secret?: string,
+): Promise<KeychainCommandResult> {
+  return new Promise((resolveResult) => {
+    const helper = fileURLToPath(new URL("./keychain-write.swift", import.meta.url));
+    const child = spawn("/usr/bin/swift", [helper, operation, service, account], {
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+      shell: false,
+    });
+    let settled = false;
+    let stdout = "";
+    const timeout = setTimeout(() => {
+      child.kill();
+      settle(false);
+    }, 30_000);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (Buffer.byteLength(stdout) > 16_384) {
+        child.kill();
+        settle(false);
+      }
+    });
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolveResult({ ok, stdout: ok ? stdout : "" });
+    };
+    child.once("error", () => settle(false));
+    child.once("close", (code) => settle(code === 0));
+    child.stdin.end(secret);
+  });
+}
+
+function optionValue(args: readonly string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  return index < 0 ? undefined : args[index + 1];
 }
 
 function parseReference(reference: string): { service: string; account: string } {

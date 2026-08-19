@@ -57,6 +57,23 @@ export class AuthProfileConfigStore {
     });
   }
 
+  /** Publishes a profile and selects it in one private-file transaction. */
+  async upsertAndSelect(profile: AuthProfile): Promise<void> {
+    await this.enqueue(async () => {
+      const config = await this.load();
+      const profiles = config.profiles.filter((entry) => entry.id !== profile.id);
+      profiles.push(copyProfile(profile));
+      const prior = config.order[profile.provider] ?? [];
+      await this.save({
+        profiles,
+        order: {
+          ...config.order,
+          [profile.provider]: [profile.id, ...prior.filter((id) => id !== profile.id)],
+        },
+      });
+    });
+  }
+
   /** Removes a profile locator and every explicit ordering reference to it. */
   async remove(profileId: string): Promise<void> {
     await this.enqueue(async () => {

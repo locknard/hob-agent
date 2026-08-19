@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { Context } from "@deepseek-ai/cordis";
@@ -6,7 +9,9 @@ import { Context } from "@deepseek-ai/cordis";
 import {
   createHomeHubProcessOptions,
   main,
+  resolveHomeHubProcessOptions,
 } from "./main.js";
+import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
 
 const ENV = {
   HOB_DATA_DIR: "/tmp/hob-agent-main-test",
@@ -63,6 +68,29 @@ test("forwards an explicit observation schedule into the Hub runtime", () => {
     HOB_OBSERVE_ON_START: "false",
   });
   assert.deepEqual(options.runtime.observation, { intervalMinutes: 180, runOnStart: false });
+});
+
+test("production process resolution prefers the selected private profile over ambient credentials", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-profile-"));
+  const secrets = new Map<string, string>();
+  const vault = {
+    read: async (reference: string) => secrets.get(reference),
+    write: async (reference: string, value: string) => { secrets.set(reference, value); },
+    delete: async (reference: string) => { secrets.delete(reference); },
+  };
+  await provisionPrimaryModelApiKey(dataDirectory, "deepseek", "private-key", vault);
+
+  const options = await resolveHomeHubProcessOptions({
+    ...ENV,
+    HOB_DATA_DIR: dataDirectory,
+    HOB_MODEL: "deepseek/deepseek-v4-flash",
+    OPENAI_API_KEY: undefined,
+    DEEPSEEK_API_KEY: undefined,
+  }, vault);
+
+  assert.equal(options.runtime.agent.profile?.id, "deepseek:primary");
+  assert.equal(options.runtime.agent.vault, vault);
+  assert.equal(options.runtime.launchEnvironment.get("DEEPSEEK_API_KEY"), undefined);
 });
 
 test("importing the executable module does not install process signal handlers", async () => {

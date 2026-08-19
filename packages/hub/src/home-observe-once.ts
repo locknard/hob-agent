@@ -6,7 +6,7 @@ import {
   type HomeAgentRuntime,
   type HomeAgentRuntimeOptions,
 } from "./home-agent-runtime.js";
-import { createHomeHubProcessOptions } from "./main.js";
+import { resolveHomeHubProcessOptions } from "./main.js";
 import {
   isHomeWorldReady,
   requestGovernedHomeObservation,
@@ -17,6 +17,7 @@ import type { LaunchEnvironment } from "./launch-config.js";
 import type { ObservationAuditStore } from "./observation-audit-store.js";
 import type { ObservationRunMetrics } from "./observation-audit-store.js";
 import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
+import type { SecretVault } from "@hob-agent/agent-layer/model-credentials";
 
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_READY_POLL_MS = 250;
@@ -37,6 +38,8 @@ export interface ObserveHomeOptions {
   readonly wait?: (delayMs: number) => Promise<void>;
   /** Test seam; production mounts the canonical HomeAgentRuntime. */
   readonly createRuntime?: (options: HomeAgentRuntimeOptions) => OneShotRuntime;
+  /** Test seam; production resolves selected profiles from macOS Keychain. */
+  readonly modelCredentialVault?: SecretVault;
 }
 
 export type ObserveHomeReport =
@@ -64,7 +67,10 @@ export async function observeHomeEnvironment(
     600_000,
     "observation timeout",
   );
-  const configured = createHomeHubProcessOptions(environment).runtime;
+  const configured = (await resolveHomeHubProcessOptions(
+    environment,
+    options.modelCredentialVault,
+  )).runtime;
   const { observation: _observation, inboxHttp: _inboxHttp, ...runtimeOptions } = configured;
   const runtime = (options.createRuntime ?? defaultRuntimeFactory)(runtimeOptions);
   const wait = options.wait ?? ((delayMs) => new Promise<void>((resolveWait) => setTimeout(resolveWait, delayMs)));

@@ -1,9 +1,14 @@
 import type { ProfileMetadataWriter } from "./api-key-profile-provisioner.js";
+import { Context } from "@deepseek-ai/cordis";
+import LlmRuntime from "@deepseek-ai/dsh-llm";
+import * as PiAiPlugin from "@deepseek-ai/dsh-llm-pi-ai";
 import type { AuthProfile } from "./auth-profiles.js";
 import type { WritableSecretVault } from "./macos-keychain-secret-vault.js";
 import { type SupportedModelProvider } from "./model-providers.js";
 import { ProviderProbePolicy } from "./provider-probe-policy.js";
 import { probeLiveProvider, type LiveProbeModels } from "./provider-live-probe.js";
+import { DshProfileCredentialProvider } from "./dsh-profile-credential-provider.js";
+import { providerSetup } from "./model-providers.js";
 
 const defaultProbePolicy = new ProviderProbePolicy();
 
@@ -34,6 +39,38 @@ export interface ProfileLiveProbeRuntimeOptions {
   profile: AuthProfile;
   vault: WritableSecretVault;
   metadata?: ProfileMetadataWriter;
+}
+
+/** Mounts and disposes the official profile-scoped DSH provider for one probe. */
+export async function probeDshApiKeyProfile(options: {
+  readonly profile: AuthProfile;
+  readonly vault: WritableSecretVault;
+  readonly modelId: string;
+  readonly signal?: AbortSignal;
+}) {
+  const provider = options.profile.provider as SupportedModelProvider;
+  const setup = providerSetup(provider);
+  if (!options.profile.secretRef) throw new Error("Selected API-key profile is missing a secret reference");
+  const ctx = new Context();
+  try {
+    await ctx.plugin(DshProfileCredentialProvider, {
+      references: { [setup.credentialEnv]: options.profile.secretRef },
+      vault: options.vault,
+    });
+    await ctx.plugin(LlmRuntime);
+    await ctx.plugin(PiAiPlugin, {
+      providers: { [setup.runtimeProviderId]: { apiKeyEnv: setup.credentialEnv } },
+    });
+    return await probeProfileConnection({
+      profile: options.profile,
+      vault: options.vault,
+      modelId: options.modelId,
+      runtime: ctx.llm,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+  } finally {
+    await ctx.fiber.dispose();
+  }
 }
 
 /** Executes a paid live probe only through one profile-scoped DSH runtime. */
