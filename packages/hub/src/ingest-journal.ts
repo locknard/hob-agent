@@ -62,7 +62,7 @@ export interface JournalLiveStateActivityQuery {
 export interface JournalLiveStateActivityPage {
   readonly activity: readonly {
     readonly nativeId: string;
-    readonly nativeInstanceId: string;
+    readonly nativeInstanceIds: readonly string[];
     readonly eventCount: number;
     readonly latestObservedAt: string;
   }[];
@@ -345,15 +345,15 @@ export class SqliteIngestJournal implements IngestJournal {
     validateLiveStateActivityQuery(query);
     const rows = this.db.prepare(`SELECT
         json_extract(envelope_json, '$.event.state.nativeId') AS native_id,
-        json_extract(envelope_json, '$.event.state.nativeInstanceId') AS native_instance_id,
+        json_group_array(DISTINCT json_extract(envelope_json, '$.event.state.nativeInstanceId')) AS native_instance_ids,
         COUNT(*) AS event_count,
         MAX(received_at) AS latest_observed_at
       FROM ingest_events
       WHERE bridge_id = ? AND epoch_id = ? AND seq > ? AND kind = 'state'
         AND julianday(received_at) >= julianday(?)
         AND julianday(received_at) <= julianday(?)
-      GROUP BY native_id, native_instance_id
-      ORDER BY event_count DESC, latest_observed_at DESC, native_id ASC, native_instance_id ASC
+      GROUP BY native_id
+      ORDER BY event_count DESC, latest_observed_at DESC, native_id ASC
       LIMIT ?`).all(
       query.bridgeId,
       query.epochId,
@@ -365,7 +365,9 @@ export class SqliteIngestJournal implements IngestJournal {
     return {
       activity: rows.slice(0, query.limit).map((row) => ({
         nativeId: String(row.native_id),
-        nativeInstanceId: String(row.native_instance_id),
+        nativeInstanceIds: (JSON.parse(String(row.native_instance_ids)) as unknown[])
+          .map(String)
+          .sort((left, right) => left.localeCompare(right)),
         eventCount: Number(row.event_count),
         latestObservedAt: String(row.latest_observed_at),
       })),

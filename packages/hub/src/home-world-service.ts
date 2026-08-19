@@ -719,14 +719,19 @@ export class HomeWorldService extends Service {
             truncated = true;
           }
           for (const item of page.activity) {
-            const capability = capabilitiesByBinding.get(activityBindingKey(
-              bridgeId,
-              item.nativeId,
-              item.nativeInstanceId,
-            ));
-            if (capability === undefined) continue;
-            const aggregate = aggregates.get(capability.hwId) ?? {
-              hwId: capability.hwId,
+            const capabilities = item.nativeInstanceIds.flatMap((nativeInstanceId) => {
+              const capability = capabilitiesByBinding.get(activityBindingKey(
+                bridgeId,
+                item.nativeId,
+                nativeInstanceId,
+              ));
+              return capability === undefined ? [] : [capability];
+            });
+            const hwIds = new Set(capabilities.map((capability) => capability.hwId));
+            if (hwIds.size !== 1) continue;
+            const hwId = [...hwIds][0]!;
+            const aggregate = aggregates.get(hwId) ?? {
+              hwId,
               eventCount: 0,
               latestObservedAt: item.latestObservedAt,
               semanticKinds: new Set<CapabilitySemanticKind>(),
@@ -735,8 +740,10 @@ export class HomeWorldService extends Service {
             if (item.latestObservedAt > aggregate.latestObservedAt) {
               aggregate.latestObservedAt = item.latestObservedAt;
             }
-            if (capability.semanticKind !== undefined) aggregate.semanticKinds.add(capability.semanticKind);
-            aggregates.set(capability.hwId, aggregate);
+            for (const capability of capabilities) {
+              if (capability.semanticKind !== undefined) aggregate.semanticKinds.add(capability.semanticKind);
+            }
+            aggregates.set(hwId, aggregate);
           }
         } catch {
           reasons.push("journal_query_unavailable");

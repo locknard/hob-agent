@@ -26,6 +26,13 @@ are ordered by event count, latest observation time, then opaque Hub identity.
 The query has a bounded lookback and reports per-bridge baseline/coverage gaps
 and truncation.
 
+The journal applies the result limit to native devices, not to capability rows.
+It aggregates every active capability belonging to each selected native device
+before the Hub merges bridge identities. A capability-rich thermostat therefore
+cannot consume several result slots or make a 12-device result look truncated
+against a 50-device limit. The final Hub merge still enforces the same 50-device
+ceiling and reports truncation honestly when that ceiling is actually exceeded.
+
 Because the minimum lookback is one hour, a newly started epoch reports
 `window_before_baseline` until it has observed the entire requested interval.
 Post-baseline events are still returned, but the unobserved prefix is unknown,

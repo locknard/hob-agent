@@ -152,7 +152,7 @@ test("aggregates bounded post-baseline state activity without returning values",
 
   assert.deepEqual(page.activity, [{
     nativeId: "lamp",
-    nativeInstanceId: "main",
+    nativeInstanceIds: ["main"],
     eventCount: 2,
     latestObservedAt: "2026-08-19T03:00:00.000Z",
   }]);
@@ -166,5 +166,51 @@ test("aggregates bounded post-baseline state activity without returning values",
     until: "2026-08-19T04:00:00.000Z",
     limit: 51,
   }));
+  journal.close();
+});
+
+test("activity limits native devices rather than truncating their active capabilities", () => {
+  const journal = new SqliteIngestJournal(":memory:");
+  append(journal, 1, "2026-08-19T00:00:00.000Z", {
+    kind: "state",
+    state: {
+      nativeId: "device",
+      nativeInstanceId: "baseline",
+      attrs: { state: "baseline" },
+      time: { sourceTsQuality: "none" },
+      origin: "observed",
+    },
+  });
+  journal.markConsistent("bridge-a", { epochId: "epoch-a", lastSeq: 1 });
+  for (const [seq, nativeInstanceId] of [[2, "power"], [3, "brightness"]] as const) {
+    append(journal, seq, `2026-08-19T0${seq}:00:00.000Z`, {
+      kind: "state",
+      state: {
+        nativeId: "device",
+        nativeInstanceId,
+        attrs: { state: `private-${seq}` },
+        time: { sourceTsQuality: "none" },
+        origin: "observed",
+      },
+    });
+  }
+
+  const page = journal.queryLiveStateActivity({
+    bridgeId: "bridge-a",
+    epochId: "epoch-a",
+    afterSeq: 1,
+    since: "2026-08-19T00:30:00.000Z",
+    until: "2026-08-19T04:00:00.000Z",
+    limit: 1,
+  });
+
+  assert.deepEqual(page.activity, [{
+    nativeId: "device",
+    nativeInstanceIds: ["brightness", "power"],
+    eventCount: 2,
+    latestObservedAt: "2026-08-19T03:00:00.000Z",
+  }]);
+  assert.equal(page.truncated, false);
+  assert.equal(JSON.stringify(page).includes("private"), false);
   journal.close();
 });
