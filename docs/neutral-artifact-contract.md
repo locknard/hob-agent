@@ -13,9 +13,10 @@
 > 测试。Artifact Registry 的只读查询已由 HomeArtifactService 接入生产；unmounted
 > HomeWorldAuthorityBindingSource、ArtifactRiskConflictSource 与 RiskProducer core 已实现，
 > unmounted private coordinator 已能顺序生成并交叉校验完整 receipt；fresh current-catalog
-> conflict refresh 和 production mutation wiring 尚未接入。
-> `ActionAuthorityConfiguration` 的 Hub-private projection 现在要求 `configIdentity` +
-> `configRevision`；compiler、dry-run、approval ticket 和执行器仍未实现。
+> conflict capture、稳定 world cut、纯 neutral compiler 与无写入 dry-run core 已实现并保持
+> unmounted。`ActionAuthorityConfiguration` 的 Hub-private projection 现在要求
+> `configIdentity` + `configRevision`；compile/dry-run 的 durable result registry、显式 Hub
+> coordinator 和只读 Inbox projection 尚未接入，approval ticket 与执行器仍未实现。
 >
 > 本文定义 M3b 之后第一版（下文称 Artifact Phase 1）的最小、可持久化、不可执行 artifact
 > 形状。它复用已有 proposal v1、HomeWorld、证据和 Bridge v6.3 语义；不修改当前
@@ -504,6 +505,32 @@ SQLite 的伪原子事务。每一个 immutable row 与对应 audit 仍在所属
 approval/compile 状态，也不会在启动时自动继续；只允许显式 Hub command 通过 producer-owned
 idempotency 重试。未来第一次加入异步远端副作用时，再单独设计 durable outbox/claim，而不
 把当前本地 assessment 链伪装成一次跨库事务。
+
+### 5.6 M3c result persistence 与协调边界
+
+Compile 与 dry-run 结果继续属于 Artifact Registry，但使用一个统一、append-only 的
+`artifact_compiler_results` 表，以 `kind` 区分 `compile-attestation` 与
+`dry-run-attestation`。每行保存完整 `ArtifactRef`、input identity、唯一 result ID、canonical
+payload 和 Registry `sequence`；所有 latest 查询按 sequence，而不是不可信时间排序。查询必须
+始终由完整 artifact ref/hash 限定，不能拿同 artifact ID 的新 revision 结果替代旧 revision。
+
+相同 kind + artifact ref + input identity 只能对应同一个确定性结果：语义重放返回原行且不增加
+audit；同一 input identity 对应不同 payload/result ID 是 `revision_conflict`。每次写入 result
+row、现有 `artifact_operations` 幂等指针和一条 `compile_recorded`/`dry_run_recorded` audit，
+必须处于同一个 SQLite transaction。读取时重新解析严格 JSON，并交叉验证 row、payload、
+artifact、assessment、compile dependency、operation 与 audit；缺失或篡改一律 fail closed。
+
+Registry 从这一 schema 开始使用显式 `PRAGMA user_version`。全新空库直接初始化为当前版本；
+旧 `user_version=0` 数据库只有在 M3b 基线表/列通过验证后才能原子迁移；高于实现版本或声明为
+当前版本却缺少表/列的数据库直接拒绝打开。迁移使用 `BEGIN IMMEDIATE`，失败整体 rollback，
+不能用 `CREATE IF NOT EXISTS` 掩盖已声明版本的损坏。
+
+M3c 使用新的异步 `ArtifactCompilationCoordinator`，不扩展同步的 M3b mutation coordinator。
+它只接受 exact ArtifactRef，并在 Hub 内依次重读 draft、latest evidence/risk/authority、执行一次
+evidence-bound current-conflict capture、生成稳定 world cut、纯编译、纯 dry-run，最后分别持久化
+compile 与 dry-run。异步 capture/compiler 期间不持有 SQLite transaction；compile row 已成功而
+dry-run 写入失败时保留 compile row，后续显式 command 以确定性幂等 key 补写 dry-run。此阶段不
+增加 outbox、启动自动恢复、生产 mount、bridge control、credential resolve、ticket 或 executor。
 
 ## 6. Compiler input/output（M3c seam）
 
