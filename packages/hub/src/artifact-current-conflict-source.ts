@@ -1,7 +1,18 @@
 import {
   canonicalAssessmentInput,
   computeConflictInputIdentity,
+  parseArtifactEvidenceAttestation,
+  type ArtifactEvidenceAttestation,
 } from "./artifact-assessments.js";
+import {
+  createNeutralConflictInput,
+  createNeutralConflictResult,
+  computeNeutralForeignCatalogIdentity,
+  type NeutralConflictInput,
+  type NeutralConflictResult,
+  type NeutralCurrentConflict,
+  type NeutralWatermark,
+} from "./artifact-compiler-contract.js";
 import type { ArtifactRegistryEntry } from "./artifact-registry.js";
 import type {
   ArtifactRiskConflictFinding,
@@ -49,7 +60,25 @@ export interface ArtifactCurrentConflictHomeWorldPort {
 
 /** The exact approved Proposal source used to read title, summary, and intent. */
 export interface ArtifactCurrentConflictCapturePort {
-  readonly capture: (input: ArtifactRef) => Promise<ArtifactRiskConflictPort>;
+  readonly capture: (input: {
+    readonly artifact: ArtifactRef;
+    readonly evidence: ArtifactEvidenceAttestation;
+  }) => Promise<ArtifactCurrentConflictCapture>;
+}
+
+/**
+ * The synchronous result of one stable current-rule capture. The compile cut
+ * is deliberately separate from the assessment port so an unavailable
+ * capture cannot be mistaken for an empty current catalog.
+ */
+export interface ArtifactCurrentConflictCapture extends ArtifactRiskConflictPort {
+  readonly compileCut: () => ArtifactCurrentConflictCompileCut | undefined;
+}
+
+export interface ArtifactCurrentConflictCompileCut {
+  readonly currentConflict: NeutralCurrentConflict;
+  readonly foreignRuleChecks: readonly NeutralConflictInput[];
+  readonly foreignCatalogIdentity: string;
 }
 
 /** Read-only exact draft Registry seam used during capture. */
@@ -123,9 +152,9 @@ interface ExistingConflict {
  * Hub-private, unmounted asynchronous current-rule capture.
  *
  * Capture owns the only asynchronous catalog read. It returns a synchronous
- * immutable conflict port bound to one exact ArtifactRef, derived capability
- * scope, and a stable HomeWorld/catalog cut. It has no bridge, control,
- * credential, network, or mutation capability.
+ * immutable conflict port bound to one exact ArtifactRef, complete evidence,
+ * derived capability scope, and a stable HomeWorld/catalog cut. It has no
+ * bridge, control, credential, network, or mutation capability.
  */
 export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCapturePort {
   private readonly proposals: ApprovedProposalSource;
@@ -160,14 +189,22 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
     this.existing = existing;
   }
 
-  /** Capture one exact ArtifactRef and return its immutable synchronous port. */
-  async capture(input: ArtifactRef): Promise<ArtifactRiskConflictPort> {
-    const requestedRef = parseArtifactRef(input);
+  /** Capture one exact ArtifactRef/evidence pair and return its immutable synchronous port. */
+  async capture(input: {
+    readonly artifact: ArtifactRef;
+    readonly evidence: ArtifactEvidenceAttestation;
+  }): Promise<ArtifactCurrentConflictCapture> {
+    const requestedInput = parseCaptureInput(input);
+    const requestedRef = requestedInput.artifact;
+    const evidence = requestedInput.evidence;
     const draft = this.readExactDraft(requestedRef);
     if (draft === undefined) return unavailablePort(requestedRef, []);
 
     const capabilityIds = capabilityRefsFromContent(draft.content);
     if (capabilityIds.length > MAX_CAPABILITY_IDS || capabilityIds.some((id) => !boundedNeutralId(id))) {
+      return unavailablePort(requestedRef, capabilityIds);
+    }
+    if (!validateEvidenceBindings(evidence, requestedRef, draft, capabilityIds)) {
       return unavailablePort(requestedRef, capabilityIds);
     }
 
@@ -180,7 +217,7 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
     } catch {
       return unavailablePort(requestedRef, capabilityIds);
     }
-    const before = collectWorldCut(beforeSnapshot, capabilityIds);
+    const before = collectWorldCut(beforeSnapshot, capabilityIds, evidence.watermarks);
     if (before === undefined) return unavailablePort(requestedRef, capabilityIds);
 
     let rawCatalogs: readonly HomeWorldForeignRuleCatalog[];
@@ -196,7 +233,7 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
     } catch {
       return unavailablePort(requestedRef, capabilityIds);
     }
-    const after = collectWorldCut(afterSnapshot, capabilityIds);
+    const after = collectWorldCut(afterSnapshot, capabilityIds, evidence.watermarks);
     if (after === undefined || before.fingerprint !== after.fingerprint) {
       return unavailablePort(requestedRef, capabilityIds);
     }
@@ -207,34 +244,61 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
     const existing = this.readExisting(requestedRef, capabilityIds);
     if (existing === undefined) return unavailablePort(requestedRef, capabilityIds);
 
-    const currentFindings = catalogs.flatMap((catalog) => catalog.rules.flatMap((rule) => {
-      if (!hasTextOverlap(rule.name, approved)) return [];
-      let reference: string;
-      try {
-        reference = computeConflictInputIdentity({
-          kind: "foreign-rule-reference",
-          bridgeId: catalog.bridgeId,
-          ruleRef: rule.ruleRef,
-        });
-      } catch {
-        return [];
-      }
-      return [{
-        kind: "foreign_rule" as const,
-        severity: "warning" as const,
-        reason: "possible_overlap" as const,
-        reference,
-      }];
+    const currentFindingsByBridge = catalogs.map((catalog) => ({
+      bridgeId: catalog.bridgeId,
+      findings: deduplicateFindings(catalog.rules.flatMap((rule) => {
+        if (!hasTextOverlap(rule.name, approved)) return [];
+        let reference: string;
+        try {
+          reference = computeConflictInputIdentity({
+            kind: "foreign-rule-reference",
+            bridgeId: catalog.bridgeId,
+            ruleRef: rule.ruleRef,
+          });
+        } catch {
+          return [];
+        }
+        return [{
+          kind: "foreign_rule" as const,
+          severity: "warning" as const,
+          reason: "possible_overlap" as const,
+          reference,
+        }];
+      })),
     }));
+    const currentFindings = currentFindingsByBridge.flatMap(({ findings }) => findings);
 
     const findings = deduplicateFindings([...existing.findings, ...currentFindings]);
     if (findings.length > MAX_FINDINGS) return unavailablePort(requestedRef, capabilityIds);
+
+    let foreignRuleChecks: readonly NeutralConflictInput[];
+    let foreignCatalogIdentity: string;
+    try {
+      foreignRuleChecks = catalogs.map((catalog) => {
+        const bridge = before.bridges.find((item) => item.bridgeId === catalog.bridgeId);
+        const bridgeFindings = currentFindingsByBridge.find((item) => item.bridgeId === catalog.bridgeId);
+        if (bridge === undefined || bridgeFindings === undefined) throw new Error("Current bridge cut is missing");
+        return createNeutralConflictInput({
+          bridgeId: catalog.bridgeId,
+          epochId: catalog.epochId,
+          watermark: semanticWatermark(bridge),
+          catalogIdentity: catalog.identity,
+          status: "current",
+          findings: bridgeFindings.findings,
+        } as NeutralConflictInput);
+      });
+      foreignCatalogIdentity = computeNeutralForeignCatalogIdentity(foreignRuleChecks);
+    } catch {
+      return unavailablePort(requestedRef, capabilityIds);
+    }
 
     let sourceIdentity: string;
     try {
       sourceIdentity = computeConflictInputIdentity({
         artifact: requestedRef,
         hwCapabilityIds: capabilityIds,
+        evidenceAttestationId: evidence.attestationId,
+        evidenceInputIdentity: evidence.inputIdentity,
         existingResult: existing.result,
         approvedText: {
           title: approved.title,
@@ -245,9 +309,6 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
           bridgeId: bridge.bridgeId,
           epochId: bridge.watermark.epochId,
           lastSeq: bridge.watermark.lastSeq,
-          ...(bridge.watermark.lastSyncCompleteAt === undefined
-            ? {}
-            : { lastSyncCompleteAt: bridge.watermark.lastSyncCompleteAt }),
           freshness: bridge.freshness,
           gapCount: bridge.gapCount,
         })),
@@ -259,15 +320,24 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
           // rows remain covered without exceeding assessment array budgets.
           catalogIdentity: catalog.identity,
         })),
+        foreignCatalogIdentity,
       });
     } catch {
       return unavailablePort(requestedRef, capabilityIds);
     }
 
+    const result = composeResult(existing.result, findings, sourceIdentity);
+    let compileCut: ArtifactCurrentConflictCompileCut;
+    try {
+      compileCut = makeCompileCut(result, sourceIdentity, foreignRuleChecks, foreignCatalogIdentity);
+    } catch {
+      return unavailablePort(requestedRef, capabilityIds);
+    }
     return makePort(
       requestedRef,
       capabilityIds,
-      composeResult(existing.result, findings, sourceIdentity),
+      result,
+      compileCut,
     );
   }
 
@@ -322,6 +392,40 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
   }
 }
 
+function parseCaptureInput(value: unknown): {
+  readonly artifact: ArtifactRef;
+  readonly evidence: ArtifactEvidenceAttestation;
+} {
+  if (!isPlainObject(value) || !hasExactKeys(value, ["artifact", "evidence"])) {
+    throw new ArtifactCurrentConflictSourceError("invalid_input", "Current conflict capture input is invalid");
+  }
+  const artifact = parseArtifactRef(value.artifact);
+  let evidence: ArtifactEvidenceAttestation;
+  try {
+    evidence = parseArtifactEvidenceAttestation(value.evidence);
+  } catch {
+    throw new ArtifactCurrentConflictSourceError("invalid_input", "Evidence attestation is invalid");
+  }
+  return Object.freeze({ artifact, evidence });
+}
+
+function validateEvidenceBindings(
+  evidence: ArtifactEvidenceAttestation,
+  requestedRef: ArtifactRef,
+  artifact: ArtifactRevision,
+  capabilityIds: readonly string[],
+): boolean {
+  return sameArtifactRef(evidence.artifact, requestedRef)
+    && sameArtifactRef(evidence.artifact, artifact)
+    && evidence.sourceProposal.proposalId === artifact.sourceProposal.proposalId
+    && evidence.sourceProposal.proposalRevision === artifact.sourceProposal.proposalRevision
+    && sameStringArray(evidence.selectedHwCapabilityIds, capabilityIds)
+    && evidence.coverage === "complete"
+    && evidence.watermarks.length > 0
+    && evidence.watermarks.length <= MAX_RELEVANT_BRIDGES
+    && evidence.watermarks.every((watermark) => watermark.freshness === "fresh" && watermark.gapCount === 0);
+}
+
 function translateApprovedProposal(
   source: HubVerifiedProposalSource,
   artifact: ArtifactRevision,
@@ -366,10 +470,16 @@ function translateApprovedProposal(
   });
 }
 
-function collectWorldCut(snapshot: HomeWorldSnapshot, capabilityIds: readonly string[]): WorldCut | undefined {
+function collectWorldCut(
+  snapshot: HomeWorldSnapshot,
+  capabilityIds: readonly string[],
+  evidenceWatermarks: readonly ArtifactEvidenceAttestation["watermarks"][number][],
+): WorldCut | undefined {
   if (!isPlainObject(snapshot) || !Array.isArray(snapshot.devices) || !isPlainObject(snapshot.bridges)) return undefined;
   const targetSet = new Set(capabilityIds);
-  const bridgeIds = new Set<string>();
+  const expectedWatermarks = new Map(evidenceWatermarks.map((watermark) => [watermark.bridgeId, watermark]));
+  if (expectedWatermarks.size !== evidenceWatermarks.length || expectedWatermarks.size > MAX_RELEVANT_BRIDGES) return undefined;
+  const bridgeIds = new Set(expectedWatermarks.keys());
   const found = new Set<string>();
 
   for (const device of snapshot.devices) {
@@ -380,9 +490,10 @@ function collectWorldCut(snapshot: HomeWorldSnapshot, capabilityIds: readonly st
         || !targetSet.has(capability.hwCapabilityId)) continue;
       if (!isCapabilitySnapshot(capability)) return undefined;
       found.add(capability.hwCapabilityId);
+      if (capability.bindings.length === 0) return undefined;
       for (const binding of capability.bindings) {
         if (!isPlainObject(binding) || !boundedNeutralId(binding.bridgeId)) return undefined;
-        bridgeIds.add(binding.bridgeId);
+        if (!expectedWatermarks.has(binding.bridgeId)) return undefined;
       }
     }
   }
@@ -390,7 +501,7 @@ function collectWorldCut(snapshot: HomeWorldSnapshot, capabilityIds: readonly st
   if (found.size !== capabilityIds.length || bridgeIds.size > MAX_RELEVANT_BRIDGES) return undefined;
   const bridges: WorldBridgeCut[] = [];
   for (const bridgeId of [...bridgeIds].sort(compareCodePoints)) {
-    const bridge = readFreshBridge(snapshot, bridgeId);
+    const bridge = readFreshBridge(snapshot, bridgeId, expectedWatermarks.get(bridgeId)!);
     if (bridge === undefined) return undefined;
     bridges.push(bridge);
   }
@@ -399,9 +510,7 @@ function collectWorldCut(snapshot: HomeWorldSnapshot, capabilityIds: readonly st
       bridges: Object.freeze(bridges.map((bridge) => Object.freeze(bridge))),
       fingerprint: canonicalAssessmentInput(bridges.map((bridge) => ({
         bridgeId: bridge.bridgeId,
-        watermark: bridge.watermark,
-        freshness: bridge.freshness,
-        gapCount: bridge.gapCount,
+        watermark: semanticWatermarkIdentity(bridge.watermark, bridge.freshness, bridge.gapCount),
       }))),
     };
   } catch {
@@ -409,7 +518,11 @@ function collectWorldCut(snapshot: HomeWorldSnapshot, capabilityIds: readonly st
   }
 }
 
-function readFreshBridge(snapshot: HomeWorldSnapshot, bridgeId: string): WorldBridgeCut | undefined {
+function readFreshBridge(
+  snapshot: HomeWorldSnapshot,
+  bridgeId: string,
+  expectedWatermark: ArtifactEvidenceAttestation["watermarks"][number],
+): WorldBridgeCut | undefined {
   const bridge = snapshot.bridges[bridgeId];
   if (!isPlainObject(bridge)
     || bridge.bridgeId !== bridgeId
@@ -428,23 +541,21 @@ function readFreshBridge(snapshot: HomeWorldSnapshot, bridgeId: string): WorldBr
 
   const watermark = normalizeWatermark(bridge.watermark, bridgeId);
   if (watermark === undefined) return undefined;
+  if (!sameSemanticWatermark(watermark, expectedWatermark)) return undefined;
   const vector = snapshot.watermarkVector?.[bridgeId];
   if (!sameWatermark(vector, watermark)) return undefined;
-  if (!Array.isArray(snapshot.bridgeWatermarks)) return undefined;
+  if (!Array.isArray(snapshot.bridgeWatermarks) || !Array.isArray(snapshot.watermarks)) return undefined;
   const listed = snapshot.bridgeWatermarks.filter((candidate) => isPlainObject(candidate) && candidate.bridgeId === bridgeId);
   if (listed.length !== 1 || !sameWatermark(listed[0], watermark)) return undefined;
+  const aliasListed = snapshot.watermarks.filter((candidate) => isPlainObject(candidate) && candidate.bridgeId === bridgeId);
+  if (aliasListed.length !== 1 || !sameWatermark(aliasListed[0], watermark)) return undefined;
 
   return {
     bridgeId,
     watermark,
     freshness: "fresh",
     gapCount: 0,
-    fingerprint: canonicalAssessmentInput({
-      bridgeId,
-      watermark,
-      freshness: "fresh",
-      gapCount: 0,
-    }),
+    fingerprint: canonicalAssessmentInput({ watermark: semanticWatermarkIdentity(watermark, "fresh", 0) }),
   };
 }
 
@@ -589,6 +700,57 @@ function composeResult(
   return freezeResult({ status, findings, sourceIdentity });
 }
 
+function semanticWatermark(bridge: WorldBridgeCut): NeutralWatermark {
+  return Object.freeze({
+    bridgeId: bridge.watermark.bridgeId,
+    epochId: bridge.watermark.epochId,
+    lastSeq: bridge.watermark.lastSeq,
+    freshness: bridge.freshness,
+    gapCount: bridge.gapCount,
+  });
+}
+
+function semanticWatermarkIdentity(
+  watermark: HomeWorldWatermark,
+  freshness: WorldBridgeCut["freshness"],
+  gapCount: WorldBridgeCut["gapCount"],
+): { readonly bridgeId: string; readonly epochId: string; readonly lastSeq: number; readonly freshness: "fresh"; readonly gapCount: 0 } {
+  return {
+    bridgeId: watermark.bridgeId,
+    epochId: watermark.epochId,
+    lastSeq: watermark.lastSeq,
+    freshness,
+    gapCount,
+  };
+}
+
+function makeCompileCut(
+  result: ArtifactRiskConflictResult,
+  sourceIdentity: string,
+  foreignRuleChecks: readonly NeutralConflictInput[],
+  foreignCatalogIdentity: string,
+): ArtifactCurrentConflictCompileCut {
+  const currentConflict = Object.freeze({
+    sourceIdentity,
+    result: createNeutralConflictResult({
+      status: result.status,
+      findings: result.findings.map((finding) => ({
+        ...finding,
+        // The neutral contract rejects the private unavailable reason. A
+        // successful cut can only reach this projection after capture has
+        // rejected unavailable results; the contract parser remains the
+        // final closed-vocabulary guard.
+        reason: finding.reason as NeutralConflictResult["findings"][number]["reason"],
+      })),
+    }),
+  });
+  return Object.freeze({
+    currentConflict,
+    foreignRuleChecks: Object.freeze(foreignRuleChecks.map((check) => Object.freeze(check))),
+    foreignCatalogIdentity,
+  });
+}
+
 function normalizeExistingResult(value: unknown): ArtifactRiskConflictResult | undefined {
   if (!isPlainObject(value)
     || !hasExactKeys(value, ["status", "findings", "sourceIdentity"])
@@ -651,8 +813,8 @@ function deduplicateFindings(findings: readonly ArtifactRiskConflictFinding[]): 
   ));
 }
 
-function unavailablePort(ref: ArtifactRef, capabilityIds: readonly string[]): ArtifactRiskConflictPort {
-  return makePort(ref, capabilityIds, unavailableResult());
+function unavailablePort(ref: ArtifactRef, capabilityIds: readonly string[]): ArtifactCurrentConflictCapture {
+  return makePort(ref, capabilityIds, unavailableResult(), undefined);
 }
 
 function unavailableResult(): ArtifactRiskConflictResult {
@@ -667,7 +829,8 @@ function makePort(
   ref: ArtifactRef,
   capabilityIds: readonly string[],
   result: ArtifactRiskConflictResult,
-): ArtifactRiskConflictPort {
+  compileCut: ArtifactCurrentConflictCompileCut | undefined,
+): ArtifactCurrentConflictCapture {
   const boundRef = Object.freeze({ ...ref });
   const boundIds = Object.freeze([...capabilityIds]);
   const boundResult = freezeResult({
@@ -683,6 +846,7 @@ function makePort(
       }
       return boundResult;
     },
+    compileCut: () => compileCut,
   });
 }
 
@@ -753,8 +917,18 @@ function sameWatermark(left: unknown, right: HomeWorldWatermark): boolean {
   return isPlainObject(left)
     && left.bridgeId === right.bridgeId
     && left.epochId === right.epochId
+    && left.lastSeq === right.lastSeq;
+}
+
+function sameSemanticWatermark(
+  left: HomeWorldWatermark,
+  right: ArtifactEvidenceAttestation["watermarks"][number],
+): boolean {
+  return left.bridgeId === right.bridgeId
+    && left.epochId === right.epochId
     && left.lastSeq === right.lastSeq
-    && left.lastSyncCompleteAt === right.lastSyncCompleteAt;
+    && right.freshness === "fresh"
+    && right.gapCount === 0;
 }
 
 function sameStringArray(left: readonly string[], right: readonly string[]): boolean {

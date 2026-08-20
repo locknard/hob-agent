@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ArtifactRegistryEntry } from "./artifact-registry.js";
+import {
+  createArtifactEvidenceAttestation,
+  type ArtifactEvidenceAttestation,
+} from "./artifact-assessments.js";
 import type {
   ArtifactRiskConflictFinding,
   ArtifactRiskConflictPort,
@@ -32,6 +36,7 @@ import type { HubVerifiedProposalSource } from "./proposal-store.js";
 import type {
   ArtifactRiskConflictArtifactRegistry,
 } from "./artifact-conflict-source.js";
+import { computeNeutralForeignCatalogIdentity } from "./artifact-compiler-contract.js";
 
 const capturedAt = "2026-08-20T04:00:00.000Z";
 
@@ -66,6 +71,21 @@ function artifact(
     content,
     createdAt: capturedAt,
   });
+}
+
+function notifyArtifact(): ArtifactRevision {
+  return artifact({
+    trigger: {
+      kind: "schedule",
+      timezone: "UTC",
+      daysOfWeek: [1],
+      at: "09:00",
+    },
+    conditions: [],
+    actions: [{ kind: "notify_local", message: "Review the household note." }],
+    rollback: { kind: "no_remote_change" },
+    postconditions: [],
+  }, "artifact-current-conflict-notify");
 }
 
 function ref(value: ArtifactRevision): ArtifactRef {
@@ -126,8 +146,13 @@ function diagnostics(
   };
 }
 
-function watermark(bridgeId: string, epochId = "epoch-relevant", lastSeq = 7): HomeWorldWatermark {
-  return { bridgeId, epochId, lastSeq, lastSyncCompleteAt: capturedAt };
+function watermark(
+  bridgeId: string,
+  epochId = "epoch-relevant",
+  lastSeq = 7,
+  lastSyncCompleteAt = capturedAt,
+): HomeWorldWatermark {
+  return { bridgeId, epochId, lastSeq, lastSyncCompleteAt };
 }
 
 function capability(
@@ -174,6 +199,7 @@ function bridge(
     readonly connectionState?: HomeWorldDiagnostics["connectionState"];
     readonly historyGapCount?: number;
     readonly capabilities?: readonly HomeWorldCapabilitySnapshot[];
+    readonly lastSyncCompleteAt?: string;
   } = {},
 ): HomeWorldBridgeSnapshot {
   const state = options.connectionState ?? "ready";
@@ -181,7 +207,12 @@ function bridge(
     bridgeId,
     adapterType: "fixture",
     diagnostics: diagnostics(state, options.historyGapCount ?? 0),
-    watermark: watermark(bridgeId, options.epochId ?? "epoch-relevant", options.lastSeq ?? 7),
+    watermark: watermark(
+      bridgeId,
+      options.epochId ?? "epoch-relevant",
+      options.lastSeq ?? 7,
+      options.lastSyncCompleteAt ?? capturedAt,
+    ),
     devices: options.capabilities === undefined ? [] : [device(bridgeId, options.capabilities)],
     extensions: { "foreignRules@1": "available" },
     metrics: {
@@ -210,6 +241,57 @@ function snapshot(bridges: readonly HomeWorldBridgeSnapshot[]): HomeWorldSnapsho
     spaces: [],
     devices: bridges.flatMap((item) => item.devices),
   };
+}
+
+type EvidenceWatermark = ArtifactEvidenceAttestation["watermarks"][number];
+
+function evidenceWatermark(
+  bridgeId: string,
+  epochId = "epoch-relevant",
+  lastSeq = 7,
+  overrides: Partial<EvidenceWatermark> = {},
+): EvidenceWatermark {
+  return {
+    bridgeId,
+    epochId,
+    lastSeq,
+    freshness: "fresh",
+    gapCount: 0,
+    ...overrides,
+  };
+}
+
+function capabilityScope(content: ArtifactContent): readonly string[] {
+  const ids = new Set<string>();
+  if (content.trigger.kind === "capability_changed") ids.add(content.trigger.source.hwCapabilityId);
+  for (const condition of content.conditions) ids.add(condition.source.hwCapabilityId);
+  for (const action of content.actions) {
+    if (action.kind !== "notify_local") ids.add(action.target.hwCapabilityId);
+  }
+  if (content.rollback.kind === "restore_previous_state") ids.add(content.rollback.target.hwCapabilityId);
+  for (const postcondition of content.postconditions) ids.add(postcondition.source.hwCapabilityId);
+  return [...ids].sort();
+}
+
+function evidenceFor(
+  value: ArtifactRevision,
+  watermarks: readonly EvidenceWatermark[] = [evidenceWatermark("bridge-relevant")],
+  selectedHwCapabilityIds: readonly string[] = capabilityScope(value.content),
+  overrides: Partial<Parameters<typeof createArtifactEvidenceAttestation>[0]> = {},
+): ArtifactEvidenceAttestation {
+  return createArtifactEvidenceAttestation({
+    artifact: ref(value),
+    attestationId: `evidence-${value.artifactId}`,
+    source: "home-world-consistent-cut",
+    sourceProposal: value.sourceProposal,
+    proposalEvidenceIdentity: `sha256:${"e".repeat(64)}`,
+    capturedAt,
+    selectedHwCapabilityIds,
+    watermarks,
+    coverage: "complete",
+    reasons: [],
+    ...overrides,
+  });
 }
 
 function availableCatalog(
@@ -275,20 +357,26 @@ class StubRegistry implements ArtifactRiskConflictArtifactRegistry {
 class StubExistingConflict implements ArtifactRiskConflictPort {
   readonly calls: ArtifactRiskConflictResult[] = [];
 
-  constructor(private readonly result: ArtifactRiskConflictResult) {}
+  constructor(
+    private readonly result: ArtifactRiskConflictResult,
+    private readonly expectedScope: readonly string[] = ["hwc-target", "hwc-trigger"],
+  ) {}
 
   assess(input: { readonly artifact: ArtifactRef; readonly hwCapabilityIds: readonly string[] }): ArtifactRiskConflictResult {
     this.calls.push({ ...this.result, findings: [...this.result.findings] });
-    assert.deepEqual(input.hwCapabilityIds, ["hwc-target", "hwc-trigger"]);
+    assert.deepEqual(input.hwCapabilityIds, this.expectedScope);
     return this.result;
   }
 }
 
 class MutableExistingConflict implements ArtifactRiskConflictPort {
-  constructor(public result: ArtifactRiskConflictResult) {}
+  constructor(
+    public result: ArtifactRiskConflictResult,
+    private readonly expectedScope: readonly string[] = ["hwc-target", "hwc-trigger"],
+  ) {}
 
   assess(input: { readonly artifact: ArtifactRef; readonly hwCapabilityIds: readonly string[] }): ArtifactRiskConflictResult {
-    assert.deepEqual(input.hwCapabilityIds, ["hwc-target", "hwc-trigger"]);
+    assert.deepEqual(input.hwCapabilityIds, this.expectedScope);
     return this.result;
   }
 }
@@ -301,34 +389,110 @@ function baseResult(findings: readonly ArtifactRiskConflictFinding[] = []): Arti
   };
 }
 
+function captureInput(value: ArtifactRevision, evidence: ArtifactEvidenceAttestation): {
+  readonly artifact: ArtifactRef;
+  readonly evidence: ArtifactEvidenceAttestation;
+} {
+  return { artifact: ref(value), evidence };
+}
+
+function captureEnvironment(environment: {
+  readonly value: ArtifactRevision;
+  readonly evidence: ArtifactEvidenceAttestation;
+  readonly source: ArtifactCurrentConflictSource;
+}) {
+  return environment.source.capture(captureInput(environment.value, environment.evidence));
+}
+
 function makeSource(options: {
+  readonly value?: ArtifactRevision;
   readonly snapshots?: readonly HomeWorldSnapshot[];
   readonly catalogs?: readonly HomeWorldForeignRuleCatalog[] | Error;
   readonly existing?: ArtifactRiskConflictPort;
+  readonly evidence?: ArtifactEvidenceAttestation;
 } = {}) {
-  const value = artifact();
-  const target = capability("hwc-target", "bridge-relevant");
-  const trigger = capability("hwc-trigger", "bridge-relevant");
-  const before = snapshot([bridge("bridge-relevant", { capabilities: [target, trigger] })]);
-  const after = snapshot([bridge("bridge-relevant", { capabilities: [target, trigger] })]);
+  const value = options.value ?? artifact();
+  const scope = capabilityScope(value.content);
+  const capabilities = scope.map((id) => capability(id, "bridge-relevant"));
+  const snapshotOptions = capabilities.length === 0 ? {} : { capabilities };
+  const before = snapshot([bridge("bridge-relevant", snapshotOptions)]);
+  const after = snapshot([bridge("bridge-relevant", snapshotOptions)]);
   const homeWorld = new FakeHomeWorld(options.snapshots ?? [before, after], options.catalogs ?? [availableCatalog()]);
-  const existing = options.existing ?? new StubExistingConflict(baseResult());
+  const evidence = options.evidence ?? evidenceFor(value);
+  const existing = options.existing ?? new StubExistingConflict(baseResult(), scope);
   const source = new ArtifactCurrentConflictSource({
     proposals: new StubProposalSource(proposal(value)),
     registry: new StubRegistry(value),
     homeWorld,
     existing,
   });
-  return { value, homeWorld, source, existing };
+  return { value, evidence, homeWorld, source, existing };
+}
+
+function makeMultiBridgeSource(options: {
+  readonly snapshots?: readonly HomeWorldSnapshot[];
+  readonly catalogs?: readonly HomeWorldForeignRuleCatalog[] | Error;
+  readonly existing?: ArtifactRiskConflictPort;
+  readonly epochA?: string;
+  readonly epochB?: string;
+  readonly lastSeqA?: number;
+  readonly lastSeqB?: number;
+} = {}) {
+  const value = artifact();
+  const target = capability("hwc-target", "bridge-a");
+  const trigger = capability("hwc-trigger", "bridge-b");
+  const epochA = options.epochA ?? "epoch-a";
+  const epochB = options.epochB ?? "epoch-b";
+  const before = snapshot([
+    bridge("bridge-a", { capabilities: [target], epochId: epochA, lastSeq: options.lastSeqA ?? 7 }),
+    bridge("bridge-b", { capabilities: [trigger], epochId: epochB, lastSeq: options.lastSeqB ?? 11 }),
+  ]);
+  const after = snapshot([
+    bridge("bridge-a", { capabilities: [target], epochId: epochA, lastSeq: options.lastSeqA ?? 7 }),
+    bridge("bridge-b", { capabilities: [trigger], epochId: epochB, lastSeq: options.lastSeqB ?? 11 }),
+  ]);
+  const catalogs = options.catalogs ?? [
+    availableCatalog("bridge-a", epochA, [{
+      ruleRef: "ha-rule-a",
+      name: "Turn on kitchen light",
+      enabled: true,
+      updatedAt: capturedAt,
+    }]),
+    availableCatalog("bridge-b", epochB, [{
+      ruleRef: "vendor-rule-b",
+      name: "Arriving home turns on light",
+      enabled: true,
+      updatedAt: capturedAt,
+    }]),
+  ];
+  const homeWorld = new FakeHomeWorld(options.snapshots ?? [before, after], catalogs);
+  const evidence = evidenceFor(value, [
+    evidenceWatermark("bridge-a", epochA, options.lastSeqA ?? 7),
+    evidenceWatermark("bridge-b", epochB, options.lastSeqB ?? 11),
+  ]);
+  const existing = options.existing ?? new StubExistingConflict(baseResult([{
+    kind: "existing_artifact",
+    severity: "blocking",
+    reason: "existing_artifact",
+    hwCapabilityId: "hwc-target",
+    reference: `sha256:${"c".repeat(64)}`,
+  }]));
+  const source = new ArtifactCurrentConflictSource({
+    proposals: new StubProposalSource(proposal(value)),
+    registry: new StubRegistry(value),
+    homeWorld,
+    existing,
+  });
+  return { value, evidence, homeWorld, source, existing, before, after };
 }
 
 function expectedQuery(value: ArtifactRevision): { artifact: ArtifactRef; hwCapabilityIds: readonly string[] } {
-  return { artifact: ref(value), hwCapabilityIds: ["hwc-target", "hwc-trigger"] };
+  return { artifact: ref(value), hwCapabilityIds: capabilityScope(value.content) };
 }
 
 test("captures zero current rules into an immutable synchronous port with a stable non-empty identity", async () => {
   const environment = makeSource();
-  const port = await environment.source.capture(ref(environment.value));
+  const port = await captureEnvironment(environment);
   const result = port.assess(expectedQuery(environment.value));
 
   assert.deepEqual({ status: result.status, findings: result.findings }, { status: "none", findings: [] });
@@ -337,16 +501,273 @@ test("captures zero current rules into an immutable synchronous port with a stab
   assert.equal(environment.homeWorld.catalogCalls.length, 1);
   assert.equal(environment.homeWorld.snapshotCalls.length, 2);
   assert.equal(typeof (port as unknown as { capture?: unknown }).capture, "undefined");
+  assert.match(port.compileCut()!.foreignCatalogIdentity, /^sha256:[0-9a-f]{64}$/);
   assert.ok(Object.isFrozen(port));
   assert.ok(Object.isFrozen(result));
   assert.ok(Object.isFrozen(result.findings));
   assert.equal(port.assess(expectedQuery(environment.value)).sourceIdentity, result.sourceIdentity);
 });
 
+test("captures notify-only artifacts for every evidence bridge even with an empty capability scope", async () => {
+  const value = notifyArtifact();
+  const evidence = evidenceFor(value, [
+    evidenceWatermark("bridge-a", "epoch-a", 3),
+    evidenceWatermark("bridge-b", "epoch-b", 5),
+  ], []);
+  const before = snapshot([
+    bridge("bridge-a", { epochId: "epoch-a", lastSeq: 3 }),
+    bridge("bridge-b", { epochId: "epoch-b", lastSeq: 5 }),
+  ]);
+  const after = snapshot([
+    bridge("bridge-a", { epochId: "epoch-a", lastSeq: 3 }),
+    bridge("bridge-b", { epochId: "epoch-b", lastSeq: 5 }),
+  ]);
+  const environment = makeSource({
+    value,
+    evidence,
+    snapshots: [before, after],
+    catalogs: [
+      availableCatalog("bridge-a", "epoch-a", [{ ruleRef: "ha-notify-a", name: "kitchen light notice" }]),
+      availableCatalog("bridge-b", "epoch-b", [{ ruleRef: "vendor-notify-b", name: "house note" }]),
+    ],
+    existing: new StubExistingConflict(baseResult(), []),
+  });
+  const port = await captureEnvironment(environment);
+  const result = port.assess(expectedQuery(value));
+  const cut = port.compileCut();
+
+  assert.equal(result.status, "possible_overlap");
+  assert.ok(cut);
+  assert.deepEqual(cut.foreignRuleChecks.map((check) => check.bridgeId), ["bridge-a", "bridge-b"]);
+  assert.deepEqual(cut.foreignRuleChecks.map((check) => check.watermark.lastSeq), [3, 5]);
+  assert.equal(cut.currentConflict.result.findings.every((finding) => finding.kind === "foreign_rule"), true);
+  assert.deepEqual(environment.existing instanceof StubExistingConflict ? environment.existing.calls[0]!.findings : [], []);
+});
+
+test("fails closed for evidence artifact/scope/coverage mismatches and stale snapshot watermarks", async () => {
+  const environment = makeSource();
+  const wrongArtifactEvidence = evidenceFor(artifact(deviceContent(), "artifact-other"));
+  const scopeMismatchEvidence = evidenceFor(environment.value, [evidenceWatermark("bridge-relevant")], ["hwc-other"]);
+  const semanticWatermarkMismatchEvidence = evidenceFor(environment.value, [
+    evidenceWatermark("bridge-relevant", "epoch-evidence-mismatch", 7),
+  ]);
+  const partialEvidence = evidenceFor(environment.value, [evidenceWatermark("bridge-relevant")], capabilityScope(environment.value.content), {
+    coverage: "partial",
+    reasons: ["history_gap"],
+  });
+  const target = capability("hwc-target", "bridge-relevant");
+  const trigger = capability("hwc-trigger", "bridge-relevant");
+  const staleSnapshot = snapshot([bridge("bridge-relevant", {
+    capabilities: [target, trigger],
+    connectionState: "down",
+  })]);
+  const cases = [
+    wrongArtifactEvidence,
+    scopeMismatchEvidence,
+    semanticWatermarkMismatchEvidence,
+    partialEvidence,
+  ];
+  for (const evidence of cases) {
+    const port = await environment.source.capture(captureInput(environment.value, evidence));
+    assert.equal(port.assess(expectedQuery(environment.value)).status, "unavailable");
+    assert.equal(port.compileCut(), undefined);
+  }
+  const stale = makeSource({
+    snapshots: [staleSnapshot, staleSnapshot],
+    evidence: evidenceFor(environment.value),
+  });
+  const stalePort = await captureEnvironment(stale);
+  assert.equal(stalePort.assess(expectedQuery(environment.value)).status, "unavailable");
+  assert.equal(stalePort.compileCut(), undefined);
+});
+
+test("fails closed when a device capability binding falls outside the evidence watermark vector", async () => {
+  const value = artifact();
+  const target = capability("hwc-target", "bridge-outside-vector");
+  const trigger = capability("hwc-trigger", "bridge-relevant");
+  const before = snapshot([
+    bridge("bridge-relevant", { capabilities: [trigger, target] }),
+    bridge("bridge-outside-vector", { connectionState: "down" }),
+  ]);
+  const after = snapshot([
+    bridge("bridge-relevant", { capabilities: [trigger, target] }),
+    bridge("bridge-outside-vector", { connectionState: "down" }),
+  ]);
+  const environment = makeSource({
+    value,
+    snapshots: [before, after],
+    evidence: evidenceFor(value, [evidenceWatermark("bridge-relevant")]),
+    catalogs: [availableCatalog("bridge-relevant")],
+  });
+
+  const port = await captureEnvironment(environment);
+  assert.equal(port.assess(expectedQuery(value)).status, "unavailable");
+  assert.equal(port.compileCut(), undefined);
+});
+
+test("exposes one frozen current conflict compile cut with exact per-bridge semantic inputs", async () => {
+  const environment = makeMultiBridgeSource();
+  const port = await captureEnvironment(environment);
+  const result = port.assess(expectedQuery(environment.value));
+  const cut = port.compileCut();
+
+  assert.ok(cut);
+  assert.deepEqual(Object.keys(cut).sort(), ["currentConflict", "foreignCatalogIdentity", "foreignRuleChecks"]);
+  assert.equal(cut.currentConflict.sourceIdentity, result.sourceIdentity);
+  assert.deepEqual(cut.currentConflict.result, {
+    status: result.status,
+    findings: result.findings,
+  });
+  assert.equal(cut.foreignRuleChecks.length, 2);
+  assert.deepEqual(cut.foreignRuleChecks.map((check) => check.bridgeId), ["bridge-a", "bridge-b"]);
+  assert.deepEqual(cut.foreignRuleChecks.map((check) => check.status), ["current", "current"]);
+  assert.match(cut.foreignCatalogIdentity, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(cut.foreignCatalogIdentity, computeNeutralForeignCatalogIdentity(cut.foreignRuleChecks));
+
+  for (const check of cut.foreignRuleChecks) {
+    const semanticWatermark = (check as unknown as {
+      readonly watermark: {
+        readonly bridgeId: string;
+        readonly epochId: string;
+        readonly lastSeq: number;
+        readonly freshness: string;
+        readonly gapCount: number;
+      };
+    }).watermark;
+    assert.equal(semanticWatermark.bridgeId, check.bridgeId);
+    assert.equal(semanticWatermark.epochId, check.epochId);
+    assert.equal(semanticWatermark.lastSeq, check.bridgeId === "bridge-a" ? 7 : 11);
+    assert.equal(semanticWatermark.freshness, "fresh");
+    assert.equal(semanticWatermark.gapCount, 0);
+    assert.match(check.catalogIdentity, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(check.findings.every((finding) => finding.kind === "foreign_rule"), true);
+    assert.equal(check.findings.some((finding) => finding.reason === "existing_artifact"), false);
+    assert.equal(JSON.stringify(check).includes("ha-rule"), false);
+    assert.equal(JSON.stringify(check).includes("vendor-rule"), false);
+  }
+  assert.equal(cut.currentConflict.result.findings.some((finding) => finding.reason === "existing_artifact"), true);
+  assert.equal(Object.isFrozen(cut), true);
+  assert.equal(Object.isFrozen(cut.currentConflict), true);
+  assert.equal(Object.isFrozen(cut.currentConflict.result), true);
+  assert.equal(Object.isFrozen(cut.currentConflict.result.findings), true);
+  assert.equal(Object.isFrozen(cut.foreignRuleChecks), true);
+  assert.equal(Object.isFrozen(cut.foreignRuleChecks[0]), true);
+  assert.equal(Object.isFrozen((cut.foreignRuleChecks[0] as unknown as { readonly watermark: object }).watermark), true);
+  assert.equal(port.compileCut(), cut);
+  assert.equal(JSON.stringify(cut).includes("native"), false);
+  assert.equal(JSON.stringify(cut).includes("provider"), false);
+  assert.equal(JSON.stringify(cut).includes("http"), false);
+});
+
+test("canonicalizes per-bridge checks and aggregate identity across catalog order", async () => {
+  const first = makeMultiBridgeSource();
+  const firstPort = await captureEnvironment(first);
+  const firstCut = firstPort.compileCut();
+  assert.ok(firstCut);
+
+  const reordered = makeMultiBridgeSource({
+    catalogs: [
+      availableCatalog("bridge-b", "epoch-b", [{
+        ruleRef: "vendor-rule-b",
+        name: "Arriving home turns on light",
+        enabled: true,
+        updatedAt: capturedAt,
+      }]),
+      availableCatalog("bridge-a", "epoch-a", [{
+        ruleRef: "ha-rule-a",
+        name: "Turn on kitchen light",
+        enabled: true,
+        updatedAt: capturedAt,
+      }]),
+    ],
+  });
+  const reorderedPort = await captureEnvironment(reordered);
+  const reorderedCut = reorderedPort.compileCut();
+  assert.ok(reorderedCut);
+  assert.deepEqual(reorderedCut.foreignRuleChecks.map((check) => check.bridgeId), ["bridge-a", "bridge-b"]);
+  assert.equal(reorderedCut.foreignCatalogIdentity, firstCut.foreignCatalogIdentity);
+  assert.equal(reorderedCut.currentConflict.sourceIdentity, firstCut.currentConflict.sourceIdentity);
+});
+
+test("changes aggregate identity for semantic watermark and catalog epoch changes", async () => {
+  const first = makeMultiBridgeSource();
+  const firstCut = (await captureEnvironment(first)).compileCut();
+  assert.ok(firstCut);
+
+  const sequenceChanged = makeMultiBridgeSource({ lastSeqA: 8 });
+  const sequenceCut = (await captureEnvironment(sequenceChanged)).compileCut();
+  assert.ok(sequenceCut);
+  assert.notEqual(sequenceCut.foreignCatalogIdentity, firstCut.foreignCatalogIdentity);
+  assert.notEqual(sequenceCut.currentConflict.sourceIdentity, firstCut.currentConflict.sourceIdentity);
+
+  const epochChanged = makeMultiBridgeSource({ epochA: "epoch-a-2" });
+  const epochCut = (await captureEnvironment(epochChanged)).compileCut();
+  assert.ok(epochCut);
+  assert.notEqual(epochCut.foreignCatalogIdentity, firstCut.foreignCatalogIdentity);
+  assert.notEqual(epochCut.currentConflict.sourceIdentity, firstCut.currentConflict.sourceIdentity);
+});
+
+test("keeps capture identity stable when only restart timestamp metadata changes", async () => {
+  const baseline = makeSource();
+  const baselinePort = await captureEnvironment(baseline);
+  const baselineResult = baselinePort.assess(expectedQuery(baseline.value));
+  const baselineCut = baselinePort.compileCut();
+  assert.ok(baselineCut);
+
+  const value = artifact();
+  const target = capability("hwc-target", "bridge-relevant");
+  const trigger = capability("hwc-trigger", "bridge-relevant");
+  const first = snapshot([bridge("bridge-relevant", {
+    capabilities: [target, trigger],
+    lastSyncCompleteAt: "2026-08-20T04:00:00.000Z",
+  })]);
+  const restarted = snapshot([bridge("bridge-relevant", {
+    capabilities: [target, trigger],
+    lastSyncCompleteAt: "2026-08-20T05:00:00.000Z",
+  })]);
+  const source = new ArtifactCurrentConflictSource({
+    proposals: new StubProposalSource(proposal(value)),
+    registry: new StubRegistry(value),
+    homeWorld: new FakeHomeWorld([first, restarted], [availableCatalog()]),
+    existing: new StubExistingConflict(baseResult()),
+  });
+  const port = await source.capture(captureInput(value, evidenceFor(value)));
+  const result = port.assess(expectedQuery(value));
+  const cut = port.compileCut();
+  assert.equal(result.status, "none");
+  assert.equal(result.sourceIdentity, baselineResult.sourceIdentity);
+  assert.ok(cut);
+  assert.equal(cut.foreignCatalogIdentity, baselineCut.foreignCatalogIdentity);
+});
+
+test("binds evidence attestation and input identities into the composed source identity", async () => {
+  const first = makeSource();
+  const firstResult = (await captureEnvironment(first)).assess(expectedQuery(first.value));
+  const secondEvidence = evidenceFor(first.value, first.evidence.watermarks, capabilityScope(first.value.content), {
+    attestationId: "evidence-current-conflict-refresh",
+  });
+  const second = makeSource({ evidence: secondEvidence });
+  const secondResult = (await captureEnvironment(second)).assess(expectedQuery(second.value));
+  const thirdEvidence = evidenceFor(first.value, first.evidence.watermarks, capabilityScope(first.value.content), {
+    proposalEvidenceIdentity: `sha256:${"f".repeat(64)}`,
+  });
+  const third = makeSource({ evidence: thirdEvidence });
+  const thirdResult = (await captureEnvironment(third)).assess(expectedQuery(third.value));
+
+  assert.deepEqual(secondResult.findings, firstResult.findings);
+  assert.notEqual(second.evidence.attestationId, first.evidence.attestationId);
+  assert.equal(second.evidence.inputIdentity, first.evidence.inputIdentity);
+  assert.notEqual(secondResult.sourceIdentity, firstResult.sourceIdentity);
+  assert.equal(third.evidence.attestationId, first.evidence.attestationId);
+  assert.notEqual(third.evidence.inputIdentity, first.evidence.inputIdentity);
+  assert.deepEqual(thirdResult.findings, firstResult.findings);
+  assert.notEqual(thirdResult.sourceIdentity, firstResult.sourceIdentity);
+});
+
 test("covers the complete bounded foreign-rule catalog without truncating its identity", async () => {
   const rules = Array.from({ length: 256 }, (_, index) => ({ ruleRef: `rule-${index}` }));
   const environment = makeSource({ catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", rules)] });
-  const result = (await environment.source.capture(ref(environment.value))).assess(expectedQuery(environment.value));
+  const result = (await captureEnvironment(environment)).assess(expectedQuery(environment.value));
   assert.equal(result.status, "none");
   assert.deepEqual(result.findings, []);
   assert.match(result.sourceIdentity, /^sha256:[0-9a-f]{64}$/);
@@ -361,7 +782,7 @@ test("adds deterministic opaque overlap findings without returning rule metadata
       updatedAt: capturedAt,
     }])],
   });
-  const port = await environment.source.capture(ref(environment.value));
+  const port = await captureEnvironment(environment);
   const result = port.assess(expectedQuery(environment.value));
 
   assert.equal(result.status, "possible_overlap");
@@ -394,7 +815,7 @@ test("preserves blocking findings from the injected source while composing curre
     existing,
     catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", [{ ruleRef: "rule-1", name: "kitchen light" }])],
   });
-  const result = (await environment.source.capture(ref(environment.value))).assess(expectedQuery(environment.value));
+  const result = (await captureEnvironment(environment)).assess(expectedQuery(environment.value));
   assert.equal(result.status, "possible_overlap");
   assert.equal(result.findings.some((finding) => finding.severity === "blocking" && finding.reason === "existing_artifact"), true);
   assert.equal(result.findings.some((finding) => finding.kind === "foreign_rule"), true);
@@ -422,9 +843,10 @@ test("fails closed for unavailable, incomplete, epoch-mismatched, and cut-changi
       homeWorld,
       existing: new StubExistingConflict(baseResult()),
     });
-    const port = await source.capture(ref(value));
+    const port = await source.capture(captureInput(value, evidenceFor(value)));
     const result = port.assess(expectedQuery(value));
     assert.equal(result.status, "unavailable");
+    assert.equal(port.compileCut(), undefined);
     assert.deepEqual(result.findings, [{
       kind: "stale_evidence",
       severity: "blocking",
@@ -447,7 +869,7 @@ test("ignores an unrelated bad bridge and changes identity when catalog or water
     homeWorld: new FakeHomeWorld([first, firstAfter], [availableCatalog()]),
     existing: new StubExistingConflict(baseResult()),
   });
-  const firstPort = await firstSource.capture(ref(value));
+  const firstPort = await firstSource.capture(captureInput(value, evidenceFor(value)));
   const firstResult = firstPort.assess(expectedQuery(value));
 
   const changed = new ArtifactCurrentConflictSource({
@@ -459,7 +881,7 @@ test("ignores an unrelated bad bridge and changes identity when catalog or water
     ),
     existing: new StubExistingConflict(baseResult()),
   });
-  const changedResult = (await changed.capture(ref(value))).assess(expectedQuery(value));
+  const changedResult = (await changed.capture(captureInput(value, evidenceFor(value)))).assess(expectedQuery(value));
   assert.notEqual(changedResult.sourceIdentity, firstResult.sourceIdentity);
 
   const watermarkChanged = new ArtifactCurrentConflictSource({
@@ -471,15 +893,16 @@ test("ignores an unrelated bad bridge and changes identity when catalog or water
     ], [availableCatalog()]),
     existing: new StubExistingConflict(baseResult()),
   });
-  const watermarkResult = (await watermarkChanged.capture(ref(value))).assess(expectedQuery(value));
+  const watermarkResult = (await watermarkChanged.capture(captureInput(value, evidenceFor(value)))).assess(expectedQuery(value));
   assert.equal(watermarkResult.status, "unavailable");
 });
 
 test("fails closed when a relevant bridge has no catalog row at all", async () => {
   const environment = makeSource({ catalogs: [] });
-  const port = await environment.source.capture(ref(environment.value));
+  const port = await captureEnvironment(environment);
   const result = port.assess(expectedQuery(environment.value));
   assert.equal(result.status, "unavailable");
+  assert.equal(port.compileCut(), undefined);
   assert.deepEqual(result.findings, [{
     kind: "stale_evidence",
     severity: "blocking",
@@ -490,13 +913,13 @@ test("fails closed when a relevant bridge has no catalog row at all", async () =
 test("changes the composed identity when the existing source identity changes with equal findings", async () => {
   const existing = new MutableExistingConflict(baseResult());
   const environment = makeSource({ existing });
-  const first = (await environment.source.capture(ref(environment.value))).assess(expectedQuery(environment.value));
+  const first = (await captureEnvironment(environment)).assess(expectedQuery(environment.value));
 
   existing.result = {
     ...baseResult(),
     sourceIdentity: `sha256:${"d".repeat(64)}`,
   };
-  const second = (await environment.source.capture(ref(environment.value))).assess(expectedQuery(environment.value));
+  const second = (await captureEnvironment(environment)).assess(expectedQuery(environment.value));
 
   assert.deepEqual(second.findings, first.findings);
   assert.notEqual(second.sourceIdentity, first.sourceIdentity);
@@ -523,11 +946,11 @@ test("requires exact capture and assessment inputs and never invokes a control s
     (error: unknown) => error instanceof ArtifactCurrentConflictSourceError && error.code === "invalid_input",
   );
   await assert.rejects(
-    () => environment.source.capture({ ...ref(environment.value), extra: true } as never),
+    () => environment.source.capture({ artifact: ref(environment.value), evidence: environment.evidence, extra: true } as never),
     (error: unknown) => error instanceof ArtifactCurrentConflictSourceError && error.code === "invalid_input",
   );
 
-  const port = await environment.source.capture(ref(environment.value));
+  const port = await captureEnvironment(environment);
   assert.throws(
     () => port.assess({ artifact: ref(environment.value), hwCapabilityIds: ["hwc-trigger", "hwc-target"] }),
     (error: unknown) => error instanceof ArtifactCurrentConflictSourceError && error.code === "invalid_input",
