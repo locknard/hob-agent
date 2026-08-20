@@ -196,8 +196,10 @@ the string `state` is not used as a type-changing fallback. `set_level` is
 compatible only when all of the following hold at the exact fresh world cut:
 
 1. `level` is present, finite, and within `0..1`;
-2. `setLevelSupported` is exactly `true`;
-3. the requested neutral level is finite, within `0..1`, and exactly
+2. projected `available` is not explicitly `false` and projected `state` is
+   neither `unavailable` nor `unknown`;
+3. `setLevelSupported` is exactly `true`;
+4. the requested neutral level is finite, within `0..1`, and exactly
    representable at HA's integer-percent step (`value * 100` is an integer).
 
 The compatibility result contains only the neutral normalized `before` and
@@ -237,6 +239,8 @@ Before implementing this mapping, tests must prove:
 - the exact cover schema admits numeric predicates and representable
   `set_level` actions only with fresh valid state and explicit support;
 - missing position, missing support, explicit no-support, stale state, and
-  non-integer-percent requests all fail closed; and
+  non-integer-percent requests all fail closed;
+- explicit HA unavailability never produces a readable current level or
+  compatible action even if stale position attributes remain present; and
 - compatibility remains independent of opaque authority candidate creation
   and of any bridge control or execution route.
