@@ -28,6 +28,7 @@ export interface ProposalInboxHttpOptions {
 }
 
 interface InboxHttpPort {
+  renderControlCenter?(): string;
   renderList(): string;
   renderDetail(proposalId: string): string | undefined;
   review(input: InboxReviewInput): Promise<unknown>;
@@ -103,8 +104,14 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && url.pathname === "/assets/inbox.css") {
         return sendCss(response, 200, INBOX_CSS, method === "HEAD");
       }
+      if ((method === "GET" || method === "HEAD") && (url.pathname === "/" || url.pathname === "/control-center")) {
+        const html = this.inbox.renderControlCenter?.();
+        return html === undefined
+          ? send(response, 404, "Control center unavailable")
+          : sendHtml(response, 200, document(html, "Control center · hob-agent", "overview"), method === "HEAD");
+      }
       if ((method === "GET" || method === "HEAD") && url.pathname === "/proposals") {
-        return sendHtml(response, 200, document(this.inbox.renderList()), method === "HEAD");
+        return sendHtml(response, 200, document(this.inbox.renderList(), "Home · hob-agent", "inbox"), method === "HEAD");
       }
       const adviceDetail = /^\/advice\/([^/]+)$/.exec(url.pathname);
       if ((method === "GET" || method === "HEAD") && adviceDetail) {
@@ -112,7 +119,7 @@ export class ProposalInboxHttpService extends Service {
         const html = adviceId === undefined ? undefined : this.inbox.renderAdvice(adviceId);
         return html === undefined
           ? send(response, 404, "Household advice not found")
-          : sendHtml(response, 200, document(html), method === "HEAD");
+          : sendHtml(response, 200, document(html, "Advice · hob-agent", "inbox"), method === "HEAD");
       }
       if (method === "POST" && url.pathname === "/advice") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Household advice origin rejected");
@@ -147,7 +154,7 @@ export class ProposalInboxHttpService extends Service {
         const html = proposalId === undefined ? undefined : this.inbox.renderDetail(proposalId);
         return html === undefined
           ? send(response, 404, "Proposal not found")
-          : sendHtml(response, 200, document(html), method === "HEAD");
+          : sendHtml(response, 200, document(html, "Proposal · hob-agent", "inbox"), method === "HEAD");
       }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
@@ -245,8 +252,9 @@ function sendCss(response: ServerResponse, status: number, css: string, head: bo
   response.end(head ? undefined : css);
 }
 
-function document(content: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f3f7f2"><title>Home · hob-agent</title><link rel="stylesheet" href="/assets/inbox.css"></head><body><a class="skip-link" href="#main-content">Skip to main content</a><div class="app-shell"><header class="app-topbar"><a class="brand" href="/proposals"><strong>hob-agent</strong><span>Household agent</span></a><span class="topbar-note">Local review</span></header><div class="app-body"><nav class="app-nav" aria-label="Primary"><a href="/proposals#overview"><span class="nav-mark" aria-hidden="true">O</span>Overview</a><a href="/proposals#advice"><span class="nav-mark" aria-hidden="true">Q</span>Questions</a><a href="/proposals#reviews" aria-current="page"><span class="nav-mark" aria-hidden="true">R</span>Reviews</a><a href="/proposals#observations"><span class="nav-mark" aria-hidden="true">A</span>Observations</a><a href="/proposals#home"><span class="nav-mark" aria-hidden="true">H</span>Home</a><a href="/proposals#settings"><span class="nav-mark" aria-hidden="true">S</span>Settings</a></nav><div class="app-content">${content}</div></div></div></body></html>`;
+function document(content: string, title: string, current: "overview" | "inbox"): string {
+  const currentAttribute = (page: "overview" | "inbox") => page === current ? ` aria-current="page"` : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f3f7f2"><title>${title}</title><link rel="stylesheet" href="/assets/inbox.css"></head><body><a class="skip-link" href="#main-content">Skip to main content</a><div class="app-shell"><header class="app-topbar"><a class="brand" href="/control-center"><strong>hob-agent</strong><span>Household agent</span></a><span class="topbar-note">Local review</span></header><div class="app-body"><nav class="app-nav" aria-label="Primary"><a href="/control-center"${currentAttribute("overview")}><span class="nav-mark" aria-hidden="true">O</span>Overview</a><a href="/proposals"${currentAttribute("inbox")}><span class="nav-mark" aria-hidden="true">I</span>Inbox</a></nav><div class="app-content">${content}</div></div></div></body></html>`;
 }
 
 function mediaType(value: string | undefined): string | undefined {

@@ -1,6 +1,14 @@
 # Proposal inbox
 
-The minimal local review surface for household proposals: list, detail,
+The local Control Center is available at `/` and `/control-center`. It leads
+with household decisions and plain-language connection, home-map, Agent, and
+observation status. Pending proposals are normal review work rather than a
+system-health warning. Provider, adapter, bridge, and sequence identifiers are
+kept in a closed technical-diagnostics disclosure. The page never reads or
+returns credential values, raw device payloads, remote bridge identity, or an
+execution control.
+
+The proposal review surface is available at `/proposals`: list, detail,
 evidence watermarks, conflict findings, dry-run result, risk, and optimistic
 approve/reject. Reviews collect one bounded quality reason plus an optional
 note so useful, duplicate, weakly evidenced, incorrect, preference-mismatched,

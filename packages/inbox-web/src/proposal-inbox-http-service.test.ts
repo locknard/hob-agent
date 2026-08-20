@@ -18,6 +18,7 @@ class StubInbox extends Service {
   }
 
   renderList() { return "<main>Inbox list</main>"; }
+  renderControlCenter() { return "<main>Control center</main>"; }
   renderDetail(id: string) { return id === "proposal-1" ? "<main>Proposal detail</main>" : undefined; }
   async review(input: unknown) {
     this.reviews.push(input);
@@ -52,6 +53,24 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   });
   assert.equal(response.status, 200);
   assert.match(await response.text(), /Inbox list/);
+
+  const controlCenter = await fetch(`${ctx.homeInboxHttp.origin}/`, {
+    headers: { authorization },
+  });
+  assert.equal(controlCenter.status, 200);
+  const controlCenterHtml = await controlCenter.text();
+  assert.match(controlCenterHtml, /Control center/);
+  const primaryNavigation = controlCenterHtml.match(/<nav class="app-nav"[^>]*>([\s\S]*?)<\/nav>/)?.[1] ?? "";
+  assert.equal((primaryNavigation.match(/<a /g) ?? []).length, 2);
+  assert.match(primaryNavigation, />Overview<\/a>/);
+  assert.match(primaryNavigation, />Inbox<\/a>/);
+  assert.equal(primaryNavigation.includes("#observations"), false);
+
+  const namedControlCenter = await fetch(`${ctx.homeInboxHttp.origin}/control-center`, {
+    headers: { authorization },
+  });
+  assert.equal(namedControlCenter.status, 200);
+  assert.match(await namedControlCenter.text(), /Control center/);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   assert.match(response.headers.get("content-security-policy") ?? "", /style-src 'self'/);
@@ -76,7 +95,7 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.match(html, /href="\/assets\/inbox.css"/);
   assert.match(html, /class="skip-link"/);
   assert.match(html, /aria-label="Primary"/);
-  assert.match(html, /href="\/proposals#advice"[^>]*>[^<]*<span[^>]*>Q<\/span>Questions/);
+  assert.match(html, /href="\/proposals"[^>]*>[^<]*<span[^>]*>I<\/span>Inbox/);
 
   await fiber.dispose();
   assert.equal(ctx.homeInboxHttp, undefined);

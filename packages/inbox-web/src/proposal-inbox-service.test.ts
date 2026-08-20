@@ -199,3 +199,56 @@ test("exposes bounded household advice without turning the Inbox into a chat run
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
+
+test("exposes a read-only control center alongside the proposal Inbox", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  assert.equal("renderControlCenter" in ctx.homeInbox, true);
+  assert.match((ctx.homeInbox as unknown as { renderControlCenter(): string }).renderControlCenter(), /Control center/i);
+  assert.equal("apply" in ctx.homeInbox, false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("composes live neutral services into the control center without reading raw bridge data", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  ctx.provide("homeWorld", {
+    snapshot: () => ({
+      bridges: {
+        "bridge-main": {
+          adapterType: "home-assistant",
+          diagnostics: { connectionState: "ready", currentProcessReadyAt: "2026-08-20T09:00:00.000Z" },
+          watermark: { epochId: "epoch-main", lastSeq: 7 },
+          metrics: { consistency: "ready" },
+        },
+      },
+      bridgeWatermarks: [{ bridgeId: "bridge-main" }],
+      diagnostics: [{ bridgeId: "bridge-main", connectionState: "ready", currentProcessReadyAt: "2026-08-20T09:00:00.000Z" }],
+      spaces: [{ hwSpaceId: "space-main" }],
+      devices: [{ bindings: [{ hwSpaceId: "space-main" }], capabilities: [{}], states: [{ raw: "must-not-render" }] }],
+    }),
+  });
+  ctx.provide("homeAgent", {
+    agent: { options: { provider: "openai", model: "gpt-5.6" }, status: "idle" },
+    observationStatus: "idle",
+  });
+  ctx.provide("homeObservationScheduler", {
+    snapshot: () => ({ enabled: true, intervalMinutes: 360, runOnStart: false, state: "waiting" as const }),
+    observeNow: async () => "no_proposal" as const,
+  });
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const html = ctx.homeInbox.renderControlCenter();
+  assert.match(html, /home-assistant/);
+  assert.match(html, /gpt-5\.6/);
+  assert.match(html, /Home map/);
+  assert.equal(html.includes("must-not-render"), false);
+  assert.equal(html.includes("epoch-main"), false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});

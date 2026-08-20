@@ -18,6 +18,15 @@ import {
   type ProposalTracePort,
   type InboxHomeAdviceRecord,
 } from "./proposal-inbox.js";
+import {
+  projectControlCenter,
+  renderControlCenter as renderControlCenterPage,
+  type ControlCenterAgentSource,
+  type ControlCenterObservationSource,
+  type ControlCenterProposalSource,
+  type ControlCenterSnapshot,
+  type ControlCenterWorldSource,
+} from "./control-center.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
@@ -35,6 +44,12 @@ export class ProposalInboxService extends Service {
     observeNow(): Promise<string>;
   };
   private readonly proposalQuality: { qualitySummary(): InboxProposalQualitySummary };
+  private readonly controlCenterSources: {
+    readonly world?: ControlCenterWorldSource;
+    readonly agent?: ControlCenterAgentSource;
+    readonly observation?: ControlCenterObservationSource;
+    readonly proposals?: ControlCenterProposalSource;
+  };
   private readonly observationAudit?: {
     list(query: { limit: number }): readonly InboxObservationAttempt[];
     summary(): InboxObservationQualitySummary;
@@ -58,6 +73,12 @@ export class ProposalInboxService extends Service {
       snapshot(): InboxObservationStatus;
       observeNow(): Promise<string>;
     } | undefined;
+    this.controlCenterSources = {
+      world: ctx.get("homeWorld") as unknown as ControlCenterWorldSource | undefined,
+      agent: ctx.get("homeAgent") as unknown as ControlCenterAgentSource | undefined,
+      ...(this.observation === undefined ? {} : { observation: this.observation }),
+      proposals: this.proposalQuality,
+    };
     this.observationAudit = ctx.get("homeObservationAudit") as unknown as {
       list(query: { limit: number }): readonly InboxObservationAttempt[];
       summary(): InboxObservationQualitySummary;
@@ -112,6 +133,14 @@ export class ProposalInboxService extends Service {
       this.advice?.list({ limit: 5 }),
       this.canAskAdvice(),
     );
+  }
+
+  controlCenterSnapshot(): ControlCenterSnapshot {
+    return projectControlCenter(this.controlCenterSources);
+  }
+
+  renderControlCenter(): string {
+    return renderControlCenterPage(this.controlCenterSnapshot());
   }
 
   renderDetail(proposalId: string): string | undefined {
