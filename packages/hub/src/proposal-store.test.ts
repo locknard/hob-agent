@@ -657,3 +657,345 @@ test("fails closed when persisted proposal state is corrupted", async () => {
   reopened.close();
   await rm(directory, { recursive: true, force: true });
 });
+
+type PreparationJobStage = "artifact" | "evidence" | "authority" | "risk" | "compile" | "dry-run";
+type PreparationJobErrorCode =
+  | "not_found"
+  | "unavailable"
+  | "malformed_dependency"
+  | "policy_blocked"
+  | "persistence_failed"
+  | "attempt_exhausted";
+
+type PreparationJob = {
+  readonly schemaVersion: "1";
+  readonly kind: "approved-proposal-preparation";
+  readonly jobId: string;
+  readonly proposalId: string;
+  readonly proposalRevision: number;
+  readonly idempotencyKey: string;
+  readonly status: "queued" | "running" | "succeeded" | "failed";
+  readonly attempt: number;
+  readonly version: number;
+  readonly stage?: PreparationJobStage;
+  readonly artifact?: Record<string, unknown>;
+  readonly error?: { readonly stage: PreparationJobStage; readonly code: PreparationJobErrorCode };
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+type PreparationJobStoreApi = {
+  readonly listPreparationJobs: () => readonly PreparationJob[];
+  readonly getPreparationJob: (jobId: string) => PreparationJob | undefined;
+  readonly claimPreparationJob: (input: {
+    readonly jobId: string;
+    readonly expectedVersion: number;
+  }) => PreparationJob;
+  readonly completePreparationJob: (input: {
+    readonly jobId: string;
+    readonly expectedVersion: number;
+  }) => PreparationJob;
+  readonly failPreparationJob: (input: {
+    readonly jobId: string;
+    readonly expectedVersion: number;
+    readonly stage: PreparationJobStage;
+    readonly code: PreparationJobErrorCode;
+  }) => PreparationJob;
+  readonly retryPreparationJob: (input: {
+    readonly jobId: string;
+    readonly expectedVersion: number;
+  }) => PreparationJob;
+};
+
+function preparationJobs(store: SqliteProposalStore): PreparationJobStoreApi {
+  return store as unknown as PreparationJobStoreApi;
+}
+
+function approvedPreparationJob(store: SqliteProposalStore, idempotencyKey: string): PreparationJob {
+  const proposal = store.create(input({ idempotencyKey, artifactCandidate }));
+  const approved = store.review({
+    proposalId: proposal.id,
+    expectedRevision: proposal.revision,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+  const jobs = preparationJobs(store).listPreparationJobs();
+  const job = jobs.find((candidate) => candidate.proposalId === approved.id);
+  assert.ok(job);
+  return job;
+}
+
+function assertJobTransitionConflict(action: () => unknown): void {
+  assert.throws(action, (error: unknown) => error instanceof ProposalStoreError);
+}
+
+test("approving one qualifying revision durably enqueues exactly one bounded job, while other reviews do not", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-preparation-enqueue-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const proposal = store.create(input({ idempotencyKey: "preparation:approved", artifactCandidate }));
+    const approved = store.review({
+      proposalId: proposal.id,
+      expectedRevision: proposal.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+
+    const jobs = preparationJobs(store).listPreparationJobs();
+    assert.equal(jobs.length, 1);
+    assert.deepEqual(jobs[0], {
+      schemaVersion: "1",
+      kind: "approved-proposal-preparation",
+      jobId: jobs[0]!.jobId,
+      proposalId: approved.id,
+      proposalRevision: approved.revision,
+      idempotencyKey: jobs[0]!.idempotencyKey,
+      status: "queued",
+      attempt: 1,
+      version: jobs[0]!.version,
+      createdAt,
+      updatedAt: createdAt,
+    });
+    assert.equal(jobs[0]!.proposalRevision, 2);
+    assert.equal(JSON.stringify(jobs[0]).includes(proposal.title), false);
+    assert.equal(JSON.stringify(jobs[0]).includes("restore_previous_state"), false);
+
+    const rejected = store.create(input({ idempotencyKey: "preparation:rejected", artifactCandidate }));
+    store.review({
+      proposalId: rejected.id,
+      expectedRevision: rejected.revision,
+      decision: "rejected",
+      reviewer: "household-owner",
+      feedbackCode: "not_useful",
+    });
+    const expired = store.create(input({ idempotencyKey: "preparation:expired", artifactCandidate }));
+    store.review({
+      proposalId: expired.id,
+      expectedRevision: expired.revision,
+      decision: "expired",
+      reviewer: "household-owner",
+    });
+    const insight = store.create(input({ kind: "household-insight", idempotencyKey: "preparation:insight" }));
+    store.review({
+      proposalId: insight.id,
+      expectedRevision: insight.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+    assert.equal(preparationJobs(store).listPreparationJobs().length, 1);
+
+    store.close();
+    const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+    try {
+      assert.equal(preparationJobs(reopened).listPreparationJobs().length, 1);
+      assert.equal(preparationJobs(reopened).listPreparationJobs()[0]?.status, "queued");
+      assert.equal(reopened.get(approved.id)?.status, "approved");
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("claims a queued preparation job once with an expected version across store connections", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-preparation-claim-"));
+  const path = join(directory, "proposals.sqlite");
+  const first = new SqliteProposalStore({ path, now: () => createdAt });
+  const second = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const queued = approvedPreparationJob(first, "preparation:claim");
+    const claimed = preparationJobs(first).claimPreparationJob({
+      jobId: queued.jobId,
+      expectedVersion: queued.version,
+    });
+    assert.equal(claimed.status, "running");
+    assert.equal(claimed.attempt, 1);
+    assert.ok(claimed.version > queued.version);
+    assert.equal(preparationJobs(second).getPreparationJob(queued.jobId)?.status, "running");
+    assertJobTransitionConflict(() => preparationJobs(second).claimPreparationJob({
+      jobId: queued.jobId,
+      expectedVersion: queued.version,
+    }));
+    assert.equal(preparationJobs(second).getPreparationJob(queued.jobId)?.status, "running");
+  } finally {
+    first.close();
+    second.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("records precise succeeded and failed preparation job states without unbounded error text", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const successQueued = approvedPreparationJob(store, "preparation:complete");
+    const successRunning = preparationJobs(store).claimPreparationJob({
+      jobId: successQueued.jobId,
+      expectedVersion: successQueued.version,
+    });
+    const succeeded = preparationJobs(store).completePreparationJob({
+      jobId: successRunning.jobId,
+      expectedVersion: successRunning.version,
+    });
+    assert.equal(succeeded.status, "succeeded");
+    assert.equal(succeeded.attempt, 1);
+    assert.equal(succeeded.stage, undefined);
+    assert.equal(succeeded.error, undefined);
+    assertJobTransitionConflict(() => preparationJobs(store).completePreparationJob({
+      jobId: succeeded.jobId,
+      expectedVersion: succeeded.version,
+    }));
+
+    const failedQueued = approvedPreparationJob(store, "preparation:fail");
+    const failedRunning = preparationJobs(store).claimPreparationJob({
+      jobId: failedQueued.jobId,
+      expectedVersion: failedQueued.version,
+    });
+    const failed = preparationJobs(store).failPreparationJob({
+      jobId: failedRunning.jobId,
+      expectedVersion: failedRunning.version,
+      stage: "compile",
+      code: "unavailable",
+    });
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.attempt, 1);
+    assert.equal(failed.stage, "compile");
+    assert.deepEqual(failed.error, { stage: "compile", code: "unavailable" });
+    assert.equal("message" in failed.error!, false);
+    assertJobTransitionConflict(() => preparationJobs(store).failPreparationJob({
+      jobId: failed.jobId,
+      expectedVersion: failed.version,
+      stage: "compile",
+      code: "unavailable",
+    }));
+  } finally {
+    store.close();
+  }
+});
+
+test("explicitly retries only a failed preparation attempt and increments its attempt", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const queued = approvedPreparationJob(store, "preparation:retry");
+    assertJobTransitionConflict(() => preparationJobs(store).retryPreparationJob({
+      jobId: queued.jobId,
+      expectedVersion: queued.version,
+    }));
+
+    const running = preparationJobs(store).claimPreparationJob({
+      jobId: queued.jobId,
+      expectedVersion: queued.version,
+    });
+    assertJobTransitionConflict(() => preparationJobs(store).retryPreparationJob({
+      jobId: running.jobId,
+      expectedVersion: running.version,
+    }));
+    const failed = preparationJobs(store).failPreparationJob({
+      jobId: running.jobId,
+      expectedVersion: running.version,
+      stage: "artifact",
+      code: "persistence_failed",
+    });
+    const retried = preparationJobs(store).retryPreparationJob({
+      jobId: failed.jobId,
+      expectedVersion: failed.version,
+    });
+    assert.equal(retried.status, "queued");
+    assert.equal(retried.attempt, failed.attempt + 1);
+    assert.ok(retried.version > failed.version);
+    assert.equal(retried.stage, undefined);
+    assert.equal(retried.error, undefined);
+
+    const succeededRunning = preparationJobs(store).claimPreparationJob({
+      jobId: retried.jobId,
+      expectedVersion: retried.version,
+    });
+    const succeeded = preparationJobs(store).completePreparationJob({
+      jobId: succeededRunning.jobId,
+      expectedVersion: succeededRunning.version,
+    });
+    assert.equal(succeeded.status, "succeeded");
+    assertJobTransitionConflict(() => preparationJobs(store).retryPreparationJob({
+      jobId: succeeded.jobId,
+      expectedVersion: succeeded.version,
+    }));
+  } finally {
+    store.close();
+  }
+});
+
+test("fails closed after five preparation attempts", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    let job = approvedPreparationJob(store, "preparation:attempt-limit");
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const running = preparationJobs(store).claimPreparationJob({
+        jobId: job.jobId,
+        expectedVersion: job.version,
+      });
+      const failed = preparationJobs(store).failPreparationJob({
+        jobId: running.jobId,
+        expectedVersion: running.version,
+        stage: "compile",
+        code: "unavailable",
+      });
+      assert.equal(failed.attempt, attempt);
+      if (attempt === 5) {
+        assertJobTransitionConflict(() => preparationJobs(store).retryPreparationJob({
+          jobId: failed.jobId,
+          expectedVersion: failed.version,
+        }));
+        assert.equal(preparationJobs(store).getPreparationJob(failed.jobId)?.status, "failed");
+      } else {
+        job = preparationJobs(store).retryPreparationJob({
+          jobId: failed.jobId,
+          expectedVersion: failed.version,
+        });
+      }
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("reopening the proposal store preserves queued and running preparation jobs without auto-claiming", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-preparation-restart-"));
+  const path = join(directory, "proposals.sqlite");
+  const first = new SqliteProposalStore({ path, now: () => createdAt });
+  let queued: PreparationJob;
+  try {
+    queued = approvedPreparationJob(first, "preparation:restart");
+  } finally {
+    first.close();
+  }
+
+  const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const persistedQueued = preparationJobs(reopened).getPreparationJob(queued!.jobId);
+    assert.equal(persistedQueued?.status, "queued");
+    assert.equal(persistedQueued?.attempt, 1);
+    const running = preparationJobs(reopened).claimPreparationJob({
+      jobId: queued!.jobId,
+      expectedVersion: persistedQueued!.version,
+    });
+    reopened.close();
+
+    const restartedAgain = new SqliteProposalStore({ path, now: () => createdAt });
+    try {
+      const persistedRunning = preparationJobs(restartedAgain).getPreparationJob(running.jobId);
+      assert.equal(persistedRunning?.status, "running");
+      assert.equal(persistedRunning?.attempt, 1);
+      assert.equal(persistedRunning?.version, running.version);
+    } finally {
+      restartedAgain.close();
+    }
+  } finally {
+    reopened.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

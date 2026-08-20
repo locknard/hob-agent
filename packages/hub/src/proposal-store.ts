@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -327,6 +327,56 @@ export interface ProposalListQuery {
   readonly limit?: number;
 }
 
+export const ARTIFACT_PREPARATION_JOB_STAGES = [
+  "artifact",
+  "evidence",
+  "authority",
+  "risk",
+  "compile",
+  "dry-run",
+] as const;
+export type ArtifactPreparationJobStage = typeof ARTIFACT_PREPARATION_JOB_STAGES[number];
+
+export const ARTIFACT_PREPARATION_JOB_ERROR_CODES = [
+  "not_found",
+  "unavailable",
+  "malformed_dependency",
+  "policy_blocked",
+  "persistence_failed",
+  "attempt_exhausted",
+] as const;
+export type ArtifactPreparationJobErrorCode = typeof ARTIFACT_PREPARATION_JOB_ERROR_CODES[number];
+export type ArtifactPreparationJobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface ArtifactPreparationJob {
+  readonly schemaVersion: "1";
+  readonly kind: "approved-proposal-preparation";
+  readonly jobId: string;
+  readonly proposalId: string;
+  readonly proposalRevision: number;
+  readonly idempotencyKey: string;
+  readonly status: ArtifactPreparationJobStatus;
+  readonly attempt: number;
+  readonly version: number;
+  readonly stage?: ArtifactPreparationJobStage;
+  readonly error?: {
+    readonly stage: ArtifactPreparationJobStage;
+    readonly code: ArtifactPreparationJobErrorCode;
+  };
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ArtifactPreparationJobTransition {
+  readonly jobId: string;
+  readonly expectedVersion: number;
+}
+
+export interface ArtifactPreparationJobFailure extends ArtifactPreparationJobTransition {
+  readonly stage: ArtifactPreparationJobStage;
+  readonly code: ArtifactPreparationJobErrorCode;
+}
+
 export type ProposalStoreErrorCode =
   | "invalid_proposal"
   | "conflict_check_required"
@@ -335,6 +385,7 @@ export type ProposalStoreErrorCode =
   | "not_found"
   | "revision_conflict"
   | "terminal_status"
+  | "job_transition_conflict"
   | "source_unavailable"
   | "retention_evidence_limit";
 
@@ -366,6 +417,31 @@ type ProposalRow = {
   epoch_id?: unknown;
   seq?: unknown;
 };
+
+type ArtifactPreparationJobRow = {
+  job_id?: unknown;
+  proposal_id?: unknown;
+  proposal_revision?: unknown;
+  idempotency_key?: unknown;
+  status?: unknown;
+  attempt?: unknown;
+  version?: unknown;
+  stage?: unknown;
+  error_code?: unknown;
+  created_at?: unknown;
+  updated_at?: unknown;
+};
+
+interface ArtifactPreparationJobMutation {
+  readonly status: ArtifactPreparationJobStatus;
+  readonly attempt: number;
+  readonly version: number;
+  readonly stage?: ArtifactPreparationJobStage;
+  readonly errorCode?: ArtifactPreparationJobErrorCode;
+  readonly updatedAt: string;
+}
+
+const MAX_ARTIFACT_PREPARATION_ATTEMPTS = 5;
 
 /** Durable local store for review-only proposal envelopes and their audit trail. */
 export class SqliteProposalStore {
@@ -401,6 +477,24 @@ export class SqliteProposalStore {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS proposals_status_created
         ON proposals (status, created_at DESC, proposal_id DESC);
+      CREATE TABLE IF NOT EXISTS approved_proposal_preparation_jobs (
+        job_id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL,
+        proposal_revision INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+        attempt INTEGER NOT NULL CHECK (attempt >= 1 AND attempt <= ${MAX_ARTIFACT_PREPARATION_ATTEMPTS}),
+        version INTEGER NOT NULL CHECK (version >= 1),
+        stage TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (proposal_id, proposal_revision),
+        CHECK ((status = 'failed' AND stage IS NOT NULL AND error_code IS NOT NULL)
+          OR (status <> 'failed' AND stage IS NULL AND error_code IS NULL))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS preparation_jobs_status_created
+        ON approved_proposal_preparation_jobs (status, created_at ASC, job_id ASC);
     `);
     this.ensurePrivateFiles();
   }
@@ -743,6 +837,11 @@ export class SqliteProposalStore {
       if (Number(result.changes) !== 1) {
         throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
       }
+      if (reviewed.status === "approved"
+        && reviewed.kind === "automation-draft"
+        && reviewed.artifactCandidate !== undefined) {
+        this.enqueuePreparationJob(reviewed, at);
+      }
       this.db.exec("COMMIT");
       return clone(reviewed);
     } catch (error) {
@@ -751,6 +850,133 @@ export class SqliteProposalStore {
     } finally {
       this.ensurePrivateFiles();
     }
+  }
+
+  listPreparationJobs(limit = 100): readonly ArtifactPreparationJob[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("preparation job list limit is invalid");
+    }
+    const rows = this.db.prepare(`SELECT job_id, proposal_id, proposal_revision,
+        idempotency_key, status, attempt, version, stage, error_code, created_at, updated_at
+      FROM approved_proposal_preparation_jobs
+      ORDER BY created_at ASC, job_id ASC LIMIT ?`).all(limit) as ArtifactPreparationJobRow[];
+    return rows.map(fromPreparationJobRow);
+  }
+
+  getPreparationJob(jobId: string): ArtifactPreparationJob | undefined {
+    validatePreparationJobId(jobId);
+    const row = this.db.prepare(`SELECT job_id, proposal_id, proposal_revision,
+        idempotency_key, status, attempt, version, stage, error_code, created_at, updated_at
+      FROM approved_proposal_preparation_jobs WHERE job_id = ?`).get(jobId) as ArtifactPreparationJobRow | undefined;
+    return row === undefined ? undefined : fromPreparationJobRow(row);
+  }
+
+  claimPreparationJob(input: ArtifactPreparationJobTransition): ArtifactPreparationJob {
+    return this.transitionPreparationJob(input, "queued", "running");
+  }
+
+  completePreparationJob(input: ArtifactPreparationJobTransition): ArtifactPreparationJob {
+    return this.transitionPreparationJob(input, "running", "succeeded");
+  }
+
+  failPreparationJob(input: ArtifactPreparationJobFailure): ArtifactPreparationJob {
+    validatePreparationFailure(input);
+    return this.mutatePreparationJob(input, (current, at) => {
+      if (current.status !== "running") throw preparationTransitionConflict();
+      return {
+        status: "failed",
+        attempt: current.attempt,
+        version: current.version + 1,
+        stage: input.stage,
+        errorCode: input.code,
+        updatedAt: at,
+      };
+    });
+  }
+
+  retryPreparationJob(input: ArtifactPreparationJobTransition): ArtifactPreparationJob {
+    validatePreparationTransition(input);
+    return this.mutatePreparationJob(input, (current, at) => {
+      if (current.status !== "failed") throw preparationTransitionConflict();
+      if (current.attempt >= MAX_ARTIFACT_PREPARATION_ATTEMPTS) {
+        throw new ProposalStoreError("job_transition_conflict", "Preparation attempt limit reached");
+      }
+      return {
+        status: "queued",
+        attempt: current.attempt + 1,
+        version: current.version + 1,
+        updatedAt: at,
+      };
+    });
+  }
+
+  private transitionPreparationJob(
+    input: ArtifactPreparationJobTransition,
+    expectedStatus: ArtifactPreparationJobStatus,
+    nextStatus: ArtifactPreparationJobStatus,
+  ): ArtifactPreparationJob {
+    validatePreparationTransition(input);
+    return this.mutatePreparationJob(input, (current, at) => {
+      if (current.status !== expectedStatus) throw preparationTransitionConflict();
+      return {
+        status: nextStatus,
+        attempt: current.attempt,
+        version: current.version + 1,
+        updatedAt: at,
+      };
+    });
+  }
+
+  private mutatePreparationJob(
+    input: ArtifactPreparationJobTransition,
+    mutation: (current: ArtifactPreparationJob, at: string) => ArtifactPreparationJobMutation,
+  ): ArtifactPreparationJob {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getPreparationJob(input.jobId);
+      if (current === undefined) throw new ProposalStoreError("not_found", "Preparation job was not found");
+      if (current.version !== input.expectedVersion) throw preparationTransitionConflict();
+      const next = mutation(current, this.timestamp());
+      const result = this.db.prepare(`UPDATE approved_proposal_preparation_jobs
+        SET status = ?, attempt = ?, version = ?, stage = ?, error_code = ?, updated_at = ?
+        WHERE job_id = ? AND version = ? AND status = ?`).run(
+        next.status,
+        next.attempt,
+        next.version,
+        next.stage ?? null,
+        next.errorCode ?? null,
+        next.updatedAt,
+        current.jobId,
+        current.version,
+        current.status,
+      );
+      if (Number(result.changes) !== 1) throw preparationTransitionConflict();
+      const updated = this.getPreparationJob(current.jobId);
+      if (updated === undefined) throw new ProposalStoreError("corrupt_store", "Preparation job disappeared");
+      this.db.exec("COMMIT");
+      return updated;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.ensurePrivateFiles();
+    }
+  }
+
+  private enqueuePreparationJob(proposal: ProposalEnvelope, at: string): void {
+    const material = `approved-proposal-preparation-v1\n${proposal.id.length}:${proposal.id}\n${proposal.revision}`;
+    const digest = createHash("sha256").update(material).digest("hex");
+    this.db.prepare(`INSERT INTO approved_proposal_preparation_jobs
+      (job_id, proposal_id, proposal_revision, idempotency_key, status, attempt,
+       version, stage, error_code, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'queued', 1, 1, NULL, NULL, ?, ?)`).run(
+      `preparation-${digest}`,
+      proposal.id,
+      proposal.revision,
+      `sha256:${digest}`,
+      at,
+      at,
+    );
   }
 
   close(): void {
@@ -879,6 +1105,99 @@ function validateReviewInput(input: ReviewProposalInput): void {
   }
   if (feedbackCode === "other" && !input.note?.trim()) {
     throw new TypeError("proposal review note is required for other feedback");
+  }
+}
+
+function validatePreparationJobId(jobId: string): void {
+  if (typeof jobId !== "string"
+    || jobId.length === 0
+    || jobId.trim() !== jobId
+    || Buffer.byteLength(jobId, "utf8") > 200) {
+    throw new TypeError("preparation job id is invalid");
+  }
+}
+
+function validatePreparationTransition(
+  input: ArtifactPreparationJobTransition,
+): void {
+  if (!input || typeof input !== "object") throw new TypeError("preparation job transition is invalid");
+  validatePreparationJobId(input.jobId);
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw new TypeError("preparation job expected version is invalid");
+  }
+}
+
+function validatePreparationFailure(input: ArtifactPreparationJobFailure): void {
+  validatePreparationTransition(input);
+  if (!ARTIFACT_PREPARATION_JOB_STAGES.includes(input.stage)
+    || !ARTIFACT_PREPARATION_JOB_ERROR_CODES.includes(input.code)) {
+    throw new TypeError("preparation job failure is invalid");
+  }
+}
+
+function preparationTransitionConflict(): ProposalStoreError {
+  return new ProposalStoreError("job_transition_conflict", "Preparation job transition conflicted");
+}
+
+function fromPreparationJobRow(row: ArtifactPreparationJobRow): ArtifactPreparationJob {
+  try {
+    if (typeof row.job_id !== "string"
+      || typeof row.proposal_id !== "string"
+      || typeof row.idempotency_key !== "string"
+      || typeof row.status !== "string"
+      || typeof row.created_at !== "string"
+      || typeof row.updated_at !== "string") {
+      throw new Error("invalid preparation job metadata");
+    }
+    const jobId = String(row.job_id);
+    const proposalId = String(row.proposal_id);
+    const proposalRevision = Number(row.proposal_revision);
+    const idempotencyKey = String(row.idempotency_key);
+    const status = String(row.status) as ArtifactPreparationJobStatus;
+    const attempt = Number(row.attempt);
+    const version = Number(row.version);
+    const createdAt = String(row.created_at);
+    const updatedAt = String(row.updated_at);
+    const stage = row.stage === null || row.stage === undefined
+      ? undefined
+      : String(row.stage) as ArtifactPreparationJobStage;
+    const errorCode = row.error_code === null || row.error_code === undefined
+      ? undefined
+      : String(row.error_code) as ArtifactPreparationJobErrorCode;
+    validatePreparationJobId(jobId);
+    validatePreparationJobId(proposalId);
+    if (!idempotencyKey.startsWith("sha256:") || idempotencyKey.length !== 71
+      || !/^[a-f0-9]+$/u.test(idempotencyKey.slice(7))
+      || !Number.isSafeInteger(proposalRevision) || proposalRevision < 1
+      || !(["queued", "running", "succeeded", "failed"] as const).includes(status)
+      || !Number.isSafeInteger(attempt) || attempt < 1 || attempt > MAX_ARTIFACT_PREPARATION_ATTEMPTS
+      || !Number.isSafeInteger(version) || version < 1
+      || !isoTimestamp.safeParse(createdAt).success
+      || !isoTimestamp.safeParse(updatedAt).success
+      || Date.parse(updatedAt) < Date.parse(createdAt)
+      || (status === "failed") !== (stage !== undefined && errorCode !== undefined)
+      || (stage !== undefined && !ARTIFACT_PREPARATION_JOB_STAGES.includes(stage))
+      || (errorCode !== undefined && !ARTIFACT_PREPARATION_JOB_ERROR_CODES.includes(errorCode))) {
+      throw new Error("invalid preparation job");
+    }
+    return deepFreeze({
+      schemaVersion: "1" as const,
+      kind: "approved-proposal-preparation" as const,
+      jobId,
+      proposalId,
+      proposalRevision,
+      idempotencyKey,
+      status,
+      attempt,
+      version,
+      ...(stage === undefined ? {} : { stage }),
+      ...(stage === undefined || errorCode === undefined ? {} : { error: { stage, code: errorCode } }),
+      createdAt,
+      updatedAt,
+    });
+  } catch (error) {
+    if (error instanceof ProposalStoreError) throw error;
+    throw new ProposalStoreError("corrupt_store", "Persisted preparation job is invalid");
   }
 }
 
