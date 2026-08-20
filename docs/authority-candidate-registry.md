@@ -1,6 +1,16 @@
 # Hub authority candidate registry
 
-Status: accepted as the M3b/M3c prerequisite; implementation not yet present.
+Status: the Hub-private registry core is implemented and tested in isolation as
+an M3b/M3c prerequisite; HomeWorld, Artifact producer, and production-root
+integration are not wired yet.
+
+The isolated core persists opaque candidate identities, lifecycle transitions,
+idempotent operations, and metadata-only audit in private SQLite. It is not an
+action route, and its existence does not make an authority assessment or an
+execution path available. `AuthorityCoordinator` now validates explicit
+`ActionAuthorityConfiguration` with Hub-owned `configIdentity` and positive
+`configRevision`, but it is not yet the binding source for this registry or an
+assessment producer.
 
 ## Decision
 
@@ -79,6 +89,12 @@ to `ArtifactAuthorityAssessment.inputIdentity`. A missing registry, corrupt
 row, incomplete scope, stale binding generation, or absent relevant watermark
 prevents an available assessment.
 
+The candidate-registry core above is currently a private, isolated seam. It is
+not consumed by HomeWorld or the Artifact producer, and it is not mounted as a
+mutation service in the production composition. The next integration boundary
+is a Hub-private binding source that can feed honest evidence/risk/authority
+assessment producers.
+
 Before M3d ticket claim, Hub resolves the latest candidate again to a final
 route and checks the same binding/config generation. The final route never
 enters Artifact bytes or model-visible context.
@@ -95,4 +111,3 @@ enters Artifact bytes or model-visible context.
 - serialized neutral output is checked for bridge/native/remote/adapter fields;
 - this registry exposes no control, credential, bridge call, or execution
   method and does not enable an action plane by itself.
-
