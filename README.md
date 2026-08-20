@@ -46,12 +46,16 @@ The initial implementation connects to Home Assistant's WebSocket API, reads a
 state and registry bootstrap snapshot, and subscribes to `state_changed`
 events. Configure a neutral bridge catalog locally; never commit a token.
 `HOB_BRIDGES` contains only bridge identity, adapter type, non-secret config, and
-explicit credential environment-name references:
+explicit credential locators. On macOS, prefer an exact bridge-scoped Keychain
+locator:
 
 ```sh
 export HOB_DATA_DIR="/var/lib/hob-agent"
-export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","config":{"baseUrl":"http://homeassistant.local:8123","authenticationPrincipal":"home-owner"},"credentialRefs":{"access-token":"HOB_HA_TOKEN"}}]'
-export HOB_HA_TOKEN='long-lived-access-token'
+export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","config":{"baseUrl":"http://homeassistant.local:8123","authenticationPrincipal":"home-owner"},"credentialRefs":{"access-token":"keychain:hob-agent/bridge:ha-main:access-token"}}]'
+export HOB_BRIDGE_ID='ha-main'
+export HOB_BRIDGE_CREDENTIAL_ALIAS='access-token'
+# Enter the HA token without echo; only the locator above remains in config.
+pnpm credentials:bridge
 export HOB_MODEL=deepseek/deepseek-v4-flash
 # Preferred on macOS: enter without echo; the key is stored in Keychain.
 pnpm credentials:model
@@ -63,7 +67,9 @@ export HOB_OBSERVATION_INTERVAL_MINUTES=360
 export HOB_OBSERVE_ON_START=false
 # Optional bounded SOUL.md, HOME.md, and MEMORY.md household context:
 export HOB_HOME_DIR='/absolute/path/to/private-home'
-# Legacy/development fallback: set the matching DEEPSEEK_API_KEY,
+# Legacy/development bridge fallback: use `env:HOB_HA_TOKEN` (or the old raw
+# `HOB_HA_TOKEN` locator) and set that variable only in the launch environment.
+# Legacy/development model fallback: set the matching DEEPSEEK_API_KEY,
 # OPENAI_API_KEY, ANTHROPIC_API_KEY, MOONSHOT_API_KEY, or ZAI_API_KEY.
 pnpm start
 ```
@@ -264,8 +270,10 @@ The intended user journey is documented in
 [`docs/ha-onboarding.md`](docs/ha-onboarding.md).
 
 The HA onboarding path starts with a credential-free WebSocket preflight. A
-2026-08-18 LAN check reached Home Assistant `2026.6.4`; registry/state bootstrap
-still requires an explicitly supplied token and remains read-only.
+later private read-only checkpoint covered 75 neutral devices and 18,206
+canonical events without recording household identities or values in this
+repository. A current-process bootstrap still requires an explicitly supplied
+token and the Phase 0 adapter remains read-only.
 
 Supported model providers and credential boundaries are documented in
 [`docs/model-providers.md`](docs/model-providers.md).
@@ -276,7 +284,9 @@ The OpenClaw-derived provider adaptation audit is tracked in
 The repository now has one executable Cordis composition root for the neutral
 HomeWorld bridge runtime and DSH agent. The production Home Agent creates or
 resumes its stable session through the official DSH SQLite provider and loads
-bounded household prompt context; governed filesystem Skills remain deferred. See
+bounded household prompt context. An optional tenant Skill provider contributes
+strict, contained, byte-bounded `SKILL.md` files through the official DSH
+registry without granting tools or authority. See
 [`docs/architecture-self-review.md`](docs/architecture-self-review.md) for the
 verified boundaries and prioritized gaps.
 The intended provider authorization and model-selection journey is documented

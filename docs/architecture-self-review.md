@@ -1,6 +1,6 @@
 # Architecture self-review
 
-Date: 2026-08-19
+Date: 2026-08-20
 
 ## Scope conclusion
 
@@ -15,9 +15,13 @@ This repository now provides an executable Phase 0 composition root. It creates
 one Cordis `Context`, mounts the neutral `HomeWorldService` before the Home
 Agent, and owns bounded process shutdown. Official DSH session persistence,
 bounded household prompt context, the DSH Skill registry/loader, and one
-reviewed first-party household-observation Skill are composed. Tenant
-filesystem Skill installation remains closed pending containment and body-size
-guards.
+reviewed first-party household-observation Skill are composed. When an explicit
+household directory is configured, a tenant provider contributes a strict
+bounded subset of `SKILL.md` through that same registry. It rechecks canonical
+containment, rejects symlinks, caps file/catalog bytes and entries, rereads on
+demand, exposes no resource path, and ranks below reviewed product Skills.
+Tenant instructions remain untrusted model input and grant no tool or policy
+authority.
 
 Long-running observation sessions now mount the official DSH token meter,
 basic compaction engine, and replay-safe tool-result pruner. The Home Product
@@ -38,6 +42,19 @@ semantic kind and v6.5 neutral space topology, catalog/registry/scoped credentia
 SQLite ingest, canonical identity and authority, world-model indexing, the HA
 adapter, and the neutral agent snapshot. Actions and artifact hosting remain an
 explicit M3 boundary rather than a second runtime hidden in Phase 0.
+
+Bridge credentials may now use exact bridge/alias-scoped macOS Keychain
+locators. Launch projection does not enumerate or passively read Keychain;
+resolution happens only for the configured bridge and declared alias when the
+adapter connects. Secret-like fields, including nested API/access keys, are
+rejected from ordinary bridge configuration.
+
+The authenticated local Control Center now leads with household review work
+and plain-language service health. Pending proposals do not masquerade as a
+system fault, degraded consistency cannot appear ready, non-spatial service
+objects do not create false room-review work, and provider/adapter/sequence
+identifiers remain behind native progressive disclosure. It is still a
+read-only projection and provides no configuration or execution control.
 
 M3a now adds a review-only proposal path inside the same root: a private SQLite
 proposal store, hub-owned evidence/conflict projection, DSH proposal tool, and
@@ -232,12 +249,12 @@ The immediate next step is the bounded real-household pilot described in
 The pilot's review outcomes and observed run metrics should decide which gap
 below becomes product work next.
 
-### P1 — canonical ingest-journal retention
+### Implemented foundation — canonical ingest-journal retention
 
 The neutral ingest journal has a deterministic logical hard quota and fails
-closed through bridge pause/quarantine, but it has no production retention
-path. Real-household validation now reports aggregate used, maximum, and
-remaining logical bytes so exhaustion is visible before an unattended pilot.
+closed through bridge pause/quarantine, and now exposes one explicit per-bridge
+retention operation. Real-household validation reports aggregate used, maximum,
+and remaining logical bytes so exhaustion is visible before an unattended pilot.
 A first live HA run reached 48% of the former 16 MiB default in roughly half an
 hour while retaining no rejections or history gaps. That measured rate could
 not support the product's bounded 168-hour evidence window. The default is now
@@ -253,16 +270,19 @@ the updated path retained 291 post-baseline state events with zero consecutive
 semantic duplicates, zero rejections, and zero history gaps; the aggregate
 capacity report showed roughly 3% of the new quota in use.
 
-The larger sizing floor is not retention. Do not silently delete old epochs.
-A reviewed implementation must preserve at least the current
-manifest-verified recovery cut, the supported 168-hour temporal evidence
-window, open history gaps, and journal rows referenced by durable proposal
-evidence. It must persist an explicit retention floor/audit so a query can
-report partial coverage instead of mistaking deleted history for quiet time.
-Logical deletion must remain transactional with its byte ledger; physical
-SQLite page reclamation may be a separate bounded maintenance step. Until that
-contract exists, capacity visibility and fail-closed backpressure are the safe
-boundary.
+`applyRetention` preserves the current manifest-verified recovery cut, the
+minimum 168-hour temporal evidence window, open history gaps, and explicitly
+supplied durable proposal references. The complete decision snapshot,
+deletions, byte ledger, immutable audit, and coverage floor are protected by
+one `BEGIN IMMEDIATE` transaction; a concurrent second SQLite connection cannot
+insert a gap between selection and deletion. Partial coverage remains explicit.
+
+Remaining P1 work is product wiring rather than retention semantics: the owning
+service must collect verified proposal references, schedule the explicit
+operation, expose policy/audit status in the Control Center, and later define a
+separate bounded physical SQLite reclamation step. Rejection, gap, and
+heartbeat metadata remain conservatively retained because their current schema
+has no receipt timestamp.
 
 ### P2 — non-local Inbox delivery
 
@@ -277,15 +297,18 @@ production data path. The provider has no retention or deletion API. Define a
 governed household reset/export policy upstream before offering either action;
 do not mutate DSH tables directly.
 
-### P1 — household Skills
+### Implemented foundation — household Skills
 
 An explicit household directory can now load bounded `SOUL.md`, `HOME.md`, and
 `MEMORY.md` startup snapshots through the DSH prompt/context registry without
-expanding tool authority. `HEARTBEAT.md`, hot reload, memory writes, and tenant
-filesystem Skills remain deferred. The official filesystem provider now shares
-the pinned compatibility family, but its uncapped bodies, repeat reads, and
-symlink fallback require containment review before mounting. Do not create a
-parallel registry.
+expanding tool authority. The tenant `SKILL.md` provider is also implemented
+through the official DSH `SkillProvider` seam, with the containment and resource
+limits described above; the general-purpose upstream filesystem provider is
+not mounted over household content. Remaining product work includes an
+installation/review UI, change provenance, explicit enable/disable state, and
+eventual process isolation for third-party executable plugins. `HEARTBEAT.md`,
+hot reload, and memory writes remain deferred. Do not create a parallel
+registry.
 
 ### P2 — bounded probe lifecycle
 

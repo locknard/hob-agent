@@ -28,9 +28,27 @@
 ## 2. 授权：最小权限、可撤销
 
 界面分步展示 HA 创建长期访问 token 的说明，并提示用户给 token 命名为
-`hob-agent-readonly`。粘贴后立即执行只读预检；输入框不回显、不进日志、不进入
+`hob-agent-phase0`。HA 长期 token 继承创建者账户权限，**它本身不是只读凭据**；当前
+只读保证来自 hob-agent 的 HA adapter 不提供 service call、配置写入或自动化写入路径。
+在 HA 能为本项目所需 registry API 提供经过验证的更窄权限前，产品不能用“只读 token”
+或“最小权限 token”描述该凭据。粘贴后立即执行只读预检；输入框不回显、不进日志、不进入
 agent 上下文。失败时只说明可操作的原因（URL 不可达、证书、认证失败、版本不支持），
 不显示 token 或原始响应。
+
+macOS 当前实现使用显式 locator
+`keychain:hob-agent/bridge:<bridgeId>:<alias>`。以 `ha-main` 的
+`access-token` 为例：
+
+```sh
+export HOB_BRIDGE_ID='ha-main'
+export HOB_BRIDGE_CREDENTIAL_ALIAS='access-token'
+pnpm credentials:bridge
+```
+
+命令通过无回显 stdin 写入 Keychain，只返回 bridge、alias 和 locator。启动配置必须写入
+完全匹配的 locator；其他 service、bridge 或 alias 会在启动解析期拒绝。状态检查只根据
+locator 报告“已配置”，不会为了渲染页面读取 Keychain；Bridge 真正连接时才按作用域解析。
+环境变量 locator 仅保留为开发兼容路径。
 
 ## 3. 预检：把信任建立在可见证据上
 
@@ -90,6 +108,9 @@ agent 上下文。失败时只说明可操作的原因（URL 不可达、证书�
 
 ## 当前局域网验收记录
 
-2026-08-18 的无凭据预检结果：`homeassistant.local:8123` 可解析，HTTP 返回 200，
-`/api/websocket` 返回 `auth_required`，报告 HA `2026.6.4`。该结果只证明实例与桥协议可达；
-尚未提供 token，因而没有读取实体、设备、区域或订阅事件，也没有执行任何写操作。
+2026-08-20 的私有家庭只读检查确认 HA 当前在线，历史中立存储包含 75 台设备、540 个
+capability 和 18,206 条 canonical event，且没有 history gap 或 rejection。HA 集成目录还
+包含一个具有 10 台设备的 Xiaomi Home 来源，为后续原生小米 Bridge 的重叠覆盖和身份治理
+提供了真实验收样本。这些仅是聚合计数；设备名、entity id、状态值、URL、账户和凭据没有
+进入仓库。当前没有连续运行的 Hub epoch，也没有真实模型 observation review，因此仍未
+通过 Phase 0 家庭价值退出门槛。

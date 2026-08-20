@@ -197,3 +197,18 @@ into model context.
 - Trace projection is bounded, deterministic, local-only, redacted by default,
   and derived solely from DSH session events.
 - DSH remains the only agent runtime and only owner of turn/step execution.
+
+## 2026-08-20 private-home migration checkpoint
+
+A read-only inspection of the current private HA integration catalog found one
+configured Xiaomi Home source with 10 devices. The same household also exposes
+device cohorts through MQTT, Midea LAN, and Roborock. Only aggregate counts were
+recorded; no device names, entity ids, state values, account data, URLs, or
+credentials entered the repository.
+
+This is useful migration evidence, not native Xiaomi product support. It shows
+that the future Xiaomi bridge can be evaluated against real overlapping HA
+coverage, including identity proposals and authority selection. It must not
+bootstrap a native Xiaomi bridge from HA entity payloads or treat equal display
+names as equivalence. The next production gate remains an authorized Xiaomi
+transport plus an explicit user onboarding flow.
