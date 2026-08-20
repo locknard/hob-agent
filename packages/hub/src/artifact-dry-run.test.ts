@@ -128,15 +128,22 @@ test("fails closed with the contract error for malformed dry-run input", () => {
 test("keeps a deterministic conflict in the compile result and fails its dry-run", () => {
   const input = makeNotifyInput();
   const { inputIdentity: _identity, ...draft } = input;
+  const finding = { kind: "foreign_rule" as const, severity: "warning" as const, reason: "possible_overlap" as const };
+  const foreignCheck = createNeutralConflictInput({
+    ...input.foreignRuleChecks[0]!,
+    findings: [finding],
+  });
   const conflictedInput = createArtifactCompileInput({
     ...draft,
     currentConflict: {
       sourceIdentity: input.currentConflict.sourceIdentity,
       result: createNeutralConflictResult({
         status: "possible_overlap",
-        findings: [{ kind: "foreign_rule", severity: "warning", reason: "possible_overlap" }],
+        findings: [finding],
       }),
     },
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([foreignCheck]),
+    foreignRuleChecks: [foreignCheck],
   });
   const compile = compileNeutralArtifact(conflictedInput);
   const dryRun = produceNeutralDryRun(compile);

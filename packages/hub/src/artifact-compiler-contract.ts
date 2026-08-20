@@ -322,6 +322,31 @@ const neutralDeviceSummaryObjectSchema = z.object({
   if (value.validity !== "valid" && value.read.status !== "unavailable") {
     ctx.addIssue({ code: "custom", path: ["read", "status"], message: "Non-valid device state requires an unavailable read" });
   }
+  for (const [index, projection] of value.actionCompatibility.entries()) {
+    if (projection.status !== "compatible") continue;
+    if (value.read.status !== "available") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["actionCompatibility", index, "status"],
+        message: "A compatible action projection requires an available capability read",
+      });
+    } else if (projection.before !== value.read.value) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["actionCompatibility", index, "before"],
+        message: "Compatible action before value must equal the capability read value",
+      });
+    }
+  }
+  for (const [index, projection] of value.predicateCompatibility.entries()) {
+    if (projection.status === "compatible" && value.read.status !== "available") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["predicateCompatibility", index, "status"],
+        message: "A compatible predicate projection requires an available capability read",
+      });
+    }
+  }
 });
 
 const neutralDeviceSummarySchemaObject = z.preprocess(
@@ -439,6 +464,9 @@ const neutralConflictInputObjectSchema = z.object({
     validateUnique(value.findings.map((finding) => findingIdentity(finding)), "finding");
     if (!isCanonicalFindingOrder(value.findings)) {
       ctx.addIssue({ code: "custom", path: ["findings"], message: "Conflict input findings must be in canonical order" });
+    }
+    if (value.findings.some((finding) => finding.kind !== "foreign_rule")) {
+      ctx.addIssue({ code: "custom", path: ["findings"], message: "Foreign rule checks may only contain foreign-rule findings" });
     }
     if (value.status === "current" && value.findings.some((finding) => finding.reason === "foreign_catalog_unavailable")) {
       ctx.addIssue({ code: "custom", path: ["status"], message: "A current foreign catalog cannot report unavailable" });
@@ -1278,6 +1306,7 @@ function validateCompileBindings(
   if (computeNeutralForeignCatalogIdentity(value.foreignRuleChecks) !== value.foreignCatalogIdentity) {
     addIssue(ctx, ["foreignCatalogIdentity"], "Foreign catalog identity must match the complete canonical foreign checks");
   }
+  validateCurrentConflictForeignFindings(value.currentConflict, value.foreignRuleChecks, ctx);
   validateForeignRuleCoverage(value.evidence.watermarks, value.worldCut.watermarks, value.foreignRuleChecks, ctx);
   const capabilityScope = deriveArtifactCapabilityScope(value.artifact.content);
   if (!sameStringSequence(value.worldCut.devices.map((device) => device.hwCapabilityId), capabilityScope)) {
@@ -1289,6 +1318,46 @@ function validateCompileBindings(
   validateWatermarkBindings(value.evidence.watermarks, value.worldCut.watermarks, ctx);
   validateActionCompatibilityBindings(value.artifact.content.actions, value.worldCut.devices, ctx);
   validatePredicateCompatibilityBindings(value.artifact.content, value.worldCut.devices, ctx);
+}
+
+function validateCurrentConflictForeignFindings(
+  currentConflict: NeutralCurrentConflict,
+  checks: readonly NeutralConflictInput[],
+  ctx: z.RefinementCtx,
+): void {
+  const foreignFindings = canonicalForeignFindingUnion(checks);
+  const foreignIdentities = new Set(foreignFindings.map(findingIdentity));
+  for (const finding of foreignFindings) {
+    if (!currentConflict.result.findings.some((candidate) => findingIdentity(candidate) === findingIdentity(finding))) {
+      addIssue(ctx, ["currentConflict", "result", "findings"], "Current conflict result must include every canonical foreign-rule finding");
+    }
+  }
+  for (const finding of currentConflict.result.findings) {
+    if (!foreignIdentities.has(findingIdentity(finding)) && finding.kind !== "existing_artifact") {
+      addIssue(ctx, ["currentConflict", "result", "findings"], "Current conflict result may only add existing-artifact findings beyond the foreign union");
+    }
+  }
+
+  const hasUnavailableCheck = checks.some((check) => check.status === "unavailable");
+  const hasDuplicateFinding = currentConflict.result.findings.some((finding) => finding.reason === "duplicate");
+  const hasExistingArtifactFinding = currentConflict.result.findings.some((finding) => finding.kind === "existing_artifact");
+  const expectedStatus: NeutralConflictStatus = hasUnavailableCheck
+    ? "unavailable"
+    : hasDuplicateFinding
+      ? "duplicate"
+      : currentConflict.result.findings.length === 0
+        ? "none"
+        : "possible_overlap";
+  // A Hub-owned existing-artifact source may carry duplicate status while its
+  // bounded finding reason remains existing_artifact. Preserve that source
+  // fact, while rejecting every other status mismatch.
+  const duplicateExistingArtifactStatus = !hasUnavailableCheck
+    && currentConflict.result.status === "duplicate"
+    && hasExistingArtifactFinding
+    && !hasDuplicateFinding;
+  if (currentConflict.result.status !== expectedStatus && !duplicateExistingArtifactStatus) {
+    addIssue(ctx, ["currentConflict", "result", "status"], "Current conflict status must match the complete foreign finding union");
+  }
 }
 
 function validateForeignRuleCoverage(
@@ -1593,6 +1662,17 @@ function isCanonicalConflictInputOrder(inputs: readonly NeutralConflictInput[]):
 
 function sortFindings(findings: readonly NeutralConflictFinding[]): NeutralConflictFinding[] {
   return [...findings].sort((left, right) => compareUnicodeCodePoints(findingIdentity(left), findingIdentity(right)));
+}
+
+function canonicalForeignFindingUnion(checks: readonly NeutralConflictInput[]): NeutralConflictFinding[] {
+  const unique = new Map<string, NeutralConflictFinding>();
+  for (const check of checks) {
+    for (const finding of check.findings) {
+      const identity = findingIdentity(finding);
+      if (!unique.has(identity)) unique.set(identity, finding);
+    }
+  }
+  return sortFindings([...unique.values()]);
 }
 
 function findingIdentity(finding: NeutralConflictFinding): string {

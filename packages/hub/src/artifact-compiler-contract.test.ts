@@ -203,6 +203,7 @@ test("binds the explicit neutral device read status and rejects stale-value tamp
   const unsupportedDevice = createNeutralDeviceSummary({
     ...device,
     read: { status: "unsupported", reason: "schema_unsupported" },
+    predicateCompatibility: [{ phase: "postcondition", order: 1, status: "unavailable", reason: "state_missing" }],
   });
   assert.equal(unsupportedDevice.validity, "valid");
   const changedWorldCut = createNeutralWorldCut({
@@ -213,6 +214,46 @@ test("binds the explicit neutral device read status and rejects stale-value tamp
   const { inputIdentity: _identity, ...draft } = input;
   const changedInput = createArtifactCompileInput({ ...draft, worldCut: changedWorldCut });
   assert.notEqual(changedInput.inputIdentity, input.inputIdentity);
+});
+
+test("binds each compatible action before value to the same capability read", () => {
+  const input = curtainInput();
+  const device = input.worldCut.devices[0]!;
+  const { inputIdentity: _identity, ...draft } = input;
+
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    worldCut: createNeutralWorldCut({
+      devices: [{
+        ...device,
+        actionCompatibility: [{ ...device.actionCompatibility[0]!, before: 0.3 }],
+      }],
+      watermarks: input.worldCut.watermarks,
+    }),
+  }));
+
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    worldCut: createNeutralWorldCut({
+      devices: [{
+        ...device,
+        read: { status: "unsupported", reason: "schema_unsupported" },
+      }],
+      watermarks: input.worldCut.watermarks,
+    }),
+  }));
+});
+
+test("does not allow a compatible predicate projection when its capability read is closed", () => {
+  const input = curtainInput();
+  const device = input.worldCut.devices[0]!;
+
+  assert.throws(() => createNeutralDeviceSummary({
+    ...device,
+    predicateCompatibility: [{ phase: "postcondition", order: 1, status: "compatible" }],
+    read: { status: "unavailable", reason: "state_missing" },
+    validity: "unavailable",
+  }));
 });
 
 test("preserves action order in a bounded neutral diff and keeps unavailable output empty", () => {
@@ -620,6 +661,100 @@ test("binds current conflict source/result and the aggregate foreign catalog ide
       policyVersion: input.risk.policyVersion,
       assessedAt: capturedAt,
     }),
+  }));
+});
+
+test("requires the canonical foreign finding union in currentConflict and binds its status", () => {
+  const input = curtainInput();
+  const watermark = input.worldCut.watermarks[0]!;
+  const finding = { kind: "foreign_rule" as const, severity: "warning" as const, reason: "possible_overlap" as const, reference: "foreign-union-finding" };
+  const check = createNeutralConflictInput({
+    bridgeId: watermark.bridgeId,
+    epochId: watermark.epochId,
+    watermark,
+    catalogIdentity: digest("1"),
+    status: "current",
+    findings: [finding],
+  });
+  const { inputIdentity: _identity, ...draft } = input;
+
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    foreignRuleChecks: [check],
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([check]),
+    currentConflict: {
+      sourceIdentity: input.currentConflict.sourceIdentity,
+      result: createNeutralConflictResult({ status: "none", findings: [] }),
+    },
+  }));
+
+  const extraExisting = {
+    kind: "existing_artifact" as const,
+    severity: "blocking" as const,
+    reason: "existing_artifact" as const,
+    hwCapabilityId: "hwc-curtain-level",
+    reference: "existing-union-finding",
+  };
+  const accepted = createArtifactCompileInput({
+    ...draft,
+    foreignRuleChecks: [check],
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([check]),
+    currentConflict: {
+      sourceIdentity: input.currentConflict.sourceIdentity,
+      result: createNeutralConflictResult({ status: "possible_overlap", findings: [finding, extraExisting] }),
+    },
+  });
+  assert.deepEqual(accepted.currentConflict.result.findings, [extraExisting, finding]);
+});
+
+test("rejects non-foreign findings inside every neutral foreign-rule check", () => {
+  const input = curtainInput();
+  const check = input.foreignRuleChecks[0]!;
+  const tamperedFinding = {
+    kind: "existing_artifact" as const,
+    severity: "warning" as const,
+    reason: "possible_overlap" as const,
+    reference: "tampered-existing-artifact",
+  };
+
+  assert.throws(() => createNeutralConflictInput({
+    ...check,
+    findings: [tamperedFinding],
+  }));
+
+  const { inputIdentity: _identity, ...draft } = input;
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    foreignRuleChecks: [{ ...check, findings: [tamperedFinding] }],
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([{ ...check, findings: [tamperedFinding] }]),
+    currentConflict: {
+      sourceIdentity: input.currentConflict.sourceIdentity,
+      result: createNeutralConflictResult({ status: "possible_overlap", findings: [tamperedFinding] }),
+    },
+  }));
+});
+
+test("requires unavailable current conflict status when a foreign check is unavailable", () => {
+  const input = curtainInput();
+  const watermark = input.worldCut.watermarks[0]!;
+  const check = createNeutralConflictInput({
+    bridgeId: watermark.bridgeId,
+    epochId: watermark.epochId,
+    watermark,
+    catalogIdentity: digest("2"),
+    status: "unavailable",
+    findings: [{ kind: "foreign_rule", severity: "blocking", reason: "foreign_catalog_unavailable", reference: "foreign-unavailable" }],
+  });
+  const { inputIdentity: _identity, ...draft } = input;
+
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    foreignRuleChecks: [check],
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([check]),
+    currentConflict: {
+      sourceIdentity: input.currentConflict.sourceIdentity,
+      result: createNeutralConflictResult({ status: "possible_overlap", findings: check.findings }),
+    },
   }));
 });
 

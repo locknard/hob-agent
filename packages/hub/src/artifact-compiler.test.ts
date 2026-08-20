@@ -361,14 +361,25 @@ test("uses only the precomputed capability-change read status", () => {
   const unsupported = compileNeutralArtifact(createArtifactCompileInput({
     ...draft,
     worldCut: createNeutralWorldCut({
-      devices: [{ ...device, read: { status: "unsupported", reason: "schema_unsupported" } }],
+      devices: [{
+        ...device,
+        read: { status: "unsupported", reason: "schema_unsupported" },
+        actionCompatibility: [{ order: 1, kind: "set_boolean", status: "incompatible", reason: "not_writable" }],
+        predicateCompatibility: [{ phase: "postcondition", order: 1, status: "incompatible", reason: "predicate_type_mismatch" }],
+      }],
       watermarks: input.worldCut.watermarks,
     }),
   }));
   const unavailable = compileNeutralArtifact(createArtifactCompileInput({
     ...draft,
     worldCut: createNeutralWorldCut({
-      devices: [{ ...device, read: { status: "unavailable", reason: "state_missing" }, validity: "unavailable" }],
+      devices: [{
+        ...device,
+        read: { status: "unavailable", reason: "state_missing" },
+        validity: "unavailable",
+        actionCompatibility: [{ order: 1, kind: "set_boolean", status: "unavailable", reason: "state_missing" }],
+        predicateCompatibility: [{ phase: "postcondition", order: 1, status: "unavailable", reason: "state_missing" }],
+      }],
       watermarks: input.worldCut.watermarks,
     }),
   }));
