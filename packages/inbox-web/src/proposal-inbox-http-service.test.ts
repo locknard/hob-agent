@@ -31,6 +31,19 @@ class StubInbox extends Service {
   renderAdvice(id: string) { return id === "advice-1" ? "<main>Advice detail</main>" : undefined; }
 }
 
+class StubRetryableInbox extends StubInbox {
+  readonly retries: unknown[] = [];
+  retryFailure: Error & { code?: string } | undefined;
+
+  canRetryPreparation() { return true; }
+
+  async retryPreparation(input: unknown) {
+    if (this.retryFailure !== undefined) throw this.retryFailure;
+    this.retries.push(input);
+    return { status: "queued" as const };
+  }
+}
+
 const token = "a-secure-local-inbox-token-1234567890";
 const authorization = `Basic ${Buffer.from(`home:${token}`).toString("base64")}`;
 
@@ -187,6 +200,111 @@ test("requires exact same-origin review posts and derives reviewer identity from
     redirect: "manual",
   });
   assert.equal(oversized.status, 413);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("serves an authenticated, same-origin preparation retry with only bounded revision fields", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubRetryableInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+  });
+  const url = `${ctx.homeInboxHttp.origin}/proposals/proposal-1/preparation/retry`;
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+
+  try {
+
+    const unauthenticated = await fetch(url, {
+    method: "POST",
+    headers: { origin: ctx.homeInboxHttp.origin, "content-type": headers["content-type"] },
+    body: "expectedRevision=1&expectedVersion=4",
+    redirect: "manual",
+  });
+    assert.equal(unauthenticated.status, 401);
+
+    const crossOrigin = await fetch(url, {
+    method: "POST",
+    headers: { ...headers, origin: "http://attacker.invalid" },
+    body: "expectedRevision=1&expectedVersion=4",
+    redirect: "manual",
+  });
+    assert.equal(crossOrigin.status, 403);
+
+    const wrongContentType = await fetch(url, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ expectedRevision: 1, expectedVersion: 4 }),
+    redirect: "manual",
+  });
+    assert.equal(wrongContentType.status, 415);
+
+    const accepted = await fetch(url, {
+    method: "POST",
+    headers,
+    body: "expectedRevision=1&expectedVersion=4",
+    redirect: "manual",
+  });
+    assert.equal(accepted.status, 303);
+    assert.equal(accepted.headers.get("location"), "/proposals/proposal-1");
+    assert.deepEqual((ctx.homeInbox as unknown as StubRetryableInbox).retries, [{
+      proposalId: "proposal-1",
+      expectedRevision: 1,
+      expectedVersion: 4,
+    }]);
+
+    const extraField = await fetch(url, {
+    method: "POST",
+    headers,
+    body: "expectedRevision=1&expectedVersion=4&jobId=must-not-cross",
+    redirect: "manual",
+  });
+    assert.equal(extraField.status, 400);
+    assert.equal((ctx.homeInbox as unknown as StubRetryableInbox).retries.length, 1);
+
+    const failure = new Error("raw retry conflict must not leak") as Error & { code: string };
+    failure.code = "job_transition_conflict";
+    (ctx.homeInbox as unknown as StubRetryableInbox).retryFailure = failure;
+    const conflict = await fetch(url, {
+      method: "POST",
+      headers,
+      body: "expectedRevision=1&expectedVersion=4",
+      redirect: "manual",
+    });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.text()).includes("raw retry conflict"), false);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("returns 404 for preparation retry when the standalone Inbox has no retry port", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+  });
+  const response = await fetch(`${ctx.homeInboxHttp.origin}/proposals/proposal-1/preparation/retry`, {
+    method: "POST",
+    headers: {
+      authorization,
+      origin: ctx.homeInboxHttp.origin,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: "expectedRevision=1&expectedVersion=4",
+    redirect: "manual",
+  });
+  assert.equal(response.status, 404);
 
   await fiber.dispose();
   await inboxFiber.dispose();

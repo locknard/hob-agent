@@ -436,6 +436,101 @@ test("renders an artifact review as an accessible read-only automation check wit
   assert.equal(/<(?:button|form)[^>]*(?:apply|install|enable|execute)/iu.test(html), false);
 });
 
+test("renders bounded preparation status on proposal list and detail without job diagnostics", () => {
+  const statuses = ["queued", "running", "succeeded", "failed"] as const;
+  const listHtml = renderProposalList(statuses.map((status) => ({
+    id: proposal.id,
+    revision: proposal.revision,
+    status: proposal.status,
+    kind: proposal.kind,
+    title: proposal.title,
+    summary: proposal.summary,
+    updatedAt: proposal.updatedAt,
+    riskLevel: proposal.risk.level,
+    existingAutomationCount: proposal.conflictCheck.existingAutomationCount,
+    conflictMatchCount: proposal.conflictCheck.matches.length,
+    preparationStatus: {
+      status,
+      ...(status === "failed" ? { stage: "compile", code: "policy_blocked" } : {}),
+    },
+  })) as never);
+
+  for (const status of statuses) assert.match(listHtml, new RegExp(`\\b${status}\\b`, "i"));
+  assert.match(listHtml, /compile/i);
+  assert.match(listHtml, /policy_blocked/i);
+
+  const detailHtml = renderProposalDetail({
+    proposal: {
+      ...proposalWithArtifactReview,
+      preparationStatus: {
+        status: "failed",
+        stage: "compile",
+        code: "policy_blocked",
+        jobId: "job-secret-123",
+        rawError: "provider timed out while calling bridge native route",
+        provider: "provider-secret",
+        bridgeId: "bridge-secret",
+        nativeId: "native-entity-secret",
+      },
+    } as never,
+  });
+
+  assert.match(detailHtml, /Preparation/i);
+  assert.match(detailHtml, /failed/i);
+  assert.match(detailHtml, /compile/i);
+  assert.match(detailHtml, /policy_blocked/i);
+  assert.match(detailHtml, /Read-only automation check/i);
+  for (const forbidden of [
+    "job-secret-123",
+    "provider timed out while calling bridge native route",
+    "provider-secret",
+    "bridge-secret",
+    "native-entity-secret",
+  ]) {
+    assert.equal(detailHtml.includes(forbidden), false, forbidden);
+  }
+});
+
+test("shows a preparation retry button only for retryable failed attempts below the limit", () => {
+  const cases = [{
+    name: "failed and retryable",
+    preparationStatus: { status: "failed", stage: "compile", code: "policy_blocked", attempt: 4, version: 9, canRetry: true },
+    expectedForms: 1,
+  }, {
+    name: "failed but not retryable",
+    preparationStatus: { status: "failed", stage: "compile", code: "policy_blocked", attempt: 4, version: 9, canRetry: false },
+    expectedForms: 0,
+  }, {
+    name: "failed at the attempt limit",
+    preparationStatus: { status: "failed", stage: "compile", code: "policy_blocked", attempt: 5, version: 9, canRetry: true },
+    expectedForms: 0,
+  }, {
+    name: "running",
+    preparationStatus: { status: "running", attempt: 1, version: 9, canRetry: true },
+    expectedForms: 0,
+  }] as const;
+
+  for (const item of cases) {
+    const html = renderProposalDetail({
+      proposal: {
+        ...proposal,
+        status: "approved",
+        preparationStatus: item.preparationStatus,
+      },
+    } as never);
+    const retryForms = html.match(/<form[^>]*action="[^"]*preparation\/retry[^"]*"[\s\S]*?<\/form>/g) ?? [];
+    assert.equal(retryForms.length, item.expectedForms, item.name);
+    if (item.expectedForms === 1) {
+      const [form] = retryForms;
+      assert.ok(form);
+      const inputNames = [...form.matchAll(/<input[^>]*name="([^"]+)"/g)].map((match) => match[1]);
+      assert.deepEqual(inputNames, ["expectedRevision", "expectedVersion"]);
+      assert.match(form, /Retry preparation/i);
+      assert.equal(/execute|install|enable|apply/iu.test(form), false);
+    }
+  }
+});
+
 test("renders the minimal not-run review shape without inventing diagnostics", () => {
   const html = renderProposalDetail({
     proposal: {

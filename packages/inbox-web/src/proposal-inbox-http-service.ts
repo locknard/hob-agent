@@ -32,6 +32,12 @@ interface InboxHttpPort {
   renderList(): string;
   renderDetail(proposalId: string): string | undefined;
   review(input: InboxReviewInput): Promise<unknown>;
+  canRetryPreparation?(): boolean;
+  retryPreparation?(input: {
+    proposalId: string;
+    expectedRevision: number;
+    expectedVersion: number;
+  }): Promise<unknown>;
   canObserveNow(): boolean;
   observeNow(): Promise<unknown>;
   canAskAdvice(): boolean;
@@ -180,6 +186,41 @@ export class ProposalInboxHttpService extends Service {
         response.end();
         return;
       }
+      const preparationRetry = /^\/proposals\/([^/]+)\/preparation\/retry$/.exec(url.pathname);
+      if (method === "POST" && preparationRetry) {
+        if (request.headers.origin !== this.origin) return send(response, 403, "Preparation retry origin rejected");
+        if (!(this.inbox.canRetryPreparation?.() ?? false) || this.inbox.retryPreparation === undefined) {
+          return send(response, 404, "Preparation retry unavailable");
+        }
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported preparation retry content type");
+        }
+        const proposalId = safeDecode(preparationRetry[1]!);
+        if (proposalId === undefined) return send(response, 400, "Invalid preparation retry");
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid preparation retry");
+        }
+        const input = preparationRetryInput(proposalId, body);
+        if (input === undefined) return send(response, 400, "Invalid preparation retry");
+        try {
+          await this.inbox.retryPreparation(input);
+        } catch (error) {
+          const code = errorCode(error);
+          if (code === "job_transition_conflict" || code === "revision_conflict") {
+            return send(response, 409, "Preparation retry conflict");
+          }
+          if (code === "not_found") return send(response, 404, "Preparation job not found");
+          return send(response, 500, "Preparation retry failed");
+        }
+        response.statusCode = 303;
+        applySecurityHeaders(response);
+        response.setHeader("location", `/proposals/${encodeURIComponent(proposalId)}`);
+        response.end();
+        return;
+      }
       const review = /^\/proposals\/([^/]+)\/review$/.exec(url.pathname);
       if (method === "POST" && review) {
         if (request.headers.origin !== this.origin) return send(response, 403, "Review origin rejected");
@@ -275,6 +316,27 @@ function adviceQuestion(body: string): string | undefined {
   if ([...params.keys()].some((key) => key !== "question") || params.getAll("question").length !== 1) return undefined;
   const question = params.get("question")?.trim();
   return question !== undefined && question.length >= 1 && question.length <= 1_000 ? question : undefined;
+}
+
+function preparationRetryInput(
+  proposalId: string,
+  body: string,
+): { proposalId: string; expectedRevision: number; expectedVersion: number } | undefined {
+  const params = new URLSearchParams(body);
+  if ([...params.keys()].some((key) => !["expectedRevision", "expectedVersion"].includes(key))
+    || params.getAll("expectedRevision").length !== 1
+    || params.getAll("expectedVersion").length !== 1) return undefined;
+  const expectedRevision = positiveInteger(params.get("expectedRevision"));
+  const expectedVersion = positiveInteger(params.get("expectedVersion"));
+  return expectedRevision === undefined || expectedVersion === undefined
+    ? undefined
+    : { proposalId, expectedRevision, expectedVersion };
+}
+
+function positiveInteger(value: string | null): number | undefined {
+  if (value === null || !/^[1-9]\d*$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 async function readBoundedBody(request: IncomingMessage, maximumBytes = MAX_FORM_BYTES): Promise<string> {

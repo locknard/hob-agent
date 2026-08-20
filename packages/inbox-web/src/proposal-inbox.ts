@@ -199,6 +199,20 @@ export interface InboxArtifactReviewSnapshot {
   readonly writesPerformed: false;
 }
 
+export type InboxPreparationStage = "artifact" | "evidence" | "authority" | "risk" | "compile" | "dry-run";
+export type InboxPreparationErrorCode = "not_found" | "unavailable" | "malformed_dependency" | "policy_blocked" | "persistence_failed" | "attempt_exhausted";
+
+export interface InboxPreparationStatus {
+  readonly status: "queued" | "running" | "succeeded" | "failed";
+  readonly attempt?: number;
+  readonly version?: number;
+  readonly stage?: InboxPreparationStage;
+  readonly code?: InboxPreparationErrorCode;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+  readonly canRetry?: boolean;
+}
+
 export interface InboxProposal {
   readonly id: string;
   readonly revision: number;
@@ -255,6 +269,7 @@ export interface InboxProposal {
   };
   readonly artifactCandidate?: InboxArtifactCandidate;
   readonly artifactReview?: InboxArtifactReviewSnapshot;
+  readonly preparationStatus?: InboxPreparationStatus;
   readonly spaceCoverage?: {
     readonly selectedDevices: number;
     readonly devicesWithSingleSpace: number;
@@ -283,6 +298,7 @@ export interface InboxProposalSummary {
   readonly riskLevel: string;
   readonly existingAutomationCount: number;
   readonly conflictMatchCount: number;
+  readonly preparationStatus?: InboxPreparationStatus;
 }
 
 export interface InboxObservationStatus {
@@ -471,6 +487,7 @@ export function renderProposalList(
   const items = proposals.map((proposal) => `<li class="proposal-row" data-status="${escapeHtml(proposal.status)}">
     <a href="/proposals/${encodeURIComponent(proposal.id)}"><h2>${escapeHtml(proposal.title)}</h2></a>
     <p>${escapeHtml(proposal.summary)}</p>
+    ${proposal.preparationStatus === undefined ? "" : `<p>${renderPreparationStatusLine(proposal.preparationStatus)}</p>`}
     <dl class="proposal-meta"><div><dt>Risk</dt><dd>${escapeHtml(proposal.riskLevel)}</dd></div><div><dt>Existing rules</dt><dd>${proposal.existingAutomationCount}</dd></div><div><dt>Possible overlaps</dt><dd>${proposal.conflictMatchCount}</dd></div></dl>
   </li>`).join("");
   const observationStatus = observation === undefined
@@ -575,7 +592,7 @@ function observationTriggerLabel(trigger: InboxObservationAttempt["trigger"]): s
   }
 }
 
-export function renderProposalDetail(detail: InboxProposalDetail): string {
+export function renderProposalDetail(detail: InboxProposalDetail, canRetryPreparation = false): string {
   const { proposal } = detail;
   const watermarks = proposal.evidence.watermarks.map((watermark) =>
     `<li><strong>${escapeHtml(watermark.bridgeId)}</strong> · seq ${watermark.lastSeq} · ${escapeHtml(watermark.freshness)} · ${watermark.gapCount} gaps</li>`,
@@ -596,6 +613,9 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
     ? "<section class=\"artifact-candidate legacy-candidate\" aria-label=\"Automation candidate\"><h2>Proposed behavior</h2><p>No exact neutral behavior candidate is recorded for this legacy proposal.</p></section>"
     : renderArtifactCandidate(proposal.artifactCandidate);
   const artifactReview = proposal.artifactReview === undefined ? "" : renderArtifactReview(proposal.artifactReview);
+  const preparation = proposal.preparationStatus === undefined
+    ? ""
+    : renderPreparationStatus(proposal, canRetryPreparation);
   const spaceCoverage = proposal.spaceCoverage === undefined
     ? "<section aria-label=\"Selected-device space coverage\"><h2>Selected-device space coverage</h2><p>Not recorded in this legacy proposal.</p></section>"
     : `<section aria-label="Selected-device space coverage"><h2>Selected-device space coverage</h2><p>Hub-produced mapping coverage; this is separate from the Agent's rationale.</p><dl><dt>Selected devices</dt><dd>${proposal.spaceCoverage.selectedDevices}</dd><dt>Single-space suggestions</dt><dd>${proposal.spaceCoverage.devicesWithSingleSpace}</dd><dt>Unassigned</dt><dd>${proposal.spaceCoverage.devicesWithoutSpace}</dd><dt>Multiple spaces</dt><dd>${proposal.spaceCoverage.devicesWithMultipleSpaces}</dd></dl></section>`;
@@ -626,7 +646,7 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   const ledgerCoverage = proposal.evidence.temporal?.coverage.map((coverage) => `<li class="ledger-item" data-coverage="${escapeHtml(coverage.status)}"><span class="ledger-marker" aria-hidden="true"></span><div><p><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}</p><p class="ledger-meta">${coverage.reasons.length === 0 ? "No recorded coverage warnings" : coverage.reasons.map(escapeHtml).join(", ")}</p></div></li>`).join("") ?? "";
   return `<main id="main-content" class="proposal-detail review-desk" data-status="${escapeHtml(proposal.status)}">
     <header><a class="back-link" href="/proposals">← Back to reviews</a><p class="eyebrow">Household proposal</p><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p><div class="status-line"><span class="status-chip">Risk: ${escapeHtml(proposal.risk.level)}</span><span class="muted">Updated ${escapeHtml(proposal.updatedAt)}</span></div></header>
-    <div class="review-columns"><div class="proposal-case">${rationale}${artifactCandidate}${artifactReview}
+    <div class="review-columns"><div class="proposal-case">${rationale}${artifactCandidate}${preparation}${artifactReview}
     <section aria-label="Intent"><h2>Intended change</h2><p>${escapeHtml(proposal.intent.description)}</p><h3>Rollback</h3><p>${escapeHtml(proposal.intent.rollback)}</p></section>
     <section aria-label="Dry run"><h2>Dry run: ${escapeHtml(proposal.dryRun.status)}</h2><p>${escapeHtml(proposal.dryRun.summary)}</p></section>
     <section aria-label="Risk"><h2>Risk: ${escapeHtml(proposal.risk.level)}</h2><ul class="risk-list">${risks}</ul></section>
@@ -636,6 +656,37 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
     <section aria-label="Existing-rule overlap screen"><h2>Existing-rule overlap screen</h2><p>${proposal.conflictCheck.existingAutomationCount} existing automations · ${proposal.conflictCheck.matches.length} possible name overlaps</p><p>Metadata-only overlap screen; zero matches does not prove non-interference. Review existing rule logic before implementation.</p></section>
     ${timeline}</aside></div>
   </main>`;
+}
+
+function renderPreparationStatusLine(status: InboxPreparationStatus): string {
+  const failure = status.status === "failed" && status.stage !== undefined && status.code !== undefined
+    ? ` · ${escapeHtml(status.stage)} · ${escapeHtml(status.code)}`
+    : "";
+  return `Preparation: ${escapeHtml(status.status)}${failure}`;
+}
+
+function renderPreparationStatus(proposal: InboxProposal, canRetry: boolean): string {
+  const status = proposal.preparationStatus!;
+  const description = preparationDescription(status);
+  const retry = (canRetry || status.canRetry === true)
+    && status.status === "failed"
+    && status.attempt !== undefined
+    && status.attempt < 5
+    && status.version !== undefined
+    ? `<form method="post" action="/proposals/${encodeURIComponent(proposal.id)}/preparation/retry"><input type="hidden" name="expectedRevision" value="${proposal.revision}"><input type="hidden" name="expectedVersion" value="${status.version}"><button type="submit">Retry preparation</button></form><p>This retries read-only preparation only; it does not execute or install anything.</p>`
+    : status.status === "failed" && status.attempt === 5
+      ? "<p>The retry limit has been reached. Create a new household-reviewed proposal for another attempt.</p>"
+      : "";
+  return `<section class="preparation-status" aria-label="Preparation status"><p class="eyebrow">Preparation</p><h2>Preparation: ${escapeHtml(status.status)}</h2><p>${renderPreparationStatusLine(status)}</p><p>${description}</p>${retry}</section>`;
+}
+
+function preparationDescription(status: InboxPreparationStatus): string {
+  switch (status.status) {
+    case "queued": return "Preparation is queued; it has not run yet.";
+    case "running": return "Preparation is in progress. It cannot control a device or install automation.";
+    case "succeeded": return "The read-only review checks are ready. Nothing was installed or enabled.";
+    case "failed": return `Preparation stopped safely${status.stage === undefined ? "" : ` at ${escapeHtml(status.stage)}`}; no household or device change was made.`;
+  }
 }
 
 function renderArtifactCandidate(candidate: InboxArtifactCandidate): string {

@@ -28,6 +28,18 @@ export type HomeProposalServiceOptions =
   | SqliteProposalStoreOptions
   | BorrowedHomeProposalServiceOptions;
 
+export interface HomePreparationStatus {
+  readonly proposalId: string;
+  readonly proposalRevision: number;
+  readonly status: ArtifactPreparationJob["status"];
+  readonly attempt: number;
+  readonly version: number;
+  readonly stage?: ArtifactPreparationJob["stage"];
+  readonly error?: ArtifactPreparationJob["error"];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 declare module "@deepseek-ai/cordis" {
   interface Context {
     homeProposals: HomeProposalService;
@@ -281,6 +293,26 @@ export class HomeProposalService extends Service {
       }
     }
     return reviewed;
+  }
+
+  preparationForProposal(
+    proposalId: string,
+    proposalRevision: number,
+  ): HomePreparationStatus | undefined {
+    const job = this.store.getPreparationJobForProposal(proposalId, proposalRevision);
+    if (job === undefined) return undefined;
+    const error = job.error === undefined ? undefined : Object.freeze({ ...job.error });
+    return Object.freeze({
+      proposalId: job.proposalId,
+      proposalRevision: job.proposalRevision,
+      status: job.status,
+      attempt: job.attempt,
+      version: job.version,
+      ...(job.stage === undefined ? {} : { stage: job.stage }),
+      ...(error === undefined ? {} : { error }),
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+    });
   }
 
   withApprovedProposalAtRevision<T>(

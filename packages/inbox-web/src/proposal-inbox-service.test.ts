@@ -84,6 +84,35 @@ class StubReviewedProposals extends Service {
   }
 }
 
+type PreparationRetryInput = {
+  readonly proposalId: string;
+  readonly expectedRevision: number;
+  readonly expectedVersion: number;
+};
+
+class StubRetryableReviewedProposals extends StubReviewedProposals {
+  readonly retries: PreparationRetryInput[] = [];
+
+  preparationForProposal(proposalId: string, proposalRevision: number) {
+    return {
+      proposalId,
+      proposalRevision,
+      status: "failed" as const,
+      attempt: 2,
+      version: 4,
+      stage: "compile" as const,
+      error: { stage: "compile" as const, code: "policy_blocked" as const },
+      createdAt: "2026-08-20T01:00:00.000Z",
+      updatedAt: "2026-08-20T01:00:01.000Z",
+    };
+  }
+
+  async retryPreparation(input: PreparationRetryInput) {
+    this.retries.push(input);
+    return this.preparationForProposal(input.proposalId, input.expectedRevision);
+  }
+}
+
 class StubProposals extends Service {
   constructor(ctx: Context) {
     super(ctx, "homeProposals");
@@ -433,6 +462,33 @@ test("projects an exact bounded artifact review into proposal list and detail wi
   ]);
   assert.equal("apply" in ctx.homeInbox, false);
   assert.equal("execute" in ctx.homeInbox, false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("delegates failed preparation retry through the optional direct port", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubRetryableReviewedProposals);
+  const fiber = await ctx.plugin(ProposalInboxService);
+  const retryInput: PreparationRetryInput = {
+    proposalId: reviewProposal.id,
+    expectedRevision: reviewProposal.revision,
+    expectedVersion: 4,
+  };
+
+  const inbox = ctx.homeInbox as unknown as {
+    retryPreparation(input: PreparationRetryInput): Promise<unknown>;
+  };
+  const status = (ctx.homeInbox.detail(reviewProposal.id)?.proposal as unknown as {
+    preparationStatus?: { status?: string; attempt?: number; canRetry?: boolean };
+  }).preparationStatus;
+  assert.equal(status?.status, "failed");
+  assert.equal(status?.attempt, 2);
+  assert.equal(status?.canRetry, true);
+
+  await inbox.retryPreparation(retryInput);
+  assert.deepEqual((ctx.homeProposals as unknown as StubRetryableReviewedProposals).retries, [retryInput]);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

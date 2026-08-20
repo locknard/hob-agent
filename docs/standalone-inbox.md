@@ -8,8 +8,8 @@ home bridge or starting DSH. This closes the review gap after
 result without causing another device snapshot, model request, or observation.
 
 The command mounts one Cordis root containing only the Hub proposal store, the
-metadata-only observation audit store, the Inbox review facade, and
-authenticated localhost HTTP delivery. This is a
+read-only Artifact projection, metadata-only observation/advice stores, the
+Inbox review facade, and authenticated localhost HTTP delivery. This is a
 smaller composition of existing neutral services, not a second Agent Runtime.
 It requires an explicit absolute `HOB_DATA_DIR` and the same explicit
 `HOB_INBOX_AUTH_TOKEN`; `HOB_MODEL`, provider credentials, `HOB_BRIDGES`, and
@@ -27,6 +27,10 @@ available only in the authenticated Inbox of the long-running full runtime.
   proposal. Approval remains a terminal record with
   `applicationStatus: not_available`; it cannot install an automation or
   control a device.
+- A qualifying approval may atomically leave a durable preparation job, and
+  the standalone Inbox can display its exact bounded status. It has no runner,
+  producer, compiler, candidate resolver, or retry port: startup and review do
+  not claim or execute that job, and `POST .../preparation/retry` is unavailable.
 - DSH trace detail is optional. Because DSH is intentionally absent, standalone
   proposal detail omits the live metadata trace rather than opening its session
   database or inventing another trace reader.

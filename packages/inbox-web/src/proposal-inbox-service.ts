@@ -20,6 +20,7 @@ import {
   type InboxObservationAttempt,
   type InboxReviewInput,
   type InboxProposalQualitySummary,
+  type InboxPreparationStatus,
   type InboxObservationQualitySummary,
   type ProposalInboxPort,
   type ProposalTracePort,
@@ -45,12 +46,28 @@ declare module "@deepseek-ai/cordis" {
   }
 }
 
+export interface InboxPreparationRetryInput {
+  readonly proposalId: string;
+  readonly expectedRevision: number;
+  readonly expectedVersion: number;
+}
+
+export interface ProposalInboxPreparationPort {
+  retry(input: InboxPreparationRetryInput): void | Promise<void>;
+}
+
+export interface ProposalInboxServiceOptions {
+  readonly preparation?: ProposalInboxPreparationPort;
+}
+
 /** Local review composition over hub proposal state and metadata-safe DSH traces. */
 export class ProposalInboxService extends Service {
   static inject = ["homeProposals"];
 
   private readonly controller: ProposalInboxController;
   private readonly artifactReviewSource?: ArtifactReviewReadSource;
+  private readonly preparationSource?: PreparationReadSource;
+  private readonly preparation?: ProposalInboxPreparationPort;
   private readonly observation?: {
     snapshot(): InboxObservationStatus;
     observeNow(): Promise<string>;
@@ -75,13 +92,16 @@ export class ProposalInboxService extends Service {
     get(id: string): InboxHomeAdviceRecord | undefined;
   };
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, options: ProposalInboxServiceOptions = {}) {
     super(ctx, "homeInbox");
     const trace = ctx.get("homeAgent") as unknown as ProposalTracePort | undefined;
     const artifacts = ctx.get("homeArtifacts") as unknown as ControlCenterArtifactSource | undefined;
     this.artifactReviewSource = hasArtifactReviewReadSource(artifacts) ? artifacts : undefined;
+    const proposals = ctx.homeProposals as unknown as ProposalInboxPort & Partial<PreparationReadSource>;
+    this.preparation = options.preparation ?? preparationPortFrom(proposals);
+    this.preparationSource = hasPreparationReadSource(proposals) ? proposals : undefined;
     this.controller = new ProposalInboxController({
-      proposals: ctx.homeProposals as unknown as ProposalInboxPort,
+      proposals,
       ...(trace === undefined ? {} : { traces: trace }),
     });
     this.proposalQuality = ctx.homeProposals as unknown as { qualitySummary(): InboxProposalQualitySummary };
@@ -106,20 +126,39 @@ export class ProposalInboxService extends Service {
   }
 
   list(query?: { status?: InboxProposalStatus; limit?: number }): readonly InboxProposalSummary[] {
-    return this.controller.list(query);
+    return this.controller.list(query).map((proposal) => {
+      const preparationStatus = this.readPreparation(proposal.id, proposal.revision);
+      return preparationStatus === undefined ? proposal : { ...proposal, preparationStatus };
+    });
   }
 
   detail(proposalId: string): InboxProposalDetail | undefined {
     const detail = this.controller.detail(proposalId);
     if (detail === undefined) return undefined;
     const artifactReview = this.readArtifactReview(detail.proposal.id, detail.proposal.revision);
-    return artifactReview === undefined
-      ? detail
-      : { ...detail, proposal: { ...detail.proposal, artifactReview } };
+    const preparationStatus = this.readPreparation(detail.proposal.id, detail.proposal.revision);
+    if (artifactReview === undefined && preparationStatus === undefined) return detail;
+    return {
+      ...detail,
+      proposal: {
+        ...detail.proposal,
+        ...(preparationStatus === undefined ? {} : { preparationStatus }),
+        ...(artifactReview === undefined ? {} : { artifactReview }),
+      },
+    };
   }
 
   review(input: InboxReviewInput): Promise<InboxProposal> {
     return this.controller.review(input);
+  }
+
+  canRetryPreparation(): boolean {
+    return this.preparation !== undefined;
+  }
+
+  async retryPreparation(input: InboxPreparationRetryInput): Promise<void> {
+    if (this.preparation === undefined) throw new Error("Preparation retry is unavailable");
+    await this.preparation.retry(input);
   }
 
   canObserveNow(): boolean {
@@ -169,7 +208,7 @@ export class ProposalInboxService extends Service {
 
   renderDetail(proposalId: string): string | undefined {
     const detail = this.detail(proposalId);
-    return detail === undefined ? undefined : renderProposalDetail(detail);
+    return detail === undefined ? undefined : renderProposalDetail(detail, this.canRetryPreparation());
   }
 
   private readArtifactReview(proposalId: string, proposalRevision: number): InboxArtifactReviewSnapshot | undefined {
@@ -180,6 +219,61 @@ export class ProposalInboxService extends Service {
       || snapshot.proposal.revision !== proposalRevision) return undefined;
     return projectArtifactReview(snapshot);
   }
+
+  private readPreparation(proposalId: string, proposalRevision: number): InboxPreparationStatus | undefined {
+    return projectPreparation(
+      this.preparationSource?.preparationForProposal(proposalId, proposalRevision),
+      this.preparation !== undefined,
+    );
+  }
+}
+
+interface PreparationReadSource {
+  preparationForProposal(proposalId: string, proposalRevision: number): unknown;
+}
+
+function hasPreparationReadSource(source: unknown): source is PreparationReadSource {
+  return typeof (source as Partial<PreparationReadSource> | undefined)?.preparationForProposal === "function";
+}
+
+function preparationPortFrom(source: unknown): ProposalInboxPreparationPort | undefined {
+  const retry = (source as { retryPreparation?: unknown } | undefined)?.retryPreparation;
+  return typeof retry === "function"
+    ? { retry: retry.bind(source) as ProposalInboxPreparationPort["retry"] }
+    : undefined;
+}
+
+const PREPARATION_STATUSES = ["queued", "running", "succeeded", "failed"] as const;
+const PREPARATION_STAGES = ["artifact", "evidence", "authority", "risk", "compile", "dry-run"] as const;
+const PREPARATION_CODES = ["not_found", "unavailable", "malformed_dependency", "policy_blocked", "persistence_failed", "attempt_exhausted"] as const;
+
+function projectPreparation(value: unknown, retryAvailable: boolean): InboxPreparationStatus | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const source = value as Record<string, unknown>;
+  if (!PREPARATION_STATUSES.includes(source.status as typeof PREPARATION_STATUSES[number])) return undefined;
+  const error = typeof source.error === "object" && source.error !== null
+    ? source.error as Record<string, unknown>
+    : undefined;
+  const stage = error?.stage ?? source.stage;
+  const code = error?.code;
+  if (source.status === "failed"
+    && (!PREPARATION_STAGES.includes(stage as typeof PREPARATION_STAGES[number])
+      || !PREPARATION_CODES.includes(code as typeof PREPARATION_CODES[number]))) return undefined;
+  return Object.freeze({
+    status: source.status as InboxPreparationStatus["status"],
+    ...(Number.isSafeInteger(source.attempt) && Number(source.attempt) > 0 ? { attempt: Number(source.attempt) } : {}),
+    ...(Number.isSafeInteger(source.version) && Number(source.version) > 0 ? { version: Number(source.version) } : {}),
+    ...(source.status === "failed" ? {
+      stage: stage as NonNullable<InboxPreparationStatus["stage"]>,
+      code: code as NonNullable<InboxPreparationStatus["code"]>,
+    } : {}),
+    ...(typeof source.createdAt === "string" ? { createdAt: source.createdAt } : {}),
+    ...(typeof source.updatedAt === "string" ? { updatedAt: source.updatedAt } : {}),
+    canRetry: retryAvailable
+      && source.status === "failed"
+      && Number.isSafeInteger(source.attempt)
+      && Number(source.attempt) < 5,
+  });
 }
 
 function hasArtifactReviewReadSource(

@@ -800,3 +800,105 @@ test("does not report a wake-hook failure after the approval and queued job comm
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("projects one exact preparation revision as closed deeply frozen metadata without queue writers", async () => {
+  const store = new SqliteProposalStore({
+    path: ":memory:",
+    now: () => "2026-08-19T01:00:00.000Z",
+  });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    const proposal = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "service-projection:exact:v1",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    const approved = store.review({
+      proposalId: proposal.id,
+      expectedRevision: proposal.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+    const queued = store.listPreparationJobs()[0];
+    assert.ok(queued);
+
+    fiber = await ctx.plugin(HomeProposalService, { store } as never);
+    const service = ctx.homeProposals as unknown as {
+      preparationForProposal: (proposalId: string, proposalRevision: number) => {
+        readonly proposalId: string;
+        readonly proposalRevision: number;
+        readonly status: string;
+        readonly attempt: number;
+        readonly version: number;
+        readonly stage?: string;
+        readonly error?: { readonly stage: string; readonly code: string };
+        readonly createdAt: string;
+        readonly updatedAt: string;
+      } | undefined;
+    };
+
+    const initial = service.preparationForProposal(approved.id, approved.revision);
+    assert.deepEqual(initial, {
+      proposalId: approved.id,
+      proposalRevision: approved.revision,
+      status: "queued",
+      attempt: 1,
+      version: queued.version,
+      createdAt: queued.createdAt,
+      updatedAt: queued.updatedAt,
+    });
+    assert.equal(Object.isFrozen(initial), true);
+
+    const running = store.claimPreparationJob({
+      jobId: queued.jobId,
+      expectedVersion: queued.version,
+    });
+    const failed = store.failPreparationJob({
+      jobId: running.jobId,
+      expectedVersion: running.version,
+      stage: "compile",
+      code: "unavailable",
+    });
+    const failure = service.preparationForProposal(approved.id, approved.revision);
+    assert.deepEqual(failure, {
+      proposalId: approved.id,
+      proposalRevision: approved.revision,
+      status: "failed",
+      attempt: failed.attempt,
+      version: failed.version,
+      stage: "compile",
+      error: { stage: "compile", code: "unavailable" },
+      createdAt: failed.createdAt,
+      updatedAt: failed.updatedAt,
+    });
+    assert.equal(Object.isFrozen(failure), true);
+    assert.equal(Object.isFrozen(failure?.error), true);
+    assert.throws(() => {
+      (failure as unknown as { status: string }).status = "queued";
+    }, TypeError);
+    assert.throws(() => {
+      (failure?.error as unknown as { code: string }).code = "policy_blocked";
+    }, TypeError);
+    assert.equal(service.preparationForProposal(approved.id, approved.revision - 1), undefined);
+    assert.equal(service.preparationForProposal("missing-proposal", approved.revision), undefined);
+
+    for (const forbidden of [
+      "listPreparationJobs",
+      "getPreparationJob",
+      "claimPreparationJob",
+      "completePreparationJob",
+      "failPreparationJob",
+      "retryPreparationJob",
+    ]) {
+      assert.equal(forbidden in ctx.homeProposals, false, forbidden);
+    }
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});

@@ -28,7 +28,11 @@ import {
   HomeObservationSchedulerService,
   type HomeObservationSchedulerOptions,
 } from "./home-observation-scheduler.js";
-import { SqliteProposalStore, type SqliteProposalStoreOptions } from "./proposal-store.js";
+import {
+  ProposalStoreError,
+  SqliteProposalStore,
+  type SqliteProposalStoreOptions,
+} from "./proposal-store.js";
 import {
   HomeAdviceService,
   type HomeAdviceServiceOptions,
@@ -122,7 +126,11 @@ export class HomeAgentRuntime {
       await mountDshHomeAgent(this.context, this.options.agent);
       await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
       await this.context.plugin(HomeObservationSchedulerService, this.options.observation ?? {});
-      await this.context.plugin(ProposalInboxService);
+      await this.context.plugin(ProposalInboxService, {
+        preparation: {
+          retry: (input) => this.retryPreparation(input),
+        },
+      });
       if (this.options.inboxHttp !== undefined) {
         await this.context.plugin(ProposalInboxHttpService, this.options.inboxHttp);
       }
@@ -170,6 +178,30 @@ export class HomeAgentRuntime {
       this.statusValue = "stopped";
     }
     if (failure !== undefined) throw failure;
+  }
+
+  private retryPreparation(input: {
+    readonly proposalId: string;
+    readonly expectedRevision: number;
+    readonly expectedVersion: number;
+  }): void {
+    const store = this.proposalStore;
+    const runner = this.preparationRunner;
+    if (store === undefined || runner === undefined || this.statusValue !== "running") {
+      throw new Error("Artifact preparation retry is unavailable");
+    }
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+      throw new TypeError("Preparation retry proposal revision is invalid");
+    }
+    const current = store.getPreparationJobForProposal(input.proposalId, input.expectedRevision);
+    if (current === undefined) {
+      throw new ProposalStoreError("not_found", "Preparation job not found");
+    }
+    const queued = store.retryPreparationJob({
+      jobId: current.jobId,
+      expectedVersion: input.expectedVersion,
+    });
+    void runner.run(queued.jobId, queued.version).catch(() => undefined);
   }
 }
 

@@ -179,7 +179,7 @@ There are two distinct idempotency layers:
 Retry is an explicit Hub-private command, never an automatic timer or
 backoff. It requires the expected job state/version and a deterministic retry
 identity derived from the job and next attempt. A successful duplicate retry
-request returns the existing transition. A retry can move a failed attempt
+request with a stale expected version returns a bounded conflict. A retry can move a failed attempt
 back to `queued`; a `running` attempt left by a crash can be retried only after
 an explicit bounded claim/lease check. Concurrent retry requests cannot create
 two running attempts. The attempt counter has a finite maximum; after that
@@ -246,6 +246,27 @@ pre-existing proposal review controls remain governed review operations only;
 they do not turn the standalone process into a preparation worker. The
 preparation projection is therefore safe to inspect after a process restart
 without causing new home reads or pipeline work.
+
+### Inbox status and explicit retry boundary
+
+The Proposal review projection may expose one exact preparation summary for
+`proposalId + proposalRevision`: `status`, `attempt`, optimistic `version`, and
+the closed `stage + error code` when failed, plus bounded created/updated time.
+It does not expose `jobId`, the job idempotency key, arbitrary error text, or queue enumeration.
+This read projection is available to both the full and standalone Inbox so a
+household can understand persisted state without causing work.
+
+Retry is different from status. It is available only when the full
+`HomeAgentRuntime` injects a narrow root-owned retry port directly into the
+Inbox composition. It is not a Cordis queue service and is absent from the
+standalone Inbox. The command contains only the exact Proposal id/revision and
+expected preparation version. The root resolves the private job, performs the
+existing failed-to-queued optimistic transition, and wakes that exact queued
+version only after the durable transition returns. A wake failure does not
+roll back or misreport the committed retry. HTTP delivery requires the same
+authentication, exact same-origin check, bounded form parsing, and conflict
+handling as Proposal review. No retry path accepts a stage, error, job id,
+ArtifactRef, route, provider payload, or execution input.
 
 ## Dry-run and no-write invariant
 

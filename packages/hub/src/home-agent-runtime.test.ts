@@ -273,3 +273,128 @@ test("wakes the private durable runner after an approved automation job commits"
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("retries one failed exact preparation through the full Inbox facade and wakes only its queued version", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-runtime-preparation-retry-"));
+  const proposalPath = join(directory, "proposals.sqlite");
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    homeProposals: { path: proposalPath },
+    homeArtifacts: { path: join(directory, "artifacts.sqlite") },
+    homeAuthorityCandidates: { path: join(directory, "authority-candidates.sqlite") },
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "preparation-retry-runtime-test",
+    },
+  });
+
+  await runtime.start();
+  const observer = new SqliteProposalStore({ path: proposalPath });
+  try {
+    const pending = runtime.context.homeProposals.create({
+      kind: "automation-draft",
+      title: "Retry a local household note",
+      summary: "Retry one local notification without a device write.",
+      idempotencyKey: "runtime-preparation-retry:v1",
+      provenance: { producer: "runtime-retry-test" },
+      evidence: {
+        references: [],
+        watermarks: [{
+          bridgeId: "unavailable-retry-fixture",
+          epochId: "unavailable-retry-epoch",
+          lastSeq: 1,
+          freshness: "unknown",
+          gapCount: 0,
+        }],
+      },
+      conflictCheck: { status: "checked", existingAutomationCount: 0, matches: [] },
+      dryRun: { status: "not_run", summary: "No artifact has been prepared." },
+      risk: { level: "low", reasons: [], requiresHumanApproval: true },
+      intent: {
+        type: "notify_local",
+        description: "Prepare a local review note.",
+        rollback: "No remote change exists.",
+      },
+      artifactCandidate: {
+        schemaVersion: "1",
+        content: {
+          trigger: { kind: "schedule", timezone: "Etc/UTC", daysOfWeek: [1], at: "08:00" },
+          conditions: [],
+          actions: [{ kind: "notify_local", message: "Retry the household note." }],
+          rollback: { kind: "no_remote_change" },
+          postconditions: [],
+        },
+      },
+    });
+    const approved = runtime.context.homeProposals.review({
+      proposalId: pending.id,
+      expectedRevision: pending.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+
+    let failed = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    for (let attempts = 0; failed !== undefined && failed.status !== "failed" && attempts < 50; attempts += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      failed = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    }
+    assert.equal(failed?.status, "failed");
+    assert.equal(failed?.attempt, 1);
+    assert.equal(failed?.error?.code, "unavailable");
+    const failedVersion = failed!.version;
+
+    const inbox = runtime.context.homeInbox as unknown as {
+      retryPreparation(input: {
+        readonly proposalId: string;
+        readonly expectedRevision: number;
+        readonly expectedVersion: number;
+      }): Promise<unknown>;
+    };
+    for (const forbidden of [
+      "listPreparationJobs",
+      "getPreparationJob",
+      "claimPreparationJob",
+      "completePreparationJob",
+      "failPreparationJob",
+      "retryPreparationJob",
+      "preparationRunner",
+      "homePreparationJobs",
+      "homePreparationRunner",
+    ]) {
+      assert.equal(forbidden in runtime.context, false, `Context leaked ${forbidden}`);
+      assert.equal(forbidden in runtime.context.homeInbox, false, `Inbox leaked ${forbidden}`);
+    }
+
+    await assert.doesNotReject(() => inbox.retryPreparation({
+      proposalId: approved.id,
+      expectedRevision: approved.revision,
+      expectedVersion: failedVersion,
+    }));
+
+    let retried = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    for (let attempts = 0; retried !== undefined && !(retried.status === "failed" && retried.attempt === 2) && attempts < 50; attempts += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      retried = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    }
+    assert.equal(retried?.proposalId, approved.id);
+    assert.equal(retried?.proposalRevision, approved.revision);
+    assert.equal(retried?.status, "failed");
+    assert.equal(retried?.attempt, 2);
+    assert.equal(retried?.error?.code, "unavailable");
+    assert.ok(retried!.version > failedVersion);
+
+    await assert.rejects(() => inbox.retryPreparation({
+      proposalId: approved.id,
+      expectedRevision: approved.revision,
+      expectedVersion: failedVersion,
+    }), /conflict|version|transition/i);
+    assert.deepEqual(observer.getPreparationJobForProposal(approved.id, approved.revision), retried);
+  } finally {
+    observer.close();
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
