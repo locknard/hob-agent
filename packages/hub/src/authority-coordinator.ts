@@ -34,6 +34,18 @@ export interface AuthorityResyncPort {
 export interface ActionAuthorityConfiguration {
   readonly bridgeId: string;
   readonly approved: boolean;
+  /** Hub-owned canonical digest of the complete authority configuration. */
+  readonly configIdentity: string;
+  /** Monotonic Hub-owned configuration revision; never defaults implicitly. */
+  readonly configRevision: number;
+}
+
+/** Hub-internal projection; never forwarded by HomeWorld or an agent tool. */
+export interface ActionAuthorityConfigurationResolution {
+  readonly status: "configured" | "not_configured" | "invalid";
+  readonly approved: boolean;
+  readonly configIdentity?: string;
+  readonly configRevision?: number;
 }
 
 export interface AuthorityCoordinatorOptions {
@@ -90,7 +102,7 @@ export class AuthorityCoordinator {
   private readonly capabilities = new Map<string, WorldCapability>();
   private readonly stateAuthorityConfig: ReadonlyMap<string, string>;
   private readonly initialStateAuthorities: ReadonlyMap<string, string>;
-  private readonly actionAuthorityConfig: ReadonlyMap<string, ActionAuthorityConfiguration>;
+  private readonly actionAuthorityConfig: ReadonlyMap<string, unknown>;
   private readonly stateAuthorities = new Map<string, string>();
   private readonly resyncPort?: AuthorityResyncPort;
   private readonly resyncTimeoutMs: number;
@@ -313,7 +325,9 @@ export class AuthorityCoordinator {
   ): ActionAuthorityResolution {
     const capability = this.capabilities.get(hwCapabilityId);
     if (capability === undefined) return { status: "unavailable", reason: "unknown_capability" };
-    const configured = this.actionAuthorityConfig.get(hwCapabilityId);
+    const configuration = this.resolveActionAuthorityConfiguration(hwCapabilityId);
+    if (configuration.status !== "configured") return { status: "unavailable", reason: "not_configured" };
+    const configured = parseActionAuthorityConfiguration(this.actionAuthorityConfig.get(hwCapabilityId));
     if (configured === undefined) return { status: "unavailable", reason: "not_configured" };
     if (!configured.approved) return { status: "unavailable", reason: "not_approved" };
     const available = availability.some((candidate) => candidate.bridgeId === configured.bridgeId
@@ -323,6 +337,28 @@ export class AuthorityCoordinator {
     return available
       ? { status: "available", bridgeId: configured.bridgeId }
       : { status: "unavailable", reason: "configured_binding_unavailable" };
+  }
+
+  /**
+   * Hub-private configuration projection for candidate/assessment producers.
+   * It intentionally omits the selected bridge and accepts no unversioned
+   * configuration, so malformed input cannot become an authority assertion.
+   */
+  resolveActionAuthorityConfiguration(hwCapabilityId: string): ActionAuthorityConfigurationResolution {
+    if (!this.capabilities.has(hwCapabilityId)) {
+      return { status: "not_configured", approved: false };
+    }
+    if (!this.actionAuthorityConfig.has(hwCapabilityId)) {
+      return { status: "not_configured", approved: false };
+    }
+    const configured = parseActionAuthorityConfiguration(this.actionAuthorityConfig.get(hwCapabilityId));
+    if (configured === undefined) return { status: "invalid", approved: false };
+    return Object.freeze({
+      status: "configured" as const,
+      approved: configured.approved,
+      configIdentity: configured.configIdentity,
+      configRevision: configured.configRevision,
+    });
   }
 
   proposeActionAuthority(hwCapabilityId: string, bridgeId: string): GovernanceProposal {
@@ -413,8 +449,44 @@ function readStringMap(value: ReadonlyMap<string, string> | Readonly<Record<stri
 
 function readActionMap(
   value: ReadonlyMap<string, ActionAuthorityConfiguration> | Readonly<Record<string, ActionAuthorityConfiguration>> | undefined,
-): ReadonlyMap<string, ActionAuthorityConfiguration> {
+): ReadonlyMap<string, unknown> {
   return value instanceof Map ? new Map(value) : new Map(Object.entries(value ?? {}));
+}
+
+const ACTION_AUTHORITY_CONFIG_IDENTITY = /^sha256:[0-9a-f]{64}$/;
+
+function parseActionAuthorityConfiguration(value: unknown): ActionAuthorityConfiguration | undefined {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const configRevision = record.configRevision;
+    const keys = Object.keys(record).sort();
+    if (keys.length !== 4 || keys.some((key, index) => key !== ["approved", "bridgeId", "configIdentity", "configRevision"][index])) {
+      return undefined;
+    }
+    if (typeof record.bridgeId !== "string"
+      || record.bridgeId.length === 0
+      || record.bridgeId.length > 200
+      || record.bridgeId !== record.bridgeId.trim()
+      || typeof record.approved !== "boolean"
+      || typeof record.configIdentity !== "string"
+      || !ACTION_AUTHORITY_CONFIG_IDENTITY.test(record.configIdentity)
+      || !isPositiveSafeInteger(configRevision)) {
+      return undefined;
+    }
+    return {
+      bridgeId: record.bridgeId,
+      approved: record.approved,
+      configIdentity: record.configIdentity,
+      configRevision,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 function normalizeTime(value: string | Date): string {

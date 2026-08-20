@@ -254,7 +254,14 @@ test("bounds a hanging requestResync control call", async () => {
 test("action authority fails closed without explicit configuration and never falls back", () => {
   const coordinator = new AuthorityCoordinator({
     capabilities: [capability("hc-1")],
-    actionAuthorityConfig: { "hc-1": { bridgeId: "bridge-a", approved: true } },
+    actionAuthorityConfig: {
+      "hc-1": {
+        bridgeId: "bridge-a",
+        approved: true,
+        configIdentity: `sha256:${"c".repeat(64)}`,
+        configRevision: 1,
+      },
+    },
   });
 
   assert.deepEqual(coordinator.resolveActionAuthority("hc-1", [
@@ -273,4 +280,77 @@ test("action authority binding is always an explicit human-governed proposal", (
   assert.equal(proposal.kind, "action-authority-binding");
   assert.equal(proposal.requiresHumanApproval, true);
   assert.equal(coordinator.resolveActionAuthority("hc-1", [{ bridgeId: "bridge-b", available: true, validity: "valid" }]).status, "unavailable");
+});
+
+test("resolves a versioned action authority configuration without exposing route details", () => {
+  const configIdentity = `sha256:${"a".repeat(64)}`;
+  const coordinator = new AuthorityCoordinator({
+    capabilities: [capability("hc-1")],
+    actionAuthorityConfig: {
+      "hc-1": {
+        bridgeId: "bridge-a",
+        approved: true,
+        configIdentity,
+        configRevision: 3,
+      },
+    },
+  });
+
+  assert.deepEqual(coordinator.resolveActionAuthorityConfiguration("hc-1"), {
+    status: "configured",
+    approved: true,
+    configIdentity,
+    configRevision: 3,
+  });
+  const resolved = coordinator.resolveActionAuthorityConfiguration("hc-1") as Record<string, unknown>;
+  assert.equal("bridgeId" in resolved, false);
+  assert.equal("nativeId" in resolved, false);
+  assert.equal("remoteInstanceId" in resolved, false);
+  assert.equal("credential" in resolved, false);
+});
+
+test("fails closed for missing, malformed, or non-positive versioned action configuration", () => {
+  const configIdentity = `sha256:${"b".repeat(64)}`;
+  const coordinator = new AuthorityCoordinator({
+    capabilities: [capability("hc-1"), capability("hc-2"), capability("hc-3"), capability("hc-4")],
+    actionAuthorityConfig: {
+      "hc-1": { bridgeId: "bridge-a", approved: true } as never,
+      "hc-2": {
+        bridgeId: "bridge-a",
+        approved: true,
+        configIdentity: "not-a-digest",
+        configRevision: 1,
+      } as never,
+      "hc-3": {
+        bridgeId: "bridge-a",
+        approved: true,
+        configIdentity,
+        configRevision: 0,
+      } as never,
+    },
+  });
+
+  assert.deepEqual(coordinator.resolveActionAuthorityConfiguration("unknown"), {
+    status: "not_configured",
+    approved: false,
+  });
+  assert.deepEqual(coordinator.resolveActionAuthorityConfiguration("hc-4"), {
+    status: "not_configured",
+    approved: false,
+  });
+  assert.deepEqual(coordinator.resolveActionAuthorityConfiguration("hc-1"), {
+    status: "invalid",
+    approved: false,
+  });
+  assert.deepEqual(coordinator.resolveActionAuthorityConfiguration("hc-2"), {
+    status: "invalid",
+    approved: false,
+  });
+  assert.deepEqual(coordinator.resolveActionAuthorityConfiguration("hc-3"), {
+    status: "invalid",
+    approved: false,
+  });
+  assert.deepEqual(coordinator.resolveActionAuthority("hc-2", [
+    { bridgeId: "bridge-a", available: true, validity: "valid" },
+  ]), { status: "unavailable", reason: "not_configured" });
 });
