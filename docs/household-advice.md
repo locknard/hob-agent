@@ -40,6 +40,13 @@ relevant, privacy impact, and a no-purchase alternative. The Agent must inspect
 the full neutral inventory before claiming that a capability is missing.
 Camera and microphone purchases are outside this first slice.
 
+When confidence is `partial` or `insufficient`, every hardware suggestion is
+optional and requires a reversible validation trial before purchase. A
+`recommended` suggestion is accepted only with `sufficient` evidence. Report
+prose is household-facing and rejects opaque Hub IDs and known internal
+diagnostic codes. Safety-device trials use manufacturer-approved procedures
+and must not create a hazard.
+
 ## Request and execution boundaries
 
 - Questions are UTF-8 text from 1 to 1,000 characters and are always untrusted
@@ -61,3 +68,7 @@ The Inbox presents an “Ask about your home” form and a bounded recent-report
 list. A report page separates: answer, what the Agent found, what remains
 unknown, a proposed trial, sensing gaps, and how to validate. This is a
 request/response document workflow, not a native chat application.
+
+The reusable acceptance matrix is documented in
+[`household-advice-evaluation.md`](household-advice-evaluation.md). Real-home
+fixtures and answers remain private and are never committed.

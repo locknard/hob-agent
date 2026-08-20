@@ -6,7 +6,7 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime from "@deepseek-ai/dsh-tools";
 
-import { HomeAdviceReportService } from "./dsh-home-advice-report.js";
+import { HomeAdviceReportService, parseHomeAdviceReport } from "./dsh-home-advice-report.js";
 import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
 
 const REPORT = {
@@ -108,4 +108,26 @@ test("rejects hardware advice until the active turn has exhausted the stable inv
   assert.match(JSON.stringify(result), /inventory/i);
   assert.equal(ctx.homeAdviceReport.end(), undefined);
   await ctx.fiber.dispose();
+});
+
+test("keeps hardware optional and trial-first when evidence is not sufficient", () => {
+  assert.throws(() => parseHomeAdviceReport({
+    ...REPORT,
+    hardwareSuggestions: [{ ...REPORT.hardwareSuggestions[0], necessity: "recommended" }],
+  }), /sufficient evidence/i);
+  assert.throws(() => parseHomeAdviceReport({
+    ...REPORT,
+    trial: undefined,
+  }), /trial/i);
+});
+
+test("rejects internal home identifiers and diagnostic codes from household-facing prose", () => {
+  assert.throws(() => parseHomeAdviceReport({
+    ...REPORT,
+    findings: ["Device hw-deadbeef reported journal_query_unavailable."],
+  }), /internal implementation detail/i);
+  assert.throws(() => parseHomeAdviceReport({
+    ...REPORT,
+    findings: ["The binary-sensor is stale."],
+  }), /internal implementation detail/i);
 });

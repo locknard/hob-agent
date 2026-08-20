@@ -154,12 +154,19 @@ export function parseHomeAdviceReport(value: unknown): HomeAdviceReport {
     throw new TypeError("Invalid home advice hardware suggestions");
   }
   const hardwareSuggestions = value.hardwareSuggestions.map((item) => validateHardwareSuggestion(item));
+  const trial = value.trial === undefined ? undefined : validateTrial(value.trial);
+  if (confidence !== "sufficient" && hardwareSuggestions.some((item) => item.necessity === "recommended")) {
+    throw new TypeError("Recommended hardware requires sufficient evidence confidence");
+  }
+  if (confidence !== "sufficient" && hardwareSuggestions.length > 0 && trial === undefined) {
+    throw new TypeError("Hardware advice with incomplete evidence requires a reversible trial");
+  }
   return {
     summary,
     confidence,
     findings,
     unknowns,
-    ...(value.trial === undefined ? {} : { trial: validateTrial(value.trial) }),
+    ...(trial === undefined ? {} : { trial }),
     hardwareSuggestions,
     validationSteps,
   };
@@ -207,7 +214,17 @@ function boundedText(value: unknown, field: string): string {
   if (typeof value !== "string") throw new TypeError(`Invalid home advice ${field}`);
   const text = value.trim();
   if (text.length < 1 || text.length > 1_000) throw new TypeError(`Invalid home advice ${field}`);
+  if (containsInternalImplementationDetail(text)) {
+    throw new TypeError(`Home advice ${field} contains an internal implementation detail`);
+  }
   return text;
+}
+
+function containsInternalImplementationDetail(text: string): boolean {
+  return /\bhwc?-[a-f0-9]{6,}\b/i.test(text)
+    || /\b(?:hwId|hwCapabilityId|capabilityId)\b/i.test(text)
+    || /\b(?:binary-sensor|invalid-source|present-but-invalid)\b/i.test(text)
+    || /\b(?:journal_query_unavailable|window_before_baseline|missing_consistent_baseline|baseline_time_unknown|bridge_not_ready|selection_too_broad|query_truncated|merge_truncated)\b/i.test(text);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
