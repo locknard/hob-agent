@@ -535,8 +535,10 @@ type ArtifactCompileInput = {
 };
 ```
 
-`NeutralDeviceSummary` 只能是 Hub 中立 projection（hw IDs、schema/semantic hint、受限当前
-值摘要和 validity）。对 artifact 中每个设备 action，它还携带由 Hub-private exact-schema
+`NeutralDeviceSummary` 只能是 Hub 中立 projection（hw IDs、schema/semantic hint、validity
+和显式 closed read result）。Read result 区分 `available`（含 neutral scalar）、
+`unsupported` 与 `unavailable`（含 closed reason），不能用缺少 current value 混淆三种事实。
+对 artifact 中每个设备 action，它还携带由 Hub-private exact-schema
 resolver 产生、按连续一基 action order 绑定的 compatibility 结果；结果只含 closed status/
 reason 和 neutral `before`/`after`，不能含原生格式或 writable metadata。Compiler 不得从
 `semanticKind`、schema 名或 scalar shape 再推断动作能力。它不得把 `HomeWorldSnapshot` 中的
