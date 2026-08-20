@@ -277,11 +277,19 @@ approval, bridge, credential, or execution method. The Control Center reports
 that the Registry is available while explicitly reporting compilation,
 simulation, and execution as unavailable.
 
-This does not complete M3b. The next boundary must be a Hub-owned producer that
-accepts an exact reviewed Proposal revision, independently validates its status
-and evidence provenance, creates the closed Artifact shape, and registers its
-durable retention references. M3c compiler and historical dry-run remain later,
-pure-read work; device writes remain unavailable.
+The Proposal store now provides the prerequisite source gate: a synchronous
+callback over only the exact current approved automation revision. It validates
+SQL metadata against the persisted envelope, the complete two-event review
+audit chain, application-unavailable state, and bounded evidence before
+returning a deeply frozen Hub projection. Non-current, pending, rejected,
+legacy-unreviewed, or corrupt sources fail closed. Retention projections now
+revalidate the owning proposal row before returning journal pins.
+
+This still does not complete M3b. The next boundary must be a Hub-owned producer
+that consumes this gate, constructs the closed Artifact shape, creates fresh
+Hub evidence/risk/authority assessments, and registers their durable retention
+references. M3c compiler and historical dry-run remain later, pure-read work;
+device writes remain unavailable.
 
 ### Implemented foundation — canonical ingest-journal retention
 

@@ -1,8 +1,9 @@
 # M3b 中立自动化 Artifact Contract
 
 > 状态：M3b 基础已部分实现。严格 Artifact revision/schema/hash、三类动态 assessment、
-> 不可变 SQLite Registry 与生产进程中的只读服务边界已经落地。Proposal 来源校验的
-> Hub-owned producer、retention 引用闭环、compiler、dry-run、approval ticket 和执行器仍未实现。
+> 不可变 SQLite Registry、生产进程中的只读服务边界和精确 approved Proposal revision
+> source gate 已经落地。Hub-owned Artifact producer、assessment 生成、compiler、dry-run、
+> approval ticket 和执行器仍未实现。
 >
 > 本文定义 M3b 之后第一版（下文称 Artifact Phase 1）的最小、可持久化、不可执行 artifact
 > 形状。它复用已有 proposal v1、HomeWorld、证据和 Bridge v6.3 语义；不修改当前

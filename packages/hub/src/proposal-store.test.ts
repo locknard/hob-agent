@@ -162,6 +162,180 @@ test("reviews with optimistic concurrency and never treats approval as applicati
   store.close();
 });
 
+test("projects a deeply frozen Hub-verified source only for the current approved automation revision", () => {
+  let now = createdAt;
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
+  const proposal = store.create(input());
+  now = "2026-08-19T01:05:00.000Z";
+  const approved = store.review({
+    proposalId: proposal.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+
+  const source = store.withApprovedProposalAtRevision(approved.id, approved.revision, (value) => {
+    assert.equal(value.proposalId, approved.id);
+    assert.equal(value.revision, 2);
+    assert.equal(value.kind, "automation-draft");
+    assert.equal(value.status, "approved");
+    assert.equal(value.applicationStatus, "not_available");
+    assert.equal(value.title, approved.title);
+    assert.equal(value.summary, approved.summary);
+    assert.deepEqual(value.intent, approved.intent);
+    assert.deepEqual(value.evidence, approved.evidence);
+    assert.deepEqual(value.conflictCheck, approved.conflictCheck);
+    assert.deepEqual(value.risk, approved.risk);
+    assert.equal(Object.isFrozen(value), true);
+    assert.equal(Object.isFrozen(value.evidence), true);
+    assert.equal(Object.isFrozen(value.evidence.references), true);
+    assert.throws(() => {
+      (value as unknown as { title: string }).title = "caller mutation";
+    }, TypeError);
+    assert.throws(() => {
+      (value.evidence.references as unknown as Array<unknown>).push({});
+    }, TypeError);
+    return value;
+  });
+  assert.equal(source.proposalId, approved.id);
+  store.close();
+});
+
+test("fails closed for missing, non-current, pending, and non-approved source revisions", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  const pending = store.create(input({ idempotencyKey: "source-pending" }));
+  assert.throws(
+    () => store.withApprovedProposalAtRevision(pending.id, pending.revision, () => undefined),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "source_unavailable",
+  );
+  assert.throws(
+    () => store.withApprovedProposalAtRevision("proposal-missing", 2, () => undefined),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "not_found",
+  );
+
+  const approved = store.review({
+    proposalId: pending.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+  assert.throws(
+    () => store.withApprovedProposalAtRevision(approved.id, 1, () => undefined),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "revision_conflict",
+  );
+
+  const rejected = store.create(input({ idempotencyKey: "source-rejected" }));
+  const rejectedRevision = store.review({
+    proposalId: rejected.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+    feedbackCode: "not_useful",
+  });
+  assert.throws(
+    () => store.withApprovedProposalAtRevision(rejectedRevision.id, rejectedRevision.revision, () => undefined),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "source_unavailable",
+  );
+  store.close();
+});
+
+test("cross-checks SQL proposal metadata and the complete approved audit chain", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-source-integrity-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  const proposal = store.create(input());
+  const approved = store.review({
+    proposalId: proposal.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+  store.close();
+
+  const raw = new DatabaseSync(path);
+  raw.prepare("UPDATE proposals SET status = ? WHERE proposal_id = ?")
+    .run("pending_review", approved.id);
+  raw.close();
+  const metadataCorrupt = new SqliteProposalStore({ path });
+  assert.throws(() => metadataCorrupt.get(approved.id), (error: unknown) => (
+    error instanceof ProposalStoreError && error.code === "corrupt_store"
+  ));
+  assert.throws(() => metadataCorrupt.list(), (error: unknown) => (
+    error instanceof ProposalStoreError && error.code === "corrupt_store"
+  ));
+  metadataCorrupt.close();
+
+  const rawAudit = new DatabaseSync(path);
+  rawAudit.prepare("UPDATE proposals SET status = ?, revision = ?, updated_at = ?, payload_json = ? WHERE proposal_id = ?")
+    .run("approved", 2, approved.updatedAt, JSON.stringify({
+      ...approved,
+      audit: [...approved.audit, { ...approved.audit[1], id: "audit-extra", revision: 3 }],
+    }), approved.id);
+  rawAudit.close();
+  const auditCorrupt = new SqliteProposalStore({ path });
+  assert.throws(
+    () => auditCorrupt.withApprovedProposalAtRevision(approved.id, 2, () => undefined),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "corrupt_store",
+  );
+  auditCorrupt.close();
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("retention projection revalidates the proposal row before returning journal pins", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-retention-integrity-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  const proposal = store.create(input({
+    idempotencyKey: "retention-integrity",
+    evidence: {
+      references: [{
+        bridgeId: "ha-main",
+        hwId: "hw-7",
+        capabilityId: "hwc-4",
+        observedAt: "2026-08-19T00:59:00.000Z",
+        source: "post-baseline-event",
+        epochId: "epoch-3",
+        seq: 605,
+      }],
+      watermarks: [{
+        bridgeId: "ha-main",
+        epochId: "epoch-3",
+        lastSeq: 606,
+        freshness: "fresh",
+        gapCount: 0,
+      }],
+      temporal: {
+        requestedSince: "2026-08-19T00:00:00.000Z",
+        requestedUntil: "2026-08-19T01:00:00.000Z",
+        truncated: false,
+        coverage: [{
+          bridgeId: "ha-main",
+          epochId: "epoch-3",
+          baselineSeq: 1,
+          baselineAt: "2026-08-18T23:00:00.000Z",
+          status: "complete",
+          reasons: [],
+        }],
+      },
+    },
+  }));
+  store.close();
+
+  const raw = new DatabaseSync(path);
+  raw.prepare("UPDATE proposals SET revision = ? WHERE proposal_id = ?").run(2, proposal.id);
+  raw.close();
+  const reopened = new SqliteProposalStore({ path });
+  assert.throws(
+    () => reopened.withRetentionEvidence("ha-main", 1_000, () => undefined),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "corrupt_store",
+  );
+  reopened.close();
+  await rm(directory, { recursive: true, force: true });
+});
+
 test("summarizes proposal quality without returning household content", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   const approved = store.create(input({ idempotencyKey: "quality:approved" }));

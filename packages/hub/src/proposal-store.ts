@@ -235,6 +235,32 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly audit: readonly ProposalAuditEvent[];
 }
 
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? readonly DeepReadonly<Item>[]
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
+/**
+ * Hub-verified source input for a future artifact producer. It is deliberately
+ * a projection rather than a caller-supplied proposal/evidence object.
+ */
+export type HubVerifiedProposalSource = DeepReadonly<{
+  readonly proposalId: string;
+  readonly revision: number;
+  readonly kind: "automation-draft";
+  readonly status: "approved";
+  readonly applicationStatus: "not_available";
+  readonly title: string;
+  readonly summary: string;
+  readonly intent: CreateProposalInput["intent"];
+  readonly evidence: CreateProposalInput["evidence"];
+  readonly conflictCheck: CreateProposalInput["conflictCheck"];
+  readonly risk: CreateProposalInput["risk"];
+}>;
+
 const proposalAuditEventSchema = z.object({
   id: boundedId,
   at: isoTimestamp,
@@ -291,6 +317,7 @@ export type ProposalStoreErrorCode =
   | "not_found"
   | "revision_conflict"
   | "terminal_status"
+  | "source_unavailable"
   | "retention_evidence_limit";
 
 export class ProposalStoreError extends Error {
@@ -306,7 +333,21 @@ export interface SqliteProposalStoreOptions {
   readonly id?: () => string;
 }
 
-type ProposalRow = { payload_json?: unknown };
+type ProposalRow = {
+  proposal_id?: unknown;
+  producer?: unknown;
+  idempotency_key?: unknown;
+  status?: unknown;
+  revision?: unknown;
+  created_at?: unknown;
+  updated_at?: unknown;
+  payload_json?: unknown;
+  reference_index?: unknown;
+  bridge_id?: unknown;
+  source?: unknown;
+  epoch_id?: unknown;
+  seq?: unknown;
+};
 
 /** Durable local store for review-only proposal envelopes and their audit trail. */
 export class SqliteProposalStore {
@@ -417,7 +458,10 @@ export class SqliteProposalStore {
   }
 
   get(proposalId: string): ProposalEnvelope | undefined {
-    const row = this.db.prepare("SELECT payload_json FROM proposals WHERE proposal_id = ?")
+    const row = this.db.prepare(`SELECT
+        proposal_id, producer, idempotency_key, status, revision,
+        created_at, updated_at, payload_json
+      FROM proposals WHERE proposal_id = ?`)
       .get(proposalId) as ProposalRow | undefined;
     return row ? fromRow(row) : undefined;
   }
@@ -428,11 +472,84 @@ export class SqliteProposalStore {
       throw new TypeError("proposal list limit must be an integer from 1 to 200");
     }
     const rows = query.status === undefined
-      ? this.db.prepare(`SELECT payload_json FROM proposals
+      ? this.db.prepare(`SELECT
+          proposal_id, producer, idempotency_key, status, revision,
+          created_at, updated_at, payload_json
+        FROM proposals
           ORDER BY created_at DESC, proposal_id DESC LIMIT ?`).all(limit)
-      : this.db.prepare(`SELECT payload_json FROM proposals WHERE status = ?
+      : this.db.prepare(`SELECT
+          proposal_id, producer, idempotency_key, status, revision,
+          created_at, updated_at, payload_json
+        FROM proposals WHERE status = ?
           ORDER BY created_at DESC, proposal_id DESC LIMIT ?`).all(query.status, limit);
     return (rows as ProposalRow[]).map(fromRow);
+  }
+
+  /**
+   * Runs a synchronous operation against the exact current approved source.
+   * The store is intentionally single-current-revision today: an older
+   * revision is rejected rather than silently reinterpreted as the current
+   * payload. The projection is deeply frozen before it crosses this seam.
+   */
+  withApprovedProposalAtRevision<T>(
+    proposalId: string,
+    revision: number,
+    operation: (source: HubVerifiedProposalSource) => T,
+  ): T {
+    validateProposalSourceQuery(proposalId, revision, operation);
+    this.db.exec("BEGIN IMMEDIATE");
+    let callbackStarted = false;
+    try {
+      const row = this.db.prepare(`SELECT
+          proposal_id, producer, idempotency_key, status, revision,
+          created_at, updated_at, payload_json
+        FROM proposals WHERE proposal_id = ?`).get(proposalId) as ProposalRow | undefined;
+      if (!row) throw new ProposalStoreError("not_found", "Proposal was not found");
+      const proposal = fromRow(row);
+      if (proposal.revision !== revision) {
+        throw new ProposalStoreError("revision_conflict", "Proposal source revision is not current");
+      }
+      if (proposal.kind !== "automation-draft"
+        || proposal.status !== "approved"
+        || proposal.applicationStatus !== "not_available"
+        || proposal.review?.decision !== "approved"
+        || proposal.review.feedbackCode !== "useful_as_is") {
+        throw new ProposalStoreError("source_unavailable", "Proposal is not an approved automation source");
+      }
+      validateApprovedAuditChain(proposal);
+      const source = freezeSource({
+        proposalId: proposal.id,
+        revision: proposal.revision,
+        kind: proposal.kind,
+        status: proposal.status,
+        applicationStatus: proposal.applicationStatus,
+        title: proposal.title,
+        summary: proposal.summary,
+        intent: proposal.intent,
+        evidence: proposal.evidence,
+        conflictCheck: proposal.conflictCheck,
+        risk: proposal.risk,
+      });
+      callbackStarted = true;
+      const result = operation(source);
+      if (isPromiseLike(result)) {
+        void Promise.resolve(result).catch(() => undefined);
+        throw new TypeError("Approved proposal source callback must be synchronous");
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the first failure; the next store operation will fail closed.
+      }
+      if (callbackStarted) throw error;
+      if (error instanceof ProposalStoreError || error instanceof TypeError) throw error;
+      throw new ProposalStoreError("corrupt_store", "Approved proposal source is unavailable");
+    } finally {
+      this.ensurePrivateFiles();
+    }
   }
 
   /**
@@ -535,7 +652,10 @@ export class SqliteProposalStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
       throw new TypeError("proposal calibration limit must be an integer from 1 to 20");
     }
-    const rows = this.db.prepare(`SELECT payload_json FROM proposals
+    const rows = this.db.prepare(`SELECT
+        proposal_id, producer, idempotency_key, status, revision,
+        created_at, updated_at, payload_json
+      FROM proposals
       WHERE status IN ('approved', 'rejected')
       ORDER BY updated_at DESC, proposal_id DESC LIMIT ?`).all(limit) as ProposalRow[];
     return rows.map((row) => {
@@ -620,7 +740,10 @@ export class SqliteProposalStore {
   }
 
   private findByIdempotency(producer: string, idempotencyKey: string): ProposalEnvelope | undefined {
-    const row = this.db.prepare(`SELECT payload_json FROM proposals
+    const row = this.db.prepare(`SELECT
+        proposal_id, producer, idempotency_key, status, revision,
+        created_at, updated_at, payload_json
+      FROM proposals
       WHERE producer = ? AND idempotency_key = ?`).get(producer, idempotencyKey) as ProposalRow | undefined;
     return row ? fromRow(row) : undefined;
   }
@@ -633,7 +756,13 @@ export class SqliteProposalStore {
     try {
       rows = this.db.prepare(`SELECT
           p.proposal_id AS proposal_id,
+          p.producer AS producer,
+          p.idempotency_key AS idempotency_key,
+          p.status AS status,
           p.revision AS revision,
+          p.created_at AS created_at,
+          p.updated_at AS updated_at,
+          p.payload_json AS payload_json,
           CAST(reference.key AS INTEGER) AS reference_index,
           json_extract(reference.value, '$.bridgeId') AS bridge_id,
           json_extract(reference.value, '$.source') AS source,
@@ -654,6 +783,7 @@ export class SqliteProposalStore {
     const references: ProposalRetentionEvidenceReference[] = [];
     const seen = new Set<string>();
     for (const row of rows) {
+      const proposal = fromRow(row as ProposalRow);
       const proposalId = row.proposal_id;
       const revision = Number(row.revision);
       const referenceIndex = Number(row.reference_index);
@@ -661,13 +791,20 @@ export class SqliteProposalStore {
       const source = row.source;
       const epochId = row.epoch_id;
       const seq = Number(row.seq);
+      const persistedReference = proposal.evidence.references[referenceIndex];
       if (typeof proposalId !== "string" || proposalId.length === 0 || proposalId.length > 200
+        || proposal.id !== proposalId
+        || proposal.revision !== revision
         || !Number.isSafeInteger(revision) || revision < 1
         || !Number.isSafeInteger(referenceIndex) || referenceIndex < 0
         || referenceBridgeId !== bridgeId
         || source !== "post-baseline-event"
         || typeof epochId !== "string" || epochId.length === 0 || epochId.length > 200
-        || !Number.isSafeInteger(seq) || seq < 0) {
+        || !Number.isSafeInteger(seq) || seq < 0
+        || persistedReference?.bridgeId !== bridgeId
+        || persistedReference.source !== "post-baseline-event"
+        || persistedReference.epochId !== epochId
+        || persistedReference.seq !== seq) {
         throw new ProposalStoreError("corrupt_store", "Proposal retention evidence is invalid");
       }
       const referenceId = `${proposalId}:${revision}:${referenceIndex}`;
@@ -734,6 +871,55 @@ function validateRetentionEvidenceQuery(bridgeId: string, limit: number): void {
   }
 }
 
+function validateProposalSourceQuery(
+  proposalId: string,
+  revision: number,
+  operation: unknown,
+): void {
+  if (typeof proposalId !== "string"
+    || proposalId.length === 0
+    || proposalId !== proposalId.trim()
+    || Buffer.byteLength(proposalId, "utf8") > 200) {
+    throw new TypeError("approved proposal source id is invalid");
+  }
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new TypeError("approved proposal source revision is invalid");
+  }
+  if (typeof operation !== "function") {
+    throw new TypeError("approved proposal source callback is invalid");
+  }
+}
+
+function validateApprovedAuditChain(proposal: ProposalEnvelope): void {
+  const created = proposal.audit[0];
+  const approved = proposal.audit[1];
+  const review = proposal.review;
+  const createdValid = proposal.revision === 2
+    && proposal.audit.length === 2
+    && created !== undefined
+    && created.action === "created"
+    && created.revision === 1
+    && created.actor === proposal.provenance.producer
+    && created.at === proposal.createdAt
+    && created.feedbackCode === undefined
+    && created.note === undefined;
+  const approvedValid = approved !== undefined
+    && review !== undefined
+    && review.decision === "approved"
+    && approved.action === "approved"
+    && approved.revision === proposal.revision
+    && approved.actor === review.reviewer
+    && approved.at === review.reviewedAt
+    && approved.at === proposal.updatedAt
+    && approved.feedbackCode === review.feedbackCode
+    && approved.note === review.note
+    && created?.id !== approved.id
+    && Date.parse(proposal.createdAt) <= Date.parse(proposal.updatedAt);
+  if (!createdValid || !approvedValid) {
+    throw new ProposalStoreError("corrupt_store", "Approved proposal audit chain is invalid");
+  }
+}
+
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") return false;
   return typeof (value as { readonly then?: unknown }).then === "function";
@@ -745,6 +931,15 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
     const parsed = proposalEnvelopeSchema.safeParse(JSON.parse(row.payload_json));
     if (!parsed.success) throw new Error("invalid payload");
     const proposal = parsed.data;
+    if (row.proposal_id !== proposal.id
+      || row.producer !== proposal.provenance.producer
+      || row.idempotency_key !== proposal.idempotencyKey
+      || row.status !== proposal.status
+      || row.revision !== proposal.revision
+      || row.created_at !== proposal.createdAt
+      || row.updated_at !== proposal.updatedAt) {
+      throw new Error("metadata mismatch");
+    }
     const lastAudit = proposal.audit.at(-1);
     const lifecycleValid = lastAudit?.revision === proposal.revision
       && (proposal.status === "pending_review"
@@ -773,4 +968,14 @@ function persistedFeedbackIsConsistent(
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function freezeSource(value: HubVerifiedProposalSource): HubVerifiedProposalSource {
+  return deepFreeze(clone(value));
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return Object.freeze(value);
 }

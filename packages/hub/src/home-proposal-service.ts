@@ -3,6 +3,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import {
   SqliteProposalStore,
   type CreateProposalInput,
+  type HubVerifiedProposalSource,
   type ProposalEnvelope,
   type ProposalCalibrationItem,
   type ProposalListQuery,
@@ -198,6 +199,14 @@ export class HomeProposalService extends Service {
 
   review(input: ReviewProposalInput): ProposalEnvelope {
     return this.store.review(input);
+  }
+
+  withApprovedProposalAtRevision<T>(
+    proposalId: string,
+    revision: number,
+    operation: (source: HubVerifiedProposalSource) => T,
+  ): T {
+    return this.store.withApprovedProposalAtRevision(proposalId, revision, operation);
   }
 
   withRetentionEvidence<T>(

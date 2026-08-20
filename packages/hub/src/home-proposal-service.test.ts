@@ -206,6 +206,40 @@ test("exposes the hub-owned proposal lifecycle as a Cordis service", async () =>
   await ctx.fiber.dispose();
 });
 
+test("exposes the synchronous approved source gate without accepting caller evidence", async () => {
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeProposalService, {
+    path: ":memory:",
+    now: () => "2026-08-19T01:00:00.000Z",
+  });
+  const created = ctx.homeProposals.create({
+    ...candidate,
+    kind: "automation-draft",
+    intent: { ...candidate.intent, type: "automation-draft" },
+    idempotencyKey: "source-gate:automation:v1",
+  });
+  const approved = ctx.homeProposals.review({
+    proposalId: created.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+
+  const source = ctx.homeProposals.withApprovedProposalAtRevision(
+    approved.id,
+    approved.revision,
+    (value) => value,
+  );
+  assert.equal(source.proposalId, approved.id);
+  assert.equal(source.revision, approved.revision);
+  assert.deepEqual(source.evidence, approved.evidence);
+  assert.equal(Object.isFrozen(source), true);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("creates evidence and conflict findings from the hub instead of trusting model claims", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);
