@@ -23,7 +23,20 @@ declare module "@deepseek-ai/cordis" {
   }
 }
 
-export type HomeArtifactServiceOptions = ArtifactRegistryOptions;
+export interface HomeArtifactRegistryReader {
+  readonly getRevision: ArtifactRegistry["getRevision"];
+  readonly list: ArtifactRegistry["list"];
+  readonly audit: ArtifactRegistry["audit"];
+  readonly listAttestations: ArtifactRegistry["listAttestations"];
+  readonly latestAttestation: ArtifactRegistry["latestAttestation"];
+  readonly currentBySourceProposal: ArtifactRegistry["currentBySourceProposal"];
+  readonly latestResult: ArtifactRegistry["latestResult"];
+}
+
+export type HomeArtifactServiceOptions = ArtifactRegistryOptions | {
+  /** Hub-root-owned read port. The service never closes or widens it. */
+  readonly registry: HomeArtifactRegistryReader;
+};
 
 export interface HomeArtifactCapabilities {
   readonly schemaVersion: "1";
@@ -97,15 +110,24 @@ const CAPABILITIES: HomeArtifactCapabilities = Object.freeze({
  * simulation, approval, bridge, or execution method.
  */
 export class HomeArtifactService extends Service {
-  private readonly registry: ArtifactRegistry;
+  private readonly registry: HomeArtifactRegistryReader;
+  private readonly ownedRegistry: ArtifactRegistry | undefined;
 
   constructor(ctx: Context, options: HomeArtifactServiceOptions) {
     super(ctx, "homeArtifacts");
-    this.registry = new ArtifactRegistry(options);
+    if (isBorrowedRegistryOptions(options)) {
+      this.registry = options.registry;
+      this.ownedRegistry = undefined;
+    } else {
+      this.ownedRegistry = new ArtifactRegistry(options);
+      this.registry = this.ownedRegistry;
+    }
   }
 
   protected async [Service.init](): Promise<void> {
-    this.ctx.effect(() => () => this.registry.close(), "home-artifacts.close");
+    if (this.ownedRegistry !== undefined) {
+      this.ctx.effect(() => () => this.ownedRegistry?.close(), "home-artifacts.close");
+    }
   }
 
   capabilities(): HomeArtifactCapabilities {
@@ -201,6 +223,12 @@ export class HomeArtifactService extends Service {
       writesPerformed: false as const,
     });
   }
+}
+
+function isBorrowedRegistryOptions(
+  options: HomeArtifactServiceOptions,
+): options is { readonly registry: HomeArtifactRegistryReader } {
+  return "registry" in options;
 }
 
 function projectCompile(result: ArtifactCompileAttestation): HomeArtifactReviewCompile {

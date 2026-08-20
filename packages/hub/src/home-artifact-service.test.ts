@@ -520,3 +520,69 @@ test("uses the exact Registry source lookup beyond 200 unrelated revisions", asy
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("uses an injected registry reader without taking ownership or widening the review surface", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-home-artifact-borrowed-"));
+  const path = join(directory, "artifacts.sqlite");
+  const backing = new ArtifactRegistry({ path });
+  const artifact = fixtureArtifact({ artifactId: "artifact-borrowed-reader" });
+  backing.createDraft({ artifact, idempotencyKey: "borrowed-reader-artifact" });
+  const calls = { list: 0, getRevision: 0 };
+  const reader = {
+    getRevision: (...args: Parameters<ArtifactRegistry["getRevision"]>) => {
+      calls.getRevision += 1;
+      return backing.getRevision(...args);
+    },
+    list: (...args: Parameters<ArtifactRegistry["list"]>) => {
+      calls.list += 1;
+      return backing.list(...args);
+    },
+    audit: (...args: Parameters<ArtifactRegistry["audit"]>) => backing.audit(...args),
+    listAttestations: (...args: Parameters<ArtifactRegistry["listAttestations"]>) => backing.listAttestations(...args),
+    latestAttestation: (...args: Parameters<ArtifactRegistry["latestAttestation"]>) => backing.latestAttestation(...args),
+    currentBySourceProposal: (...args: Parameters<ArtifactRegistry["currentBySourceProposal"]>) => backing.currentBySourceProposal(...args),
+    latestResult: (...args: Parameters<ArtifactRegistry["latestResult"]>) => backing.latestResult(...args),
+  };
+  const context = new Context();
+  try {
+    // The reader is deliberately narrow and has no close or mutation methods.
+    // Supplying no path ensures the service cannot silently construct another owner.
+    await context.plugin(HomeArtifactService, { registry: reader } as never);
+    const service = context.homeArtifacts;
+
+    assert.equal(service.diagnostics().hasRecords, true);
+    assert.equal(service.list({ limit: 1 }).length, 1);
+    assert.equal(service.getRevision(artifact.artifactId, artifact.revision)?.artifact.artifactId, artifact.artifactId);
+    assert.ok(calls.list > 0);
+    assert.ok(calls.getRevision > 0);
+    assert.equal(service.capabilities().canCompile, false);
+    assert.equal(service.capabilities().canSimulate, false);
+    assert.equal(service.capabilities().canExecute, false);
+    for (const forbidden of ["getRegistry", "compile", "producer"]) {
+      assert.equal(forbidden in service, false, forbidden);
+    }
+
+    await context.fiber.dispose();
+    assert.equal(backing.list({ limit: 1 }).length, 1);
+  } finally {
+    backing.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("closes the default owned registry when the service stops", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-home-artifact-owned-"));
+  const path = join(directory, "artifacts.sqlite");
+  const context = new Context();
+  try {
+    await context.plugin(HomeArtifactService, { path });
+    const service = context.homeArtifacts;
+    assert.equal(service.capabilities().canCompile, false);
+    assert.equal(service.capabilities().canSimulate, false);
+    assert.equal(service.capabilities().canExecute, false);
+    await context.fiber.dispose();
+    assert.throws(() => service.list({ limit: 1 }), /closed/i);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
