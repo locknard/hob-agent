@@ -56,6 +56,17 @@ objects do not create false room-review work, and provider/adapter/sequence
 identifiers remain behind native progressive disclosure. It is still a
 read-only projection and provides no configuration or execution control.
 
+The Control Center also exposes the Hub-owned retention status as a
+metadata-only details section: aggregate/per-bridge capacity, complete versus
+partial/degraded coverage, coverage floor, and latest retention audit time,
+result, and bytes deleted. It does not read journal records, proposal text, or
+device values and never shows the internal retention policy id. An untouched
+bridge honestly says **Not run yet** without making a healthy complete view
+look degraded; partial/degraded coverage and exhausted capacity remain
+attention states, with a fixed 90% used/max early warning and invalid quota
+metadata failing closed. There is no retention button, HTTP mutation, Agent
+tool, or timer.
+
 M3a now adds a review-only proposal path inside the same root: a private SQLite
 proposal store, hub-owned evidence/conflict projection, DSH proposal tool, and
 local Inbox facade. Approval remains a terminal review decision and cannot
@@ -277,12 +288,12 @@ deletions, byte ledger, immutable audit, and coverage floor are protected by
 one `BEGIN IMMEDIATE` transaction; a concurrent second SQLite connection cannot
 insert a gap between selection and deletion. Partial coverage remains explicit.
 
-Remaining P1 work is product wiring rather than retention semantics: the owning
-service must collect verified proposal references, schedule the explicit
-operation, expose policy/audit status in the Control Center, and later define a
-separate bounded physical SQLite reclamation step. Rejection, gap, and
-heartbeat metadata remain conservatively retained because their current schema
-has no receipt timestamp.
+The Hub-owned retention service now collects verified proposal references and
+invokes the explicit operation without a scheduler; the Control Center exposes
+its metadata-only capacity/coverage/audit status. A separate bounded physical
+SQLite reclamation step remains future work. Rejection, gap, and heartbeat
+metadata remain conservatively retained because their current schema has no
+receipt timestamp.
 
 ### P2 — non-local Inbox delivery
 

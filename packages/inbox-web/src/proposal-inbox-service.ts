@@ -24,6 +24,7 @@ import {
   type ControlCenterAgentSource,
   type ControlCenterObservationSource,
   type ControlCenterProposalSource,
+  type ControlCenterRetentionSource,
   type ControlCenterSnapshot,
   type ControlCenterWorldSource,
 } from "./control-center.js";
@@ -46,6 +47,7 @@ export class ProposalInboxService extends Service {
   private readonly proposalQuality: { qualitySummary(): InboxProposalQualitySummary };
   private readonly controlCenterSources: {
     readonly world?: ControlCenterWorldSource;
+    readonly retention?: ControlCenterRetentionSource;
     readonly agent?: ControlCenterAgentSource;
     readonly observation?: ControlCenterObservationSource;
     readonly proposals?: ControlCenterProposalSource;
@@ -69,12 +71,14 @@ export class ProposalInboxService extends Service {
       ...(trace === undefined ? {} : { traces: trace }),
     });
     this.proposalQuality = ctx.homeProposals as unknown as { qualitySummary(): InboxProposalQualitySummary };
+    const retention = ctx.get("homeRetention") as unknown as { status(): ReturnType<ControlCenterRetentionSource["snapshot"]> } | undefined;
     this.observation = ctx.get("homeObservationScheduler") as unknown as {
       snapshot(): InboxObservationStatus;
       observeNow(): Promise<string>;
     } | undefined;
     this.controlCenterSources = {
       world: ctx.get("homeWorld") as unknown as ControlCenterWorldSource | undefined,
+      ...(retention === undefined ? {} : { retention: { snapshot: () => retention.status() } }),
       agent: ctx.get("homeAgent") as unknown as ControlCenterAgentSource | undefined,
       ...(this.observation === undefined ? {} : { observation: this.observation }),
       proposals: this.proposalQuality,

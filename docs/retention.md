@@ -2,10 +2,11 @@
 
 Status: implemented as an explicit, per-bridge SQLite journal operation.
 
-`SqliteIngestJournal.applyRetention(policy)` is the only retention entry
-point. It does not run from a timer and it does not infer permission to delete
-history from quota pressure. A caller supplies a bounded policy id, operator,
-reason, and decision timestamp. Reusing a policy id fails closed.
+`SqliteIngestJournal.applyRetention(policy)` is the only journal-level
+destructive entry point. It does not run from a timer and it does not infer
+permission to delete history from quota pressure. At this boundary, a caller
+supplies a bounded policy id, operator, reason, and decision timestamp.
+Reusing a policy id fails closed.
 
 ## Required preservation rules
 
@@ -29,6 +30,22 @@ accepts verified sequence references as a small pinning seam; it does not read
 or enumerate proposal contents and it does not copy state values into the
 retention audit.
 
+The Hub-owned `HomeRetentionService.retain(request)` is the explicit product
+entry point. It accepts a bridge, a bounded reason, an optional evidence window,
+and `requestedBy` from a trusted in-process operator context only. `requestedBy`
+is not an HTTP, agent, or UI input in this phase. The service generates
+`requestedAt` from its injected clock and derives the policy id, so a caller
+cannot move the evidence window into the future or supply a policy timestamp.
+It never accepts proposal references. The service asks `HomeProposalService`
+for a durable, bridge-filtered projection of exact `post-baseline-event`
+references. The proposal store holds a SQLite write lock while the projection
+callback runs, so proposal creation/review cannot commit between evidence
+collection and the journal's retention transaction. This callback is a
+synchronous seam: an async/Promise callback is rejected before commit. The
+projection contains only `{ referenceId, bridgeId, epochId, seq }`; proposal
+title, summary, rationale, notes, and other text never enter the retention
+path. The projection and policy are capped at 1,000 references.
+
 ## Atomic audit and coverage
 
 Deletion, the retention audit row, and recalculation of the logical byte ledger
@@ -50,12 +67,35 @@ post-operation coverage floor. `journal.coverage(bridgeId)` reports:
 Consumers must treat `partial: true` as incomplete historical coverage. An
 empty result after deletion is not reported as a quiet, complete bridge.
 
+`HomeRetentionService.status()` is the read-only operational seam for the
+local Control Center. It queries only journal capacity, aggregate coverage,
+and one bounded latest-audit lookup: per-bridge and aggregate logical bytes,
+complete/partial/degraded coverage, coverage floor, and the latest applied
+time/result/bytes deleted. It never reads event rows, proposal text, or device
+state values, and it does not expose the internal policy id. A bridge with no
+audit is displayed as **Not run yet**; that is not an error when its coverage
+is complete and capacity remains available. Partial/degraded coverage or an
+exhausted capacity is shown as attention. Capacity reaches an early-warning
+attention state at the fixed 90% used/max threshold; zero or invalid maxBytes
+is unavailable rather than presented as healthy. The Control Center places
+this report in native details and has no retention button, HTTP mutation,
+Agent tool, timer, or automatic deletion path.
+
+The full Home Agent Cordis runtime mounts this service as `homeRetention` after
+the durable proposal service and HomeWorld. It performs no work at startup and
+owns no timer or scheduler. The standalone Inbox runtime intentionally does not
+mount it because it has no HomeWorld journals; retention remains unavailable
+there rather than silently falling back to an in-memory or caller-supplied
+journal.
+
 ## Conservative limits in this slice
 
 The existing rejection, history-gap, and compressed-heartbeat tables do not
 carry a receipt timestamp. This slice therefore never deletes those metadata
 rows; retaining them is safer than guessing a time window. A future schema
 revision may add an auditable metadata-retention policy, but it must preserve
-open gaps and rejection presence first. There is also no automatic retention
-scheduler or proposal-store callback yet: the owning service must call the
-explicit operation with the references it has verified.
+open gaps and rejection presence first. There is no automatic retention
+scheduler. Repeating the same bounded request with the same generated clock
+instant derives the same policy id and is rejected by the journal's immutable
+audit key after the first committed run; calls at later instants are distinct
+decisions by design.

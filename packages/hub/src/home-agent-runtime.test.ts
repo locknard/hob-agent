@@ -43,10 +43,11 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 4), [
+  assert.deepEqual(pluginOrder.slice(0, 5), [
     "HomeWorldService",
     "HomeObservationAuditService",
     "HomeProposalService",
+    "HomeRetentionService",
     "DshHomeAgentComposition",
   ]);
   assert.equal(runtime.context.root, runtime.context);
@@ -70,6 +71,27 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
   await runtime.stop();
+});
+
+test("mounts the explicit retention coordinator without starting a timer", async () => {
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "retention-runtime-test",
+    },
+  });
+
+  await runtime.start();
+  try {
+    assert.equal(runtime.context.homeRetention.name, "homeRetention");
+    assert.equal(typeof runtime.context.homeRetention.retain, "function");
+  } finally {
+    await runtime.stop();
+  }
+  assert.equal(runtime.context.homeRetention, undefined);
 });
 
 test("stops the already-mounted HomeWorld when DSH startup fails", async () => {

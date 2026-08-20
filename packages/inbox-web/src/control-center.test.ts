@@ -276,3 +276,58 @@ test("does not call a model or expose launch credential material while projectin
   assert.equal(JSON.stringify(snapshot).includes("OPENAI_API_KEY"), false);
   assert.equal(JSON.stringify(snapshot).includes("super-secret"), false);
 });
+
+test("keeps retention operations metadata-only and never shows Ready for partial coverage", () => {
+  const snapshot = projectControlCenter({
+    world: { snapshot: () => worldSnapshot() },
+    retention: {
+      snapshot: () => ({
+        status: "attention" as const,
+        capacity: { usedBytes: 800, maxBytes: 2_000, remainingBytes: 1_200 },
+        bridges: [{
+          bridgeId: "bridge-main",
+          status: "attention" as const,
+          capacity: { usedBytes: 800, maxBytes: 2_000, remainingBytes: 1_200 },
+          coverage: { status: "partial" as const, coverageFloor: "2026-08-13T00:00:00.000Z" },
+        }],
+      }),
+    },
+  });
+
+  assert.equal(snapshot.retention.status, "attention");
+  assert.equal(snapshot.systemChecks.find((check) => check.key === "retention")?.status, "attention");
+  assert.equal(snapshot.status, "attention");
+  const html = renderControlCenter(snapshot);
+  assert.match(html, /Evidence retention/);
+  assert.match(html, /partial/);
+  assert.match(html, /2026-08-13/);
+  assert.match(html, /800 bytes/);
+  assert.equal(html.includes("policy-id"), false);
+  assert.equal(html.includes("raw-device-value"), false);
+});
+
+test("reports a bridge with no retention audit as Not run yet", () => {
+  const snapshot = projectControlCenter({
+    world: { snapshot: () => worldSnapshot() },
+    agent: { agent: { options: { provider: "openai", model: "gpt-5.6" }, status: "idle" } },
+    observation: { snapshot: () => ({ enabled: false, runOnStart: false, state: "waiting" as const }) },
+    proposals: { qualitySummary: emptyQualitySummary },
+    retention: {
+      snapshot: () => ({
+        status: "ready" as const,
+        capacity: { usedBytes: 0, maxBytes: 1_000, remainingBytes: 1_000 },
+        bridges: [{
+          bridgeId: "bridge-main",
+          status: "ready" as const,
+          capacity: { usedBytes: 0, maxBytes: 1_000, remainingBytes: 1_000 },
+          coverage: { status: "complete" as const },
+        }],
+      }),
+    },
+  });
+
+  const html = renderControlCenter(snapshot);
+  assert.equal(snapshot.status, "ready");
+  assert.equal(snapshot.retention.status, "ready");
+  assert.match(html, /Not run yet/);
+});

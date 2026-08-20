@@ -103,6 +103,20 @@ test("deduplicates a producer idempotency key without adding another audit event
   store.close();
 });
 
+test("rejects an asynchronous retention evidence callback before committing", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    assert.throws(
+      () => store.withRetentionEvidence("ha-main", 1_000, async () => {
+        await Promise.resolve();
+      }),
+      (error: unknown) => error instanceof TypeError && error.message === "Retention evidence callback must be synchronous",
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("reviews with optimistic concurrency and never treats approval as application", () => {
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });

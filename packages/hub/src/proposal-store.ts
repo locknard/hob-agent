@@ -182,6 +182,16 @@ export interface ProposalCalibrationItem {
   readonly feedbackCode?: ProposalReviewFeedbackCode;
 }
 
+/** Exact journal pins projected from durable proposal evidence, without text. */
+export interface ProposalRetentionEvidenceReference {
+  readonly referenceId: string;
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly seq: number;
+}
+
+export const MAX_PROPOSAL_RETENTION_REFERENCES = 1_000;
+
 const approvalFeedbackCodes = ["useful_as_is"] as const;
 const rejectionFeedbackCodes = [
   "already_covered",
@@ -280,7 +290,8 @@ export type ProposalStoreErrorCode =
   | "corrupt_store"
   | "not_found"
   | "revision_conflict"
-  | "terminal_status";
+  | "terminal_status"
+  | "retention_evidence_limit";
 
 export class ProposalStoreError extends Error {
   constructor(readonly code: ProposalStoreErrorCode, message: string) {
@@ -422,6 +433,44 @@ export class SqliteProposalStore {
       : this.db.prepare(`SELECT payload_json FROM proposals WHERE status = ?
           ORDER BY created_at DESC, proposal_id DESC LIMIT ?`).all(query.status, limit);
     return (rows as ProposalRow[]).map(fromRow);
+  }
+
+  /**
+   * Holds the proposal write lock while projecting only exact event evidence
+   * refs. The callback runs before commit so retention can hold this snapshot
+   * while the journal transaction deletes eligible rows; proposal text never
+   * enters the projection.
+   */
+  withRetentionEvidence<T>(
+    bridgeId: string,
+    limit: number,
+    operation: (references: readonly ProposalRetentionEvidenceReference[]) => T,
+  ): T {
+    validateRetentionEvidenceQuery(bridgeId, limit);
+    this.db.exec("BEGIN IMMEDIATE");
+    let callbackStarted = false;
+    try {
+      const references = this.readRetentionEvidence(bridgeId, limit);
+      callbackStarted = true;
+      const result = operation(references);
+      if (isPromiseLike(result)) {
+        void Promise.resolve(result).catch(() => undefined);
+        throw new TypeError("Retention evidence callback must be synchronous");
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the first failure; the next store operation will fail closed.
+      }
+      if (callbackStarted) throw error;
+      if (error instanceof ProposalStoreError) throw error;
+      throw new ProposalStoreError("corrupt_store", "Proposal retention evidence is unavailable");
+    } finally {
+      this.ensurePrivateFiles();
+    }
   }
 
   /** Aggregates bounded lifecycle/feedback metadata without loading proposal content into callers. */
@@ -576,6 +625,61 @@ export class SqliteProposalStore {
     return row ? fromRow(row) : undefined;
   }
 
+  private readRetentionEvidence(
+    bridgeId: string,
+    limit: number,
+  ): readonly ProposalRetentionEvidenceReference[] {
+    let rows: Record<string, unknown>[];
+    try {
+      rows = this.db.prepare(`SELECT
+          p.proposal_id AS proposal_id,
+          p.revision AS revision,
+          CAST(reference.key AS INTEGER) AS reference_index,
+          json_extract(reference.value, '$.bridgeId') AS bridge_id,
+          json_extract(reference.value, '$.source') AS source,
+          json_extract(reference.value, '$.epochId') AS epoch_id,
+          json_extract(reference.value, '$.seq') AS seq
+        FROM proposals AS p
+        JOIN json_each(p.payload_json, '$.evidence.references') AS reference
+        WHERE json_extract(reference.value, '$.bridgeId') = ?
+          AND json_extract(reference.value, '$.source') = 'post-baseline-event'
+        ORDER BY p.proposal_id ASC, reference_index ASC
+        LIMIT ?`).all(bridgeId, limit + 1) as Record<string, unknown>[];
+    } catch {
+      throw new ProposalStoreError("corrupt_store", "Proposal retention evidence is unavailable");
+    }
+    if (rows.length > limit) {
+      throw new ProposalStoreError("retention_evidence_limit", "Proposal retention evidence exceeds the bounded limit");
+    }
+    const references: ProposalRetentionEvidenceReference[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const proposalId = row.proposal_id;
+      const revision = Number(row.revision);
+      const referenceIndex = Number(row.reference_index);
+      const referenceBridgeId = row.bridge_id;
+      const source = row.source;
+      const epochId = row.epoch_id;
+      const seq = Number(row.seq);
+      if (typeof proposalId !== "string" || proposalId.length === 0 || proposalId.length > 200
+        || !Number.isSafeInteger(revision) || revision < 1
+        || !Number.isSafeInteger(referenceIndex) || referenceIndex < 0
+        || referenceBridgeId !== bridgeId
+        || source !== "post-baseline-event"
+        || typeof epochId !== "string" || epochId.length === 0 || epochId.length > 200
+        || !Number.isSafeInteger(seq) || seq < 0) {
+        throw new ProposalStoreError("corrupt_store", "Proposal retention evidence is invalid");
+      }
+      const referenceId = `${proposalId}:${revision}:${referenceIndex}`;
+      if (referenceId.length > 200 || seen.has(referenceId)) {
+        throw new ProposalStoreError("corrupt_store", "Proposal retention evidence is invalid");
+      }
+      seen.add(referenceId);
+      references.push({ referenceId, bridgeId, epochId, seq });
+    }
+    return references;
+  }
+
   private timestamp(): string {
     const value = this.now();
     if (!isoTimestamp.safeParse(value).success) throw new TypeError("proposal clock must return an ISO timestamp");
@@ -619,6 +723,20 @@ function validateReviewInput(input: ReviewProposalInput): void {
   if (feedbackCode === "other" && !input.note?.trim()) {
     throw new TypeError("proposal review note is required for other feedback");
   }
+}
+
+function validateRetentionEvidenceQuery(bridgeId: string, limit: number): void {
+  if (typeof bridgeId !== "string" || bridgeId.trim().length === 0 || bridgeId.length > 200) {
+    throw new TypeError("retention evidence bridge id is invalid");
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PROPOSAL_RETENTION_REFERENCES) {
+    throw new RangeError("retention evidence limit is unbounded");
+  }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") return false;
+  return typeof (value as { readonly then?: unknown }).then === "function";
 }
 
 function fromRow(row: ProposalRow): ProposalEnvelope {

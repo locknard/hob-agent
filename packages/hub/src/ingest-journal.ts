@@ -168,6 +168,8 @@ export interface IngestJournal {
   applyRetention?(policy: IngestJournalRetentionPolicy): IngestJournalRetentionResult;
   coverage?(bridgeId: string): IngestJournalCoverage;
   retentionAudits?(bridgeId?: string): readonly IngestJournalRetentionAudit[];
+  /** Bounded metadata-only latest audit lookup; does not enumerate history. */
+  latestRetentionAudit?(bridgeId: string): IngestJournalRetentionAudit | undefined;
   assertWithinQuota(): void;
   contains(text: string): boolean;
   close(): void;
@@ -545,24 +547,16 @@ export class SqliteIngestJournal implements IngestJournal {
           skipped_history_gap_count, skipped_proposal_evidence_count, skipped_evidence_window_count,
           bytes_deleted, coverage_floor, partial_coverage
         FROM ingest_retention_audits WHERE bridge_id = ? ORDER BY rowid`).all(bridgeId)) as SqlRow[];
-    return rows.map((row) => ({
-      policyId: String(row.policy_id),
-      bridgeId: String(row.bridge_id),
-      appliedAt: String(row.applied_at),
-      requestedBy: String(row.requested_by),
-      reason: String(row.reason),
-      evidenceWindowStart: String(row.evidence_window_start),
-      candidateCount: Number(row.candidate_count),
-      deletedEventCount: Number(row.deleted_event_count),
-      skippedRecoveryCount: Number(row.skipped_recovery_count),
-      skippedHistoryGapCount: Number(row.skipped_history_gap_count),
-      skippedProposalEvidenceCount: Number(row.skipped_proposal_evidence_count),
-      skippedEvidenceWindowCount: Number(row.skipped_evidence_window_count),
-      bytesDeleted: Number(row.bytes_deleted),
-      ...(row.coverage_floor === null || row.coverage_floor === undefined
-        ? {} : { coverageFloor: String(row.coverage_floor) }),
-      partialCoverage: Number(row.partial_coverage) !== 0,
-    }));
+    return rows.map(retentionAuditFromRow);
+  }
+
+  latestRetentionAudit(bridgeId: string): IngestJournalRetentionAudit | undefined {
+    const row = this.db.prepare(`SELECT policy_id, bridge_id, applied_at, requested_by, reason,
+        evidence_window_start, candidate_count, deleted_event_count, skipped_recovery_count,
+        skipped_history_gap_count, skipped_proposal_evidence_count, skipped_evidence_window_count,
+        bytes_deleted, coverage_floor, partial_coverage
+      FROM ingest_retention_audits WHERE bridge_id = ? ORDER BY rowid DESC LIMIT 1`).get(bridgeId) as SqlRow | undefined;
+    return row === undefined ? undefined : retentionAuditFromRow(row);
   }
 
   records(bridgeId?: string): IngestRecord[] {
@@ -846,4 +840,25 @@ function validateTimestamp(value: unknown, label: string): asserts value is stri
   if (typeof value !== "string" || value.length > 64 || !Number.isFinite(Date.parse(value))) {
     throw new TypeError(`${label} is invalid`);
   }
+}
+
+function retentionAuditFromRow(row: SqlRow): IngestJournalRetentionAudit {
+  return {
+    policyId: String(row.policy_id),
+    bridgeId: String(row.bridge_id),
+    appliedAt: String(row.applied_at),
+    requestedBy: String(row.requested_by),
+    reason: String(row.reason),
+    evidenceWindowStart: String(row.evidence_window_start),
+    candidateCount: Number(row.candidate_count),
+    deletedEventCount: Number(row.deleted_event_count),
+    skippedRecoveryCount: Number(row.skipped_recovery_count),
+    skippedHistoryGapCount: Number(row.skipped_history_gap_count),
+    skippedProposalEvidenceCount: Number(row.skipped_proposal_evidence_count),
+    skippedEvidenceWindowCount: Number(row.skipped_evidence_window_count),
+    bytesDeleted: Number(row.bytes_deleted),
+    ...(row.coverage_floor === null || row.coverage_floor === undefined
+      ? {} : { coverageFloor: String(row.coverage_floor) }),
+    partialCoverage: Number(row.partial_coverage) !== 0,
+  };
 }

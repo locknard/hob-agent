@@ -7,6 +7,7 @@ import {
   type ProposalCalibrationItem,
   type ProposalListQuery,
   type ProposalQualitySummary,
+  type ProposalRetentionEvidenceReference,
   type ReviewProposalInput,
   type SqliteProposalStoreOptions,
 } from "./proposal-store.js";
@@ -197,6 +198,14 @@ export class HomeProposalService extends Service {
 
   review(input: ReviewProposalInput): ProposalEnvelope {
     return this.store.review(input);
+  }
+
+  withRetentionEvidence<T>(
+    bridgeId: string,
+    limit: number,
+    operation: (references: readonly ProposalRetentionEvidenceReference[]) => T,
+  ): T {
+    return this.store.withRetentionEvidence(bridgeId, limit, operation);
   }
 }
 

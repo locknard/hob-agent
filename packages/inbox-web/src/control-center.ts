@@ -39,6 +39,39 @@ export interface ControlCenterWorldSource {
   };
 }
 
+export type ControlCenterRetentionCoverageStatus = "complete" | "partial" | "degraded" | "unavailable";
+
+export interface ControlCenterRetentionCapacity {
+  readonly usedBytes: number;
+  readonly maxBytes: number;
+  readonly remainingBytes: number;
+}
+
+export interface ControlCenterRetentionBridgeStatus {
+  readonly bridgeId: string;
+  readonly status: ControlCenterCardStatus;
+  readonly capacity?: ControlCenterRetentionCapacity;
+  readonly coverage: {
+    readonly status: ControlCenterRetentionCoverageStatus;
+    readonly coverageFloor?: string;
+  };
+  readonly lastRetention?: {
+    readonly appliedAt: string;
+    readonly result: "complete" | "partial";
+    readonly bytesDeleted: number;
+  };
+}
+
+export interface ControlCenterRetentionSnapshot {
+  readonly status: ControlCenterCardStatus;
+  readonly capacity: ControlCenterRetentionCapacity;
+  readonly bridges: readonly ControlCenterRetentionBridgeStatus[];
+}
+
+export interface ControlCenterRetentionSource {
+  snapshot(): ControlCenterRetentionSnapshot;
+}
+
 export interface ControlCenterAgentSource {
   /** Optional human-facing label; absent means the runtime route is shown plainly. */
   readonly productLabel?: string;
@@ -59,6 +92,7 @@ export interface ControlCenterProposalSource {
 
 export interface ControlCenterSources {
   readonly world?: ControlCenterWorldSource;
+  readonly retention?: ControlCenterRetentionSource;
   readonly agent?: ControlCenterAgentSource;
   readonly observation?: ControlCenterObservationSource;
   readonly proposals?: ControlCenterProposalSource;
@@ -115,7 +149,7 @@ export interface ControlCenterInboxStatus {
 }
 
 export interface ControlCenterSystemCheck {
-  readonly key: "bridges" | "model" | "homeMap" | "agent" | "observation" | "inbox";
+  readonly key: "bridges" | "model" | "homeMap" | "agent" | "observation" | "inbox" | "retention";
   readonly status: ControlCenterCardStatus;
 }
 
@@ -128,6 +162,7 @@ export interface ControlCenterSnapshot {
   readonly agent: ControlCenterAgentStatus;
   readonly observation: ControlCenterObservationStatus;
   readonly inbox: ControlCenterInboxStatus;
+  readonly retention: ControlCenterRetentionSnapshot;
   readonly systemChecks: readonly ControlCenterSystemCheck[];
 }
 
@@ -145,6 +180,7 @@ export function projectControlCenter(
   const agent = projectAgent(sources.agent);
   const observation = projectObservation(sources.observation);
   const inbox = projectInbox(sources.proposals);
+  const retention = projectRetention(sources.retention);
   const systemChecks: ControlCenterSystemCheck[] = [
     { key: "bridges", status: bridgeCheckStatus(bridges) },
     { key: "model", status: model.status === "configured" ? "ready" : "unavailable" },
@@ -153,6 +189,7 @@ export function projectControlCenter(
     { key: "observation", status: observationCardStatus(observation.status) },
     { key: "inbox", status: inbox.status },
   ];
+  if (sources.retention !== undefined) systemChecks.push({ key: "retention", status: retention.status });
   return {
     generatedAt,
     status: systemStatus(systemChecks),
@@ -162,6 +199,7 @@ export function projectControlCenter(
     agent,
     observation,
     inbox,
+    retention,
     systemChecks,
   };
 }
@@ -174,6 +212,7 @@ export function renderControlCenter(snapshot: ControlCenterSnapshot): string {
       <div class="control-list-meta"><span class="status-chip" data-status="${escapeHtml(bridge.status)}">${escapeHtml(statusLabel(bridge.status))}</span><span>connection ${escapeHtml(bridge.connectionState)}</span><span>consistency ${escapeHtml(bridge.consistency)}</span>${bridge.lastSeq === undefined ? "" : `<span>seq ${bridge.lastSeq}</span>`}</div>
     </li>`).join("");
   const checks = snapshot.systemChecks.map((check) => `<li><span>${escapeHtml(systemCheckLabel(check.key))}</span><span class="status-chip" data-status="${escapeHtml(check.status)}">${escapeHtml(statusLabel(check.status))}</span></li>`).join("");
+  const retentionDetails = renderRetentionDetails(snapshot.retention);
   const connectionsStatus = bridgeCheckStatus(snapshot.bridges);
   const connectionsDescription = snapshot.bridges.length === 0
     ? "No live home connection is available"
@@ -212,7 +251,7 @@ export function renderControlCenter(snapshot: ControlCenterSnapshot): string {
       ${serviceRow("Home Agent", snapshot.agent.status, agentDescription, snapshot.agent.status === "unavailable" ? "Start the full home runtime after connections and model setup are ready." : "The Agent can suggest review items but cannot apply household changes.")}
       ${serviceRow("Observation", observationCardStatus(snapshot.observation.status), observationDescription, "Observation is bounded, governed, and review-only.", observationStatusLabel(snapshot.observation.status))}
     </ul></section>
-    <details class="control-diagnostics"><summary>Technical diagnostics</summary><div class="control-diagnostics-body">${modelTechnical}<h2>System checks</h2><ul class="control-check-list">${checks}</ul><div class="section-heading"><div><h2>Bridge instances</h2></div><p>${snapshot.bridges.length} configured in the live world</p></div><ul class="control-list">${bridgeItems}</ul></div></details>
+    <details class="control-diagnostics"><summary>Technical diagnostics</summary><div class="control-diagnostics-body">${modelTechnical}<h2>System checks</h2><ul class="control-check-list">${checks}</ul>${retentionDetails}<div class="section-heading"><div><h2>Bridge instances</h2></div><p>${snapshot.bridges.length} configured in the live world</p></div><ul class="control-list">${bridgeItems}</ul></div></details>
     <section class="control-section control-note" aria-label="Control center boundary"><h2>You remain in control</h2><p>Everything above is a report. This page cannot edit setup, call a model, approve an idea, or control a device. Any future household change will require its own exact review.</p></section>
   </main>`;
 }
@@ -286,6 +325,62 @@ function unavailableHomeMap(): ControlCenterHomeMapStatus {
   };
 }
 
+function projectRetention(source: ControlCenterRetentionSource | undefined): ControlCenterRetentionSnapshot {
+  if (source === undefined) return unavailableRetention();
+  try {
+    const status = source.snapshot();
+    const bridges = status.bridges.map((bridge) => ({
+      bridgeId: bridge.bridgeId,
+      status: bridge.status,
+      ...(bridge.capacity === undefined ? {} : { capacity: safeCapacity(bridge.capacity) }),
+      coverage: {
+        status: bridge.coverage.status,
+        ...(bridge.coverage.coverageFloor === undefined ? {} : { coverageFloor: bridge.coverage.coverageFloor }),
+      },
+      ...(bridge.lastRetention === undefined ? {} : {
+        lastRetention: {
+          appliedAt: bridge.lastRetention.appliedAt,
+          result: bridge.lastRetention.result,
+          bytesDeleted: safeCount(bridge.lastRetention.bytesDeleted),
+        },
+      }),
+    }));
+    const ready = status.status === "ready"
+      && bridges.length > 0
+      && bridges.every((bridge) => bridge.status === "ready" && bridge.coverage.status === "complete");
+    const projectedStatus = status.status === "unavailable"
+      ? "unavailable"
+      : ready ? "ready" : "attention";
+    return {
+      status: projectedStatus,
+      capacity: safeCapacity(status.capacity),
+      bridges,
+    };
+  } catch {
+    return unavailableRetention();
+  }
+}
+
+function unavailableRetention(): ControlCenterRetentionSnapshot {
+  return {
+    status: "unavailable",
+    capacity: { usedBytes: 0, maxBytes: 0, remainingBytes: 0 },
+    bridges: [],
+  };
+}
+
+function safeCapacity(value: ControlCenterRetentionCapacity): ControlCenterRetentionCapacity {
+  return {
+    usedBytes: safeCount(value.usedBytes),
+    maxBytes: safeCount(value.maxBytes),
+    remainingBytes: safeCount(value.remainingBytes),
+  };
+}
+
+function safeCount(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 function projectModel(agent: ControlCenterAgentSource | undefined): ControlCenterModelStatus {
   const provider = agent?.agent?.options?.provider;
   const model = agent?.agent?.options?.model;
@@ -355,6 +450,33 @@ function projectInbox(proposals: ControlCenterProposalSource | undefined): Contr
   };
 }
 
+function renderRetentionDetails(retention: ControlCenterRetentionSnapshot): string {
+  const aggregate = `${formatCount(retention.capacity.usedBytes)} bytes used of ${formatCount(retention.capacity.maxBytes)} (${formatCount(retention.capacity.remainingBytes)} remaining)`;
+  const bridges = retention.bridges.length === 0
+    ? "<p class=\"muted\">Retention status is unavailable in this process.</p>"
+    : `<ul class="control-list">${retention.bridges.map((bridge) => {
+      const capacity = bridge.capacity === undefined
+        ? "Capacity unavailable"
+        : `${formatCount(bridge.capacity.usedBytes)} bytes used of ${formatCount(bridge.capacity.maxBytes)}`;
+      const floor = bridge.coverage.coverageFloor === undefined
+        ? "No coverage floor"
+        : `Coverage floor ${timeElement(bridge.coverage.coverageFloor)}`;
+      const lastRetention = bridge.lastRetention === undefined
+        ? "Not run yet"
+        : `Last retention ${timeElement(bridge.lastRetention.appliedAt)} · ${escapeHtml(bridge.lastRetention.result)} · ${formatCount(bridge.lastRetention.bytesDeleted)} bytes deleted`;
+      return `<li class="control-list-item" data-status="${escapeHtml(bridge.status)}"><div><strong>${escapeHtml(bridge.bridgeId)}</strong><span class="muted">${escapeHtml(capacity)}</span></div><div class="control-list-meta"><span class="status-chip" data-status="${escapeHtml(bridge.status)}">${escapeHtml(statusLabel(bridge.status))}</span><span>coverage ${escapeHtml(bridge.coverage.status)}</span><span>${floor}</span><span>${lastRetention}</span></div></li>`;
+    }).join("")}</ul>`;
+  return `<section class="control-retention" aria-labelledby="control-retention-heading"><div class="section-heading"><div><h2 id="control-retention-heading">Evidence retention</h2><p>Read-only journal coverage and capacity; retention is never started here.</p></div><span class="status-chip" data-status="${escapeHtml(retention.status)}">${escapeHtml(statusLabel(retention.status))}</span></div><p class="control-retention-capacity">Aggregate capacity: ${escapeHtml(aggregate)}</p>${bridges}</section>`;
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+function timeElement(value: string): string {
+  return `<time datetime="${escapeHtml(value)}">${escapeHtml(displayTimestamp(value))}</time>`;
+}
+
 function bridgeCheckStatus(bridges: readonly ControlCenterBridgeStatus[]): ControlCenterCardStatus {
   if (bridges.length === 0) return "unavailable";
   return bridges.every((bridge) => bridge.status === "ready") ? "ready" : "attention";
@@ -410,6 +532,7 @@ function systemCheckLabel(key: ControlCenterSystemCheck["key"]): string {
     case "agent": return "Home Agent";
     case "observation": return "Observation scheduler";
     case "inbox": return "Review Inbox";
+    case "retention": return "Evidence retention";
   }
 }
 

@@ -9,6 +9,7 @@ import {
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
 import { HomeProposalService } from "./home-proposal-service.js";
+import { HomeRetentionService } from "./home-retention-service.js";
 import {
   HomeObservationAuditService,
   type HomeObservationAuditServiceOptions,
@@ -77,6 +78,7 @@ export class HomeAgentRuntime {
         this.options.homeObservationAudit ?? { path: ":memory:" },
       );
       await this.context.plugin(HomeProposalService, this.options.homeProposals ?? { path: ":memory:" });
+      await this.context.plugin(HomeRetentionService);
       await mountDshHomeAgent(this.context, this.options.agent);
       await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
       await this.context.plugin(HomeObservationSchedulerService, this.options.observation ?? {});

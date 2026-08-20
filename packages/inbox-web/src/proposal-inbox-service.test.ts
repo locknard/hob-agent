@@ -252,3 +252,30 @@ test("composes live neutral services into the control center without reading raw
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
+
+test("passes the Hub retention metadata seam into the read-only Control Center", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  ctx.provide("homeRetention", {
+    status: () => ({
+      status: "ready" as const,
+      capacity: { usedBytes: 100, maxBytes: 1_000, remainingBytes: 900 },
+      bridges: [{
+        bridgeId: "bridge-main",
+        status: "ready" as const,
+        capacity: { usedBytes: 100, maxBytes: 1_000, remainingBytes: 900 },
+        coverage: { status: "complete" as const, coverageFloor: "2026-08-13T00:00:00.000Z" },
+        lastRetention: { appliedAt: "2026-08-20T08:00:00.000Z", result: "complete" as const, bytesDeleted: 42 },
+      }],
+    }),
+  });
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const html = ctx.homeInbox.renderControlCenter();
+  assert.match(html, /Evidence retention/);
+  assert.match(html, /42 bytes deleted/);
+  assert.equal(html.includes("applyRetention"), false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});

@@ -112,6 +112,7 @@ test("retention keeps recovery, evidence, open-gap, and proposal references whil
     lastRetentionPolicyId: "retention-1",
   });
   assert.equal(journal.retentionAudits("bridge-a").length, 1);
+  assert.equal(journal.latestRetentionAudit("bridge-a")?.policyId, "retention-1");
   assert.throws(() => journal.applyRetention({
     policyId: "retention-1",
     bridgeId: "bridge-a",

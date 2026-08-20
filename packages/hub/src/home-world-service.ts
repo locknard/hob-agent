@@ -459,6 +459,11 @@ export class HomeWorldService extends Service {
     return this.runtimesById.get(bridgeId)?.journal;
   }
 
+  /** Metadata-only bridge enumeration for Hub-owned operational status seams. */
+  bridgeIds(): readonly string[] {
+    return [...this.runtimesById.keys()].sort();
+  }
+
   /** Caller-owned read-model handle, useful for recovery diagnostics only. */
   get worldModel(): WorldModelIndex | undefined {
     return this.worldModelIndexValue;
