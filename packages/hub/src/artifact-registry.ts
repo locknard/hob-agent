@@ -116,6 +116,12 @@ export interface ArtifactAssessmentLookup {
   readonly limit?: number;
 }
 
+export interface ArtifactAssessmentIdentityLookup {
+  readonly kind: ArtifactAssessmentKind;
+  readonly artifact: ArtifactRef;
+  readonly inputIdentity: string;
+}
+
 export interface ArtifactAssessmentEntry {
   readonly kind: ArtifactAssessmentKind;
   readonly recordId: string;
@@ -153,6 +159,7 @@ const MAX_LIST_LIMIT = 200;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 200;
 const MAX_ACTOR_LENGTH = 200;
 const MAX_REASON_LENGTH = 1_000;
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 
 /**
  * The M3b registry owns only immutable neutral artifact rows, lifecycle state,
@@ -449,6 +456,31 @@ export class ArtifactRegistry {
         input_identity, record_id, payload_json, recorded_at
       FROM artifact_assessments ${where} ORDER BY sequence DESC LIMIT 1`).get(...values) as SqlRow | undefined;
     return row === undefined ? undefined : this.assessmentEntryFromRow(row);
+  }
+
+  /**
+   * Returns one exact immutable assessment without enumerating stale history.
+   * The unique storage key makes this a bounded point lookup, not a latest/list
+   * approximation.
+   */
+  attestationByInputIdentity(query: ArtifactAssessmentIdentityLookup): ArtifactAssessmentEntry | undefined {
+    this.ensureOpen();
+    const normalized = normalizeAssessmentIdentityLookup(query);
+    const rows = this.db.prepare(`SELECT sequence, kind, artifact_id, revision, content_hash,
+        input_identity, record_id, payload_json, recorded_at
+      FROM artifact_assessments
+      WHERE kind = ? AND artifact_id = ? AND revision = ? AND content_hash = ? AND input_identity = ?
+      LIMIT 2`).all(
+      normalized.kind,
+      normalized.artifact.artifactId,
+      normalized.artifact.revision,
+      normalized.artifact.contentHash,
+      normalized.inputIdentity,
+    ) as SqlRow[];
+    if (rows.length > 1) {
+      throw new ArtifactRegistryError("corrupt_record", "Assessment identity lookup is ambiguous");
+    }
+    return rows.length === 0 ? undefined : this.assessmentEntryFromRow(rows[0]!);
   }
 
   getRevision(artifactId: string, revision: number): ArtifactRegistryEntry | undefined {
@@ -1090,6 +1122,38 @@ function normalizeAssessmentQuery(query: ArtifactAssessmentListQuery, requireExa
     throw new ArtifactRegistryError("invalid_input", "Assessment list limit is out of bounds");
   }
   return { kind, artifact, limit };
+}
+
+function normalizeAssessmentIdentityLookup(query: unknown): ArtifactAssessmentIdentityLookup {
+  if (query === null || typeof query !== "object" || Array.isArray(query)) {
+    throw new ArtifactRegistryError("invalid_input", "Assessment identity lookup is invalid");
+  }
+  const keys = Reflect.ownKeys(query);
+  if (keys.length !== 3 || !keys.every((key) => (
+    key === "kind" || key === "artifact" || key === "inputIdentity"
+  ))) {
+    throw new ArtifactRegistryError("invalid_input", "Assessment identity lookup is invalid");
+  }
+  const value = query as {
+    readonly kind?: unknown;
+    readonly artifact?: unknown;
+    readonly inputIdentity?: unknown;
+  };
+  if (typeof value.kind !== "string" || !isAssessmentKind(value.kind)) {
+    throw new ArtifactRegistryError("invalid_input", "Assessment identity kind is invalid");
+  }
+  const artifact = artifactRefSchema.safeParse(value.artifact);
+  if (!artifact.success) {
+    throw new ArtifactRegistryError("invalid_input", "Assessment identity artifact ref is invalid");
+  }
+  if (typeof value.inputIdentity !== "string" || !SHA256_DIGEST.test(value.inputIdentity)) {
+    throw new ArtifactRegistryError("invalid_input", "Assessment identity digest is invalid");
+  }
+  return {
+    kind: value.kind,
+    artifact: artifact.data,
+    inputIdentity: value.inputIdentity,
+  };
 }
 
 function assertArtifactRefMatches(artifact: ArtifactRevision, ref: ArtifactRef): void {

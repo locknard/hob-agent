@@ -698,6 +698,78 @@ test("appends dynamic assessment identities without changing the artifact revisi
   });
 });
 
+test("finds an exact assessment identity without depending on the bounded history list", () => {
+  withRegistry("assessment-exact-identity", (registry) => {
+    const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-exact-artifact" });
+    const ref = artifactRef(created.artifact);
+    const evidence = registry.recordEvidenceAttestation({
+      assessment: evidenceAssessment(ref, "evidence-exact-identity"),
+      idempotencyKey: "idem-exact-evidence",
+    });
+    const authority = registry.recordAuthorityAssessment({
+      assessment: authorityAssessment(ref, "authority-exact-identity"),
+      idempotencyKey: "idem-exact-authority",
+    });
+    const risks: ArtifactRiskAssessment[] = [];
+    for (let index = 0; index <= 200; index += 1) {
+      const risk = createArtifactRiskAssessment({
+        artifact: ref,
+        assessmentId: `risk-exact-${index}`,
+        assessedAt: "2026-08-20T01:00:00.000Z",
+        evidence: { attestationId: evidence.assessment.attestationId, inputIdentity: evidence.inputIdentity },
+        authority: { assessmentId: authority.assessment.assessmentId, inputIdentity: authority.inputIdentity },
+        conflictInputIdentity: `sha256:${index.toString(16).padStart(64, "0")}`,
+        class: "comfort_reversible",
+        reasons: ["Bounded exact identity fixture."],
+        policyId: "policy-home-v1",
+        policyVersion: "1.0.0",
+      });
+      risks.push(risk);
+      registry.recordRiskAssessment({ assessment: risk, idempotencyKey: `idem-exact-risk-${index}` });
+    }
+
+    const target = risks[0]!;
+    assert.deepEqual(
+      registry.attestationByInputIdentity({
+        kind: "risk-assessment",
+        artifact: ref,
+        inputIdentity: target.inputIdentity,
+      })?.assessment,
+      target,
+    );
+    assert.equal(registry.attestationByInputIdentity({
+      kind: "risk-assessment",
+      artifact: { ...ref, artifactId: "other-artifact" },
+      inputIdentity: target.inputIdentity,
+    }), undefined);
+    assert.throws(
+      () => (registry.attestationByInputIdentity as (query: unknown) => unknown)({
+        kind: "risk-assessment",
+        artifact: ref,
+        inputIdentity: "not-a-sha256-digest",
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "invalid_input",
+    );
+    assert.throws(
+      () => (registry.attestationByInputIdentity as (query: unknown) => unknown)({
+        kind: "unsupported",
+        artifact: ref,
+        inputIdentity: target.inputIdentity,
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "invalid_input",
+    );
+    assert.throws(
+      () => (registry.attestationByInputIdentity as (query: unknown) => unknown)({
+        kind: "risk-assessment",
+        artifact: ref,
+        inputIdentity: target.inputIdentity,
+        limit: 1,
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "invalid_input",
+    );
+  });
+});
+
 test("cross-checks assessment refs and blocks assessments for superseded revisions", () => {
   withRegistry("assessment-cross-check", (registry) => {
     const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-assessment-artifact" });
