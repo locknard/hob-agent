@@ -75,6 +75,72 @@ export interface JournalCapacityStatus {
   readonly remainingBytes: number;
 }
 
+/** A journal sequence range pinned by a durable proposal evidence reference. */
+export interface IngestJournalRetentionEvidenceReference {
+  readonly referenceId: string;
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly seq: number;
+}
+
+/** Explicit, operator/audit supplied retention request. */
+export interface IngestJournalRetentionPolicy {
+  readonly policyId: string;
+  readonly bridgeId: string;
+  /** The caller supplies the decision time so the operation is deterministic and auditable. */
+  readonly requestedAt: string;
+  readonly requestedBy: string;
+  readonly reason: string;
+  /** Defaults to the supported 168-hour evidence window. */
+  readonly evidenceWindowMs?: number;
+  readonly proposalEvidence?: readonly IngestJournalRetentionEvidenceReference[];
+}
+
+export interface IngestJournalRetentionResult {
+  readonly policyId: string;
+  readonly bridgeId: string;
+  readonly evidenceWindowStart: string;
+  /** Eligible records older than the evidence window, before protection rules. */
+  readonly candidateCount: number;
+  readonly deletedEventCount: number;
+  readonly skippedRecoveryCount: number;
+  readonly skippedHistoryGapCount: number;
+  readonly skippedProposalEvidenceCount: number;
+  readonly skippedEvidenceWindowCount: number;
+  readonly bytesDeleted: number;
+  readonly coverageFloor?: string;
+  readonly partialCoverage: boolean;
+}
+
+export interface IngestJournalRetentionAudit {
+  readonly policyId: string;
+  readonly bridgeId: string;
+  readonly appliedAt: string;
+  readonly requestedBy: string;
+  readonly reason: string;
+  readonly evidenceWindowStart: string;
+  readonly candidateCount: number;
+  readonly deletedEventCount: number;
+  readonly skippedRecoveryCount: number;
+  readonly skippedHistoryGapCount: number;
+  readonly skippedProposalEvidenceCount: number;
+  readonly skippedEvidenceWindowCount: number;
+  readonly bytesDeleted: number;
+  readonly coverageFloor?: string;
+  readonly partialCoverage: boolean;
+}
+
+/** Current queryable coverage, including an explicit partial-history floor. */
+export interface IngestJournalCoverage {
+  readonly bridgeId: string;
+  readonly coverageFloor?: string;
+  readonly retainedRecordCount: number;
+  readonly partial: boolean;
+  readonly latestConsistentWatermark?: JournalWatermark;
+  readonly openHistoryGapCount: number;
+  readonly lastRetentionPolicyId?: string;
+}
+
 export interface IngestJournal {
   appendAtomic(record: IngestRecord): void;
   append?(record: IngestRecord): void;
@@ -99,15 +165,28 @@ export interface IngestJournal {
   heartbeatIntervals(bridgeId?: string): HeartbeatIntervalRecord[];
   /** Aggregate logical quota only; never returns journal records or household values. */
   capacity?(): JournalCapacityStatus;
+  applyRetention?(policy: IngestJournalRetentionPolicy): IngestJournalRetentionResult;
+  coverage?(bridgeId: string): IngestJournalCoverage;
+  retentionAudits?(bridgeId?: string): readonly IngestJournalRetentionAudit[];
   assertWithinQuota(): void;
   contains(text: string): boolean;
   close(): void;
 }
 
 type SqlRow = Record<string, unknown>;
+type RetentionEventRow = {
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly seq: number;
+  readonly receivedAt: string;
+  readonly bytes: number;
+};
 
 const serializedBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
+const DEFAULT_EVIDENCE_WINDOW_MS = 168 * 60 * 60 * 1_000;
+const MAX_EVIDENCE_WINDOW_MS = 366 * 24 * 60 * 60 * 1_000;
+const MAX_RETENTION_REFERENCES = 1_000;
 
 /**
  * The Phase 0 journal deliberately exposes a small SQLite seam. Every legal
@@ -158,6 +237,15 @@ export class SqliteIngestJournal implements IngestJournal {
       ) STRICT;
       CREATE TABLE IF NOT EXISTS ingest_consistent_watermarks (
         bridge_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, last_seq INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS ingest_retention_audits (
+        policy_id TEXT PRIMARY KEY, bridge_id TEXT NOT NULL, applied_at TEXT NOT NULL,
+        requested_by TEXT NOT NULL, reason TEXT NOT NULL, evidence_window_start TEXT NOT NULL,
+        candidate_count INTEGER NOT NULL, deleted_event_count INTEGER NOT NULL,
+        skipped_recovery_count INTEGER NOT NULL, skipped_history_gap_count INTEGER NOT NULL,
+        skipped_proposal_evidence_count INTEGER NOT NULL, skipped_evidence_window_count INTEGER NOT NULL,
+        bytes_deleted INTEGER NOT NULL, coverage_floor TEXT,
+        partial_coverage INTEGER NOT NULL
       ) STRICT;
     `);
     this.usedBytes = this.readUsedBytes();
@@ -298,6 +386,183 @@ export class SqliteIngestJournal implements IngestJournal {
       ON CONFLICT(bridge_id) DO UPDATE SET epoch_id = excluded.epoch_id, last_seq = excluded.last_seq`)
       .run(bridgeId, watermark.epochId, watermark.lastSeq);
     this.ensurePrivateFile();
+  }
+
+  applyRetention(policy: IngestJournalRetentionPolicy): IngestJournalRetentionResult {
+    const validated = validateRetentionPolicy(policy);
+    const evidenceWindowStart = new Date(Date.parse(policy.requestedAt) - validated.evidenceWindowMs).toISOString();
+    const usedBytesBefore = this.usedBytes;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db.prepare("SELECT policy_id FROM ingest_retention_audits WHERE policy_id = ?")
+        .get(policy.policyId) as SqlRow | undefined;
+      if (existing !== undefined) throw new Error(`retention policy ${policy.policyId} already applied`);
+
+      // The lock must cover the complete decision snapshot. A second process
+      // cannot commit a new gap/watermark between these reads and deletion.
+      const consistent = this.consistentWatermark(policy.bridgeId);
+      const openGapEpochs = new Set((this.db.prepare(`SELECT DISTINCT epoch_id
+        FROM ingest_history_gaps WHERE bridge_id = ? AND closed = 0`).all(policy.bridgeId) as SqlRow[])
+        .map((row) => String(row.epoch_id)));
+      const rows = this.db.prepare(`SELECT bridge_id, epoch_id, seq, received_at, bytes
+        FROM ingest_events WHERE bridge_id = ? ORDER BY rowid`).all(policy.bridgeId) as SqlRow[];
+      const references = validated.proposalEvidence;
+      const toDelete: RetentionEventRow[] = [];
+      let candidateCount = 0;
+      let skippedRecoveryCount = 0;
+      let skippedHistoryGapCount = 0;
+      let skippedProposalEvidenceCount = 0;
+      let skippedEvidenceWindowCount = 0;
+
+      for (const row of rows) {
+        const receivedAt = String(row.received_at);
+        const receivedAtMs = Date.parse(receivedAt);
+        if (!Number.isFinite(receivedAtMs) || receivedAtMs >= Date.parse(evidenceWindowStart)) {
+          skippedEvidenceWindowCount += 1;
+          continue;
+        }
+        const event: RetentionEventRow = {
+          bridgeId: String(row.bridge_id),
+          epochId: String(row.epoch_id),
+          seq: Number(row.seq),
+          receivedAt,
+          bytes: Number(row.bytes),
+        };
+        candidateCount += 1;
+        if (consistent !== undefined && event.epochId === consistent.epochId && event.seq <= consistent.lastSeq) {
+          skippedRecoveryCount += 1;
+        } else if (openGapEpochs.has(event.epochId)) {
+          skippedHistoryGapCount += 1;
+        } else if (references.some((reference) => (
+          reference.bridgeId === event.bridgeId
+          && reference.epochId === event.epochId
+          && event.seq === reference.seq
+        ))) {
+          skippedProposalEvidenceCount += 1;
+        } else {
+          toDelete.push(event);
+        }
+      }
+
+      for (const event of toDelete) {
+        this.db.prepare("DELETE FROM ingest_events WHERE bridge_id = ? AND epoch_id = ? AND seq = ?")
+          .run(event.bridgeId, event.epochId, event.seq);
+      }
+      const bytesDeleted = toDelete.reduce((sum, event) => sum + event.bytes, 0);
+      const coverageFloor = this.readCoverageFloor(policy.bridgeId);
+      const previousPartial = this.db.prepare(`SELECT COALESCE(MAX(partial_coverage), 0) AS partial
+        FROM ingest_retention_audits WHERE bridge_id = ?`).get(policy.bridgeId) as SqlRow;
+      const partialCoverage = Number(previousPartial.partial) !== 0 || toDelete.length > 0;
+      this.db.prepare(`INSERT INTO ingest_retention_audits
+        (policy_id, bridge_id, applied_at, requested_by, reason, evidence_window_start,
+         candidate_count, deleted_event_count, skipped_recovery_count, skipped_history_gap_count,
+         skipped_proposal_evidence_count, skipped_evidence_window_count, bytes_deleted,
+         coverage_floor, partial_coverage)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        policy.policyId,
+        policy.bridgeId,
+        policy.requestedAt,
+        policy.requestedBy,
+        policy.reason,
+        evidenceWindowStart,
+        candidateCount,
+        toDelete.length,
+        skippedRecoveryCount,
+        skippedHistoryGapCount,
+        skippedProposalEvidenceCount,
+        skippedEvidenceWindowCount,
+        bytesDeleted,
+        coverageFloor ?? null,
+        partialCoverage ? 1 : 0,
+      );
+      const usedBytesAfter = this.readUsedBytes();
+      // Check permissions while rollback is still possible. The commit below
+      // is the point at which deletion and its audit become durable together.
+      this.ensurePrivateFile();
+      this.db.exec("COMMIT");
+      this.usedBytes = usedBytesAfter;
+      return {
+        policyId: policy.policyId,
+        bridgeId: policy.bridgeId,
+        evidenceWindowStart,
+        candidateCount,
+        deletedEventCount: toDelete.length,
+        skippedRecoveryCount,
+        skippedHistoryGapCount,
+        skippedProposalEvidenceCount,
+        skippedEvidenceWindowCount,
+        bytesDeleted,
+        ...(coverageFloor === undefined ? {} : { coverageFloor }),
+        partialCoverage,
+      };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure; SQLite will reject any future write if
+        // the transaction could not be rolled back.
+      }
+      this.usedBytes = usedBytesBefore;
+      throw error;
+    }
+  }
+
+  coverage(bridgeId: string): IngestJournalCoverage {
+    validateBridgeId(bridgeId);
+    const row = this.db.prepare("SELECT COUNT(*) AS retained_count FROM ingest_events WHERE bridge_id = ?")
+      .get(bridgeId) as SqlRow;
+    const partialRow = this.db.prepare(`SELECT COALESCE(MAX(partial_coverage), 0) AS partial,
+        (SELECT policy_id FROM ingest_retention_audits WHERE bridge_id = ? ORDER BY rowid DESC LIMIT 1) AS policy_id
+      FROM ingest_retention_audits WHERE bridge_id = ?`).get(bridgeId, bridgeId) as SqlRow;
+    const gapRow = this.db.prepare(`SELECT COUNT(*) AS count FROM ingest_history_gaps
+      WHERE bridge_id = ? AND closed = 0`).get(bridgeId) as SqlRow;
+    const coverageFloor = this.readCoverageFloor(bridgeId);
+    const latestPolicy = partialRow.policy_id === null || partialRow.policy_id === undefined
+      ? undefined
+      : String(partialRow.policy_id);
+    return {
+      bridgeId,
+      ...(coverageFloor === undefined ? {} : { coverageFloor }),
+      retainedRecordCount: Number(row.retained_count),
+      partial: Number(partialRow.partial) !== 0,
+      ...(this.consistentWatermark(bridgeId) === undefined
+        ? {}
+        : { latestConsistentWatermark: this.consistentWatermark(bridgeId) }),
+      openHistoryGapCount: Number(gapRow.count),
+      ...(latestPolicy === undefined ? {} : { lastRetentionPolicyId: latestPolicy }),
+    };
+  }
+
+  retentionAudits(bridgeId?: string): readonly IngestJournalRetentionAudit[] {
+    const rows = (bridgeId === undefined
+      ? this.db.prepare(`SELECT policy_id, bridge_id, applied_at, requested_by, reason,
+          evidence_window_start, candidate_count, deleted_event_count, skipped_recovery_count,
+          skipped_history_gap_count, skipped_proposal_evidence_count, skipped_evidence_window_count,
+          bytes_deleted, coverage_floor, partial_coverage
+        FROM ingest_retention_audits ORDER BY rowid`).all()
+      : this.db.prepare(`SELECT policy_id, bridge_id, applied_at, requested_by, reason,
+          evidence_window_start, candidate_count, deleted_event_count, skipped_recovery_count,
+          skipped_history_gap_count, skipped_proposal_evidence_count, skipped_evidence_window_count,
+          bytes_deleted, coverage_floor, partial_coverage
+        FROM ingest_retention_audits WHERE bridge_id = ? ORDER BY rowid`).all(bridgeId)) as SqlRow[];
+    return rows.map((row) => ({
+      policyId: String(row.policy_id),
+      bridgeId: String(row.bridge_id),
+      appliedAt: String(row.applied_at),
+      requestedBy: String(row.requested_by),
+      reason: String(row.reason),
+      evidenceWindowStart: String(row.evidence_window_start),
+      candidateCount: Number(row.candidate_count),
+      deletedEventCount: Number(row.deleted_event_count),
+      skippedRecoveryCount: Number(row.skipped_recovery_count),
+      skippedHistoryGapCount: Number(row.skipped_history_gap_count),
+      skippedProposalEvidenceCount: Number(row.skipped_proposal_evidence_count),
+      skippedEvidenceWindowCount: Number(row.skipped_evidence_window_count),
+      bytesDeleted: Number(row.bytes_deleted),
+      ...(row.coverage_floor === null || row.coverage_floor === undefined
+        ? {} : { coverageFloor: String(row.coverage_floor) }),
+      partialCoverage: Number(row.partial_coverage) !== 0,
+    }));
   }
 
   records(bridgeId?: string): IngestRecord[] {
@@ -469,6 +734,19 @@ export class SqliteIngestJournal implements IngestJournal {
     return Number(row.used);
   }
 
+  private readCoverageFloor(bridgeId: string): string | undefined {
+    const rows = this.db.prepare("SELECT received_at FROM ingest_events WHERE bridge_id = ?")
+      .all(bridgeId) as SqlRow[];
+    let floor: { readonly value: string; readonly timestamp: number } | undefined;
+    for (const row of rows) {
+      const value = String(row.received_at);
+      const timestamp = Date.parse(value);
+      if (!Number.isFinite(timestamp) || (floor !== undefined && timestamp >= floor.timestamp)) continue;
+      floor = { value, timestamp };
+    }
+    return floor?.value;
+  }
+
   private assertCapacity(additionalBytes: number): void {
     if (this.usedBytes + additionalBytes > this.maxBytes) {
       throw new JournalCapacityError(undefined, this.minimumRetainedRecords > 0);
@@ -520,3 +798,52 @@ function validateLiveStateActivityQuery(query: JournalLiveStateActivityQuery): v
 export { SqliteIngestJournal as IngestJournalStore };
 // Runtime alias for callers that use the frozen concept name directly.
 export const IngestJournal = SqliteIngestJournal;
+
+function validateRetentionPolicy(policy: IngestJournalRetentionPolicy): {
+  readonly evidenceWindowMs: number;
+  readonly proposalEvidence: readonly IngestJournalRetentionEvidenceReference[];
+} {
+  if (policy === null || typeof policy !== "object") throw new TypeError("retention policy is invalid");
+  validateBoundedString(policy.policyId, "retention policy id");
+  validateBridgeId(policy.bridgeId);
+  validateTimestamp(policy.requestedAt, "retention requestedAt");
+  validateBoundedString(policy.requestedBy, "retention requestedBy");
+  validateBoundedString(policy.reason, "retention reason", 1_000);
+  const evidenceWindowMs = policy.evidenceWindowMs ?? DEFAULT_EVIDENCE_WINDOW_MS;
+  if (!Number.isSafeInteger(evidenceWindowMs)
+    || evidenceWindowMs < DEFAULT_EVIDENCE_WINDOW_MS
+    || evidenceWindowMs > MAX_EVIDENCE_WINDOW_MS) {
+    throw new RangeError("retention evidenceWindowMs must retain at least 168 hours");
+  }
+  const proposalEvidence = policy.proposalEvidence ?? [];
+  if (!Array.isArray(proposalEvidence) || proposalEvidence.length > MAX_RETENTION_REFERENCES) {
+    throw new RangeError("retention proposal evidence references are unbounded");
+  }
+  for (const reference of proposalEvidence) {
+    if (reference === null || typeof reference !== "object") throw new TypeError("retention evidence reference is invalid");
+    validateBoundedString(reference.referenceId, "retention evidence reference id");
+    validateBridgeId(reference.bridgeId);
+    validateBoundedString(reference.epochId, "retention evidence epoch id");
+    if (reference.bridgeId !== policy.bridgeId) throw new TypeError("retention evidence bridge must match policy bridge");
+    if (!Number.isSafeInteger(reference.seq) || reference.seq < 0) {
+      throw new RangeError("retention evidence sequence is invalid");
+    }
+  }
+  return { evidenceWindowMs, proposalEvidence };
+}
+
+function validateBridgeId(value: unknown): asserts value is string {
+  validateBoundedString(value, "bridge id");
+}
+
+function validateBoundedString(value: unknown, label: string, maxLength = 200): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > maxLength) {
+    throw new TypeError(`${label} is invalid`);
+  }
+}
+
+function validateTimestamp(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || value.length > 64 || !Number.isFinite(Date.parse(value))) {
+    throw new TypeError(`${label} is invalid`);
+  }
+}

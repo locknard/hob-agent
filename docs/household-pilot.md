@@ -101,8 +101,10 @@ capacity is visible in `validate:home`. A fresh updated 10-minute epoch stayed
 ready for all 75 devices, returned 13 active neutral devices and 291 events
 without activity truncation, retained zero consecutive semantic duplicates,
 and reported about 3% quota use. Both runs retained zero rejections and zero
-history gaps. The larger quota supports the observed seven-day evidence rate;
-it is not a substitute for the still-required governed retention policy.
+history gaps. The larger quota supports the observed seven-day evidence rate.
+An explicit, audited retention operation now exists, but its proposal-reference
+collector and unattended scheduler are not yet wired into the production
+service.
 
 ## Next household action after this checkpoint
 
@@ -120,8 +122,9 @@ must not discover on its own:
    record one structured household review.
 
 That outcome—not another synthetic loop—should decide the next product change.
-Governed canonical-journal retention remains P1 before a longer unattended
-deployment, but the new bounded quota is sufficient for this manual pilot.
+Production wiring for governed canonical-journal retention remains P1 before a
+longer unattended deployment, but the explicit operation and bounded quota are
+sufficient for this manual pilot.
 
 After every run:
 
