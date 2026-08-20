@@ -68,12 +68,18 @@ Player control and media discovery are separate capabilities:
 - `mediaCatalog@1` is a read-only catalog provider. It searches an authorized
   service or local library and returns bounded neutral candidates.
 
+The initial neutral media kinds are `artist`, `album`, `track`, `playlist`,
+`radio`, `audiobook`, `podcast`, `episode`, and `genre`. Search results carry an
+explicit `playable` flag because a useful discovery result is not necessarily a
+direct playback target. A genre or artist may instead seed a provider-owned
+mix. The Hub never infers playability from a title or media kind.
+
 A search candidate contains a Hub-issued opaque `mediaRef`, title, media kind,
-source label, optional creator, and optional duration. It contains no bearer
-token, provider-native account identifier, arbitrary provider payload, or
-model-authored URL. A `mediaRef` is short-lived, tenant-scoped, bound to the
-catalog generation, and resolved only by the Hub when preparing an exact
-action ticket.
+source label, `playable`, optional creator, and optional duration. It contains
+no bearer token, provider-native account identifier, arbitrary provider
+payload, or model-authored URL. A `mediaRef` is short-lived, tenant-scoped,
+bound to the catalog generation, and resolved only by the Hub when preparing
+an exact action ticket.
 
 The neutral action describes the desired outcome rather than an HA service:
 
@@ -81,9 +87,16 @@ The neutral action describes the desired outcome rather than an HA service:
 play_media {
   player: hwCapabilityId,
   media: mediaRef,
-  initialVolume?: 0.0..policyMaximum
+  queueMode: replace_and_play | play_next | add_to_queue
 }
 ```
+
+Queue behavior is always explicit because replacing what a household is
+already listening to is materially different from playing next or appending.
+The pending action UI must say which will happen. Volume is a separate player
+operation and policy check; a catalog result never supplies it. The first
+playback slice uses the current verified volume or refuses a policy-exceeding
+volume. It does not hide a non-atomic volume change inside `play_media`.
 
 Home Assistant, Xiaomi, AirPlay, a local music server, and future ecosystem
 adapters must pass the same conformance surface. HA entity ids, service calls,
@@ -94,6 +107,43 @@ Catalog plugins can contribute search candidates but cannot select an action
 target, resolve a `mediaRef` outside their granted tenant scope, invoke a
 player, or claim that playback succeeded. Uninstalling a catalog or bridge
 cannot erase the Hub audit trail.
+
+### Music Assistant reference model
+
+[Music Assistant](https://github.com/music-assistant/server) is the primary
+reference and the first real integration candidate for this seam. Its useful
+architectural lessons are:
+
+- Music Providers, Player Providers, metadata providers, and queues are
+  separate concerns. hob-agent preserves the same separation instead of
+  treating every media function as an HA media-player service.
+- Search spans the local library and connected streaming providers and accepts
+  explicit media-type filters. hob-agent adopts bounded kind filters, while
+  returning a smaller neutral candidate projection.
+- Each player owns a queue and queue insertion has explicit semantics. The Hub
+  therefore binds `queueMode` into the future approval ticket.
+- A provider-facing Player and an API-facing PlayerState are different. The
+  Hub similarly keeps provider/native routing and identifiers private while
+  exposing only a neutral state projection.
+- A physical player may have several output protocols. The Hub may eventually
+  model multiple action routes behind one reviewed player identity, but it
+  must not silently merge HA, Music Assistant, AirPlay, Cast, or DLNA records
+  merely because their names match.
+
+Music Assistant exposes rich URIs, provider mappings, image URLs, raw player
+ids, queue ids, and provider-specific metadata. Those are valid inside Music
+Assistant but are deliberately not copied into `mediaCatalog@1`. A future
+trusted Music Assistant adapter keeps them behind the Hub-issued `mediaRef` and
+player binding. Search results remain candidates; compatibility between a
+candidate and the selected player route is revalidated privately before an
+action ticket is issued.
+
+For the first real integration, a direct, explicitly configured Music
+Assistant client is preferred over converting a search into an arbitrary Home
+Assistant service call. The HA integration may help discovery and onboarding,
+but HA service payloads and Music Assistant URIs do not become the neutral
+contract. No Music Assistant network client is enabled during Phase 0 merely
+because this reference design exists.
 
 ## Voice surface state machine
 
@@ -179,7 +229,7 @@ When the household has one eligible player and one preferred catalog:
 ```text
 User: 帮我在多媒体室放一部爵士音乐。
 Agent: 我找到了多媒体室的音响，并从家庭已连接的音乐库里选了
-       “晚间爵士”。将从 20% 音量开始。现在播放吗？
+       “晚间爵士”。当前音量 20%，这会替换当前队列并开始播放。继续吗？
 User: 播放。
 Agent: 已在多媒体室开始播放“晚间爵士”，当前音量 20%。
 ```
@@ -199,7 +249,9 @@ the result is uncertain and does not retry automatically.
    non-applying and can coexist with the Phase 0 document workflow only as an
    explicitly bounded experiment, not as a general chat runtime.
 3. **V2 — media discovery:** add neutral player inventory and bounded
-   `mediaCatalog@1` search. Show choices and an exact pending action, but do not
+   `mediaCatalog@1` search, first against a synthetic provider. After the Phase
+   0 exit gate, add an explicitly configured Music Assistant integration. Show
+   choices and an exact pending action, including queue behavior, but do not
    invoke a player.
 4. **V3 — governed playback:** after the real-household and action-plane entry
    gates, add `play_media` to the exact approval-ticket, executor,

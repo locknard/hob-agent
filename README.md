@@ -168,6 +168,11 @@ input/output mode for the single DSH runtime; media search is read-only, and
 playback cannot bypass Hub policy, confirmation, action tickets, verification,
 or audit. See
 [`docs/voice-and-media-interaction.md`](docs/voice-and-media-interaction.md).
+The Hub now contains the first non-networked `mediaCatalog@1` boundary: a
+trusted provider can return strictly bounded Music Assistant-compatible media
+kinds, while Agent-facing candidates receive only an opaque, tenant- and
+generation-bound short-lived reference. Provider ids, URLs, account data,
+tokens, raw payloads, player control, queues, and playback remain unavailable.
 
 For behavioral evidence, keep the full runtime connected and use **Observe
 now** in its authenticated Inbox. This starts one paid turn through the same
