@@ -11,6 +11,7 @@ import {
   type Envelope,
   type StateEvent,
 } from "./bridge-ingest.js";
+import { HOME_ASSISTANT_ADAPTER_REGISTRATION } from "./home-assistant-bridge.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 import { SyntheticBridge } from "./synthetic-bridge.js";
 
@@ -48,6 +49,139 @@ function createIngest(journal = new SqliteIngestJournal(":memory:")) {
     clock: () => "2026-08-18T00:00:00.000Z",
   });
 }
+
+function createHomeAssistantSchemaIngest(journal = new SqliteIngestJournal(":memory:")) {
+  const registrations = HOME_ASSISTANT_ADAPTER_REGISTRATION.capabilitySchemas;
+  const registeredSchemas = new Set(registrations.map((registration) => `${registration.schema}@${registration.majorVersion}`));
+  const schemaRegistrations = new Map(
+    registrations.map((registration) => [`${registration.schema}@${registration.majorVersion}`, registration] as const),
+  );
+  return {
+    ingest: new BridgeIngest({
+      bridgeId: "synthetic-bridge",
+      journal,
+      registeredSchemas,
+      schemaRegistrations,
+      clock: () => "2026-08-18T00:00:00.000Z",
+    }),
+    registeredSchemas,
+    schemaRegistrations,
+    journal,
+  };
+}
+
+test("routes ha.entity and ha.cover states through their own strict registrations", async () => {
+  const { ingest, registeredSchemas, schemaRegistrations, journal } = createHomeAssistantSchemaIngest();
+  assert.equal(registeredSchemas.has("ha.entity@1"), true);
+  assert.equal(registeredSchemas.has("ha.cover@1"), true);
+  assert.equal(schemaRegistrations.get("ha.entity@1")?.attrsSchema.safeParse({ state: "on" }).success, true);
+  assert.equal(schemaRegistrations.get("ha.cover@1")?.attrsSchema.safeParse({ state: "open", level: 0.5 }).success, true);
+
+  const mixedDescriptor: DeviceDescriptor = {
+    nativeId: "ha-device",
+    capabilities: [
+      { nativeInstanceId: "generic-instance", schema: "ha.entity", schemaVersion: "1.0.0" },
+      { nativeInstanceId: "cover-instance", schema: "ha.cover", schemaVersion: "1.0.0", semanticKind: "cover" },
+    ],
+  };
+  const genericState: StateEvent = {
+    nativeId: "ha-device",
+    nativeInstanceId: "generic-instance",
+    attrs: { state: "on", brightness: 200 },
+    time: { sourceTsQuality: "none" },
+    origin: "observed",
+  };
+  const coverState: StateEvent = {
+    nativeId: "ha-device",
+    nativeInstanceId: "cover-instance",
+    attrs: { state: "open", level: 0.5, setLevelSupported: true },
+    time: { sourceTsQuality: "none" },
+    origin: "observed",
+  };
+
+  assert.equal((await ingest.ingest(envelope("epoch-ha", 1, {
+    kind: "sync-start",
+    snapshotId: "snapshot-ha",
+    reason: "initial",
+  }))).accepted, true);
+  assert.equal((await ingest.ingest(envelope("epoch-ha", 2, {
+    kind: "device-upserted",
+    device: mixedDescriptor,
+  }))).accepted, true);
+  assert.equal((await ingest.ingest(envelope("epoch-ha", 3, { kind: "state", state: genericState }))).accepted, true);
+  assert.equal((await ingest.ingest(envelope("epoch-ha", 4, { kind: "state", state: coverState }))).accepted, true);
+  assert.equal((await ingest.ingest(envelope("epoch-ha", 5, {
+    kind: "sync-complete",
+    manifest: snapshotManifest("snapshot-ha", 1, 2),
+  }))).accepted, true);
+
+  const invalidGeneric = await ingest.ingest(envelope("epoch-ha", 6, {
+    kind: "state",
+    state: { ...genericState, attrs: { state: "on", level: 0.5 } },
+  }));
+  const invalidCover = await ingest.ingest(envelope("epoch-ha", 7, {
+    kind: "state",
+    state: { ...coverState, attrs: { state: "open", level: "0.5" } },
+  }));
+  assert.equal(invalidGeneric.accepted, false);
+  assert.equal(invalidGeneric.reason, "invalid_payload");
+  assert.equal(invalidCover.accepted, false);
+  assert.equal(invalidCover.reason, "invalid_payload");
+  assert.deepEqual(ingest.world().devices.get("ha-device")?.states.get("generic-instance")?.attrs, {
+    state: "on",
+    brightness: 200,
+  });
+  assert.deepEqual(ingest.world().devices.get("ha-device")?.states.get("cover-instance")?.attrs, {
+    state: "open",
+    level: 0.5,
+    setLevelSupported: true,
+  });
+  journal.close();
+});
+
+test("restores a complete legacy ha.entity epoch after ha.cover registration is added", async () => {
+  const first = createHomeAssistantSchemaIngest();
+  const legacyDescriptor: DeviceDescriptor = {
+    nativeId: "legacy-device",
+    capabilities: [{ nativeInstanceId: "legacy-instance", schema: "ha.entity", schemaVersion: "1.0.0" }],
+  };
+  const legacyState: StateEvent = {
+    nativeId: "legacy-device",
+    nativeInstanceId: "legacy-instance",
+    attrs: { state: "on", brightness: 128 },
+    time: { sourceTsQuality: "none" },
+    origin: "observed",
+  };
+  await first.ingest.ingest(envelope("legacy-epoch", 1, {
+    kind: "sync-start",
+    snapshotId: "legacy-snapshot",
+    reason: "initial",
+  }));
+  await first.ingest.ingest(envelope("legacy-epoch", 2, {
+    kind: "device-upserted",
+    device: legacyDescriptor,
+  }));
+  await first.ingest.ingest(envelope("legacy-epoch", 3, { kind: "state", state: legacyState }));
+  const complete = await first.ingest.ingest(envelope("legacy-epoch", 4, {
+    kind: "sync-complete",
+    manifest: snapshotManifest("legacy-snapshot", 1, 1),
+  }));
+  assert.equal(complete.accepted, true);
+  const watermark = first.journal.consistentWatermark?.("synthetic-bridge");
+  assert.deepEqual(watermark, { epochId: "legacy-epoch", lastSeq: 4 });
+
+  const second = createHomeAssistantSchemaIngest();
+  assert.equal(await second.ingest.restoreConsistent(first.journal.records(), watermark!), true);
+  const restored = second.ingest.world().devices.get("legacy-device");
+  assert.equal(restored?.validity, "valid");
+  assert.equal(restored?.descriptor.capabilities[0]?.schema, "ha.entity");
+  assert.deepEqual(restored?.states.get("legacy-instance")?.attrs, {
+    state: "on",
+    brightness: 128,
+  });
+  first.journal.close();
+  second.journal.close();
+});
 
 test("requires sync-start seq=1 and rejects an epoch that starts at another sequence", async () => {
   const journal = new SqliteIngestJournal(":memory:");

@@ -396,6 +396,10 @@ export const HOME_ASSISTANT_ADAPTER_TYPE = "home-assistant";
 export const HOME_ASSISTANT_ACCESS_TOKEN_ALIAS = "access-token";
 export const HOME_ASSISTANT_ENTITY_SCHEMA = "ha.entity";
 export const HOME_ASSISTANT_ENTITY_SCHEMA_VERSION = "1.0.0";
+export const HOME_ASSISTANT_COVER_SCHEMA = "ha.cover";
+export const HOME_ASSISTANT_COVER_SCHEMA_VERSION = "1.0.0";
+/** Home Assistant's CoverEntityFeature.SET_POSITION bit. */
+export const HOME_ASSISTANT_COVER_SET_POSITION_FEATURE = 4;
 export const HOME_ASSISTANT_CORE_VERSION = "6.5.0";
 export const HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS = 60_000;
 
@@ -463,6 +467,20 @@ export const HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH = `sha256:${createHash(
   .update(HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_FORM)
   .digest("hex")}`;
 
+const HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_FORM = [
+  "schema=ha.cover",
+  "majorVersion=1",
+  "state=string",
+  "level=number",
+  "setLevelSupported=boolean",
+  "available=boolean",
+  "unknownAttributeCount=number",
+].join("|");
+
+export const HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH = `sha256:${createHash("sha256")
+  .update(HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_FORM)
+  .digest("hex")}`;
+
 const homeAssistantEntityAttrsSchema = z
   .object({
     state: z.string(),
@@ -473,6 +491,16 @@ const homeAssistantEntityAttrsSchema = z
     humidity: z.number().finite().optional(),
     batteryLevel: z.number().finite().optional(),
     volumeLevel: z.number().finite().optional(),
+    available: z.boolean().optional(),
+    unknownAttributeCount: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+const homeAssistantCoverAttrsSchema = z
+  .object({
+    state: z.string(),
+    level: z.number().finite().min(0).max(1).optional(),
+    setLevelSupported: z.boolean().optional(),
     available: z.boolean().optional(),
     unknownAttributeCount: z.number().int().nonnegative().optional(),
   })
@@ -490,6 +518,11 @@ export const HOME_ASSISTANT_ADAPTER_REGISTRATION: ContractAdapterRegistration<Ho
     majorVersion: 1,
     attrsSchema: homeAssistantEntityAttrsSchema,
     canonicalHash: HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH,
+  }, {
+    schema: HOME_ASSISTANT_COVER_SCHEMA,
+    majorVersion: 1,
+    attrsSchema: homeAssistantCoverAttrsSchema,
+    canonicalHash: HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH,
   }]),
   factory: (context) => new HomeAssistantBridgeAdapter(context),
 };
@@ -934,10 +967,11 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
     bindings.sort((left, right) => left.nativeInstanceId.localeCompare(right.nativeInstanceId));
     const capabilities = bindings.map((binding) => {
       const semanticKind = homeAssistantSemanticKind(binding.entityId);
+      const cover = isHomeAssistantCoverEntity(binding.entityId);
       return {
         nativeInstanceId: binding.nativeInstanceId,
-        schema: HOME_ASSISTANT_ENTITY_SCHEMA,
-        schemaVersion: HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
+        schema: cover ? HOME_ASSISTANT_COVER_SCHEMA : HOME_ASSISTANT_ENTITY_SCHEMA,
+        schemaVersion: cover ? HOME_ASSISTANT_COVER_SCHEMA_VERSION : HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
         ...(semanticKind === undefined ? {} : { semanticKind }),
         ...(binding.nativeSpaceId === undefined
           ? {}
@@ -1004,6 +1038,11 @@ export function homeAssistantSemanticKind(entityId: string): CapabilitySemanticK
   return HOME_ASSISTANT_SEMANTIC_KINDS[entityId.slice(0, separator)];
 }
 
+function isHomeAssistantCoverEntity(entityId: string): boolean {
+  const separator = entityId.indexOf(".");
+  return separator > 0 && entityId.slice(0, separator) === "cover";
+}
+
 function projectDeviceIdentityClaims(raw: Record<string, unknown>): readonly ContractIdentityClaim[] {
   const claims: ContractIdentityClaim[] = [];
   const seen = new Set<string>();
@@ -1052,7 +1091,9 @@ function boundedIdentityValue(value: unknown): string | undefined {
 
 function projectNativeState(nativeState: HomeAssistantNativeStateEvent, binding: EntityBinding): ContractStateEvent | undefined {
   if (nativeState.entityId !== binding.entityId || nativeState.state.trim() === "") return undefined;
-  const attrs = projectKnownAttributes(nativeState.state, nativeState.attrs);
+  const attrs = isHomeAssistantCoverEntity(binding.entityId)
+    ? projectCoverAttributes(nativeState.state, nativeState.attrs)
+    : projectKnownAttributes(nativeState.state, nativeState.attrs);
   return {
     nativeId: binding.nativeId,
     nativeInstanceId: binding.nativeInstanceId,
@@ -1062,6 +1103,45 @@ function projectNativeState(nativeState: HomeAssistantNativeStateEvent, binding:
       : { sourceTs: nativeState.ts, sourceTsQuality: "platform" },
     origin: "observed",
   };
+}
+
+function projectCoverAttributes(
+  state: string,
+  attributes: Record<string, unknown>,
+): Record<string, string | number | boolean | null> {
+  const projected: Record<string, string | number | boolean | null> = { state };
+  const knownKeys = new Set(["current_position", "supported_features", "available"]);
+
+  if (Object.prototype.hasOwnProperty.call(attributes, "current_position")) {
+    const level = normalizeCoverPosition(attributes.current_position);
+    if (level !== undefined) projected.level = level;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(attributes, "supported_features")) {
+    const setLevelSupported = coverSetLevelSupported(attributes.supported_features);
+    if (setLevelSupported !== undefined) projected.setLevelSupported = setLevelSupported;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(attributes, "available")
+    && typeof attributes.available === "boolean") {
+    projected.available = attributes.available;
+  }
+
+  const unknownAttributeCount = Object.keys(attributes)
+    .filter((key) => !knownKeys.has(key))
+    .length;
+  if (unknownAttributeCount > 0) projected.unknownAttributeCount = unknownAttributeCount;
+  return projected;
+}
+
+function normalizeCoverPosition(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > 100) return undefined;
+  return value / 100;
+}
+
+function coverSetLevelSupported(value: unknown): boolean | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return undefined;
+  return Math.floor(value / HOME_ASSISTANT_COVER_SET_POSITION_FEATURE) % 2 === 1;
 }
 
 function projectKnownAttributes(state: string, attributes: Record<string, unknown>): Record<string, string | number | boolean | null> {

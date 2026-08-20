@@ -13,6 +13,7 @@ const numericOperators = Object.freeze(["equals", "not_equals", "greater_than", 
 /** Exact schema/version pairs reviewed by the Hub-private M3c resolver. */
 export const CAPABILITY_SEMANTICS_ALLOWLIST = Object.freeze([
   "ha.entity@1.0.0",
+  "ha.cover@1.0.0",
   "miot.property@1.0.0",
 ] as const);
 
@@ -110,6 +111,12 @@ export type CapabilityActionResult =
       readonly after: boolean;
     }
   | {
+      readonly status: "compatible";
+      readonly kind: "set_level";
+      readonly before: number;
+      readonly after: number;
+    }
+  | {
       readonly status: "incompatible";
       readonly kind: "set_level" | "set_boolean";
       readonly reason: CapabilitySemanticsReason;
@@ -137,17 +144,24 @@ export function resolveCapabilityRead(input: CapabilitySemanticsInput): Capabili
   const schemaKey = exactSchemaKey(input?.capability);
   if (schemaKey === undefined) return frozen({ status: "unsupported", reason: "schema_unsupported" });
 
-  const availability = stateAvailability(input?.state);
+  const availability = stateAvailability(input?.state, schemaKey === "ha.cover@1.0.0");
   if (availability !== "ready") return frozen({ status: "unavailable", reason: availability });
 
   const attrs = input.state!.attrs;
+  if (schemaKey === "ha.cover@1.0.0" && isHaCoverUnavailable(attrs)) {
+    return frozen({ status: "unavailable", reason: "state_invalid" });
+  }
   const rawValue = schemaKey === "ha.entity@1.0.0"
     ? ownValue(attrs, "state")
-    : ownValue(attrs, "value");
+    : schemaKey === "ha.cover@1.0.0"
+      ? ownValue(attrs, "level")
+      : ownValue(attrs, "value");
   if (rawValue === undefined) return frozen({ status: "unavailable", reason: "state_missing" });
   const scalar = schemaKey === "ha.entity@1.0.0"
     ? readHaState(rawValue)
-    : readScalar(rawValue);
+    : schemaKey === "ha.cover@1.0.0"
+      ? readCoverLevel(rawValue)
+      : readScalar(rawValue);
   if (scalar.status !== "available") return frozen(scalar);
 
   const valueType = neutralValueType(scalar.value);
@@ -171,6 +185,9 @@ export function checkCapabilityPredicate(input: CapabilityPredicateInput): Capab
   if (!isNeutralScalar(input.value) || neutralValueType(input.value) !== read.valueType) {
     return frozen({ status: "incompatible", reason: "predicate_type_mismatch" });
   }
+  if (exactSchemaKey(input?.capability) === "ha.cover@1.0.0" && !isNormalizedLevel(input.value)) {
+    return frozen({ status: "incompatible", reason: "value_invalid" });
+  }
   return frozen({ status: "compatible", operator: input.operator, valueType: read.valueType });
 }
 
@@ -188,10 +205,33 @@ export function checkCapabilityAction(input: CapabilityActionInput): CapabilityA
     return frozen({ status: "incompatible", kind, reason: "schema_unsupported" });
   }
 
-  const availability = stateAvailability(input?.state);
+  const availability = stateAvailability(input?.state, schemaKey === "ha.cover@1.0.0");
   if (availability !== "ready") return frozen({ status: "unavailable", kind, reason: availability });
 
   if (kind === "set_level") {
+    if (schemaKey === "ha.cover@1.0.0") {
+      const read = resolveCapabilityRead(input);
+      if (read.status === "unavailable") return frozen({ status: "unavailable", kind, reason: read.reason });
+      if (read.status === "unsupported") return frozen({ status: "incompatible", kind, reason: read.reason });
+
+      const support = ownValue(input.state!.attrs, "setLevelSupported");
+      if (support === false) return frozen({ status: "incompatible", kind, reason: "not_writable" });
+      if (support !== true) {
+        return frozen({ status: "incompatible", kind, reason: "action_mapping_unreviewed" });
+      }
+
+      const requested = input.action.value;
+      if (!isNormalizedLevel(requested)) {
+        return frozen({ status: "incompatible", kind, reason: "action_invalid" });
+      }
+      if (!isIntegerPercent(requested)) {
+        return frozen({ status: "incompatible", kind, reason: "action_mapping_unreviewed" });
+      }
+      if (!isNormalizedLevel(read.value)) {
+        return frozen({ status: "incompatible", kind, reason: "action_mapping_unreviewed" });
+      }
+      return frozen({ status: "compatible", kind, before: read.value, after: requested });
+    }
     return frozen({ status: "incompatible", kind, reason: "set_level_unsupported" });
   }
 
@@ -234,7 +274,7 @@ function exactSchemaKey(capability: CapabilitySemanticsCapability | undefined): 
     : undefined;
 }
 
-function stateAvailability(state: CapabilitySemanticsState | undefined): StateAvailability {
+function stateAvailability(state: CapabilitySemanticsState | undefined, requireFresh = false): StateAvailability {
   if (state === undefined) return "state_missing";
   if (!isPlainRecord(state) || !isPlainRecord(state.attrs)) return "state_invalid";
   if (state.freshness !== undefined && state.freshness !== "fresh" && state.freshness !== "stale-gap") {
@@ -242,6 +282,7 @@ function stateAvailability(state: CapabilitySemanticsState | undefined): StateAv
   }
   if (state.validity === "stale" || state.freshness === "stale-gap") return "state_stale";
   if (state.validity !== "valid") return "state_invalid";
+  if (requireFresh && state.freshness !== "fresh") return "state_stale";
   return "ready";
 }
 
@@ -267,8 +308,30 @@ function readHaState(value: unknown): ReadScalarResult {
     : { status: "unsupported", reason: "value_invalid" };
 }
 
+function readCoverLevel(value: unknown): ReadScalarResult {
+  return isNormalizedLevel(value)
+    ? { status: "available", value }
+    : { status: "unsupported", reason: "value_invalid" };
+}
+
+function isHaCoverUnavailable(attrs: Readonly<Record<string, JsonValue>>): boolean {
+  const available = ownValue(attrs, "available");
+  const state = ownValue(attrs, "state");
+  return available === false || state === "unavailable" || state === "unknown";
+}
+
 function isNeutralScalar(value: unknown): value is CapabilityNeutralScalar {
   return readScalar(value).status === "available";
+}
+
+function isNormalizedLevel(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function isIntegerPercent(value: number): boolean {
+  const scaled = value * 100;
+  if (!Number.isFinite(scaled)) return false;
+  return Math.round(scaled) / 100 === value;
 }
 
 function isNeutralString(value: string): boolean {

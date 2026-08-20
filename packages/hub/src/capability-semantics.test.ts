@@ -14,6 +14,11 @@ const haCapability = {
   schemaVersion: "1.0.0",
 } as const;
 
+const haCoverCapability = {
+  schema: "ha.cover",
+  schemaVersion: "1.0.0",
+} as const;
+
 const miotCapability = {
   schema: "miot.property",
   schemaVersion: "1.0.0",
@@ -47,7 +52,11 @@ function levelAction(value = 0.65) {
 }
 
 test("exposes only the reviewed exact schema/version allowlist", () => {
-  assert.deepEqual(CAPABILITY_SEMANTICS_ALLOWLIST, ["ha.entity@1.0.0", "miot.property@1.0.0"]);
+  assert.deepEqual(CAPABILITY_SEMANTICS_ALLOWLIST, [
+    "ha.entity@1.0.0",
+    "ha.cover@1.0.0",
+    "miot.property@1.0.0",
+  ]);
   assert.equal(Object.isFrozen(CAPABILITY_SEMANTICS_ALLOWLIST), true);
 
   const unsupported = resolveCapabilityRead({
@@ -88,6 +97,147 @@ test("reads HA state as a string and permits equality predicates only", () => {
     status: "incompatible",
     reason: "operator_unsupported",
   });
+});
+
+test("reads reviewed HA cover level as a normalized number with numeric predicates", () => {
+  const read = resolveCapabilityRead({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: true }),
+  });
+  assert.deepEqual(read, {
+    status: "available",
+    value: 0.37,
+    valueType: "number",
+    operators: ["equals", "not_equals", "greater_than", "less_than"],
+  });
+
+  assert.deepEqual(checkCapabilityPredicate({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: true }),
+    operator: "greater_than",
+    value: 0.2,
+  }), {
+    status: "compatible",
+    operator: "greater_than",
+    valueType: "number",
+  });
+  assert.deepEqual(checkCapabilityPredicate({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: true }),
+    operator: "equals",
+    value: "open",
+  }), {
+    status: "incompatible",
+    reason: "predicate_type_mismatch",
+  });
+});
+
+test("accepts HA cover set_level only with explicit support and exact integer-percent values", () => {
+  assert.deepEqual(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: true }),
+    action: levelAction(0.65),
+  }), {
+    status: "compatible",
+    kind: "set_level",
+    before: 0.37,
+    after: 0.65,
+  });
+  assert.equal(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: true }),
+    action: levelAction(0.29),
+  }).status, "compatible");
+
+  assert.deepEqual(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37 }),
+    action: levelAction(0.65),
+  }), {
+    status: "incompatible",
+    kind: "set_level",
+    reason: "action_mapping_unreviewed",
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: false }),
+    action: levelAction(0.65),
+  }), {
+    status: "incompatible",
+    kind: "set_level",
+    reason: "not_writable",
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: true }),
+    action: levelAction(0.655),
+  }), {
+    status: "incompatible",
+    kind: "set_level",
+    reason: "action_mapping_unreviewed",
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 0.37, setLevelSupported: true }),
+    action: levelAction(0.6500000000000001),
+  }), {
+    status: "incompatible",
+    kind: "set_level",
+    reason: "action_mapping_unreviewed",
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", setLevelSupported: true }),
+    action: levelAction(0.65),
+  }), {
+    status: "unavailable",
+    kind: "set_level",
+    reason: "state_missing",
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haCoverCapability,
+    state: state({ state: "open", level: 1.01, setLevelSupported: true }),
+    action: levelAction(0.65),
+  }), {
+    status: "incompatible",
+    kind: "set_level",
+    reason: "value_invalid",
+  });
+  assert.deepEqual(resolveCapabilityRead({
+    capability: haCoverCapability,
+    state: {
+      attrs: { state: "open", level: 0.37, setLevelSupported: true },
+      validity: "valid",
+    },
+  }), {
+    status: "unavailable",
+    reason: "state_stale",
+  });
+});
+
+test("treats explicit HA cover unavailability as unavailable despite retained level attrs", () => {
+  for (const attrs of [
+    { state: "open", level: 0.37, setLevelSupported: true, available: false },
+    { state: "unavailable", level: 0.37, setLevelSupported: true },
+    { state: "unknown", level: 0.37, setLevelSupported: true },
+  ]) {
+    assert.deepEqual(resolveCapabilityRead({
+      capability: haCoverCapability,
+      state: state(attrs),
+    }), {
+      status: "unavailable",
+      reason: "state_invalid",
+    });
+    assert.deepEqual(checkCapabilityAction({
+      capability: haCoverCapability,
+      state: state(attrs),
+      action: levelAction(0.65),
+    }), {
+      status: "unavailable",
+      kind: "set_level",
+      reason: "state_invalid",
+    });
+  }
 });
 
 test("does not coerce numeric-looking HA text or use semanticKind as authority", () => {
@@ -223,7 +373,7 @@ test("only MIoT bool plus writable is action-compatible and returns neutral befo
   });
 });
 
-test("fails closed for set_level on every currently admitted schema", () => {
+test("fails closed for set_level on generic HA and MIoT schemas", () => {
   assert.deepEqual(checkCapabilityAction({
     capability: haCapability,
     state: state({ state: "open" }),

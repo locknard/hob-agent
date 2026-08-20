@@ -150,6 +150,111 @@ function makeInput(withNotify = false, withCapabilityTrigger = false, withNoOpGa
   });
 }
 
+function makeCoverInput(): ArtifactCompileInput {
+  const artifact = createArtifactRevision({
+    schemaVersion: "1",
+    kind: "event-condition-action",
+    artifactId: "artifact-compiler-cover-1",
+    revision: 1,
+    title: "Set the reviewed curtain position",
+    summary: "A bounded cover compiler fixture.",
+    sourceProposal: { proposalId: "proposal-compiler-cover-1", proposalRevision: 1 },
+    content: {
+      trigger: { kind: "schedule", timezone: "Etc/UTC", daysOfWeek: [1], at: "09:00" },
+      conditions: [],
+      actions: [{ kind: "set_level", target: { hwCapabilityId: "hwc-compiler-cover" }, value: 0.65 }],
+      rollback: { kind: "restore_previous_state", target: { hwCapabilityId: "hwc-compiler-cover" }, maxAgeSeconds: 900 },
+      postconditions: [{ kind: "capability_value", source: { hwCapabilityId: "hwc-compiler-cover" }, operator: "equals", value: 0.65, withinSeconds: 120 }],
+    },
+    createdAt: capturedAt,
+  });
+  const artifactRef = {
+    artifactId: artifact.artifactId,
+    revision: artifact.revision,
+    contentHash: artifact.contentHash,
+  };
+  const watermark = {
+    bridgeId: "bridge-compiler-cover-1",
+    epochId: "epoch-compiler-cover-1",
+    lastSeq: 42,
+    lastSyncCompleteAt: "2026-08-20T00:59:00.000Z",
+    freshness: "fresh" as const,
+    gapCount: 0,
+  };
+  const scope = deriveArtifactCapabilityScope(artifact.content);
+  const evidence = createArtifactEvidenceAttestation({
+    artifact: artifactRef,
+    attestationId: "evidence-compiler-cover-1",
+    source: "home-world-consistent-cut",
+    sourceProposal: { proposalId: artifact.sourceProposal.proposalId, proposalRevision: artifact.sourceProposal.proposalRevision },
+    proposalEvidenceIdentity: digest("1"),
+    selectedHwCapabilityIds: scope,
+    capturedAt,
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  });
+  const authority = createArtifactAuthorityAssessment({
+    artifact: artifactRef,
+    assessmentId: "authority-compiler-cover-1",
+    authorityRegistryIdentity: digest("2"),
+    candidates: [{
+      actionAuthorityCandidateId: "candidate-compiler-cover-1",
+      hwCapabilityId: "hwc-compiler-cover",
+      status: "available",
+    }],
+    checkedWatermarks: [watermark],
+    assessedAt: capturedAt,
+  }, { hwCapabilityIds: scope });
+  const currentConflict = {
+    sourceIdentity: digest("3"),
+    result: createNeutralConflictResult({ status: "none", findings: [] }),
+  };
+  const risk = createArtifactRiskAssessment({
+    artifact: artifactRef,
+    assessmentId: "risk-compiler-cover-1",
+    evidence: { attestationId: evidence.attestationId, inputIdentity: evidence.inputIdentity },
+    authority: { assessmentId: authority.assessmentId, inputIdentity: authority.inputIdentity },
+    conflictInputIdentity: currentConflict.sourceIdentity,
+    class: "comfort_reversible",
+    reasons: ["Bounded cover compiler fixture."],
+    policyId: "policy-home-v1",
+    policyVersion: "1.0.0",
+    assessedAt: capturedAt,
+  });
+  const device = createNeutralDeviceSummary({
+    hwCapabilityId: "hwc-compiler-cover",
+    schema: "ha.cover",
+    schemaVersion: "1.0.0",
+    semanticKind: "cover",
+    read: { status: "available", value: 0.37 },
+    validity: "valid",
+    actionCompatibility: [{ order: 1, kind: "set_level", status: "compatible", before: 0.37, after: 0.65 }],
+    predicateCompatibility: [{ phase: "postcondition", order: 1, status: "compatible" }],
+  });
+  const worldCut = createNeutralWorldCut({ devices: [device], watermarks: [watermark] });
+  const foreignCheck = createNeutralConflictInput({
+    bridgeId: watermark.bridgeId,
+    epochId: watermark.epochId,
+    watermark,
+    catalogIdentity: digest("4"),
+    status: "current",
+    findings: [],
+  });
+  return createArtifactCompileInput({
+    artifact,
+    proposal: { id: artifact.sourceProposal.proposalId, revision: artifact.sourceProposal.proposalRevision, status: "approved" },
+    evidence,
+    risk,
+    authority,
+    currentConflict,
+    worldCut,
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([foreignCheck]),
+    foreignRuleChecks: [foreignCheck],
+    compiler: { id: "neutral-compiler", version: "1.0.0" },
+  });
+}
+
 test("compiles only the parsed neutral input and emits a frozen authority-bound diff", () => {
   const input = makeInput();
   const result = compileNeutralArtifact(input);
@@ -179,6 +284,37 @@ test("compiles only the parsed neutral input and emits a frozen authority-bound 
   assert.deepEqual(compileNeutralArtifact(input), result);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.diff), true);
+});
+
+test("compiles an approved curtain level artifact from an opaque authority and exact HA cover cut", () => {
+  const input = makeCoverInput();
+  const result = compileNeutralArtifact(input);
+
+  assert.equal(result.status, "compiled");
+  assert.deepEqual(result.diff, {
+    status: "changes",
+    operations: [{
+      actionOrder: 1,
+      kind: "set_level",
+      hwCapabilityId: "hwc-compiler-cover",
+      actionAuthorityCandidateId: "candidate-compiler-cover-1",
+      before: 0.37,
+      after: 0.65,
+    }],
+    unchangedCount: 0,
+    redacted: true,
+  });
+  assert.deepEqual(result.actionAuthorityBindings, [{
+    actionOrder: 1,
+    kind: "set_level",
+    hwCapabilityId: "hwc-compiler-cover",
+    actionAuthorityCandidateId: "candidate-compiler-cover-1",
+  }]);
+
+  const serialized = JSON.stringify(result);
+  for (const forbidden of ["set_cover_position", "cover.curtain", "entity_id", "nativeId", "nativeInstanceId", "route"]) {
+    assert.equal(serialized.includes(forbidden), false, `serialized compiler output leaked ${forbidden}`);
+  }
 });
 
 test("retains artifact action order across notify and device diff operations", () => {

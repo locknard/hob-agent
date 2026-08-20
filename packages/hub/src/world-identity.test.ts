@@ -35,6 +35,23 @@ test("allocates stable hub identities and capability bindings for one observed d
   assert.deepEqual(repeated.proposals, []);
 });
 
+test("does not inherit a capability identity across an adapter schema change", () => {
+  const manager = new WorldIdentityManager();
+  const descriptor = (schema: string) => ({
+    nativeId: "native-cover",
+    capabilities: [capability("cover-main", schema)],
+  });
+
+  const generic = manager.observe("bridge-ha", descriptor("ha.entity"));
+  const reviewedCover = manager.observe("bridge-ha", descriptor("ha.cover"));
+
+  assert.equal(reviewedCover.identity.hwId, generic.identity.hwId);
+  assert.notEqual(
+    reviewedCover.capabilities[0]?.hwCapabilityId,
+    generic.capabilities[0]?.hwCapabilityId,
+  );
+});
+
 test("explicit idFactory remains the test seam for hub ids", () => {
   const manager = new WorldIdentityManager({
     idFactory: (kind) => `injected-${kind}`,

@@ -79,6 +79,32 @@ function artifact(): ArtifactRevision {
   });
 }
 
+function coverArtifact(): ArtifactRevision {
+  return createArtifactRevision({
+    schemaVersion: "1",
+    kind: "event-condition-action",
+    artifactId: "artifact-world-cut-cover-1",
+    revision: 1,
+    title: "Set the cover level",
+    summary: "A bounded HA cover world-cut fixture.",
+    sourceProposal: { proposalId: "proposal-world-cut-cover-1", proposalRevision: 1 },
+    content: {
+      trigger: { kind: "schedule", timezone: "Etc/UTC", daysOfWeek: [1], at: "09:00" },
+      conditions: [],
+      actions: [{ kind: "set_level", target: { hwCapabilityId: "hwc-target" }, value: 0.65 }],
+      rollback: { kind: "restore_previous_state", target: { hwCapabilityId: "hwc-target" }, maxAgeSeconds: 900 },
+      postconditions: [{
+        kind: "capability_value",
+        source: { hwCapabilityId: "hwc-target" },
+        operator: "equals",
+        value: 0.65,
+        withinSeconds: 120,
+      }],
+    },
+    createdAt: capturedAt,
+  });
+}
+
 function ref(value: ArtifactRevision): ArtifactRef {
   return {
     artifactId: value.artifactId,
@@ -249,6 +275,31 @@ function snapshot(
   };
 }
 
+function coverSnapshot(): HomeWorldSnapshot {
+  const base = snapshot();
+  const cover = capability(
+    "hwc-target",
+    "native-target",
+    "ha.cover",
+    "1.0.0",
+    "cover",
+  );
+  const item = device([cover], [state("native-target", {
+    state: "open",
+    level: 0.37,
+    setLevelSupported: true,
+  })]);
+  const bridge = base.bridges["bridge-world-cut"]!;
+  return {
+    ...base,
+    bridges: {
+      ...base.bridges,
+      "bridge-world-cut": { ...bridge, devices: [item] },
+    },
+    devices: [item],
+  };
+}
+
 function crossBridgeCollisionSnapshot(): HomeWorldSnapshot {
   const first = snapshot({ targetState: true, triggerState: "on" });
   const secondBridgeId = "bridge-world-cut-2";
@@ -354,11 +405,13 @@ function assessments(value: ArtifactRevision, options: {
 }
 
 function makeEnvironment(options: {
+  readonly artifact?: ArtifactRevision;
+  readonly bound?: ReturnType<typeof assessments>;
   readonly snapshots?: readonly HomeWorldSnapshot[];
   readonly resolver?: ArtifactWorldCutCapabilityResolver;
 } = {}) {
-  const value = artifact();
-  const bound = assessments(value);
+  const value = options.artifact ?? artifact();
+  const bound = options.bound ?? assessments(value);
   const first = snapshot({ targetState: true, triggerState: "on" });
   const snapshots = options.snapshots ?? [first, first];
   const resolverCalls = { reads: [] as unknown[], predicates: [] as unknown[], actions: [] as unknown[] };
@@ -481,6 +534,46 @@ test("keeps resolver compatibility independent from authority candidate availabi
   assert.deepEqual(emptyCut.devices.find((device) => device.hwCapabilityId === "hwc-target")?.actionCompatibility, expected);
   assert.equal(unavailableCut.cutIdentity, availableCut.cutIdentity);
   assert.equal(emptyCut.cutIdentity, availableCut.cutIdentity);
+});
+
+test("projects an exact HA cover snapshot into a compatible neutral set_level action", () => {
+  const value = coverArtifact();
+  const bound = assessments(value);
+  const environment = makeEnvironment({
+    artifact: value,
+    bound,
+    snapshots: [coverSnapshot(), coverSnapshot()],
+  });
+
+  const cut = read(environment.source, value, bound);
+  const cover = cut.devices.find((item) => item.hwCapabilityId === "hwc-target");
+
+  assert.deepEqual(cover, {
+    hwCapabilityId: "hwc-target",
+    schema: "ha.cover",
+    schemaVersion: "1.0.0",
+    semanticKind: "cover",
+    read: { status: "available", value: 0.37 },
+    validity: "valid",
+    actionCompatibility: [{
+      order: 1,
+      kind: "set_level",
+      status: "compatible",
+      before: 0.37,
+      after: 0.65,
+    }],
+    predicateCompatibility: [{
+      phase: "postcondition",
+      order: 1,
+      status: "compatible",
+    }],
+  });
+  assert.equal(environment.resolverCalls.actions.length, 2);
+  assert.deepEqual((environment.resolverCalls.actions[0] as { state?: unknown }).state, {
+    attrs: { state: "open", level: 0.37, setLevelSupported: true },
+    validity: "valid",
+    freshness: "fresh",
+  });
 });
 
 test("rejects a snapshot change instead of returning a mixed world cut", () => {

@@ -13,6 +13,8 @@ import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js"
 import {
   HOME_ASSISTANT_ACCESS_TOKEN_ALIAS,
   HOME_ASSISTANT_ADAPTER_REGISTRATION,
+  HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH,
+  HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH,
   HomeAssistantBridgeAdapter,
   createHomeAssistantBridgeAdapter,
   deriveHomeAssistantRemoteInstanceId,
@@ -143,6 +145,149 @@ function respondToBootstrap(
     socket.receive({ id: command.id, type: "result", success: true, result });
   }
 }
+
+function respondToCoverBootstrap(
+  socket: FakeSocket,
+  attributes: Record<string, unknown> = {},
+  entityId = "cover.curtain",
+): void {
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  for (const command of commands) {
+    const result = command.type === "get_states"
+      ? [{
+          entity_id: entityId,
+          state: "open",
+          attributes,
+          last_updated: "2026-08-18T00:00:01.000Z",
+        }]
+      : command.type === "config/entity_registry/list"
+        ? [{ id: "entity-cover-1", entity_id: entityId, device_id: "device-cover-1", name: "Curtain" }]
+        : command.type === "config/device_registry/list"
+          ? [{ id: "device-cover-1", name: "Curtain" }]
+          : [];
+    socket.receive({ id: command.id, type: "result", success: true, result });
+  }
+}
+
+test("registers a separate strict cover schema and projects an integer position", async () => {
+  assert.equal(
+    HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH,
+    "sha256:03776626d28e04468296c7d6f4cc42a5e949e74c1c1013bfe96cad44ebd2cf65",
+  );
+  assert.equal(
+    HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH,
+    "sha256:8df94f40bdcb6cbb2a45cd08b8449572411a185395ace8def3f584a3b8567b70",
+  );
+  const registrations = HOME_ASSISTANT_ADAPTER_REGISTRATION.capabilitySchemas;
+  assert.deepEqual(
+    registrations.map((registration) => [registration.schema, registration.majorVersion]),
+    [["ha.entity", 1], ["ha.cover", 1]],
+  );
+  const coverRegistration = registrations.find((registration) => registration.schema === "ha.cover");
+  assert.notEqual(coverRegistration, undefined);
+  assert.equal(coverRegistration!.attrsSchema.safeParse({
+    state: "open",
+    level: 0.37,
+    setLevelSupported: true,
+    available: true,
+    unknownAttributeCount: 1,
+  }).success, true);
+  assert.equal(coverRegistration!.attrsSchema.safeParse({ state: "open", level: 1.01 }).success, false);
+  assert.equal(coverRegistration!.attrsSchema.safeParse({ state: "open", level: "0.37" }).success, false);
+  assert.equal(coverRegistration!.attrsSchema.safeParse({ state: "open", setLevelSupported: 1 }).success, false);
+
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const events = await readSnapshot(adapter, socket, () => respondToCoverBootstrap(socket, {
+    current_position: 37,
+    supported_features: 4,
+    available: true,
+    vendor_field: "must-not-cross-contract",
+  }));
+  const descriptor = (events[1]!.event as Extract<BridgeEvent, { kind: "device-upserted" }>).device;
+  assert.deepEqual(descriptor.capabilities[0], {
+    nativeInstanceId: "entity-cover-1",
+    schema: "ha.cover",
+    schemaVersion: "1.0.0",
+    semanticKind: "cover",
+  });
+  const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+  assert.deepEqual(state.attrs, {
+    state: "open",
+    level: 0.37,
+    setLevelSupported: true,
+    available: true,
+    unknownAttributeCount: 1,
+  });
+  assert.equal(JSON.stringify(state).includes("vendor_field"), false);
+});
+
+test("normalizes cover boundary positions without rounding and reports explicit support", async () => {
+  for (const [position, expectedLevel] of [[0, 0], [100, 1], [37, 0.37]] as const) {
+    const socket = new FakeSocket();
+    const { adapter } = createAdapter(socket);
+    const events = await readSnapshot(adapter, socket, () => respondToCoverBootstrap(socket, {
+      current_position: position,
+      supported_features: 0,
+    }));
+    const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+    assert.equal(state.attrs.level, expectedLevel);
+    assert.equal(state.attrs.setLevelSupported, false);
+  }
+
+  const supportedSocket = new FakeSocket();
+  const { adapter: supportedAdapter } = createAdapter(supportedSocket);
+  const supportedEvents = await readSnapshot(supportedAdapter, supportedSocket, () => respondToCoverBootstrap(supportedSocket, {
+    current_position: 37,
+    supported_features: 5,
+  }));
+  const supportedState = (supportedEvents[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+  assert.equal(supportedState.attrs.level, 0.37);
+  assert.equal(supportedState.attrs.setLevelSupported, true);
+});
+
+test("omits invalid cover positions and feature masks instead of coercing them", async () => {
+  const invalidPositions: readonly unknown[] = [50.5, "50", -1, 101, null];
+  for (const position of invalidPositions) {
+    const socket = new FakeSocket();
+    const { adapter } = createAdapter(socket);
+    const events = await readSnapshot(adapter, socket, () => respondToCoverBootstrap(socket, {
+      current_position: position,
+      supported_features: 4,
+    }));
+    const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+    assert.equal(Object.prototype.hasOwnProperty.call(state.attrs, "level"), false);
+    assert.equal(state.attrs.setLevelSupported, true);
+  }
+
+  for (const featureMask of ["4", -1, 1.5, null] as readonly unknown[]) {
+    const socket = new FakeSocket();
+    const { adapter } = createAdapter(socket);
+    const events = await readSnapshot(adapter, socket, () => respondToCoverBootstrap(socket, {
+      current_position: 50,
+      supported_features: featureMask,
+    }));
+    const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+    assert.equal(state.attrs.level, 0.5);
+    assert.equal(Object.prototype.hasOwnProperty.call(state.attrs, "setLevelSupported"), false);
+  }
+});
+
+test("keeps generic HA entities on ha.entity even when they expose cover-like attributes", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const events = await readSnapshot(adapter, socket, () => respondToCoverBootstrap(socket, {
+    current_position: 50,
+    supported_features: 4,
+  }, "light.curtain"));
+  const descriptor = (events[1]!.event as Extract<BridgeEvent, { kind: "device-upserted" }>).device;
+  assert.equal(descriptor.capabilities[0]?.schema, "ha.entity");
+  const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+  assert.equal(Object.prototype.hasOwnProperty.call(state.attrs, "level"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(state.attrs, "setLevelSupported"), false);
+});
 
 async function readSnapshot(
   adapter: HomeAssistantBridgeAdapter,

@@ -10,6 +10,9 @@ test("builtin product bundle registers adapters through the neutral catalog", ()
 
   assert.equal(registration.adapterType, "home-assistant");
   assert.ok(registration.capabilitySchemas.some((schema) => schema.schema === "ha.entity"));
+  assert.ok(registration.capabilitySchemas.some((schema) => schema.schema === "ha.cover"));
+  assert.equal(catalog.schema("ha.entity", 1)?.schema, "ha.entity");
+  assert.equal(catalog.schema("ha.cover", 1)?.schema, "ha.cover");
 });
 
 test("registers Xiaomi beside HA only when an authorized transport is supplied", () => {
