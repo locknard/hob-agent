@@ -11,6 +11,11 @@ import {
   type ArtifactRegistryListQuery,
   type ArtifactRegistryOptions,
 } from "./artifact-registry.js";
+import type {
+  ArtifactCompileAttestation,
+  NeutralDryRunAttestation,
+} from "./artifact-compiler-contract.js";
+import type { ArtifactRef } from "./neutral-artifact.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
@@ -31,6 +36,49 @@ export interface HomeArtifactCapabilities {
 export interface HomeArtifactDiagnostics extends HomeArtifactCapabilities {
   readonly status: "ready";
   readonly hasRecords: boolean;
+}
+
+export interface HomeArtifactReviewEvidence {
+  readonly watermarks: readonly ArtifactCompileAttestation["usedWatermarks"][number][];
+}
+
+export type HomeArtifactReviewCompile =
+  | { readonly status: "not_run" }
+  | Pick<
+      ArtifactCompileAttestation,
+      "status"
+      | "resultId"
+      | "inputIdentity"
+      | "compiler"
+      | "usedWatermarks"
+      | "diff"
+      | "conflicts"
+      | "blockingReasons"
+      | "actionAuthorityBindings"
+    >;
+
+export type HomeArtifactReviewDryRun =
+  | {
+      readonly status: "not_run";
+      readonly writesPerformed: false;
+    }
+  | Pick<NeutralDryRunAttestation, "status" | "resultId" | "inputIdentity" | "compileAttestationId" | "compileInputIdentity" | "compiler" | "checkedWatermarks" | "diff" | "conflicts" | "actionAuthorityBindings" | "writesPerformed" | "summary">;
+
+/**
+ * Bounded, neutral review output for one exact source proposal revision.
+ * Artifact content, compiler plan, and all ecosystem/provider details stay in
+ * the Hub-owned registry and never cross this facade.
+ */
+export interface HomeArtifactReviewSnapshot {
+  readonly artifact: ArtifactRef;
+  readonly proposal: {
+    readonly id: string;
+    readonly revision: number;
+  };
+  readonly evidence: HomeArtifactReviewEvidence | undefined;
+  readonly compile: HomeArtifactReviewCompile;
+  readonly dryRun: HomeArtifactReviewDryRun;
+  readonly writesPerformed: false;
 }
 
 const CAPABILITIES: HomeArtifactCapabilities = Object.freeze({
@@ -92,4 +140,131 @@ export class HomeArtifactService extends Service {
   latestAttestation(query: ArtifactAssessmentLookup): ArtifactAssessmentEntry | undefined {
     return this.registry.latestAttestation(query);
   }
+
+  /**
+   * Returns only the current draft artifact sourced by this exact proposal
+   * revision. The Registry performs the narrow source lookup, proves
+   * uniqueness, and revalidates the returned lifecycle row before projection.
+   */
+  reviewForProposal(proposalId: string, proposalRevision: number): HomeArtifactReviewSnapshot | undefined {
+    const entry = this.registry.currentBySourceProposal({ proposalId, proposalRevision });
+    if (entry === undefined) return undefined;
+
+    const artifact = {
+      artifactId: entry.artifact.artifactId,
+      revision: entry.artifact.revision,
+      contentHash: entry.artifact.contentHash,
+    } satisfies ArtifactRef;
+    const compileEntry = this.registry.latestResult({
+      kind: "compile-attestation",
+      artifact,
+    });
+    const dryRunEntry = this.registry.latestResult({
+      kind: "dry-run-attestation",
+      artifact,
+    });
+    const compile = compileEntry?.kind === "compile-attestation"
+      && compileEntry.result.kind === "compile-attestation"
+      ? compileEntry.result
+      : undefined;
+    const dryRun = dryRunEntry?.kind === "dry-run-attestation"
+      && dryRunEntry.result.kind === "dry-run-attestation"
+      ? dryRunEntry.result
+      : undefined;
+    const evidenceEntry = this.registry.latestAttestation({
+      kind: "evidence-attestation",
+      artifact,
+    });
+    // A dry-run row cannot stand alone: the projection is only meaningful
+    // when it is bound to the exact latest compile row.
+    const boundDryRun = compile !== undefined
+      && dryRun !== undefined
+      && isDryRunBoundToCompile(dryRun, compile)
+      ? dryRun
+      : undefined;
+    const watermarks = compile?.usedWatermarks
+      ?? boundDryRun?.checkedWatermarks
+      ?? (evidenceEntry?.assessment.kind === "evidence-attestation" ? evidenceEntry.assessment.watermarks : undefined);
+    const projectedDryRun: HomeArtifactReviewDryRun = compile !== undefined && boundDryRun !== undefined
+      ? projectDryRun(boundDryRun)
+      : { status: "not_run", writesPerformed: false };
+
+    return freezeDeep({
+      artifact,
+      proposal: {
+        id: entry.artifact.sourceProposal.proposalId,
+        revision: entry.artifact.sourceProposal.proposalRevision,
+      },
+      evidence: watermarks === undefined ? undefined : { watermarks },
+      compile: compile === undefined ? { status: "not_run" as const } : projectCompile(compile),
+      dryRun: projectedDryRun,
+      writesPerformed: false as const,
+    });
+  }
+}
+
+function projectCompile(result: ArtifactCompileAttestation): HomeArtifactReviewCompile {
+  return {
+    status: result.status,
+    resultId: result.resultId,
+    inputIdentity: result.inputIdentity,
+    compiler: result.compiler,
+    usedWatermarks: result.usedWatermarks,
+    diff: result.diff,
+    conflicts: result.conflicts,
+    blockingReasons: result.blockingReasons,
+    actionAuthorityBindings: result.actionAuthorityBindings,
+  };
+}
+
+function projectDryRun(result: NeutralDryRunAttestation): HomeArtifactReviewDryRun {
+  return {
+    status: result.status,
+    resultId: result.resultId,
+    inputIdentity: result.inputIdentity,
+    compileAttestationId: result.compileAttestationId,
+    compileInputIdentity: result.compileInputIdentity,
+    compiler: result.compiler,
+    checkedWatermarks: result.checkedWatermarks,
+    diff: result.diff,
+    conflicts: result.conflicts,
+    actionAuthorityBindings: result.actionAuthorityBindings,
+    writesPerformed: false,
+    summary: result.summary,
+  };
+}
+
+function isDryRunBoundToCompile(
+  dryRun: NeutralDryRunAttestation,
+  compile: ArtifactCompileAttestation,
+): boolean {
+  return sameArtifactRef(dryRun.artifact, compile.artifact)
+    && dryRun.compileAttestationId === compile.resultId
+    && dryRun.compileInputIdentity === compile.inputIdentity
+    && dryRun.evidenceAttestationId === compile.evidenceAttestationId
+    && dryRun.evidenceInputIdentity === compile.evidenceInputIdentity
+    && dryRun.riskAssessmentId === compile.riskAssessmentId
+    && dryRun.riskInputIdentity === compile.riskInputIdentity
+    && dryRun.authorityAssessmentId === compile.authorityAssessmentId
+    && dryRun.authorityInputIdentity === compile.authorityInputIdentity
+    && dryRun.worldCutIdentity === compile.worldCutIdentity
+    && dryRun.foreignCatalogIdentity === compile.foreignCatalogIdentity
+    && JSON.stringify(dryRun.compiler) === JSON.stringify(compile.compiler)
+    && JSON.stringify(dryRun.checkedWatermarks) === JSON.stringify(compile.usedWatermarks)
+    && JSON.stringify(dryRun.actionAuthorityBindings) === JSON.stringify(compile.actionAuthorityBindings)
+    && JSON.stringify(dryRun.diff) === JSON.stringify(compile.diff)
+    && JSON.stringify(dryRun.conflicts) === JSON.stringify(compile.conflicts);
+}
+
+function sameArtifactRef(left: ArtifactRef, right: ArtifactRef): boolean {
+  return left.artifactId === right.artifactId
+    && left.revision === right.revision
+    && left.contentHash === right.contentHash;
+}
+
+function freezeDeep<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const child of Object.values(value as Record<string, unknown>)) freezeDeep(child);
+  return value;
 }
