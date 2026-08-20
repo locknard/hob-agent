@@ -139,6 +139,7 @@ interface CatalogRule {
 interface CurrentCatalog {
   readonly bridgeId: string;
   readonly epochId: string;
+  readonly lastSeq: number;
   readonly rules: readonly CatalogRule[];
   readonly identity: string;
 }
@@ -244,28 +245,24 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
     const existing = this.readExisting(requestedRef, capabilityIds);
     if (existing === undefined) return unavailablePort(requestedRef, capabilityIds);
 
-    const currentFindingsByBridge = catalogs.map((catalog) => ({
-      bridgeId: catalog.bridgeId,
-      findings: deduplicateFindings(catalog.rules.flatMap((rule) => {
-        if (!hasTextOverlap(rule.name, approved)) return [];
-        let reference: string;
-        try {
-          reference = computeConflictInputIdentity({
-            kind: "foreign-rule-reference",
-            bridgeId: catalog.bridgeId,
-            ruleRef: rule.ruleRef,
-          });
-        } catch {
-          return [];
-        }
-        return [{
+    let currentFindingsByBridge: readonly { readonly bridgeId: string; readonly findings: readonly ArtifactRiskConflictFinding[] }[];
+    try {
+      currentFindingsByBridge = catalogs.map((catalog) => ({
+        bridgeId: catalog.bridgeId,
+        findings: catalog.rules.length === 0 ? [] : [{
           kind: "foreign_rule" as const,
           severity: "warning" as const,
           reason: "possible_overlap" as const,
-          reference,
-        }];
-      })),
-    }));
+          reference: computeConflictInputIdentity({
+            kind: "foreign-catalog-reference",
+            bridgeId: catalog.bridgeId,
+            catalogIdentity: catalog.identity,
+          }),
+        }],
+      }));
+    } catch {
+      return unavailablePort(requestedRef, capabilityIds);
+    }
     const currentFindings = currentFindingsByBridge.flatMap(({ findings }) => findings);
 
     const findings = deduplicateFindings([...existing.findings, ...currentFindings]);
@@ -591,7 +588,7 @@ function normalizeCurrentCatalogs(
     if (relevant.has(candidate.bridgeId)) return undefined;
     const bridge = cut.bridges.find((item) => item.bridgeId === candidate.bridgeId);
     if (bridge === undefined) return undefined;
-    const normalized = normalizeCurrentCatalog(candidate, bridge.watermark.epochId);
+    const normalized = normalizeCurrentCatalog(candidate, bridge.watermark.epochId, bridge.watermark.lastSeq);
     if (normalized === undefined) return undefined;
     relevant.set(candidate.bridgeId, normalized);
   }
@@ -599,14 +596,22 @@ function normalizeCurrentCatalogs(
   return [...relevant.values()].sort((left, right) => compareCodePoints(left.bridgeId, right.bridgeId));
 }
 
-function normalizeCurrentCatalog(value: Record<string, unknown>, expectedEpochId: string): CurrentCatalog | undefined {
-  if (!hasExactKeys(value, ["bridgeId", "status", "epochId", "rules"])
+function normalizeCurrentCatalog(
+  value: Record<string, unknown>,
+  expectedEpochId: string,
+  expectedLastSeq: number,
+): CurrentCatalog | undefined {
+  if (!hasExactKeys(value, ["bridgeId", "status", "epochId", "lastSeq", "rules"])
     || typeof value.bridgeId !== "string"
     || !boundedNeutralId(value.bridgeId)
     || value.status !== "available"
     || typeof value.epochId !== "string"
     || !boundedNeutralId(value.epochId)
     || value.epochId !== expectedEpochId
+    || typeof value.lastSeq !== "number"
+    || !Number.isSafeInteger(value.lastSeq)
+    || value.lastSeq <= 0
+    || value.lastSeq !== expectedLastSeq
     || !Array.isArray(value.rules)
     || value.rules.length > 256) {
     return undefined;
@@ -623,6 +628,7 @@ function normalizeCurrentCatalog(value: Record<string, unknown>, expectedEpochId
     identity = computeConflictInputIdentity({
       bridgeId: value.bridgeId,
       epochId: value.epochId,
+      lastSeq: value.lastSeq,
       ruleMetadataChunks: hashRuleMetadata(value.bridgeId, rules),
     });
   } catch {
@@ -631,6 +637,7 @@ function normalizeCurrentCatalog(value: Record<string, unknown>, expectedEpochId
   return {
     bridgeId: value.bridgeId,
     epochId: value.epochId,
+    lastSeq: value.lastSeq,
     rules: Object.freeze(rules.map((rule) => Object.freeze(rule))),
     identity,
   };

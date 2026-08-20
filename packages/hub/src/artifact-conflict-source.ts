@@ -324,18 +324,22 @@ function translateProposalSource(
     if (seen.has(match.identity)) throw new Error("approved Proposal conflict match is duplicated");
     seen.add(match.identity);
     matches.push({ identity: match.identity, relation: match.relation });
+    const reference = computeConflictInputIdentity({
+      kind: "foreign-rule-reference",
+      ruleRef: match.identity,
+    });
     findings.push(match.relation === "possible_overlap"
       ? {
           kind: "foreign_rule",
           severity: "warning",
           reason: "possible_overlap",
-          reference: match.identity,
+          reference,
         }
       : {
           kind: "foreign_rule",
           severity: "blocking",
           reason: match.relation === "duplicate" ? "duplicate" : "foreign_rule",
-          reference: match.identity,
+          reference,
         });
   }
   return {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ArtifactRegistryEntry } from "./artifact-registry.js";
+import { computeConflictInputIdentity } from "./artifact-assessments.js";
 import type {
   ArtifactRiskConflictResult,
 } from "./artifact-risk-producer.js";
@@ -170,6 +171,10 @@ function assertSourceIdentity(result: ArtifactRiskConflictResult): void {
   assert.match(result.sourceIdentity, /^sha256:[0-9a-f]{64}$/);
 }
 
+function foreignRuleReference(ruleRef: string): string {
+  return computeConflictInputIdentity({ kind: "foreign-rule-reference", ruleRef });
+}
+
 test("reads the exact draft and approved proposal, then maps closed proposal conflicts", () => {
   const candidate = artifact();
   const environment = makeSource(candidate, [], [
@@ -186,15 +191,16 @@ test("reads the exact draft and approved proposal, then maps closed proposal con
   assert.deepEqual(withoutSourceIdentity(result), {
     status: "duplicate",
     findings: [
-      { kind: "foreign_rule", severity: "blocking", reason: "duplicate", reference: "opaque-duplicate" },
-      { kind: "foreign_rule", severity: "blocking", reason: "foreign_rule", reference: "opaque-conflict" },
-      { kind: "foreign_rule", severity: "warning", reason: "possible_overlap", reference: "opaque-overlap" },
+      { kind: "foreign_rule", severity: "blocking", reason: "duplicate", reference: foreignRuleReference("opaque-duplicate") },
+      { kind: "foreign_rule", severity: "blocking", reason: "foreign_rule", reference: foreignRuleReference("opaque-conflict") },
+      { kind: "foreign_rule", severity: "warning", reason: "possible_overlap", reference: foreignRuleReference("opaque-overlap") },
     ],
   });
   assertSourceIdentity(result);
   assert.deepEqual(environment.proposals.calls, [{ proposalId: "proposal-source", revision: 2 }]);
   assert.deepEqual(environment.registry.listCalls, [{ limit: 200 }]);
   assert.equal(JSON.stringify(result).includes("Conflict source fixture"), false);
+  assert.equal(JSON.stringify(result).includes("opaque-"), false);
 });
 
 test("blocks exact behavior and conflicting target actions, but only warns for shared references", () => {

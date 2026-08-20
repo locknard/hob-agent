@@ -214,7 +214,7 @@ function bridge(
       options.lastSyncCompleteAt ?? capturedAt,
     ),
     devices: options.capabilities === undefined ? [] : [device(bridgeId, options.capabilities)],
-    extensions: { "foreignRules@1": "available" },
+    extensions: { "foreignRules@2": "available" },
     metrics: {
       consistency: state === "ready" ? "ready" : "degraded",
       eventActivity: "active",
@@ -298,8 +298,9 @@ function availableCatalog(
   bridgeId = "bridge-relevant",
   epochId = "epoch-relevant",
   rules: HomeWorldForeignRuleCatalog["rules"] = [],
+  lastSeq = 7,
 ): HomeWorldForeignRuleCatalog {
-  return { bridgeId, status: "available", epochId, rules };
+  return { bridgeId, status: "available", epochId, lastSeq, rules };
 }
 
 class FakeHomeWorld implements ArtifactCurrentConflictHomeWorldPort {
@@ -457,13 +458,13 @@ function makeMultiBridgeSource(options: {
       name: "Turn on kitchen light",
       enabled: true,
       updatedAt: capturedAt,
-    }]),
+    }], options.lastSeqA ?? 7),
     availableCatalog("bridge-b", epochB, [{
       ruleRef: "vendor-rule-b",
       name: "Arriving home turns on light",
       enabled: true,
       updatedAt: capturedAt,
-    }]),
+    }], options.lastSeqB ?? 11),
   ];
   const homeWorld = new FakeHomeWorld(options.snapshots ?? [before, after], catalogs);
   const evidence = evidenceFor(value, [
@@ -527,8 +528,8 @@ test("captures notify-only artifacts for every evidence bridge even with an empt
     evidence,
     snapshots: [before, after],
     catalogs: [
-      availableCatalog("bridge-a", "epoch-a", [{ ruleRef: "ha-notify-a", name: "kitchen light notice" }]),
-      availableCatalog("bridge-b", "epoch-b", [{ ruleRef: "vendor-notify-b", name: "house note" }]),
+      availableCatalog("bridge-a", "epoch-a", [{ ruleRef: "ha-notify-a", name: "kitchen light notice" }], 3),
+      availableCatalog("bridge-b", "epoch-b", [{ ruleRef: "vendor-notify-b", name: "house note" }], 5),
     ],
     existing: new StubExistingConflict(baseResult(), []),
   });
@@ -669,16 +670,16 @@ test("canonicalizes per-bridge checks and aggregate identity across catalog orde
     catalogs: [
       availableCatalog("bridge-b", "epoch-b", [{
         ruleRef: "vendor-rule-b",
-        name: "Arriving home turns on light",
-        enabled: true,
-        updatedAt: capturedAt,
-      }]),
+      name: "Arriving home turns on light",
+      enabled: true,
+      updatedAt: capturedAt,
+    }], 11),
       availableCatalog("bridge-a", "epoch-a", [{
         ruleRef: "ha-rule-a",
-        name: "Turn on kitchen light",
-        enabled: true,
-        updatedAt: capturedAt,
-      }]),
+      name: "Turn on kitchen light",
+      enabled: true,
+      updatedAt: capturedAt,
+    }], 7),
     ],
   });
   const reorderedPort = await captureEnvironment(reordered);
@@ -767,10 +768,65 @@ test("binds evidence attestation and input identities into the composed source i
 test("covers the complete bounded foreign-rule catalog without truncating its identity", async () => {
   const rules = Array.from({ length: 256 }, (_, index) => ({ ruleRef: `rule-${index}` }));
   const environment = makeSource({ catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", rules)] });
-  const result = (await captureEnvironment(environment)).assess(expectedQuery(environment.value));
-  assert.equal(result.status, "none");
-  assert.deepEqual(result.findings, []);
-  assert.match(result.sourceIdentity, /^sha256:[0-9a-f]{64}$/);
+  const port = await captureEnvironment(environment);
+  const result = port.assess(expectedQuery(environment.value));
+  const cut = port.compileCut();
+  assert.equal(result.status, "possible_overlap");
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0]!.kind, "foreign_rule");
+  assert.match(result.findings[0]!.reference!, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(cut);
+  assert.equal(cut.foreignRuleChecks[0]!.findings.length, 1);
+  assert.equal(JSON.stringify(cut).includes("rule-0"), false);
+  assert.equal(JSON.stringify(cut).includes("rule-255"), false);
+
+  const changedRules = [...rules.slice(0, -1), { ruleRef: "rule-255-changed" }];
+  const changed = makeSource({ catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", changedRules)] });
+  const changedCut = (await captureEnvironment(changed)).compileCut();
+  assert.ok(changedCut);
+  assert.notEqual(changedCut.foreignRuleChecks[0]!.catalogIdentity, cut.foreignRuleChecks[0]!.catalogIdentity);
+  assert.notEqual(changedCut.currentConflict.sourceIdentity, cut.currentConflict.sourceIdentity);
+  assert.notEqual(
+    changedCut.currentConflict.result.findings[0]!.reference,
+    cut.currentConflict.result.findings[0]!.reference,
+  );
+});
+
+test("treats every non-empty opaque catalog as a possible overlap instead of none", async () => {
+  const environment = makeSource({
+    catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", [{ ruleRef: "opaque-rule-without-structure" }])],
+  });
+  const port = await captureEnvironment(environment);
+  const result = port.assess(expectedQuery(environment.value));
+  const cut = port.compileCut();
+
+  assert.equal(result.status, "possible_overlap");
+  assert.equal(result.findings.length, 1);
+  assert.deepEqual(result.findings[0], {
+    kind: "foreign_rule",
+    severity: "warning",
+    reason: "possible_overlap",
+    reference: result.findings[0]!.reference,
+  });
+  assert.match(result.findings[0]!.reference!, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(cut);
+  assert.equal(cut.foreignRuleChecks[0]!.findings.length, 1);
+  const encoded = JSON.stringify(result);
+  assert.equal(encoded.includes("opaque-rule-without-structure"), false);
+});
+
+test("uses one catalog-level opaque finding beyond the finding budget", async () => {
+  const rules = Array.from({ length: 21 }, (_, index) => ({ ruleRef: `opaque-budget-rule-${index}` }));
+  const environment = makeSource({ catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", rules)] });
+  const port = await captureEnvironment(environment);
+  const result = port.assess(expectedQuery(environment.value));
+
+  assert.equal(result.status, "possible_overlap");
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0]!.kind, "foreign_rule");
+  assert.equal(result.findings[0]!.reason, "possible_overlap");
+  assert.match(result.findings[0]!.reference!, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(port.compileCut());
 });
 
 test("adds deterministic opaque overlap findings without returning rule metadata", async () => {
@@ -830,6 +886,7 @@ test("fails closed for unavailable, incomplete, epoch-mismatched, and cut-changi
     { homeWorld: new FakeHomeWorld([stableBefore, stableBefore], [{ bridgeId: "bridge-relevant", status: "unavailable", rules: [] }]) },
     { homeWorld: new FakeHomeWorld([stableBefore, stableBefore], [{ bridgeId: "bridge-relevant", status: "available", epochId: "epoch-relevant", rules: [] }, { bridgeId: "bridge-relevant", status: "available", epochId: "epoch-relevant", rules: [] }]) },
     { homeWorld: new FakeHomeWorld([stableBefore, stableBefore], [availableCatalog("bridge-relevant", "wrong-epoch")]) },
+    { homeWorld: new FakeHomeWorld([stableBefore, stableBefore], [availableCatalog("bridge-relevant", "epoch-relevant", [], 8)]) },
     { homeWorld: new FakeHomeWorld([
       stableBefore,
       snapshot([bridge("bridge-relevant", { lastSeq: 8, capabilities: [target, trigger] })]),
