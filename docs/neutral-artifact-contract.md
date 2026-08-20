@@ -532,6 +532,24 @@ compile 与 dry-run。异步 capture/compiler 期间不持有 SQLite transaction
 dry-run 写入失败时保留 compile row，后续显式 command 以确定性幂等 key 补写 dry-run。此阶段不
 增加 outbox、启动自动恢复、生产 mount、bridge control、credential resolve、ticket 或 executor。
 
+### 5.7 Hub → Inbox 只读审查投影
+
+Inbox 不直接 import compiler/Registry contract，也不接收 ArtifactRevision、world cut、plan、
+native binding、provider error 或任意 payload JSON。`HomeArtifactService` 负责把 Registry 中已经
+严格重验的 latest compile/dry-run row 投影成独立的 `ArtifactReviewSnapshot`，并只按 exact
+`proposalId + proposalRevision` 查询；没有精确匹配时返回 `not_run`，不能用另一个 proposal、
+旧 revision 或 latest 全局结果替代。
+
+该 projection 只包含 artifact ref/hash、compile/dry-run status 与 identities、compiler metadata、
+semantic watermarks、closed blocking reasons、neutral diff/conflict、opaque authority candidate 和
+固定的 `writesPerformed:false`。家庭可读摘要与技术字段分层：主视图说明“通过/发现问题/资料
+不足/尚未运行”和“没有改变家庭”；完整 identity、水位、action order 与 candidate 仅在技术
+诊断中。`unavailable` 不能渲染成 no change，`none` conflict 不能表述为绝对安全。
+
+这个 read facade 不提供 compile、simulate、apply、install、enable、execute 或 ticket 方法；
+Control Center 与 Proposal Inbox 也不新增对应 POST route/button。M3d 未来使用独立 ticket/read
+section，不修改既有 M3c attestation status，也绝不能从页面展示的 diff 反向生成 authority。
+
 ## 6. Compiler input/output（M3c seam）
 
 M3c compiler 接受 typed、只读的 neutral input；它不接受 bridge adapter 实例、生态 payload、
