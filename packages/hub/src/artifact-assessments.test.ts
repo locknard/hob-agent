@@ -232,6 +232,20 @@ test("requires an explicit, bounded authority capability scope", () => {
   }, { hwCapabilityIds: ["hwc-1", "hwc-1"] }));
 });
 
+test("allows an explicit empty authority scope for notify-only artifacts", () => {
+  const result = createArtifactAuthorityAssessment({
+    ...authorityBindings,
+    artifact,
+    assessmentId: "authority-empty-scope",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    candidates: [],
+    checkedWatermarks: [watermark],
+  }, { hwCapabilityIds: [] });
+
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(result.checkedWatermarks, [watermark]);
+});
+
 test("rejects duplicate authority candidates and oversized assessment input", () => {
   assert.throws(() => createArtifactAuthorityAssessment({
     ...authorityBindings,

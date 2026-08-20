@@ -225,7 +225,9 @@ const authorityInputSchema = z.object({
 }).strict();
 
 const authorityScopeSchema = z.object({
-  hwCapabilityIds: z.array(boundedId).min(1).max(MAX_AUTHORITY_CANDIDATES),
+  // An explicit empty scope is valid for notify-only artifacts. The field
+  // remains required so callers cannot omit authority scope accidentally.
+  hwCapabilityIds: z.array(boundedId).max(MAX_AUTHORITY_CANDIDATES),
 }).strict();
 
 const authoritySchema = z.preprocess(preflightForSchema, z.object({
