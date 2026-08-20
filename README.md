@@ -192,6 +192,14 @@ bounded read-only `get_home_evidence` tool, plus the review-only
 Inbox. Device actions, configuration writes, and proposal application remain
 deliberately unavailable.
 
+The Hub also contains the first non-applying neutral Artifact foundation:
+strict immutable ECA revisions, stable canonical hashes, append-only lifecycle
+and audit records, and separately versioned evidence, risk, and authority
+assessments. Production mounts only bounded read queries and metadata-only
+diagnostics. Proposal-to-Artifact production, compilation, simulation,
+approval tickets, and execution remain unavailable; an approved proposal is
+not an installed automation.
+
 Long-running sessions use the official DSH compaction engine with its one
 supported summarizer hook replaced by a household checkpoint template; the
 project does not implement a second compaction runtime. See

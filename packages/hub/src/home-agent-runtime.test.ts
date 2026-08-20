@@ -43,10 +43,11 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 5), [
+  assert.deepEqual(pluginOrder.slice(0, 6), [
     "HomeWorldService",
     "HomeObservationAuditService",
     "HomeProposalService",
+    "HomeArtifactService",
     "HomeRetentionService",
     "DshHomeAgentComposition",
   ]);
@@ -54,6 +55,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeWorld.name, "homeWorld");
   assert.equal(runtime.context.homeProposals.name, "homeProposals");
   assert.equal(runtime.context.homeObservationAudit.name, "homeObservationAudit");
+  assert.equal(runtime.context.homeArtifacts.capabilities().canExecute, false);
   assert.equal(runtime.context.homeAdvice.name, "homeAdvice");
   assert.equal(runtime.context.homeInbox.name, "homeInbox");
   assert.equal(runtime.context.homeInboxHttp, undefined);
@@ -66,6 +68,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeProposals, undefined);
   assert.equal(runtime.context.homeObservationAudit, undefined);
+  assert.equal(runtime.context.homeArtifacts, undefined);
   assert.equal(runtime.context.homeAdvice, undefined);
   assert.equal(runtime.context.homeInbox, undefined);
   assert.equal(runtime.context.homeInboxHttp, undefined);
@@ -114,6 +117,7 @@ test("stops the already-mounted HomeWorld when DSH startup fails", async () => {
   assert.equal(runtime.status, "stopped");
   assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeProposals, undefined);
+  assert.equal(runtime.context.homeArtifacts, undefined);
   assert.equal(runtime.context.homeInbox, undefined);
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);

@@ -90,12 +90,27 @@ export interface ControlCenterProposalSource {
   qualitySummary(): InboxProposalQualitySummary;
 }
 
+export interface ControlCenterArtifactSnapshot {
+  readonly status: "ready" | "unavailable";
+  readonly schemaVersion?: "1";
+  readonly lifecycleStates: readonly ("draft" | "superseded")[];
+  readonly hasRecords: boolean;
+  readonly canCompile: false;
+  readonly canSimulate: false;
+  readonly canExecute: false;
+}
+
+export interface ControlCenterArtifactSource {
+  diagnostics(): ControlCenterArtifactSnapshot;
+}
+
 export interface ControlCenterSources {
   readonly world?: ControlCenterWorldSource;
   readonly retention?: ControlCenterRetentionSource;
   readonly agent?: ControlCenterAgentSource;
   readonly observation?: ControlCenterObservationSource;
   readonly proposals?: ControlCenterProposalSource;
+  readonly artifacts?: ControlCenterArtifactSource;
 }
 
 export interface ControlCenterBridgeStatus {
@@ -149,7 +164,7 @@ export interface ControlCenterInboxStatus {
 }
 
 export interface ControlCenterSystemCheck {
-  readonly key: "bridges" | "model" | "homeMap" | "agent" | "observation" | "inbox" | "retention";
+  readonly key: "bridges" | "model" | "homeMap" | "agent" | "observation" | "inbox" | "retention" | "artifacts";
   readonly status: ControlCenterCardStatus;
 }
 
@@ -163,6 +178,7 @@ export interface ControlCenterSnapshot {
   readonly observation: ControlCenterObservationStatus;
   readonly inbox: ControlCenterInboxStatus;
   readonly retention: ControlCenterRetentionSnapshot;
+  readonly artifacts: ControlCenterArtifactSnapshot;
   readonly systemChecks: readonly ControlCenterSystemCheck[];
 }
 
@@ -181,6 +197,7 @@ export function projectControlCenter(
   const observation = projectObservation(sources.observation);
   const inbox = projectInbox(sources.proposals);
   const retention = projectRetention(sources.retention);
+  const artifacts = projectArtifacts(sources.artifacts);
   const systemChecks: ControlCenterSystemCheck[] = [
     { key: "bridges", status: bridgeCheckStatus(bridges) },
     { key: "model", status: model.status === "configured" ? "ready" : "unavailable" },
@@ -190,6 +207,7 @@ export function projectControlCenter(
     { key: "inbox", status: inbox.status },
   ];
   if (sources.retention !== undefined) systemChecks.push({ key: "retention", status: retention.status });
+  if (sources.artifacts !== undefined) systemChecks.push({ key: "artifacts", status: artifacts.status });
   return {
     generatedAt,
     status: systemStatus(systemChecks),
@@ -200,6 +218,7 @@ export function projectControlCenter(
     observation,
     inbox,
     retention,
+    artifacts,
     systemChecks,
   };
 }
@@ -213,6 +232,7 @@ export function renderControlCenter(snapshot: ControlCenterSnapshot): string {
     </li>`).join("");
   const checks = snapshot.systemChecks.map((check) => `<li><span>${escapeHtml(systemCheckLabel(check.key))}</span><span class="status-chip" data-status="${escapeHtml(check.status)}">${escapeHtml(statusLabel(check.status))}</span></li>`).join("");
   const retentionDetails = renderRetentionDetails(snapshot.retention);
+  const artifactDetails = renderArtifactDetails(snapshot.artifacts);
   const connectionsStatus = bridgeCheckStatus(snapshot.bridges);
   const connectionsDescription = snapshot.bridges.length === 0
     ? "No live home connection is available"
@@ -251,7 +271,7 @@ export function renderControlCenter(snapshot: ControlCenterSnapshot): string {
       ${serviceRow("Home Agent", snapshot.agent.status, agentDescription, snapshot.agent.status === "unavailable" ? "Start the full home runtime after connections and model setup are ready." : "The Agent can suggest review items but cannot apply household changes.")}
       ${serviceRow("Observation", observationCardStatus(snapshot.observation.status), observationDescription, "Observation is bounded, governed, and review-only.", observationStatusLabel(snapshot.observation.status))}
     </ul></section>
-    <details class="control-diagnostics"><summary>Technical diagnostics</summary><div class="control-diagnostics-body">${modelTechnical}<h2>System checks</h2><ul class="control-check-list">${checks}</ul>${retentionDetails}<div class="section-heading"><div><h2>Bridge instances</h2></div><p>${snapshot.bridges.length} configured in the live world</p></div><ul class="control-list">${bridgeItems}</ul></div></details>
+    <details class="control-diagnostics"><summary>Technical diagnostics</summary><div class="control-diagnostics-body">${modelTechnical}<h2>System checks</h2><ul class="control-check-list">${checks}</ul>${artifactDetails}${retentionDetails}<div class="section-heading"><div><h2>Bridge instances</h2></div><p>${snapshot.bridges.length} configured in the live world</p></div><ul class="control-list">${bridgeItems}</ul></div></details>
     <section class="control-section control-note" aria-label="Control center boundary"><h2>You remain in control</h2><p>Everything above is a report. This page cannot edit setup, call a model, approve an idea, or control a device. Any future household change will require its own exact review.</p></section>
   </main>`;
 }
@@ -369,6 +389,43 @@ function unavailableRetention(): ControlCenterRetentionSnapshot {
   };
 }
 
+function projectArtifacts(source: ControlCenterArtifactSource | undefined): ControlCenterArtifactSnapshot {
+  if (source === undefined) return unavailableArtifacts();
+  try {
+    const diagnostics = source.diagnostics();
+    if (diagnostics.status !== "ready"
+      || diagnostics.schemaVersion !== "1"
+      || diagnostics.canCompile !== false
+      || diagnostics.canSimulate !== false
+      || diagnostics.canExecute !== false
+      || diagnostics.lifecycleStates.some((state) => state !== "draft" && state !== "superseded")) {
+      return unavailableArtifacts();
+    }
+    return {
+      status: "ready",
+      schemaVersion: "1",
+      lifecycleStates: [...diagnostics.lifecycleStates],
+      hasRecords: diagnostics.hasRecords === true,
+      canCompile: false,
+      canSimulate: false,
+      canExecute: false,
+    };
+  } catch {
+    return unavailableArtifacts();
+  }
+}
+
+function unavailableArtifacts(): ControlCenterArtifactSnapshot {
+  return {
+    status: "unavailable",
+    lifecycleStates: [],
+    hasRecords: false,
+    canCompile: false,
+    canSimulate: false,
+    canExecute: false,
+  };
+}
+
 function safeCapacity(value: ControlCenterRetentionCapacity): ControlCenterRetentionCapacity {
   return {
     usedBytes: safeCount(value.usedBytes),
@@ -469,6 +526,12 @@ function renderRetentionDetails(retention: ControlCenterRetentionSnapshot): stri
   return `<section class="control-retention" aria-labelledby="control-retention-heading"><div class="section-heading"><div><h2 id="control-retention-heading">Evidence retention</h2><p>Read-only journal coverage and capacity; retention is never started here.</p></div><span class="status-chip" data-status="${escapeHtml(retention.status)}">${escapeHtml(statusLabel(retention.status))}</span></div><p class="control-retention-capacity">Aggregate capacity: ${escapeHtml(aggregate)}</p>${bridges}</section>`;
 }
 
+function renderArtifactDetails(artifacts: ControlCenterArtifactSnapshot): string {
+  if (artifacts.status === "unavailable") return "";
+  const records = artifacts.hasRecords ? "registry contains immutable records" : "registry is empty";
+  return `<section class="control-retention" aria-labelledby="control-artifacts-heading"><div class="section-heading"><div><h2 id="control-artifacts-heading">Automation artifacts</h2><p>Read-only neutral registry; no behavior can be installed or run from this surface.</p></div><span class="status-chip" data-status="ready">Ready</span></div><p class="control-technical-line"><strong>Artifact boundary</strong><span>schema ${escapeHtml(artifacts.schemaVersion ?? "unavailable")} · ${escapeHtml(records)} · compile unavailable · simulation unavailable · execution unavailable</span></p></section>`;
+}
+
 function formatCount(value: number): string {
   return value.toLocaleString("en-US");
 }
@@ -533,6 +596,7 @@ function systemCheckLabel(key: ControlCenterSystemCheck["key"]): string {
     case "observation": return "Observation scheduler";
     case "inbox": return "Review Inbox";
     case "retention": return "Evidence retention";
+    case "artifacts": return "Automation artifact registry";
   }
 }
 

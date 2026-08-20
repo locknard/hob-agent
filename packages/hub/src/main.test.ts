@@ -36,6 +36,7 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   }]);
   assert.equal(options.runtime.homeWorld.catalog.hasAdapter("home-assistant"), true);
   assert.equal(options.runtime.homeProposals.path, "/tmp/hob-agent-main-test/proposals.sqlite");
+  assert.equal(options.runtime.homeArtifacts.path, "/tmp/hob-agent-main-test/artifacts.sqlite");
   assert.equal(options.runtime.homeObservationAudit.path, "/tmp/hob-agent-main-test/observation-audit.sqlite");
   assert.equal(options.runtime.homeAdvice.path, "/tmp/hob-agent-main-test/home-advice.sqlite");
   assert.deepEqual(options.runtime.agent, {

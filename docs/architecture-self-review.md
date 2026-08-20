@@ -260,6 +260,29 @@ The immediate next step is the bounded real-household pilot described in
 The pilot's review outcomes and observed run metrics should decide which gap
 below becomes product work next.
 
+### Implemented foundation — non-applying Artifact Registry
+
+The Hub now has a strict neutral ECA Artifact revision contract, canonical
+content hashing, immutable SQLite revisions, append-only lifecycle/audit rows,
+and separately versioned evidence, risk, and authority assessments. Dynamic
+watermarks, policy decisions, and authority candidates never mutate the stable
+Artifact bytes. Reads re-validate persisted rows and exact artifact references;
+resource limits, idempotency, restart recovery, transaction rollback, corrupt
+records, and private SQLite sidecars fail closed.
+
+The production Cordis composition mounts only a read service. It exposes
+bounded revision, audit, and assessment queries plus metadata-only diagnostics.
+It deliberately exposes no create, assessment-recording, compile, simulation,
+approval, bridge, credential, or execution method. The Control Center reports
+that the Registry is available while explicitly reporting compilation,
+simulation, and execution as unavailable.
+
+This does not complete M3b. The next boundary must be a Hub-owned producer that
+accepts an exact reviewed Proposal revision, independently validates its status
+and evidence provenance, creates the closed Artifact shape, and registers its
+durable retention references. M3c compiler and historical dry-run remain later,
+pure-read work; device writes remain unavailable.
+
 ### Implemented foundation — canonical ingest-journal retention
 
 The neutral ingest journal has a deterministic logical hard quota and fails

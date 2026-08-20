@@ -331,3 +331,34 @@ test("reports a bridge with no retention audit as Not run yet", () => {
   assert.equal(snapshot.retention.status, "ready");
   assert.match(html, /Not run yet/);
 });
+
+test("keeps the inert artifact registry in technical diagnostics without exposing content or actions", () => {
+  const snapshot = projectControlCenter({
+    world: { snapshot: () => worldSnapshot() },
+    artifacts: {
+      diagnostics: () => ({
+        status: "ready" as const,
+        schemaVersion: "1" as const,
+        lifecycleStates: ["draft", "superseded"] as const,
+        hasRecords: true,
+        canCompile: false as const,
+        canSimulate: false as const,
+        canExecute: false as const,
+      }),
+    },
+  });
+
+  assert.equal(snapshot.artifacts.status, "ready");
+  assert.equal(snapshot.artifacts.hasRecords, true);
+  assert.equal(snapshot.artifacts.canExecute, false);
+  assert.equal(snapshot.systemChecks.find((check) => check.key === "artifacts")?.status, "ready");
+
+  const html = renderControlCenter(snapshot);
+  assert.match(html, /Automation artifacts/);
+  assert.match(html, /schema 1/);
+  assert.match(html, /compile unavailable/);
+  assert.match(html, /simulation unavailable/);
+  assert.match(html, /execution unavailable/);
+  assert.equal(html.includes("Private artifact title"), false);
+  assert.equal(html.includes("Apply"), false);
+});

@@ -9,6 +9,10 @@ import {
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
 import { HomeProposalService } from "./home-proposal-service.js";
+import {
+  HomeArtifactService,
+  type HomeArtifactServiceOptions,
+} from "./home-artifact-service.js";
 import { HomeRetentionService } from "./home-retention-service.js";
 import {
   HomeObservationAuditService,
@@ -36,6 +40,7 @@ import {
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
   readonly homeProposals?: SqliteProposalStoreOptions;
+  readonly homeArtifacts?: HomeArtifactServiceOptions;
   readonly homeObservationAudit?: HomeObservationAuditServiceOptions;
   readonly homeAdvice?: HomeAdviceServiceOptions;
   readonly inboxHttp?: ProposalInboxHttpOptions;
@@ -78,6 +83,7 @@ export class HomeAgentRuntime {
         this.options.homeObservationAudit ?? { path: ":memory:" },
       );
       await this.context.plugin(HomeProposalService, this.options.homeProposals ?? { path: ":memory:" });
+      await this.context.plugin(HomeArtifactService, this.options.homeArtifacts ?? { path: ":memory:" });
       await this.context.plugin(HomeRetentionService);
       await mountDshHomeAgent(this.context, this.options.agent);
       await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });

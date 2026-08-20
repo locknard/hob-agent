@@ -279,3 +279,30 @@ test("passes the Hub retention metadata seam into the read-only Control Center",
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
+
+test("passes only artifact capability diagnostics into the Control Center", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  ctx.provide("homeArtifacts", {
+    diagnostics: () => ({
+      status: "ready" as const,
+      schemaVersion: "1" as const,
+      lifecycleStates: ["draft", "superseded"] as const,
+      hasRecords: true,
+      canCompile: false as const,
+      canSimulate: false as const,
+      canExecute: false as const,
+      privateTitle: "Private artifact title",
+    }),
+  });
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const html = ctx.homeInbox.renderControlCenter();
+  assert.match(html, /Automation artifacts/);
+  assert.match(html, /execution unavailable/);
+  assert.equal(html.includes("Private artifact title"), false);
+  assert.equal("apply" in ctx.homeInbox, false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});

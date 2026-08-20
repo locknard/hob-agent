@@ -129,6 +129,7 @@ test("reads the standalone Inbox slice without bridge or model configuration", (
     HOB_INBOX_PORT: "9876",
   });
   assert.equal(config.proposalPath, "/tmp/hob-agent-inbox-test/proposals.sqlite");
+  assert.equal(config.artifactPath, "/tmp/hob-agent-inbox-test/artifacts.sqlite");
   assert.equal(config.observationAuditPath, "/tmp/hob-agent-inbox-test/observation-audit.sqlite");
   assert.equal(config.advicePath, "/tmp/hob-agent-inbox-test/home-advice.sqlite");
   assert.equal(config.inboxHttp.port, 9876);

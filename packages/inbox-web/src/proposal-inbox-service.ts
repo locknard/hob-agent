@@ -22,6 +22,7 @@ import {
   projectControlCenter,
   renderControlCenter as renderControlCenterPage,
   type ControlCenterAgentSource,
+  type ControlCenterArtifactSource,
   type ControlCenterObservationSource,
   type ControlCenterProposalSource,
   type ControlCenterRetentionSource,
@@ -51,6 +52,7 @@ export class ProposalInboxService extends Service {
     readonly agent?: ControlCenterAgentSource;
     readonly observation?: ControlCenterObservationSource;
     readonly proposals?: ControlCenterProposalSource;
+    readonly artifacts?: ControlCenterArtifactSource;
   };
   private readonly observationAudit?: {
     list(query: { limit: number }): readonly InboxObservationAttempt[];
@@ -82,6 +84,7 @@ export class ProposalInboxService extends Service {
       agent: ctx.get("homeAgent") as unknown as ControlCenterAgentSource | undefined,
       ...(this.observation === undefined ? {} : { observation: this.observation }),
       proposals: this.proposalQuality,
+      artifacts: ctx.get("homeArtifacts") as unknown as ControlCenterArtifactSource | undefined,
     };
     this.observationAudit = ctx.get("homeObservationAudit") as unknown as {
       list(query: { limit: number }): readonly InboxObservationAttempt[];

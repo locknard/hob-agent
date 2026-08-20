@@ -46,6 +46,7 @@ export interface HomeHubLaunchConfig {
   readonly registryPath: string;
   readonly worldModelPath: string;
   readonly proposalPath: string;
+  readonly artifactPath: string;
   readonly observationAuditPath: string;
   readonly advicePath: string;
   readonly sessionPath: string;
@@ -84,6 +85,7 @@ export interface HomeWorldLaunchConfig {
 
 export interface HomeInboxLaunchConfig {
   readonly proposalPath: string;
+  readonly artifactPath: string;
   readonly observationAuditPath: string;
   readonly advicePath: string;
   readonly inboxHttp: NonNullable<HomeHubLaunchConfig["inboxHttp"]>;
@@ -98,6 +100,7 @@ export function readHomeInboxLaunchConfig(environment: LaunchEnvironment): HomeI
   }
   return {
     proposalPath: join(dataDirectory, "proposals.sqlite"),
+    artifactPath: join(dataDirectory, "artifacts.sqlite"),
     observationAuditPath: join(dataDirectory, "observation-audit.sqlite"),
     advicePath: join(dataDirectory, "home-advice.sqlite"),
     inboxHttp,
@@ -182,6 +185,7 @@ export function readHomeHubLaunchConfig(
   return {
     ...world,
     proposalPath: join(world.dataDirectory, "proposals.sqlite"),
+    artifactPath: join(world.dataDirectory, "artifacts.sqlite"),
     observationAuditPath: join(world.dataDirectory, "observation-audit.sqlite"),
     advicePath: join(world.dataDirectory, "home-advice.sqlite"),
     sessionPath: join(world.dataDirectory, "dsh-sessions.sqlite"),

@@ -13,6 +13,7 @@ test("mounts the persisted Inbox without HomeWorld or DSH", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-standalone-inbox-"));
   const runtime = createHomeInboxRuntime({
     homeProposals: { path: join(directory, "proposals.sqlite") },
+    homeArtifacts: { path: join(directory, "artifacts.sqlite") },
     homeObservationAudit: { path: join(directory, "observation-audit.sqlite") },
     homeAdvice: { path: join(directory, "home-advice.sqlite") },
     inboxHttp: { port: 0, authenticate: () => true },
@@ -21,6 +22,7 @@ test("mounts the persisted Inbox without HomeWorld or DSH", async () => {
     await runtime.start();
     assert.equal(runtime.status, "running");
     assert.notEqual(runtime.context.homeProposals, undefined);
+    assert.notEqual(runtime.context.homeArtifacts, undefined);
     assert.notEqual(runtime.context.homeInbox, undefined);
     assert.notEqual(runtime.context.homeObservationAudit, undefined);
     assert.notEqual(runtime.context.homeAdvice, undefined);
@@ -51,6 +53,8 @@ test("mounts the persisted Inbox without HomeWorld or DSH", async () => {
     const response = await fetch(`${runtime.context.homeInboxHttp.origin}/proposals`);
     assert.equal(response.status, 200);
     assert.match(await response.text(), /Review ideas for your home/);
+    const controlCenter = await fetch(`${runtime.context.homeInboxHttp.origin}/`);
+    assert.match(await controlCenter.text(), /Automation artifacts/);
   } finally {
     await runtime.stop();
     await rm(directory, { recursive: true, force: true });
@@ -64,6 +68,7 @@ test("builds a standalone process slice without bridge or model options", () => 
     HOB_INBOX_AUTH_TOKEN: "i".repeat(32),
   });
   assert.equal(options.homeProposals.path, "/tmp/hob-standalone-inbox-config/proposals.sqlite");
+  assert.equal(options.homeArtifacts.path, "/tmp/hob-standalone-inbox-config/artifacts.sqlite");
   assert.equal(options.homeObservationAudit.path, "/tmp/hob-standalone-inbox-config/observation-audit.sqlite");
   assert.equal(options.homeAdvice.path, "/tmp/hob-standalone-inbox-config/home-advice.sqlite");
   assert.equal(options.inboxHttp.port, 8_787);
