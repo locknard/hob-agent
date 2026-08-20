@@ -27,6 +27,7 @@ interface MediaCatalogSearchInput {
   readonly query: string;
   readonly limit?: number;
   readonly kinds?: readonly MediaKind[];
+  readonly signal?: AbortSignal;
 }
 
 interface MediaCatalogSearchResult {
@@ -235,6 +236,38 @@ test("uses the reviewed Music Assistant-compatible media kinds when no filter is
     "episode",
     "genre",
   ]);
+});
+
+test("does not issue a mediaRef from a provider result that arrives after cancellation", async () => {
+  const { MediaCatalog } = await loadMediaCatalogModule();
+  let finishProvider: ((rows: readonly unknown[]) => void) | undefined;
+  const catalog = new MediaCatalog({
+    tenantId: "household-a",
+    catalogId: "music-assistant-main",
+    generation: 1,
+    sourceLabel: "House library",
+    mediaRefTtlMs: 1_000,
+    maxQueryChars: 128,
+    maxResults: 3,
+    now: () => 1_000,
+    mediaRefFactory: () => "cancelledOpaqueRef001",
+    provider: {
+      search: () => new Promise((resolve) => {
+        finishProvider = resolve;
+      }),
+    },
+  });
+  const controller = new AbortController();
+  const pending = catalog.search({ query: "jazz", limit: 1, signal: controller.signal });
+  controller.abort(new Error("cancelled"));
+  finishProvider?.([providerRow("native-track-1", "Late Jazz")]);
+
+  await assert.rejects(() => pending, /search failed/i);
+  assert.equal(catalog.resolveMediaRef({
+    tenantId: "household-a",
+    mediaRef: "cancelledOpaqueRef001",
+    now: 1_001,
+  }), undefined);
 });
 
 test("rejects a provider page with URL, native, token, or raw payload fields", async () => {

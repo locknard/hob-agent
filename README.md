@@ -173,6 +173,11 @@ trusted provider can return strictly bounded Music Assistant-compatible media
 kinds, while Agent-facing candidates receive only an opaque, tenant- and
 generation-bound short-lived reference. Provider ids, URLs, account data,
 tokens, raw payloads, player control, queues, and playback remain unavailable.
+When a neutral catalog service is explicitly mounted, the DSH Agent gains the
+bounded read-only `search_home_media` tool. Deployments without a catalog keep
+the tool absent. Its model-facing projection removes expiry and all
+provider-native fields; `mediaRef` and `playable` remain discovery hints, not
+playback authority.
 
 For behavioral evidence, keep the full runtime connected and use **Observe
 now** in its authenticated Inbox. This starts one paid turn through the same

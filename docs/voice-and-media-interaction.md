@@ -81,6 +81,13 @@ payload, or model-authored URL. A `mediaRef` is short-lived, tenant-scoped,
 bound to the catalog generation, and resolved only by the Hub when preparing
 an exact action ticket.
 
+The DSH-facing `search_home_media` projection is narrower still: it exposes
+only those neutral discovery fields and omits the expiry timestamp. The tool is
+registered only when an explicit neutral catalog service exists. It forwards
+DSH cancellation to that service, caps the model request at three candidates,
+and has no player, queue, resolve, or action method. Catalog text is untrusted
+data; neither a result nor its `playable` hint grants authority.
+
 The neutral action describes the desired outcome rather than an HA service:
 
 ```text
@@ -248,11 +255,11 @@ the result is uncertain and does not retry automatically.
    cancellation, captions, optional TTS, and one DSH advice turn. This remains
    non-applying and can coexist with the Phase 0 document workflow only as an
    explicitly bounded experiment, not as a general chat runtime.
-3. **V2 — media discovery:** add neutral player inventory and bounded
-   `mediaCatalog@1` search, first against a synthetic provider. After the Phase
-   0 exit gate, add an explicitly configured Music Assistant integration. Show
-   choices and an exact pending action, including queue behavior, but do not
-   invoke a player.
+3. **V2 — media discovery:** the Hub-owned `mediaCatalog@1` boundary and
+   conditional DSH read-only search tool are now in place. Next add neutral
+   player inventory and a synthetic provider. After the Phase 0 exit gate, add
+   an explicitly configured Music Assistant integration. Show choices and an
+   exact pending action, including queue behavior, but do not invoke a player.
 4. **V3 — governed playback:** after the real-household and action-plane entry
    gates, add `play_media` to the exact approval-ticket, executor,
    postcondition, and audit path. Start with one low-risk, reversible route and

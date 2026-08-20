@@ -13,6 +13,7 @@
     "./home-calibration-tool": "./src/dsh-home-calibration-tool.ts",
     "./home-evidence-tool": "./src/dsh-home-evidence-tool.ts",
     "./home-inventory-tool": "./src/dsh-home-inventory-tool.ts",
+    "./home-media-tool": "./src/dsh-home-media-tool.ts",
     "./home-observation-budget": "./src/dsh-home-observation-budget.ts",
     "./home-observation-report": "./src/dsh-home-observation-report.ts",
     "./home-rules-tool": "./src/dsh-home-rules-tool.ts",

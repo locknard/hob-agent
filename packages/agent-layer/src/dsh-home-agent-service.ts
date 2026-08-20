@@ -25,6 +25,7 @@ import * as CompactionInvariant from "@deepseek-ai/dsh-compaction/invariant";
 import * as HomeSnapshotTool from "./dsh-home-snapshot-tool.js";
 import * as HomeInventoryTool from "./dsh-home-inventory-tool.js";
 import * as HomeActivityTool from "./dsh-home-activity-tool.js";
+import * as HomeMediaTool from "./dsh-home-media-tool.js";
 import * as HomeCalibrationTool from "./dsh-home-calibration-tool.js";
 import { HomeCalibrationCoverageService } from "./dsh-home-calibration-tool.js";
 import { HomeInventoryCoverageService } from "./dsh-home-inventory-tool.js";
@@ -342,6 +343,9 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(HomeCalibrationTool);
     await this.ctx.plugin(HomeInventoryTool);
     await this.ctx.plugin(HomeActivityTool);
+    if (this.ctx.get("homeMediaCatalog") !== undefined) {
+      await this.ctx.plugin(HomeMediaTool);
+    }
     await this.ctx.plugin(HomeSnapshotTool);
     await this.ctx.plugin(HomeEvidenceTool);
     await this.ctx.plugin(HomeRulesCoverageService);

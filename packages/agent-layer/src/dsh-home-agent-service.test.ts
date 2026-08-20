@@ -28,6 +28,16 @@ class StubProposalService extends Service {
   }
 }
 
+class StubMediaCatalogService extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeMediaCatalog");
+  }
+
+  async search(): Promise<{ readonly candidates: readonly unknown[] }> {
+    return { candidates: [] };
+  }
+}
+
 class RecordingAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = [];
 
@@ -163,6 +173,33 @@ class HangingAdapter extends LlmAdapter {
 
 test("declares the neutral home-world service as a required production dependency", () => {
   assert.deepEqual(DshHomeAgentService.inject, ["homeWorld", "homeProposals"]);
+});
+
+test("mounts media search only when a neutral media catalog is explicitly available", async () => {
+  const withoutCatalog = new Context();
+  await withoutCatalog.plugin(StubWorldService);
+  await withoutCatalog.plugin(StubProposalService);
+  const withoutFiber = await withoutCatalog.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter: new RecordingAdapter(),
+  });
+  assert.equal(withoutCatalog.tools.schemas().some((schema) => schema.name === "search_home_media"), false);
+  await withoutFiber.dispose();
+  await withoutCatalog.fiber.dispose();
+
+  const withCatalog = new Context();
+  await withCatalog.plugin(StubWorldService);
+  await withCatalog.plugin(StubProposalService);
+  await withCatalog.plugin(StubMediaCatalogService);
+  const withFiber = await withCatalog.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter: new RecordingAdapter(),
+  });
+  assert.equal(withCatalog.tools.schemas().some((schema) => schema.name === "search_home_media"), true);
+  await withFiber.dispose();
+  await withCatalog.fiber.dispose();
 });
 
 test("mounts the sole production Agent through the DSH runtime", async () => {

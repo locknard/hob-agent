@@ -178,6 +178,7 @@ export class MediaCatalog {
     } catch {
       throw new MediaCatalogError("provider_failed", "Media catalog search failed");
     }
+    if (signal.aborted) throw new MediaCatalogError("provider_failed", "Media catalog search failed");
     if (!Array.isArray(raw) || raw.length > MAX_PROVIDER_ROWS) {
       throw new MediaCatalogError("invalid_provider_result", "Media catalog provider result is invalid");
     }
