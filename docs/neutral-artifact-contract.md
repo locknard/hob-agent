@@ -1,6 +1,8 @@
 # M3b 中立自动化 Artifact Contract
 
-> 状态：已接受用于 M3b 实现；本文不表示 Artifact Registry、compiler、dry-run 或执行器已经实现。
+> 状态：M3b 基础已部分实现。严格 Artifact revision/schema/hash、三类动态 assessment、
+> 不可变 SQLite Registry 与生产进程中的只读服务边界已经落地。Proposal 来源校验的
+> Hub-owned producer、retention 引用闭环、compiler、dry-run、approval ticket 和执行器仍未实现。
 >
 > 本文定义 M3b 之后第一版（下文称 Artifact Phase 1）的最小、可持久化、不可执行 artifact
 > 形状。它复用已有 proposal v1、HomeWorld、证据和 Bridge v6.3 语义；不修改当前
@@ -17,7 +19,8 @@
 7. 第一用例是**窗帘舒适度**的可逆时段试验：以 schedule/中立 capability 状态触发，向一个受 Hub authority candidate 绑定的 level capability 提交 bounded level change，并能恢复此前值。Artifact contract 只表达中立 level，不表达任何生态平台的 entity、service、rule 或 payload。
 
 本文的 “Artifact Phase 1” 是 M3b 的第一版 artifact contract，不是把项目当前 Phase 0 的
-review-only 边界提前变成执行能力。当前 Phase 0 仍不创建或应用 artifact。
+review-only 边界提前变成执行能力。当前生产组合只挂载 Registry 的只读查询和元数据诊断；
+没有面向 Agent、Inbox、bridge 或插件的 Artifact 创建入口，也不编译、模拟或应用 artifact。
 
 ## 1. 与现有产品边界的关系
 
