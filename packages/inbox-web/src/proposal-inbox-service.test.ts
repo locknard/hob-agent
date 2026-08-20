@@ -101,6 +101,34 @@ class StubObservation extends Service {
   }
 }
 
+class StubAdvice extends Service {
+  questions: string[] = [];
+  constructor(ctx: Context) { super(ctx, "homeAdvice"); }
+  canAsk() { return true; }
+  async ask(question: string) {
+    this.questions.push(question);
+    return this.get("advice-1")!;
+  }
+  list() { return [this.get("advice-1")!]; }
+  get(id: string) {
+    return id === "advice-1" ? {
+      id,
+      status: "completed" as const,
+      question: "Why is the curtain timing uncomfortable?",
+      createdAt: "2026-08-20T10:00:00.000Z",
+      completedAt: "2026-08-20T10:00:02.000Z",
+      report: {
+        summary: "Try a bounded daylight-aware schedule.",
+        confidence: "partial" as const,
+        findings: [],
+        unknowns: ["Indoor brightness is unavailable."],
+        hardwareSuggestions: [],
+        validationSteps: ["Review after two weeks."],
+      },
+    } : undefined;
+  }
+}
+
 test("mounts a local review facade when the optional DSH trace is absent", async () => {
   const ctx = new Context();
   await ctx.plugin(StubProposals);
@@ -149,6 +177,24 @@ test("renders bounded persisted observation history without DSH trace content", 
   assert.match(ctx.homeInbox.renderList(), /240 input \/ 36 output \/ 14 reasoning tokens/i);
   assert.match(ctx.homeInbox.renderList(), /12 tool calls \/ 1 failed/i);
   assert.equal(ctx.homeInbox.renderList().includes("observation-1"), false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("exposes bounded household advice without turning the Inbox into a chat runtime", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAdvice);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  assert.equal(ctx.homeInbox.canAskAdvice(), true);
+  const result = await ctx.homeInbox.askAdvice("Why is the curtain timing uncomfortable?");
+  assert.equal(result.id, "advice-1");
+  assert.equal((ctx.homeAdvice as unknown as StubAdvice).questions.length, 1);
+  assert.match(ctx.homeInbox.renderList(), /Ask about your home/i);
+  assert.match(ctx.homeInbox.renderAdvice("advice-1") ?? "", /Try a bounded daylight-aware schedule/i);
+  assert.equal(ctx.homeInbox.renderAdvice("missing"), undefined);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

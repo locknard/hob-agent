@@ -24,10 +24,15 @@ import {
   type SignalProcess,
 } from "./process-entry.js";
 import type { SqliteProposalStoreOptions } from "./proposal-store.js";
+import {
+  HomeAdviceService,
+  type HomeAdviceServiceOptions,
+} from "./home-advice-service.js";
 
 export interface HomeInboxRuntimeOptions {
   readonly homeProposals: SqliteProposalStoreOptions;
   readonly homeObservationAudit: HomeObservationAuditServiceOptions;
+  readonly homeAdvice: HomeAdviceServiceOptions;
   readonly inboxHttp: ProposalInboxHttpOptions;
 }
 
@@ -53,6 +58,7 @@ export class HomeInboxRuntime implements HomeHubRuntime {
     try {
       await this.context.plugin(HomeProposalService, this.options.homeProposals);
       await this.context.plugin(HomeObservationAuditService, this.options.homeObservationAudit);
+      await this.context.plugin(HomeAdviceService, this.options.homeAdvice);
       await this.context.plugin(ProposalInboxService);
       await this.context.plugin(ProposalInboxHttpService, this.options.inboxHttp);
       this.statusValue = "running";
@@ -86,6 +92,7 @@ export function createHomeInboxProcessOptions(environment: LaunchEnvironment): H
   return {
     homeProposals: { path: config.proposalPath },
     homeObservationAudit: { path: config.observationAuditPath },
+    homeAdvice: { path: config.advicePath },
     inboxHttp: config.inboxHttp,
   };
 }

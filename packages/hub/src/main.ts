@@ -59,6 +59,7 @@ export function createHomeHubProcessOptions(
       },
       homeProposals: { path: config.proposalPath },
       homeObservationAudit: { path: config.observationAuditPath },
+      homeAdvice: { path: config.advicePath },
       agent: {
         ...config.agent,
         sessionPersistencePath: config.sessionPath,

@@ -147,6 +147,40 @@ export type InboxObservationDisposition =
   | "mapping_uncertain"
   | "other_uncertainty";
 
+export type InboxHomeAdviceRecord = {
+  readonly id: string;
+  readonly question: string;
+  readonly createdAt: string;
+} & (
+  | { readonly status: "running" }
+  | { readonly status: "failed"; readonly completedAt: string }
+  | {
+      readonly status: "completed";
+      readonly completedAt: string;
+      readonly report: {
+        readonly summary: string;
+        readonly confidence: "sufficient" | "partial" | "insufficient";
+        readonly findings: readonly string[];
+        readonly unknowns: readonly string[];
+        readonly trial?: {
+          readonly description: string;
+          readonly durationDays: number;
+          readonly successCriteria: readonly string[];
+          readonly rollback: string;
+        };
+        readonly hardwareSuggestions: readonly {
+          readonly capability: "illuminance" | "motion" | "presence" | "contact" | "temperature" | "humidity" | "air_quality" | "energy" | "leak" | "weather";
+          readonly necessity: "optional" | "recommended";
+          readonly reason: string;
+          readonly placement?: string;
+          readonly privacyImpact: "low" | "medium" | "high";
+          readonly alternative: string;
+        }[];
+        readonly validationSteps: readonly string[];
+      };
+    }
+);
+
 export interface InboxProposalQualitySummary {
   readonly total: number;
   readonly statuses: Readonly<Record<InboxProposalStatus, number>>;
@@ -247,6 +281,8 @@ export function renderProposalList(
   observation?: InboxObservationStatus,
   persistedAttempts: readonly InboxObservationAttempt[] = [],
   calibration?: InboxCalibrationSummary,
+  advice: readonly InboxHomeAdviceRecord[] = [],
+  canAskAdvice = false,
 ): string {
   const items = proposals.map((proposal) => `<li class="proposal-row" data-status="${escapeHtml(proposal.status)}">
     <a href="/proposals/${encodeURIComponent(proposal.id)}"><h2>${escapeHtml(proposal.title)}</h2></a>
@@ -267,7 +303,31 @@ export function renderProposalList(
     ).join("")}</ol>`;
   const calibrationSection = calibration === undefined ? "" : `<details class="quiet-section">${renderCalibrationSummary(calibration)}</details>`;
   const empty = proposals.length === 0 ? `<div class="empty-state"><h2>No ideas need review</h2><p>When the Agent finds a useful pattern with enough evidence, it will appear here before anything can change.</p></div>` : `<ol class="proposal-list">${items}</ol>`;
-  return `<main id="main-content" class="proposal-inbox"><header id="overview" class="page-header"><p class="eyebrow">Household review</p><h1>Review ideas for your home</h1><p class="muted">The Agent can suggest persistent behavior, but your household decides what is useful.</p></header><section id="home" class="inbox-overview" aria-label="Home status">${observationStatus}</section><section id="observations" class="observation-panel" aria-label="Home observation">${observationControl}</section><section class="quiet-section" aria-label="Recent observations"><details><summary>Recent observations</summary>${observationHistory || "<p>No observations have been recorded yet.</p>"}</details></section><section id="reviews" class="quiet-section" aria-labelledby="reviews-heading"><div class="section-heading"><div><p class="eyebrow">Decision queue</p><h2 id="reviews-heading">Reviews</h2></div><p>${proposals.length} item${proposals.length === 1 ? "" : "s"}</p></div>${empty}</section>${calibrationSection}<section id="settings" class="quiet-section" aria-labelledby="settings-heading"><h2 id="settings-heading">Connections and access</h2><p>Secrets are kept outside household files and are never shown in proposal evidence or Agent traces.</p></section></main>`;
+  const adviceItems = advice.slice(0, 5).map((item) => `<li><a href="/advice/${encodeURIComponent(item.id)}"><strong>${escapeHtml(item.question)}</strong></a><span>${item.status === "completed" ? escapeHtml(item.report.summary) : escapeHtml(item.status)}</span></li>`).join("");
+  const adviceControl = canAskAdvice
+    ? `<form class="advice-form" method="post" action="/advice"><label for="home-question">What would you like to understand?</label><textarea id="home-question" name="question" maxlength="1000" required></textarea><p>The Agent will inspect bounded household evidence and return guidance only. It cannot make a change.</p><button type="submit">Ask about your home</button></form>`
+    : `<p>Open the full home runtime to ask a new question. Stored answers remain available here.</p>`;
+  const adviceHistory = adviceItems.length === 0 ? "<p>No household questions have been answered yet.</p>" : `<ol class="advice-list">${adviceItems}</ol>`;
+  return `<main id="main-content" class="proposal-inbox"><header id="overview" class="page-header"><p class="eyebrow">Household review</p><h1>Review ideas for your home</h1><p class="muted">The Agent can suggest persistent behavior, but your household decides what is useful.</p></header><section id="home" class="inbox-overview" aria-label="Home status">${observationStatus}</section><section id="advice" class="quiet-section" aria-labelledby="advice-heading"><div class="section-heading"><div><p class="eyebrow">One question at a time</p><h2 id="advice-heading">Ask about your home</h2></div></div>${adviceControl}<details><summary>Recent answers</summary>${adviceHistory}</details></section><section id="observations" class="observation-panel" aria-label="Home observation">${observationControl}</section><section class="quiet-section" aria-label="Recent observations"><details><summary>Recent observations</summary>${observationHistory || "<p>No observations have been recorded yet.</p>"}</details></section><section id="reviews" class="quiet-section" aria-labelledby="reviews-heading"><div class="section-heading"><div><p class="eyebrow">Decision queue</p><h2 id="reviews-heading">Reviews</h2></div><p>${proposals.length} item${proposals.length === 1 ? "" : "s"}</p></div>${empty}</section>${calibrationSection}<section id="settings" class="quiet-section" aria-labelledby="settings-heading"><h2 id="settings-heading">Connections and access</h2><p>Secrets are kept outside household files and are never shown in proposal evidence or Agent traces.</p></section></main>`;
+}
+
+export function renderHomeAdvice(advice: InboxHomeAdviceRecord): string {
+  const header = `<header><a class="back-link" href="/proposals#advice">← Back to household questions</a><p class="eyebrow">Agent-authored guidance</p><h1>${escapeHtml(advice.question)}</h1><p class="muted">This answer cannot control a device, change a rule, or grant authority.</p></header>`;
+  if (advice.status === "running") return `<main id="main-content" class="advice-detail">${header}<section><h2>Answer in progress</h2><p>The Agent is inspecting bounded household evidence.</p></section></main>`;
+  if (advice.status === "failed") return `<main id="main-content" class="advice-detail">${header}<section><h2>No answer was produced</h2><p>The request failed safely without storing provider error details.</p></section></main>`;
+  const report = advice.report;
+  const findings = report.findings.length === 0 ? "<p>No supported findings were reported.</p>" : `<ul>${report.findings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+  const unknowns = report.unknowns.length === 0 ? "<p>No additional unknowns were reported.</p>" : `<ul>${report.unknowns.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+  const trial = report.trial === undefined ? "<p>No trial was suggested.</p>" : `<div class="advice-trial"><p>${escapeHtml(report.trial.description)}</p><p><strong>Duration:</strong> ${report.trial.durationDays} days</p><h3>Success criteria</h3><ul>${report.trial.successCriteria.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul><p><strong>Rollback:</strong> ${escapeHtml(report.trial.rollback)}</p></div>`;
+  const hardware = report.hardwareSuggestions.length === 0
+    ? "<p>No additional hardware is currently suggested.</p>"
+    : `<ol class="hardware-suggestions">${report.hardwareSuggestions.map((item) => `<li><h3>${escapeHtml(hardwareCapabilityLabel(item.capability))} sensing · ${escapeHtml(item.necessity)}</h3><p>${escapeHtml(item.reason)}</p>${item.placement === undefined ? "" : `<p><strong>Placement:</strong> ${escapeHtml(item.placement)}</p>`}<p><strong>Privacy impact:</strong> ${escapeHtml(item.privacyImpact)}</p><p class="no-purchase-alternative"><strong>No-purchase alternative:</strong> ${escapeHtml(item.alternative)}</p></li>`).join("")}</ol>`;
+  const validation = report.validationSteps.length === 0 ? "<p>No validation steps were reported.</p>" : `<ol>${report.validationSteps.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`;
+  return `<main id="main-content" class="advice-detail">${header}<section class="advice-answer"><p class="eyebrow">Confidence: ${escapeHtml(report.confidence)}</p><h2>Answer</h2><p>${escapeHtml(report.summary)}</p></section><section><h2>What the Agent found</h2>${findings}</section><section><h2>What remains unknown</h2>${unknowns}</section><section><h2>Suggested trial</h2>${trial}</section><section><h2>Would more sensing help?</h2>${hardware}</section><section><h2>How to validate</h2>${validation}</section></main>`;
+}
+
+function hardwareCapabilityLabel(value: string): string {
+  return `${value.replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase())}`;
 }
 
 function renderCalibrationSummary(summary: InboxCalibrationSummary): string {

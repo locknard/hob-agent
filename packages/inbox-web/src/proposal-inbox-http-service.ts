@@ -8,6 +8,8 @@ import { INBOX_CSS } from "./inbox-styles.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_FORM_BYTES = 4 * 1024;
+// application/x-www-form-urlencoded expands a 1,000-character CJK question to roughly 9 KiB.
+const MAX_ADVICE_FORM_BYTES = 12 * 1024;
 const SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store",
   "content-security-policy": "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -31,6 +33,9 @@ interface InboxHttpPort {
   review(input: InboxReviewInput): Promise<unknown>;
   canObserveNow(): boolean;
   observeNow(): Promise<unknown>;
+  canAskAdvice(): boolean;
+  askAdvice(question: string): Promise<{ id: string }>;
+  renderAdvice(id: string): string | undefined;
 }
 
 declare module "@deepseek-ai/cordis" {
@@ -100,6 +105,41 @@ export class ProposalInboxHttpService extends Service {
       }
       if ((method === "GET" || method === "HEAD") && url.pathname === "/proposals") {
         return sendHtml(response, 200, document(this.inbox.renderList()), method === "HEAD");
+      }
+      const adviceDetail = /^\/advice\/([^/]+)$/.exec(url.pathname);
+      if ((method === "GET" || method === "HEAD") && adviceDetail) {
+        const adviceId = safeDecode(adviceDetail[1]!);
+        const html = adviceId === undefined ? undefined : this.inbox.renderAdvice(adviceId);
+        return html === undefined
+          ? send(response, 404, "Household advice not found")
+          : sendHtml(response, 200, document(html), method === "HEAD");
+      }
+      if (method === "POST" && url.pathname === "/advice") {
+        if (request.headers.origin !== this.origin) return send(response, 403, "Household advice origin rejected");
+        if (!this.inbox.canAskAdvice()) return send(response, 404, "Household advice unavailable");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported household advice content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request, MAX_ADVICE_FORM_BYTES);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid household advice request");
+        }
+        const question = adviceQuestion(body);
+        if (question === undefined) return send(response, 400, "Invalid household advice request");
+        let advice: { id: string };
+        try {
+          advice = await this.inbox.askAdvice(question);
+        } catch {
+          return send(response, 500, "Household advice request failed");
+        }
+        if (safeDecode(advice.id) === undefined) return send(response, 500, "Household advice request failed");
+        response.statusCode = 303;
+        applySecurityHeaders(response);
+        response.setHeader("location", `/advice/${encodeURIComponent(advice.id)}`);
+        response.end();
+        return;
       }
       const detail = /^\/proposals\/([^/]+)$/.exec(url.pathname);
       if ((method === "GET" || method === "HEAD") && detail) {
@@ -206,7 +246,7 @@ function sendCss(response: ServerResponse, status: number, css: string, head: bo
 }
 
 function document(content: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f3f7f2"><title>Reviews · hob-agent</title><link rel="stylesheet" href="/assets/inbox.css"></head><body><a class="skip-link" href="#main-content">Skip to main content</a><div class="app-shell"><header class="app-topbar"><a class="brand" href="/proposals"><strong>hob-agent</strong><span>Household agent</span></a><span class="topbar-note">Local review</span></header><div class="app-body"><nav class="app-nav" aria-label="Primary"><a href="/proposals#overview"><span class="nav-mark" aria-hidden="true">O</span>Overview</a><a href="/proposals#reviews" aria-current="page"><span class="nav-mark" aria-hidden="true">R</span>Reviews</a><a href="/proposals#observations"><span class="nav-mark" aria-hidden="true">A</span>Observations</a><a href="/proposals#home"><span class="nav-mark" aria-hidden="true">H</span>Home</a><a href="/proposals#settings"><span class="nav-mark" aria-hidden="true">S</span>Settings</a></nav><div class="app-content">${content}</div></div></div></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f3f7f2"><title>Home · hob-agent</title><link rel="stylesheet" href="/assets/inbox.css"></head><body><a class="skip-link" href="#main-content">Skip to main content</a><div class="app-shell"><header class="app-topbar"><a class="brand" href="/proposals"><strong>hob-agent</strong><span>Household agent</span></a><span class="topbar-note">Local review</span></header><div class="app-body"><nav class="app-nav" aria-label="Primary"><a href="/proposals#overview"><span class="nav-mark" aria-hidden="true">O</span>Overview</a><a href="/proposals#advice"><span class="nav-mark" aria-hidden="true">Q</span>Questions</a><a href="/proposals#reviews" aria-current="page"><span class="nav-mark" aria-hidden="true">R</span>Reviews</a><a href="/proposals#observations"><span class="nav-mark" aria-hidden="true">A</span>Observations</a><a href="/proposals#home"><span class="nav-mark" aria-hidden="true">H</span>Home</a><a href="/proposals#settings"><span class="nav-mark" aria-hidden="true">S</span>Settings</a></nav><div class="app-content">${content}</div></div></div></body></html>`;
 }
 
 function mediaType(value: string | undefined): string | undefined {
@@ -222,16 +262,23 @@ function safeDecode(value: string): string | undefined {
   }
 }
 
-async function readBoundedBody(request: IncomingMessage): Promise<string> {
+function adviceQuestion(body: string): string | undefined {
+  const params = new URLSearchParams(body);
+  if ([...params.keys()].some((key) => key !== "question") || params.getAll("question").length !== 1) return undefined;
+  const question = params.get("question")?.trim();
+  return question !== undefined && question.length >= 1 && question.length <= 1_000 ? question : undefined;
+}
+
+async function readBoundedBody(request: IncomingMessage, maximumBytes = MAX_FORM_BYTES): Promise<string> {
   const declared = Number(request.headers["content-length"] ?? 0);
-  if (Number.isFinite(declared) && declared > MAX_FORM_BYTES) throw new PayloadTooLargeError();
+  if (Number.isFinite(declared) && declared > maximumBytes) throw new PayloadTooLargeError();
   const chunks: Buffer[] = [];
   let size = 0;
   let overflow = false;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > MAX_FORM_BYTES) overflow = true;
+    if (size > maximumBytes) overflow = true;
     else chunks.push(buffer);
   }
   if (overflow) throw new PayloadTooLargeError();

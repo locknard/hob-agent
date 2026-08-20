@@ -5,7 +5,9 @@ import {
   ProposalInboxController,
   renderProposalDetail,
   renderProposalList,
+  renderHomeAdvice,
   type InboxProposal,
+  type InboxHomeAdviceRecord,
 } from "./proposal-inbox.js";
 
 const proposal: InboxProposal = {
@@ -223,4 +225,52 @@ test("renders the recorded structured household feedback without treating it as 
   assert.match(html, /Not enough evidence/i);
   assert.match(html, /Observe for another week/i);
   assert.equal(html.includes("<form"), false);
+});
+
+test("renders a household advice document with uncertainty, trial, and capability-only hardware guidance", () => {
+  const advice: InboxHomeAdviceRecord = {
+    id: "advice-1",
+    status: "completed",
+    question: "Why is <the curtain> sometimes early and sometimes late?",
+    createdAt: "2026-08-20T10:00:00.000Z",
+    completedAt: "2026-08-20T10:00:02.000Z",
+    report: {
+      summary: "Try a daylight-aware schedule before buying hardware.",
+      confidence: "partial",
+      findings: ["The current schedule appears fixed."],
+      unknowns: ["Indoor brightness is unavailable."],
+      trial: {
+        description: "Use sunrise with bounded earliest and latest times.",
+        durationDays: 14,
+        successCriteria: ["Fewer manual reversals."],
+        rollback: "Restore the fixed schedule.",
+      },
+      hardwareSuggestions: [{
+        capability: "illuminance",
+        necessity: "optional",
+        reason: "It observes actual room brightness.",
+        placement: "Near the window outside direct glare.",
+        privacyImpact: "low",
+        alternative: "Use sunrise and weather data first.",
+      }],
+      validationSteps: ["Review after two weeks."],
+    },
+  };
+
+  const html = renderHomeAdvice(advice);
+  assert.equal(html.includes("<the curtain>"), false);
+  assert.match(html, /Why is &lt;the curtain&gt;/);
+  assert.match(html, /Agent-authored guidance/i);
+  assert.match(html, /What remains unknown/i);
+  assert.match(html, /14 days/i);
+  assert.match(html, /Illuminance sensing/i);
+  assert.match(html, /Privacy impact:<\/strong> low/i);
+  assert.match(html, /No-purchase alternative/i);
+  assert.match(html, /class="no-purchase-alternative"/);
+  assert.equal(html.includes("Approve"), false);
+
+  const list = renderProposalList([], undefined, [], undefined, [advice], true);
+  assert.match(list, /Ask about your home/i);
+  assert.match(list, /name="question"/i);
+  assert.match(list, /Try a daylight-aware schedule/i);
 });

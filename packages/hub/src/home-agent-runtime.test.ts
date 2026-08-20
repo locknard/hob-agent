@@ -53,6 +53,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeWorld.name, "homeWorld");
   assert.equal(runtime.context.homeProposals.name, "homeProposals");
   assert.equal(runtime.context.homeObservationAudit.name, "homeObservationAudit");
+  assert.equal(runtime.context.homeAdvice.name, "homeAdvice");
   assert.equal(runtime.context.homeInbox.name, "homeInbox");
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(pluginOrder.includes("ProposalInboxService"), true);
@@ -64,6 +65,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeWorld, undefined);
   assert.equal(runtime.context.homeProposals, undefined);
   assert.equal(runtime.context.homeObservationAudit, undefined);
+  assert.equal(runtime.context.homeAdvice, undefined);
   assert.equal(runtime.context.homeInbox, undefined);
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);

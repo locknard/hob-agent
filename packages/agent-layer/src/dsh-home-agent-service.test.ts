@@ -97,6 +97,57 @@ class ObservationReportingAdapter extends LlmAdapter {
   }
 }
 
+class AdviceReportingAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = [];
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options);
+    if (this.requests.length === 1) {
+      const args = JSON.stringify({ limit: 50 });
+      yield { type: "block-start", index: 0, blockType: "tool-call" };
+      yield { type: "tool-call-delta", index: 0, id: "advice-inventory-1", name: "get_home_inventory", argumentsDelta: args };
+      yield { type: "block-end", index: 0, block: { type: "tool-call", id: "advice-inventory-1", name: "get_home_inventory", arguments: args } };
+      yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish", reason: { kind: "tool-calls" } };
+      return;
+    }
+    if (this.requests.length === 2) {
+      const args = JSON.stringify({
+        summary: "Try a bounded daylight-aware curtain schedule.",
+        confidence: "partial",
+        findings: ["The current behavior may rely on a fixed time."],
+        unknowns: ["Indoor illuminance is not available."],
+        trial: {
+          description: "Use sunrise with earliest and latest bounds.",
+          durationDays: 14,
+          successCriteria: ["Fewer manual reversals."],
+          rollback: "Restore the prior schedule.",
+        },
+        hardwareSuggestions: [{
+          capability: "illuminance",
+          necessity: "optional",
+          reason: "It can distinguish bright and dark mornings.",
+          placement: "Near the window outside direct glare.",
+          privacyImpact: "low",
+          alternative: "Use sunrise and weather data first.",
+        }],
+        validationSteps: ["Review after two weeks."],
+      });
+      yield { type: "block-start", index: 0, blockType: "tool-call" };
+      yield { type: "tool-call-delta", index: 0, id: "advice-report-1", name: "report_home_advice", argumentsDelta: args };
+      yield { type: "block-end", index: 0, block: { type: "tool-call", id: "advice-report-1", name: "report_home_advice", arguments: args } };
+      yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish", reason: { kind: "tool-calls" } };
+      return;
+    }
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "text-delta", index: 0, text: "Advice recorded." };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "Advice recorded." } };
+    yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }
+}
+
 class HangingAdapter extends LlmAdapter {
   requests = 0;
 
@@ -159,11 +210,12 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "get_home_evidence",
     "get_home_rules",
     "create_home_proposal",
+    "report_home_advice",
     "report_home_observation",
     "skill",
   ]);
   const skills = ctx.get("skills") as unknown as { list(): Promise<readonly { name: string }[]> };
-  assert.deepEqual((await skills.list()).map((skill) => skill.name), ["review-home-observation"]);
+  assert.deepEqual((await skills.list()).map((skill) => skill.name), ["answer-home-question", "review-home-observation"]);
   const loadedSkill = await ctx.tools.execute({
     callId: "load-home-skill" as never,
     name: "skill",
@@ -381,6 +433,41 @@ test("returns the bounded disposition reported by one canonical DSH observation 
     failedToolCalls: 0,
   });
   assert.equal((ctx.homeAgent.observationMetrics()?.durationMs ?? -1) >= 0, true);
+
+  await ctx.fiber.dispose();
+});
+
+test("returns one structured advice report for a bounded untrusted household question", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  const adapter = new AdviceReportingAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter,
+    sessionId: "advice-home",
+  });
+
+  const report = await ctx.homeAgent.requestAdvice("Why does the curtain open too early or too late?");
+
+  assert.equal(report.confidence, "partial");
+  assert.equal(report.hardwareSuggestions[0]?.capability, "illuminance");
+  assert.equal(adapter.requests.length, 3);
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) => JSON.stringify(message).includes("load the answer-home-question skill")),
+    true,
+  );
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) => JSON.stringify(message).includes("untrusted household question")),
+    true,
+  );
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) => JSON.stringify(message).includes("same language as the household question")),
+    true,
+  );
+  await assert.rejects(ctx.homeAgent.requestAdvice("x".repeat(1_001)), /question/i);
+  assert.equal(ctx.homeAgent.observationStatus, "idle");
 
   await ctx.fiber.dispose();
 });

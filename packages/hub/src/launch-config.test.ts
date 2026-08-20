@@ -40,6 +40,7 @@ test("reads neutral bridge entries and selected model credential without putting
   assert.equal(config.catalog.hasAdapter("home-assistant"), true);
   assert.equal(config.proposalPath, "/tmp/hob-agent-launch-test/proposals.sqlite");
   assert.equal(config.observationAuditPath, "/tmp/hob-agent-launch-test/observation-audit.sqlite");
+  assert.equal(config.advicePath, "/tmp/hob-agent-launch-test/home-advice.sqlite");
   assert.equal(config.sessionPath, "/tmp/hob-agent-launch-test/dsh-sessions.sqlite");
   assert.equal(JSON.stringify(config.bridges).includes("home-assistant-secret"), false);
   assert.deepEqual(config.agent, { provider: "gpt", model: "gpt-5.4" });
@@ -79,6 +80,7 @@ test("reads the standalone Inbox slice without bridge or model configuration", (
   });
   assert.equal(config.proposalPath, "/tmp/hob-agent-inbox-test/proposals.sqlite");
   assert.equal(config.observationAuditPath, "/tmp/hob-agent-inbox-test/observation-audit.sqlite");
+  assert.equal(config.advicePath, "/tmp/hob-agent-inbox-test/home-advice.sqlite");
   assert.equal(config.inboxHttp.port, 9876);
   const authorization = `Basic ${Buffer.from(`home:${"i".repeat(32)}`).toString("base64")}`;
   assert.equal(config.inboxHttp.authenticate(authorization), true);

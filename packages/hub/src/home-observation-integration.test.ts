@@ -5,6 +5,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { DshHomeAgentService } from "@hob-agent/agent-layer/home-agent";
 import { ProposalInboxService } from "@hob-agent/inbox-web/service";
 
+import { HomeAdviceService } from "./home-advice-service.js";
 import { HomeProposalService } from "./home-proposal-service.js";
 
 class AcceptanceWorld extends Service {
@@ -196,6 +197,74 @@ class ObservationScriptAdapter {
   }
 }
 
+class AdviceScriptAdapter extends ObservationScriptAdapter {
+  override async *stream(options: unknown) {
+    this.requests.push(options);
+    const step = this.requests.length;
+    if (step === 1) {
+      yield* toolCall("call-advice-skill", "skill", { name: "answer-home-question" });
+      return;
+    }
+    if (step === 2) {
+      yield* toolCall("call-advice-calibration", "get_home_calibration", {});
+      return;
+    }
+    if (step === 3) {
+      yield* toolCall("call-advice-inventory", "get_home_inventory", { limit: 50 });
+      return;
+    }
+    if (step === 4) {
+      yield* toolCall("call-advice-activity", "get_home_activity", { lookbackHours: 24, limit: 20 });
+      return;
+    }
+    if (step === 5) {
+      yield* toolCall("call-advice-snapshot", "get_home_snapshot", { hwIds: ["hw-1"], limit: 10 });
+      return;
+    }
+    if (step === 6) {
+      yield* toolCall("call-advice-evidence", "get_home_evidence", {
+        hwCapabilityIds: ["hwc-1"],
+        lookbackHours: 24,
+        limit: 50,
+      });
+      return;
+    }
+    if (step === 7) {
+      yield* toolCall("call-advice-rules", "get_home_rules", { limit: 20 });
+      return;
+    }
+    if (step === 8) {
+      yield* toolCall("call-advice-report", "report_home_advice", {
+        summary: "Try a daylight-aware window before changing hardware.",
+        confidence: "partial",
+        findings: ["The available household evidence does not explain changing daylight."],
+        unknowns: ["Indoor brightness is not currently observed."],
+        trial: {
+          description: "Use sunrise with bounded earliest and latest opening times.",
+          durationDays: 14,
+          successCriteria: ["Fewer manual curtain reversals within 30 minutes."],
+          rollback: "Restore the current fixed schedule.",
+        },
+        hardwareSuggestions: [{
+          capability: "illuminance",
+          necessity: "optional",
+          reason: "It can distinguish dark mornings from bright mornings.",
+          placement: "Near the window but outside direct glare.",
+          privacyImpact: "low",
+          alternative: "Use sunrise and weather data first.",
+        }],
+        validationSteps: ["Review manual reversals after two weeks."],
+      });
+      return;
+    }
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "text-delta", index: 0, text: "The advice report is ready." };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "The advice report is ready." } };
+    yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }
+}
+
 async function* toolCall(id: string, name: string, args: unknown) {
   const callId = id;
   const serialized = JSON.stringify(args);
@@ -263,6 +332,46 @@ test("runs one DSH observation through governed tools into a trusted Inbox propo
     relation: "possible_overlap",
   }]);
   assert.equal(detail.proposal.applicationStatus, "not_available");
+
+  await ctx.fiber.dispose();
+});
+
+test("answers a curtain question through governed DSH evidence into the local Inbox without proposing a change", async () => {
+  const ctx = new Context();
+  await ctx.plugin(AcceptanceWorld);
+  await ctx.plugin(HomeProposalService, { path: ":memory:", now: () => "2026-08-19T04:00:00.000Z" });
+  const adapter = new AdviceScriptAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "acceptance-provider",
+    model: "acceptance-model",
+    adapter: adapter as never,
+    sessionId: "acceptance-advice",
+  });
+  await ctx.plugin(HomeAdviceService, {
+    path: ":memory:",
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+  await ctx.plugin(ProposalInboxService);
+
+  const answer = await ctx.homeInbox.askAdvice("Why does the curtain sometimes open too early and sometimes too late?");
+
+  assert.equal(answer.status, "completed");
+  if (answer.status !== "completed") return;
+  assert.equal(answer.report.hardwareSuggestions[0]?.capability, "illuminance");
+  assert.equal(answer.report.hardwareSuggestions[0]?.necessity, "optional");
+  assert.match(ctx.homeInbox.renderAdvice(answer.id) ?? "", /No-purchase alternative/);
+  assert.match(ctx.homeInbox.renderList(), /Why does the curtain/);
+  assert.equal(ctx.homeInbox.list().length, 0);
+  assert.deepEqual(ctx.homeAgent.traceSnapshot()?.tools.map((tool) => tool.name), [
+    "skill",
+    "get_home_calibration",
+    "get_home_inventory",
+    "get_home_activity",
+    "get_home_snapshot",
+    "get_home_evidence",
+    "get_home_rules",
+    "report_home_advice",
+  ]);
 
   await ctx.fiber.dispose();
 });

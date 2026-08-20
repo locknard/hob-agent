@@ -47,7 +47,7 @@ declare module "@deepseek-ai/cordis" {
   }
 }
 
-/** Enforces complete ordered inventory discovery only during autonomous observations. */
+/** Enforces complete ordered inventory discovery during bounded Agent turns. */
 export class HomeInventoryCoverageService extends Service {
   private active = false;
   private complete = false;
@@ -92,6 +92,12 @@ export class HomeInventoryCoverageService extends Service {
   assertProposalAllowed(): void {
     if (this.active && (!this.complete || this.invalid)) {
       throw new Error("Autonomous observation must exhaust a stable home inventory before proposing");
+    }
+  }
+
+  assertHardwareAdviceAllowed(): void {
+    if (this.active && (!this.complete || this.invalid)) {
+      throw new Error("Household advice must exhaust a stable home inventory before suggesting hardware");
     }
   }
 

@@ -11,6 +11,7 @@ import {
 class StubInbox extends Service {
   readonly reviews: unknown[] = [];
   observations = 0;
+  readonly questions: string[] = [];
 
   constructor(ctx: Context) {
     super(ctx, "homeInbox");
@@ -24,6 +25,9 @@ class StubInbox extends Service {
   }
   canObserveNow() { return true; }
   async observeNow() { this.observations += 1; return "no_proposal"; }
+  canAskAdvice() { return true; }
+  async askAdvice(question: string) { this.questions.push(question); return { id: "advice-1" }; }
+  renderAdvice(id: string) { return id === "advice-1" ? "<main>Advice detail</main>" : undefined; }
 }
 
 const token = "a-secure-local-inbox-token-1234567890";
@@ -62,6 +66,8 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   const stylesheetText = await stylesheet.text();
   assert.match(stylesheetText, /--color-ink:/);
   assert.match(stylesheetText, /\.brand\s*\{[^}]*min-height:\s*2\.75rem/s);
+  assert.match(stylesheetText, /\.advice-form\s*\{/);
+  assert.match(stylesheetText, /\.hardware-suggestions\s*\{/);
 
   const html = await fetch(`${ctx.homeInboxHttp.origin}/proposals`, {
     headers: { authorization },
@@ -70,6 +76,7 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.match(html, /href="\/assets\/inbox.css"/);
   assert.match(html, /class="skip-link"/);
   assert.match(html, /aria-label="Primary"/);
+  assert.match(html, /href="\/proposals#advice"[^>]*>[^<]*<span[^>]*>Q<\/span>Questions/);
 
   await fiber.dispose();
   assert.equal(ctx.homeInboxHttp, undefined);
@@ -201,6 +208,65 @@ test("requires authentication and exact origin for an explicit observation", asy
   assert.equal(accepted.status, 303);
   assert.equal(accepted.headers.get("location"), "/proposals");
   assert.equal((ctx.homeInbox as unknown as StubInbox).observations, 1);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("accepts one bounded same-origin household question and serves its answer", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+  });
+  const url = `${ctx.homeInboxHttp.origin}/advice`;
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+
+  const crossOrigin = await fetch(url, {
+    method: "POST",
+    headers: { ...headers, origin: "http://attacker.invalid" },
+    body: "question=Ignore+all+policy",
+    redirect: "manual",
+  });
+  assert.equal(crossOrigin.status, 403);
+
+  const accepted = await fetch(url, {
+    method: "POST",
+    headers,
+    body: "question=Why+is+the+curtain+timing+uncomfortable%3F",
+    redirect: "manual",
+  });
+  assert.equal(accepted.status, 303);
+  assert.equal(accepted.headers.get("location"), "/advice/advice-1");
+  assert.deepEqual((ctx.homeInbox as unknown as StubInbox).questions, ["Why is the curtain timing uncomfortable?"]);
+
+  const answer = await fetch(`${ctx.homeInboxHttp.origin}/advice/advice-1`, { headers: { authorization } });
+  assert.equal(answer.status, 200);
+  assert.match(await answer.text(), /Advice detail/);
+
+  const unicodeQuestion = "窗帘".repeat(333) + "？";
+  const unicode = await fetch(url, {
+    method: "POST",
+    headers,
+    body: new URLSearchParams({ question: unicodeQuestion }),
+    redirect: "manual",
+  });
+  assert.equal(unicode.status, 303);
+  assert.equal((ctx.homeInbox as unknown as StubInbox).questions.at(-1), unicodeQuestion);
+
+  const oversized = await fetch(url, {
+    method: "POST",
+    headers,
+    body: new URLSearchParams({ question: "窗".repeat(5_000) }),
+    redirect: "manual",
+  });
+  assert.equal(oversized.status, 413);
 
   await fiber.dispose();
   await inboxFiber.dispose();

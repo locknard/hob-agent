@@ -4,6 +4,7 @@ import {
   ProposalInboxController,
   renderProposalDetail,
   renderProposalList,
+  renderHomeAdvice,
   type InboxProposal,
   type InboxProposalDetail,
   type InboxProposalStatus,
@@ -15,6 +16,7 @@ import {
   type InboxObservationQualitySummary,
   type ProposalInboxPort,
   type ProposalTracePort,
+  type InboxHomeAdviceRecord,
 } from "./proposal-inbox.js";
 
 declare module "@deepseek-ai/cordis" {
@@ -37,6 +39,12 @@ export class ProposalInboxService extends Service {
     list(query: { limit: number }): readonly InboxObservationAttempt[];
     summary(): InboxObservationQualitySummary;
   };
+  private readonly advice?: {
+    canAsk(): boolean;
+    ask(question: string): Promise<InboxHomeAdviceRecord>;
+    list(query?: { limit?: number }): readonly InboxHomeAdviceRecord[];
+    get(id: string): InboxHomeAdviceRecord | undefined;
+  };
 
   constructor(ctx: Context) {
     super(ctx, "homeInbox");
@@ -54,6 +62,7 @@ export class ProposalInboxService extends Service {
       list(query: { limit: number }): readonly InboxObservationAttempt[];
       summary(): InboxObservationQualitySummary;
     } | undefined;
+    this.advice = ctx.get("homeAdvice") as unknown as typeof this.advice;
   }
 
   list(query?: { status?: InboxProposalStatus; limit?: number }): readonly InboxProposalSummary[] {
@@ -77,6 +86,20 @@ export class ProposalInboxService extends Service {
     return this.observation.observeNow();
   }
 
+  canAskAdvice(): boolean {
+    return this.advice?.canAsk() ?? false;
+  }
+
+  async askAdvice(question: string): Promise<InboxHomeAdviceRecord> {
+    if (!this.canAskAdvice() || this.advice === undefined) throw new Error("Home advice is unavailable");
+    return this.advice.ask(question);
+  }
+
+  renderAdvice(id: string): string | undefined {
+    const advice = this.advice?.get(id);
+    return advice === undefined ? undefined : renderHomeAdvice(advice);
+  }
+
   renderList(query?: { status?: InboxProposalStatus; limit?: number }): string {
     return renderProposalList(
       this.list(query),
@@ -86,6 +109,8 @@ export class ProposalInboxService extends Service {
         proposals: this.proposalQuality.qualitySummary(),
         ...(this.observationAudit === undefined ? {} : { observations: this.observationAudit.summary() }),
       },
+      this.advice?.list({ limit: 5 }),
+      this.canAskAdvice(),
     );
   }
 

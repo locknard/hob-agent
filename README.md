@@ -130,6 +130,11 @@ device. It also shows the five most recent metadata-only observation attempts.
 The Inbox includes an all-time count-only household calibration summary over
 proposal decisions, structured feedback, observation outcomes, and bounded
 Agent-reported no-proposal dispositions.
+When the full runtime is connected, **Ask about your home** accepts one bounded
+question and returns a locally persisted, structured advice document. The
+Agent may suggest a reversible trial and optional sensing capabilities, but it
+cannot change a rule or device. Stored answers remain readable in standalone
+Inbox mode. See [`docs/household-advice.md`](docs/household-advice.md).
 See [`docs/standalone-inbox.md`](docs/standalone-inbox.md) and
 [`docs/observation-audit.md`](docs/observation-audit.md), plus
 [`docs/household-calibration-summary.md`](docs/household-calibration-summary.md).

@@ -8,6 +8,7 @@
     "./composition": "./src/dsh-home-agent-composition.ts",
     "./home-compaction": "./src/dsh-home-compaction.ts",
     "./home-agent": "./src/dsh-home-agent-service.ts",
+    "./home-advice-report": "./src/dsh-home-advice-report.ts",
     "./home-activity-tool": "./src/dsh-home-activity-tool.ts",
     "./home-calibration-tool": "./src/dsh-home-calibration-tool.ts",
     "./home-evidence-tool": "./src/dsh-home-evidence-tool.ts",
