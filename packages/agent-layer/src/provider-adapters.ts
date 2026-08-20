@@ -14,6 +14,7 @@ const ADAPTERS: Record<SupportedModelProvider, ProviderAdapter> = {
   deepseek: { id: "deepseek", authMethods: ["api_key"] },
   kimi: { id: "kimi", authMethods: ["api_key"] },
   glm: { id: "glm", authMethods: ["api_key"] },
+  custom: { id: "custom", authMethods: ["api_key"] },
 };
 
 export function providerAdapter(provider: SupportedModelProvider): ProviderAdapter {

@@ -5,8 +5,11 @@ import { providerSetup } from "./model-providers.js";
 
 test("publishes the DSH route catalog without resolving credentials", () => {
   assert.deepEqual(
-    ["gpt", "claude", "deepseek", "kimi", "glm"].map((provider) => {
-      const setup = providerSetup(provider as never);
+    ["gpt", "claude", "deepseek", "kimi", "glm", "custom"].map((provider) => {
+      const setup = providerSetup(
+        provider as never,
+        provider === "custom" ? { baseURL: "https://models.example.test/v1" } : undefined,
+      );
       return [setup.id, setup.runtimeProviderId, setup.credentialEnv];
     }),
     [
@@ -15,7 +18,28 @@ test("publishes the DSH route catalog without resolving credentials", () => {
       ["deepseek", "deepseek", "DEEPSEEK_API_KEY"],
       ["kimi", "moonshotai", "MOONSHOT_API_KEY"],
       ["glm", "zai", "ZAI_API_KEY"],
+      ["custom", "hob-custom-openai", "HOB_CUSTOM_MODEL_API_KEY"],
     ],
+  );
+});
+
+test("validates one HTTPS OpenAI-compatible custom deployment endpoint", () => {
+  assert.equal(
+    providerSetup("custom", { baseURL: "https://models.example.test:8443/v1/" }).baseURL,
+    "https://models.example.test:8443/v1",
+  );
+  for (const baseURL of [
+    "http://models.example.test/v1",
+    "https://user:secret@models.example.test/v1",
+    "https://models.example.test/v1?token=secret",
+    "https://models.example.test/v1#fragment",
+  ]) {
+    assert.throws(() => providerSetup("custom", { baseURL }), /custom model endpoint/i);
+  }
+  assert.throws(() => providerSetup("custom"), /custom model endpoint/i);
+  assert.throws(
+    () => providerSetup("deepseek", { baseURL: "https://models.example.test/v1" }),
+    /only valid for custom/i,
   );
 });
 

@@ -11,6 +11,7 @@ import {
   type ProviderProbeResult,
 } from "@hob-agent/agent-layer/model-credential-probe";
 import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
+import { providerSetup } from "@hob-agent/agent-layer/model-providers";
 
 import { loadSelectedModelCredential } from "./model-credential-profile.js";
 
@@ -18,6 +19,7 @@ type Probe = (options: {
   profile: AuthProfile;
   vault: WritableSecretVault;
   modelId: string;
+  baseURL?: string;
 }) => Promise<ProviderProbeResult>;
 
 /** Executes one paid, metadata-only connection probe for the selected profile. */
@@ -38,7 +40,24 @@ export async function probeConfiguredModelCredential(
   }
   const selected = await loadSelectedModelCredential(dataDirectory, model.provider, vault);
   if (!selected) throw new Error(`No selected credential profile for ${model.provider}`);
-  return probe({ profile: selected.profile, vault, modelId: model.modelId });
+  const rawBaseURL = environment.HOB_MODEL_BASE_URL;
+  let baseURL: string | undefined;
+  try {
+    if (model.provider === "custom") {
+      if (rawBaseURL === undefined || rawBaseURL.trim() === "") throw new Error("missing");
+      baseURL = providerSetup("custom", { baseURL: rawBaseURL }).baseURL;
+    } else if (rawBaseURL !== undefined) {
+      throw new Error("unexpected");
+    }
+  } catch {
+    throw new Error("Invalid HOB_MODEL_BASE_URL for selected provider");
+  }
+  return probe({
+    profile: selected.profile,
+    vault,
+    modelId: model.modelId,
+    ...(baseURL === undefined ? {} : { baseURL }),
+  });
 }
 
 function isMainModule(): boolean {

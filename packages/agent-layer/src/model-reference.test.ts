@@ -8,6 +8,10 @@ test("parses a supported provider/model reference into a stable route", () => {
     provider: "claude",
     modelId: "claude-sonnet-4-6",
   });
+  assert.deepEqual(parseModelReference("custom/deepseek-v4-flash-0731"), {
+    provider: "custom",
+    modelId: "deepseek-v4-flash-0731",
+  });
 });
 
 test("rejects ambiguous, blank, and unsupported model references", () => {

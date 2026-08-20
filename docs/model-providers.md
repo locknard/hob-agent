@@ -10,14 +10,38 @@ DSH runtime route 的映射如下：
 | DeepSeek | `deepseek/deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
 | Kimi | `kimi/kimi-k2.6` | `MOONSHOT_API_KEY` |
 | GLM | `glm/glm-5.2` | `ZAI_API_KEY` |
+| 自托管 / OpenAI-compatible | `custom/<deployment-model-id>` | `HOB_CUSTOM_MODEL_API_KEY` |
 
-以上五个产品路径均通过 DSH credential seam 提供 API key。GPT/OpenAI API route 不提供
+以上路径均通过 DSH credential seam 提供 API key。GPT/OpenAI API route 不提供
 OAuth。Claude 保留 OAuth profile、SecretVault、刷新锁和 expiry metadata 基础件，但官方
 DSH rc.7 adapter 没有交互式 login/logout contract；未安装未来的 provider-specific DSH
 OAuth adapter 时默认 fail closed，不能视为已可用的产品接入。
 
 Provider 目录与协议兼容层由官方 `dsh-llm-pi-ai` 插件管理。其内部 provider SDK 是
-插件实现细节；hob-agent 不直接依赖或导入该 SDK，也不自行模拟 OpenAI-compatible API。
+插件实现细节；hob-agent 不直接依赖或导入该 SDK。`custom` 也通过这个官方插件的
+`openai-completions` adapter 挂载独立 DSH route，不在 hub 内实现一套 HTTP client。
+
+## 自托管 OpenAI-compatible 部署
+
+自托管模型使用单独的 `custom` 产品身份，避免把代理或私有部署伪装成官方 OpenAI / DeepSeek
+服务。模型 ID 和端点都是显式启动配置：
+
+```sh
+export HOB_MODEL='custom/deployment-model-id'
+export HOB_MODEL_BASE_URL='https://models.example.com:8443/v1'
+pnpm credentials:model
+pnpm credentials:test
+```
+
+`HOB_MODEL_BASE_URL` 只允许 HTTPS，不接受 URL userinfo、query 或 fragment，并且仅对
+`custom` 有效；非标准 HTTPS 端口是允许的。密钥仍通过 `credentials:model` 写入 Keychain，
+不应直接 export 到 shell、`.env` 或仓库文件。当前一个启动实例只选择一个 base URL；主备
+端点切换是显式配置操作。自动故障转移需要独立定义健康判定、请求幂等和审计语义，不能仅
+因为存在备用地址就静默切换。
+
+自托管服务必须实现与 `openai-completions` 兼容的流式文本请求。初始接入只声明调用方
+明确选择的一个模型，不通过 `/models` 自动扩张模型或工具权限；模型特有的 reasoning、
+图像和工具兼容性应分别用真实能力测试确认。
 
 DSH 是唯一 Agent Runtime。标准 env API-key 路径使用官方
 `@deepseek-ai/dsh-llm-pi-ai@0.1.0-rc.7`，由它转换 text/tool/reasoning/image、usage、

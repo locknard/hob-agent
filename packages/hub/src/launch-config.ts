@@ -51,6 +51,7 @@ export interface HomeHubLaunchConfig {
   readonly agent: {
     readonly provider: SupportedModelProvider;
     readonly model: string;
+    readonly baseURL?: string;
     readonly profile?: SelectedModelCredential["profile"];
     readonly vault?: SelectedModelCredential["vault"];
   };
@@ -136,7 +137,27 @@ export function readHomeHubLaunchConfig(
   if (selectedCredential !== undefined && selectedCredential.profile.provider !== model.provider) {
     throw new Error("Selected credential profile does not match HOB_MODEL provider");
   }
-  const credentialEnv = providerSetup(model.provider).credentialEnv;
+  const baseURLValue = environment.HOB_MODEL_BASE_URL;
+  let provider: ReturnType<typeof providerSetup>;
+  try {
+    if (model.provider === "custom") {
+      if (baseURLValue === undefined || baseURLValue.trim() === "") {
+        throw new Error("missing");
+      }
+      provider = providerSetup(model.provider, { baseURL: baseURLValue });
+    } else {
+      if (baseURLValue !== undefined) {
+        throw new Error("only-valid-for-custom");
+      }
+      provider = providerSetup(model.provider);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "only-valid-for-custom") {
+      throw new Error("HOB_MODEL_BASE_URL is only valid for the custom provider");
+    }
+    throw new Error("Invalid HOB_MODEL_BASE_URL for custom model endpoint");
+  }
+  const credentialEnv = provider.credentialEnv;
   const launchEnvironment = selectedCredential === undefined
     ? createLaunchEnvironmentSnapshot([{
         source: "process",
@@ -159,6 +180,7 @@ export function readHomeHubLaunchConfig(
     agent: {
       provider: model.provider,
       model: model.modelId,
+      ...(provider.baseURL === undefined ? {} : { baseURL: provider.baseURL }),
       ...(selectedCredential === undefined ? {} : selectedCredential),
     },
     ...(inboxHttp === undefined ? {} : { inboxHttp }),

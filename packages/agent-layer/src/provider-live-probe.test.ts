@@ -68,6 +68,30 @@ test("accepts max-tokens as a successful provider connection", async () => {
   assert.deepEqual(result, { model: "deepseek/deepseek-v4-flash", status: "ok", latencyMs: 0 });
 });
 
+test("routes a custom deployment through its mounted DSH provider", async () => {
+  const calls: string[] = [];
+  const result = await probeLiveProvider("custom", "deepseek-v4-flash-0731", async () => ({
+    resolveModelInfo: async (provider, model) => {
+      calls.push(`${provider}/${model}`);
+      return { provider, id: model, name: model };
+    },
+    stream: (options) => {
+      calls.push(`${options.provider}/${options.model}`);
+      return stop();
+    },
+  }), () => 0, undefined, "https://models.example.test:8443/v1/");
+
+  assert.deepEqual(result, {
+    model: "custom/deepseek-v4-flash-0731",
+    status: "ok",
+    latencyMs: 0,
+  });
+  assert.deepEqual(calls, [
+    "hob-custom-openai/deepseek-v4-flash-0731",
+    "hob-custom-openai/deepseek-v4-flash-0731",
+  ]);
+});
+
 test("forwards cancellation to DSH model resolution and request", async () => {
   const controller = new AbortController();
   const receivedSignals: (AbortSignal | undefined)[] = [];

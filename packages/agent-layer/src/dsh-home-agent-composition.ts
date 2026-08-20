@@ -12,6 +12,8 @@ import type { SecretVault } from "./secret-vault.js";
 export interface DshHomeAgentCompositionOptions {
   readonly provider: SupportedModelProvider;
   readonly model: string;
+  /** HTTPS OpenAI-compatible endpoint required only for the custom provider. */
+  readonly baseURL?: string;
   /** Optional explicit API-key profile; requires vault and takes precedence over ambient env. */
   readonly profile?: AuthProfile;
   readonly vault?: SecretVault;
@@ -28,7 +30,10 @@ class DshHomeAgentComposition extends Service {
   }
 
   protected async [Service.init](): Promise<void> {
-    const setup = providerSetup(this.options.provider);
+    const setup = providerSetup(
+      this.options.provider,
+      this.options.baseURL === undefined ? undefined : { baseURL: this.options.baseURL },
+    );
     const householdContext = this.options.householdDirectory === undefined
       ? undefined
       : await loadHouseholdPromptContext(this.options.householdDirectory);
@@ -48,7 +53,15 @@ class DshHomeAgentComposition extends Service {
     await this.ctx.plugin(LlmRuntime);
     await this.ctx.plugin(PiAiPlugin, {
       providers: {
-        [setup.runtimeProviderId]: { apiKeyEnv: setup.credentialEnv },
+        [setup.runtimeProviderId]: setup.baseURL === undefined
+          ? { apiKeyEnv: setup.credentialEnv }
+          : {
+              displayName: "Custom OpenAI-compatible deployment",
+              apiKeyEnv: setup.credentialEnv,
+              api: "openai-completions",
+              baseURL: setup.baseURL,
+              models: [{ id: this.options.model, name: this.options.model }],
+            },
       },
     });
     await this.ctx.plugin(DshHomeAgentService, {

@@ -74,6 +74,41 @@ test("bridges a selected API-key profile into the official DSH credential seam",
   await ctx.fiber.dispose();
 });
 
+test("mounts a hand-declared OpenAI-compatible custom deployment", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  const fiber = await mountDshHomeAgent(ctx, {
+    provider: "custom",
+    model: "deepseek-v4-flash-0731",
+    baseURL: "https://models.example.test:8443/v1/",
+    profile: {
+      id: "custom:primary",
+      provider: "custom",
+      kind: "api_key",
+      secretRef: "keychain:hob-agent/custom:primary",
+    },
+    vault: { read: async () => "custom-profile-key" },
+    sessionId: "custom-provider-test",
+  });
+
+  assert.deepEqual(ctx.llm.listProviders().map((provider) => provider.id), ["hob-custom-openai"]);
+  assert.deepEqual((await ctx.llm.listModels("hob-custom-openai")).map((model) => model.id), [
+    "deepseek-v4-flash-0731",
+  ]);
+  assert.equal(
+    (await ctx.credentials.resolve(credentialRef("HOB_CUSTOM_MODEL_API_KEY")))?.value,
+    "custom-profile-key",
+  );
+  assert.equal(
+    (await ctx.llm.resolveModelInfo("hob-custom-openai", "deepseek-v4-flash-0731")).provider,
+    "hob-custom-openai",
+  );
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("loads an explicit household directory into the official DSH prompt seam", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-composition-home-"));
   try {

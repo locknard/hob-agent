@@ -68,6 +68,21 @@ export HOB_HOME_DIR='/absolute/path/to/private-home'
 pnpm start
 ```
 
+For a self-hosted OpenAI-compatible deployment, select the neutral custom
+provider and configure its HTTPS endpoint; keep the token in the same Keychain
+flow:
+
+```sh
+export HOB_MODEL='custom/deployment-model-id'
+export HOB_MODEL_BASE_URL='https://models.example.com:8443/v1'
+pnpm credentials:model
+pnpm credentials:test
+```
+
+`HOB_MODEL_BASE_URL` is valid only for `custom`. One endpoint is active per
+process; switching to a backup endpoint is currently explicit rather than
+automatic.
+
 `credentials:model` uses `HOB_DATA_DIR` and the provider selected by
 `HOB_MODEL`. Re-running it safely rotates that provider's primary key. Only a
 non-secret profile locator and selection order are written to the private

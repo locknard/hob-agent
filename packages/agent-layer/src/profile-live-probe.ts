@@ -18,6 +18,8 @@ export interface ProfileLiveProbeOptions {
   /** Required for OAuth so a DSH credential adapter can persist refreshed metadata. */
   metadata?: ProfileMetadataWriter;
   modelId: string;
+  /** Required only for an OpenAI-compatible custom deployment. */
+  baseURL?: string;
   /** A runtime already mounted with the selected profile's DSH credential route. */
   runtime?: LiveProbeModels;
   /**
@@ -46,10 +48,14 @@ export async function probeDshApiKeyProfile(options: {
   readonly profile: AuthProfile;
   readonly vault: WritableSecretVault;
   readonly modelId: string;
+  readonly baseURL?: string;
   readonly signal?: AbortSignal;
 }) {
   const provider = options.profile.provider as SupportedModelProvider;
-  const setup = providerSetup(provider);
+  const setup = providerSetup(
+    provider,
+    options.baseURL === undefined ? undefined : { baseURL: options.baseURL },
+  );
   if (!options.profile.secretRef) throw new Error("Selected API-key profile is missing a secret reference");
   const ctx = new Context();
   try {
@@ -59,12 +65,23 @@ export async function probeDshApiKeyProfile(options: {
     });
     await ctx.plugin(LlmRuntime);
     await ctx.plugin(PiAiPlugin, {
-      providers: { [setup.runtimeProviderId]: { apiKeyEnv: setup.credentialEnv } },
+      providers: {
+        [setup.runtimeProviderId]: setup.baseURL === undefined
+          ? { apiKeyEnv: setup.credentialEnv }
+          : {
+              displayName: "Custom OpenAI-compatible deployment",
+              apiKeyEnv: setup.credentialEnv,
+              api: "openai-completions",
+              baseURL: setup.baseURL,
+              models: [{ id: options.modelId, name: options.modelId }],
+            },
+      },
     });
     return await probeProfileConnection({
       profile: options.profile,
       vault: options.vault,
       modelId: options.modelId,
+      ...(setup.baseURL === undefined ? {} : { baseURL: setup.baseURL }),
       runtime: ctx.llm,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
@@ -95,6 +112,7 @@ export async function probeProfileConnection(options: ProfileLiveProbeOptions) {
         () => runtime,
         options.clock,
         signal,
+        options.baseURL,
       );
     },
     { cooldownUntil: options.cooldownUntil, signal: options.signal },

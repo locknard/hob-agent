@@ -1,6 +1,6 @@
 import type { SupportedModelProvider } from "./model-providers.js";
 
-const SUPPORTED = new Set<SupportedModelProvider>(["gpt", "claude", "deepseek", "kimi", "glm"]);
+const SUPPORTED = new Set<SupportedModelProvider>(["gpt", "claude", "deepseek", "kimi", "glm", "custom"]);
 
 export interface ModelReference {
   provider: SupportedModelProvider;

@@ -28,8 +28,12 @@ export async function probeLiveProvider(
   createRuntime: () => LiveProbeModels | Promise<LiveProbeModels>,
   clock: () => number = Date.now,
   signal?: AbortSignal,
+  baseURL?: string,
 ): Promise<ProviderProbeResult> {
-  const setup = providerSetup(provider);
+  const setup = providerSetup(
+    provider,
+    baseURL === undefined ? undefined : { baseURL },
+  );
   return probeProvider(`${provider}/${modelId}`, async () => {
     const models = await createRuntime();
     await models.resolveModelInfo(setup.runtimeProviderId, modelId, signal);

@@ -174,6 +174,50 @@ test("selects the corresponding standard model credential and never copies the p
   assert.equal(config.launchEnvironment.get("OPENAI_API_KEY"), undefined);
 });
 
+test("configures one explicit HTTPS OpenAI-compatible custom model route", () => {
+  const config = readHomeHubLaunchConfig({
+    HOB_DATA_DIR: "/tmp/hob-agent-launch-test-custom",
+    HOB_BRIDGES: BRIDGES,
+    HOB_HA_TOKEN: "home-assistant-secret",
+    HOB_MODEL: "custom/deepseek-v4-flash-0731",
+    HOB_MODEL_BASE_URL: "https://models.example.test:8443/v1/",
+    HOB_CUSTOM_MODEL_API_KEY: "custom-secret",
+    OPENAI_API_KEY: "must-not-enter-the-snapshot",
+  });
+
+  assert.deepEqual(config.agent, {
+    provider: "custom",
+    model: "deepseek-v4-flash-0731",
+    baseURL: "https://models.example.test:8443/v1",
+  });
+  assert.equal(config.launchEnvironment.get("HOB_CUSTOM_MODEL_API_KEY")?.value, "custom-secret");
+  assert.equal(config.launchEnvironment.get("OPENAI_API_KEY"), undefined);
+});
+
+test("requires a safe endpoint only for a custom model route", () => {
+  assert.throws(() => readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_MODEL: "custom/deepseek-v4-flash-0731",
+    HOB_CUSTOM_MODEL_API_KEY: "custom-secret",
+  }), /HOB_MODEL_BASE_URL/);
+  assert.throws(() => readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_MODEL_BASE_URL: "https://models.example.test/v1",
+  }), /only valid.*custom/i);
+  const unsafe = "https://user:secret@models.example.test/v1";
+  assert.throws(
+    () => readHomeHubLaunchConfig({
+      ...BASE_ENV,
+      HOB_MODEL: "custom/deepseek-v4-flash-0731",
+      HOB_MODEL_BASE_URL: unsafe,
+      HOB_CUSTOM_MODEL_API_KEY: "custom-secret",
+    }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes("HOB_MODEL_BASE_URL")
+      && !error.message.includes("secret"),
+  );
+});
+
 test("uses an explicit Keychain profile without requiring or snapshotting an environment API key", () => {
   const vault = { read: async () => "keychain-secret" };
   const profile = {
@@ -248,6 +292,7 @@ test("reads only the explicit launch allowlist before lazy bridge credential res
     "HOB_DATA_DIR",
     "HOB_BRIDGES",
     "HOB_MODEL",
+    "HOB_MODEL_BASE_URL",
     "OPENAI_API_KEY",
     "HOB_INBOX_AUTH_TOKEN",
     "HOB_INBOX_PORT",

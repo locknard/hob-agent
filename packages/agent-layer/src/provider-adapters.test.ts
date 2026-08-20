@@ -10,4 +10,5 @@ test("registers provider-specific auth capability without claiming unsupported O
   assert.deepEqual(providerAdapter("deepseek").authMethods, ["api_key"]);
   assert.equal(providerAdapter("kimi").oauth, undefined);
   assert.equal(providerAdapter("glm").oauth, undefined);
+  assert.deepEqual(providerAdapter("custom").authMethods, ["api_key"]);
 });
