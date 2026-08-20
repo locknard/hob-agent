@@ -308,17 +308,32 @@ the root production Context: evidence identity now binds the exact approved
 Proposal evidence and capability scope; risk identity binds evidence,
 authority, and conflict inputs, and the Registry refuses a risk row unless both
 referenced assessments already exist for the exact artifact ref and input
-identities; authority identity binds the future private binding source.
+identities; authority identity binds the Hub-private fresh-world binding input.
+
+Two additional Hub-only, non-applying assessment producer cores now exist but
+remain unmounted. `ArtifactEvidenceProducer` re-reads the exact Artifact and
+approved Proposal source, derives all neutral capability references, and reads
+fresh HomeWorld query/snapshot watermarks and coverage. `ArtifactAuthorityProducer`
+re-reads the exact Artifact, consumes a source-owned opaque fresh-world binding
+input, resolves candidates through the private registry, and persists an
+authority assessment; notify-only artifacts use an explicit empty authority
+scope. Neither producer calls a bridge or control path.
 
 The isolated Hub-private authority candidate registry core now persists opaque
 candidate lifecycle and metadata-only audit. `AuthorityCoordinator` also
 validates explicit action configuration with `configIdentity` and
-`configRevision`. Neither seam is wired to HomeWorld, the Artifact producer, or
-the root production composition. The next boundary is the Hub-private binding
-source plus honest evidence/risk/authority assessment producers and their
-integration. Agent, Inbox, bridge, and plugin contexts must remain unable to
-discover that mutation seam. M3c compiler and historical dry-run remain later,
-pure-read work; device writes remain unavailable.
+`configRevision`. The candidate registry is consumed only by the unmounted
+authority producer. An unmounted `HomeWorldAuthorityBindingSource` binds its
+opaque inputs to fresh relevant bridge watermarks, and an unmounted
+`ArtifactRiskProducer` applies the fixed Hub policy after exact evidence,
+authority, and Hub-private conflict input validation. The unmounted
+`ArtifactRiskConflictSource` rebinds the exact approved Proposal conflict check
+and scans a bounded read-only Artifact Registry view; incomplete scans and
+source mismatches stay unavailable. Root production coordination and fresh
+current-catalog conflict refresh are still absent. Agent, Inbox, bridge, and
+plugin contexts must remain unable to discover that mutation seam. M3c
+compiler/dry-run and the action plane remain later, pure-read or unimplemented
+work; device writes remain unavailable.
 
 ### Implemented foundation — canonical ingest-journal retention
 

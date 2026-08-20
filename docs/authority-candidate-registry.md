@@ -1,16 +1,19 @@
 # Hub authority candidate registry
 
-Status: the Hub-private registry core is implemented and tested in isolation as
-an M3b/M3c prerequisite; HomeWorld, Artifact producer, and production-root
-integration are not wired yet.
+Status: the Hub-private registry core, an unmounted authority-assessment
+producer, and an unmounted HomeWorld binding source are implemented and tested
+in isolation as M3b/M3c prerequisites. Production-root integration is not wired
+yet.
 
 The isolated core persists opaque candidate identities, lifecycle transitions,
 idempotent operations, and metadata-only audit in private SQLite. It is not an
 action route, and its existence does not make an authority assessment or an
 execution path available. `AuthorityCoordinator` now validates explicit
 `ActionAuthorityConfiguration` with Hub-owned `configIdentity` and positive
-`configRevision`, but it is not yet the binding source for this registry or an
-assessment producer.
+`configRevision`. `ArtifactAuthorityProducer` can consume this candidate
+registry together with a Hub-private fresh-world opaque binding input and write
+an immutable authority assessment, but that producer remains unmounted. It
+does not make a HomeWorld binding adapter or an execution path available.
 
 ## Decision
 
@@ -83,17 +86,23 @@ type AuthorityAssessmentInput = {
 };
 ```
 
-Every device-action target must have exactly one candidate. The registry
-identity, candidate IDs/statuses, scope, and checked watermarks all contribute
-to `ArtifactAuthorityAssessment.inputIdentity`. A missing registry, corrupt
-row, incomplete scope, stale binding generation, or absent relevant watermark
+Every device-action target must have exactly one candidate. Notify-only
+artifacts use an explicit empty capability scope and candidate set; they do not
+invent an action authority. The registry identity, candidate IDs/statuses,
+scope, and checked watermarks all contribute to
+`ArtifactAuthorityAssessment.inputIdentity`. A missing registry, corrupt row,
+incomplete scope, stale binding generation, or absent relevant watermark
 prevents an available assessment.
 
 The candidate-registry core above is currently a private, isolated seam. It is
-not consumed by HomeWorld or the Artifact producer, and it is not mounted as a
-mutation service in the production composition. The next integration boundary
-is a Hub-private binding source that can feed honest evidence/risk/authority
-assessment producers.
+consumed only by the unmounted `ArtifactAuthorityProducer` through its narrow
+resolve seam. The unmounted `HomeWorldAuthorityBindingSource` creates an exact
+fresh-world input for that producer from neutral snapshots and Hub-private
+authority selectors; it exposes neither native routes nor control. The next
+integration boundary is private production coordination and fresh
+current-catalog conflict refresh, not a public mutation service. The initial
+unmounted conflict source already binds the approved Proposal's checked rule
+evidence and bounded existing Artifact overlap into the fixed risk producer.
 
 Before M3d ticket claim, Hub resolves the latest candidate again to a final
 route and checks the same binding/config generation. The final route never

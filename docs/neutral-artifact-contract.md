@@ -5,10 +5,14 @@
 > source gate 已经落地。新的 automation Proposal 还必须携带一个经 Hub 重新校验、可在
 > Inbox 精确审阅的闭集中立 ECA candidate；旧 Proposal 仍可读取但不能成为 Artifact source。
 > Hub-only Artifact producer core 已能从精确 source gate 幂等生成 revision 1，但尚未挂入
-> 生产组合；三类 assessment 的动态输入 identity、Artifact Registry 持久化（含 risk 对
+> 生产组合；EvidenceProducer、AuthorityProducer 的 unmounted core 已能分别从 approved
+> Proposal + HomeWorld query/snapshot port、以及 Hub-private fresh-world opaque binding input
+> + candidate registry 生成 immutable assessment；notify-only authority scope 明确为空。
+> 三类 assessment 的动态输入 identity、Artifact Registry 持久化（含 risk 对
 > evidence+authority 的 exact cross-check）和私有 authority candidate registry core 已实现并
-> 测试。Artifact Registry 的只读查询已由 HomeArtifactService 接入生产；candidate binding
-> source、实际 evidence/risk/authority producer 和 production mutation wiring 尚未接入。
+> 测试。Artifact Registry 的只读查询已由 HomeArtifactService 接入生产；unmounted
+> HomeWorldAuthorityBindingSource、ArtifactRiskConflictSource 与 RiskProducer core 已实现，
+> fresh current-catalog conflict refresh、private coordinator 和 production mutation wiring 尚未接入。
 > `ActionAuthorityConfiguration` 的 Hub-private projection 现在要求 `configIdentity` +
 > `configRevision`；compiler、dry-run、approval ticket 和执行器仍未实现。
 >
@@ -442,11 +446,19 @@ Artifact Registry core 已由 Hub 以私有 SQLite 持久化，包含 0600 文�
 revision/assessment rows、幂等、重启恢复和 append-only audit；risk row 写入还会 exact
 cross-check 已持久化且属于同一 artifact/revision 的 evidence 与 authority input identities。
 它的只读查询和元数据 diagnostics 已由 `HomeArtifactService` 挂入生产组合；ArtifactProducer
-mutation、实际 assessment producer 和执行相关路径仍未挂载。私有
-`AuthorityCandidateRegistry` core 也已具备持久化 candidate lifecycle 和 metadata-only audit，
-但尚未接入 HomeWorld、ArtifactProducer 或 production binding/mutation composition。Agent、Inbox
-和 bridge 只通过窄的 typed service 接口访问。插件如果未来参与，只能提交
-proposal/compiler candidate，不能拥有 registry 或 audit。
+mutation、EvidenceProducer、AuthorityProducer 和执行相关路径仍未挂载到生产组合。EvidenceProducer
+只读 approved Proposal source 与 HomeWorld query/snapshot port；AuthorityProducer 只读
+Hub-private fresh-world opaque binding input，并通过 candidate registry 生成 authority
+assessment；notify-only scope 明确为空。私有 `AuthorityCandidateRegistry` core 已具备持久化
+candidate lifecycle 和 metadata-only audit。未挂载的 `HomeWorldAuthorityBindingSource`
+从中立 snapshot 与 Hub-private authority selector 生成 fresh、gap-free、binding-scoped input；
+未挂载的 `ArtifactRiskProducer` 只消费精确 persisted evidence、authority 与 Hub-private
+conflict input。未挂载的 `ArtifactRiskConflictSource` 从 exact approved Proposal 的冻结
+conflict check 与 bounded Artifact Registry scan 产生 closed findings；任何截断或 source
+mismatch 都保持 unavailable。fresh current-catalog conflict refresh、private production
+coordinator 和 mutation composition 尚未接入。Agent、Inbox 和 bridge 只通过窄的 typed
+service 接口访问。插件如果未来参与，只能提交 proposal/compiler candidate，不能拥有
+registry 或 audit。
 
 ### 5.2 Lifecycle states
 
@@ -673,9 +685,10 @@ Artifact 内只保留 `hwCapabilityId`；candidate 只存在于 Hub authority as
 dry-run attestation 和 ticket。`authorityRegistryIdentity` 只保存 Hub 对 authority config、
 binding generation 和适用 scope 的不可逆 identity，不暴露 route/native payload；当前
 AuthorityCoordinator 已验证并投影带 `configIdentity`、`configRevision` 的显式 action
-configuration，但尚未提供 binding source 或 assessment producer；在完整
-`authorityRegistryIdentity` 可由该 Hub-private source 提供之前不得生成可用 authority
-assessment。最终
+configuration。未挂载的 AuthorityProducer 已能消费完整 Hub-private fresh-world opaque
+binding input 和 candidate registry；未挂载的 `HomeWorldAuthorityBindingSource` 已能从
+中立 snapshot 与精确 configuration binding 生成该 input。它仍未进入 production
+coordination，因此生产路径不得据此宣称可用 authority assessment。最终
 authority target（bridgeId、catalog adapterType,
 bridge-registry binding generation、remote-instance identity）由 Hub 在 ticket 中重新产生，
 永远不接受 model/plugin/artifact payload 提供的值。Candidate 被撤销、bridge rebind、adapter
