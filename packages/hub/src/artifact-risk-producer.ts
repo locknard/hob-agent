@@ -1,6 +1,5 @@
 import {
   computeAssessmentInputIdentity,
-  computeConflictInputIdentity,
   createArtifactRiskAssessment,
   parseArtifactAuthorityAssessment,
   parseArtifactEvidenceAttestation,
@@ -187,11 +186,10 @@ export class ArtifactRiskProducer {
       throw new ArtifactRiskProducerError("assessment_unavailable", "Risk assessment clock is unavailable");
     }
 
-    const conflictInputIdentity = computeConflictInputIdentity({
-      artifact: artifactRef,
-      hwCapabilityIds: capabilityIds,
-      result: conflictResult,
-    });
+    // The source identity already commits to the exact bounded conflict query
+    // and result. Preserve it verbatim so risk and compiler consume the same
+    // current-catalog capture rather than hashing two different envelopes.
+    const conflictInputIdentity = conflictResult.sourceIdentity;
     const reasons = policyReasons(policyClass, conflictResult);
     const identityInput: Omit<ArtifactRiskInput, "assessmentId" | "assessedAt"> & {
       readonly requiresHumanApproval?: never;

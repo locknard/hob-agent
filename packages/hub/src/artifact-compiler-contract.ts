@@ -1292,7 +1292,7 @@ function validateCompileBindings(
   if (value.risk.conflictInputIdentity !== value.currentConflict.sourceIdentity) {
     addIssue(ctx, ["risk", "conflictInputIdentity"], "Risk conflict identity must match the current conflict source identity");
   }
-  validateWatermarkBindings(value.authority.checkedWatermarks, value.worldCut.watermarks, ctx);
+  validateAuthorityWatermarkBindings(value.authority.checkedWatermarks, value.worldCut.watermarks, ctx);
   for (const [index, check] of value.foreignRuleChecks.entries()) {
     if (check.watermark.bridgeId !== check.bridgeId) addIssue(ctx, ["foreignRuleChecks", index, "watermark", "bridgeId"], "Foreign rule watermark bridge must match its check bridge");
     if (check.watermark.epochId !== check.epochId) addIssue(ctx, ["foreignRuleChecks", index, "watermark", "epochId"], "Foreign rule watermark epoch must match its check epoch");
@@ -1411,6 +1411,25 @@ function validateWatermarkBindings(
     if (!evidenceByBridge.has(bridgeId)) {
       addIssue(ctx, ["worldCut", "watermarks"], `World-cut watermark ${bridgeId} is not present in evidence`);
     }
+  }
+}
+
+function validateAuthorityWatermarkBindings(
+  authorityWatermarks: readonly NeutralWatermark[],
+  worldCutWatermarks: readonly NeutralWatermark[],
+  ctx: z.RefinementCtx,
+): void {
+  const worldCutByBridge = new Map(worldCutWatermarks.map((watermark) => [watermark.bridgeId, watermark]));
+  const seen = new Set<string>();
+  for (const authorityWatermark of authorityWatermarks) {
+    const bridgeId = authorityWatermark.bridgeId;
+    const worldCutWatermark = worldCutByBridge.get(bridgeId);
+    if (seen.has(bridgeId)
+      || worldCutWatermark === undefined
+      || !sameWatermarkSemantics(authorityWatermark, worldCutWatermark)) {
+      addIssue(ctx, ["authority", "checkedWatermarks"], `Authority watermark ${bridgeId} must be a unique exact subset of the world cut`);
+    }
+    seen.add(bridgeId);
   }
 }
 

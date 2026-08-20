@@ -5,11 +5,13 @@ import type {
   ArtifactCompilationReceipt,
   ArtifactCompilationCoordinator,
 } from "./artifact-compilation-coordinator.js";
+import { ArtifactCompilationCoordinatorError } from "./artifact-compilation-coordinator.js";
 import type {
   ArtifactMutationCoordinator,
   ArtifactMutationProposalCommand,
   ArtifactMutationReceipt,
 } from "./artifact-mutation-coordinator.js";
+import { ArtifactMutationCoordinatorError } from "./artifact-mutation-coordinator.js";
 import {
   ArtifactPreparationService,
   ArtifactPreparationServiceError,
@@ -148,6 +150,25 @@ test("does not invoke compilation when mutation fails", async () => {
   assert.equal(compileCalls, 0);
 });
 
+test("preserves a bounded mutation coordinator stage without leaking producer details", async () => {
+  const preparation = service(
+    {
+      fromApprovedProposal: () => {
+        throw new ArtifactMutationCoordinatorError("evidence", "producer_failed");
+      },
+    },
+    { compile: () => Promise.resolve(compilationReceipt) },
+  );
+
+  await assert.rejects(
+    preparation.prepare(command),
+    (error: unknown) => error instanceof ArtifactPreparationServiceError
+      && error.stage === "evidence"
+      && error.code === "failed"
+      && !error.message.includes("producer"),
+  );
+});
+
 test("normalizes compiler failures to a bounded stage/code error without leaking the original message", async () => {
   const originalMessage = "provider-native detail https://user:secret@example.invalid/route";
   const preparation = service(
@@ -170,6 +191,25 @@ test("normalizes compiler failures to a bounded stage/code error without leaking
       && !error.message.includes("provider-native")
       && !error.message.includes("secret")
       && !error.message.includes("example.invalid"),
+  );
+});
+
+test("preserves a bounded compilation coordinator stage without leaking dependency details", async () => {
+  const preparation = service(
+    { fromApprovedProposal: () => mutationReceipt },
+    {
+      compile: async () => {
+        throw new ArtifactCompilationCoordinatorError("world-cut", "unavailable");
+      },
+    },
+  );
+
+  await assert.rejects(
+    preparation.prepare(command),
+    (error: unknown) => error instanceof ArtifactPreparationServiceError
+      && error.stage === "world-cut"
+      && error.code === "failed"
+      && !error.message.includes("dependency"),
   );
 });
 
@@ -221,4 +261,24 @@ test("returns a metadata-only receipt without route, native, or credential field
   assert.doesNotMatch(serialized, /route/i);
   assert.doesNotMatch(serialized, /native/i);
   assert.doesNotMatch(serialized, /credential/i);
+});
+
+test("accepts one root-private asynchronous pipeline port without exposing its dependencies", async () => {
+  let calls = 0;
+  const preparation = new ArtifactPreparationService({
+    pipeline: {
+      async run(input) {
+        calls += 1;
+        assert.deepEqual(input, command);
+        return { mutation: mutationReceipt, compilation: compilationReceipt };
+      },
+    },
+  } as never);
+
+  const first = preparation.prepare(command);
+  const second = preparation.prepare({ ...command });
+  assert.strictEqual(first, second);
+  assert.deepEqual(await first, { mutation: mutationReceipt, compilation: compilationReceipt });
+  assert.equal(calls, 1);
+  assert.equal("pipeline" in preparation, false);
 });

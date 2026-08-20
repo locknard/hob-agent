@@ -454,12 +454,16 @@ function validateResultEntry<T extends ArtifactCompileAttestation | NeutralDryRu
   stage: "compile-persist" | "dry-run-persist",
 ): ArtifactCompilationResultEntry<T> {
   if (!isPlainObject(value)
-    || !hasOnlyKeys(value, ["kind", "resultId", "artifact", "inputIdentity", "sequence", "recordedAt", "result", "audit"])
+    || !hasOnlyKeys(value, ["kind", "recordId", "resultId", "artifact", "inputIdentity", "sequence", "recordedAt", "result", "audit"])
     || (value.kind !== expected.kind)
     || typeof value.resultId !== "string"
     || !isExactArtifactRef(value.artifact, expected.artifact)
     || value.inputIdentity !== expected.inputIdentity
     || !isPlainObject(value.result)) {
+    throw coordinatorError(stage, "malformed_result");
+  }
+  if (value.recordId !== undefined
+    && (typeof value.recordId !== "string" || value.recordId !== expected.resultId)) {
     throw coordinatorError(stage, "malformed_result");
   }
   if (value.sequence !== undefined

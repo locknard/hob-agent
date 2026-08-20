@@ -773,15 +773,21 @@ function sameStringArray(left: readonly string[], right: readonly string[]): boo
 }
 
 function sameAssessmentWatermarks(
-  left: readonly ArtifactEvidenceAttestation["watermarks"][number][],
-  right: readonly ArtifactAuthorityAssessment["checkedWatermarks"][number][],
+  evidence: readonly ArtifactEvidenceAttestation["watermarks"][number][],
+  authority: readonly ArtifactAuthorityAssessment["checkedWatermarks"][number][],
 ): boolean {
-  // Assessment binding follows the semantic fence; lastSyncCompleteAt is
-  // intentionally excluded because it is capture metadata.
-  return left.length === right.length && left.every((watermark, index) => {
-    const candidate = right[index];
-    return candidate !== undefined
-      && candidate.bridgeId === watermark.bridgeId
+  // Evidence covers every capability referenced by the Artifact, while
+  // authority covers only device-action targets. Consequently authority is
+  // an exact semantic-fence subset; notify-only artifacts have an empty set.
+  // lastSyncCompleteAt is capture metadata and is intentionally excluded.
+  const evidenceByBridge = new Map(evidence.map((watermark) => [watermark.bridgeId, watermark]));
+  if (evidenceByBridge.size !== evidence.length) return false;
+  const seen = new Set<string>();
+  return authority.every((candidate) => {
+    if (seen.has(candidate.bridgeId)) return false;
+    seen.add(candidate.bridgeId);
+    const watermark = evidenceByBridge.get(candidate.bridgeId);
+    return watermark !== undefined
       && candidate.epochId === watermark.epochId
       && candidate.lastSeq === watermark.lastSeq
       && candidate.freshness === watermark.freshness
