@@ -296,11 +296,23 @@ escapes and renders the exact candidate while exposing no install or execution
 path. Legacy Proposal rows remain readable but the source gate rejects those
 without a candidate.
 
-This still does not complete M3b. The next boundary must be a Hub-owned producer
-that consumes this gate, constructs the closed Artifact shape, creates fresh
-Hub evidence/risk/authority assessments, and registers their durable retention
-references. M3c compiler and historical dry-run remain later, pure-read work;
-device writes remain unavailable.
+The Hub-only producer core now consumes this gate, derives a stable opaque
+Artifact identity/idempotency key, copies the exact reviewed content without
+reinterpretation, and writes revision one through the immutable Registry. A
+restart replay returns the same row and audit. It accepts no caller content,
+assessment, route, actor, or Registry key and owns no bridge, credential, or
+remote-write port.
+
+This still does not complete M3b. The producer is intentionally not mounted in
+the root production Context: evidence identity now binds the exact approved
+Proposal evidence and capability scope; risk identity binds evidence,
+authority, and conflict inputs; authority identity binds a future private
+registry generation. The next boundary is the durable opaque authority
+candidate registry plus honest Hub assessment producers. Only then may a
+private isolated Hub command coordinate Artifact creation. Agent, Inbox,
+bridge, and plugin contexts must remain unable to discover that mutation seam.
+M3c compiler and historical dry-run remain later, pure-read work; device writes
+remain unavailable.
 
 ### Implemented foundation — canonical ingest-journal retention
 

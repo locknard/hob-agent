@@ -199,9 +199,12 @@ assessments. New automation proposals include the same closed neutral ECA
 content as a review-only candidate; the Hub validates its selected devices and
 capability evidence, and the Inbox renders the exact trigger, conditions,
 actions, rollback, and postconditions. Production mounts only bounded Artifact
-read queries and metadata-only diagnostics. Proposal-to-Artifact production,
-compilation, simulation, approval tickets, and execution remain unavailable;
-an approved proposal is not an installed automation.
+read queries and metadata-only diagnostics. An unmounted Hub-only producer core
+can already convert the exact current approved Proposal into one idempotent
+revision-one draft, but production coordination and dynamic assessment
+generation remain unavailable until the private authority candidate registry
+exists. Compilation, simulation, approval tickets, and execution also remain
+unavailable; an approved proposal is not an installed automation.
 
 Long-running sessions use the official DSH compaction engine with its one
 supported summarizer hook replaced by a household checkpoint template; the

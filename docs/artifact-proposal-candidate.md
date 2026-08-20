@@ -42,11 +42,13 @@ rollback, and postconditions before accepting a household decision. It clearly
 states that approval records the reviewed intent only and cannot install,
 enable, or execute anything.
 
-After an exact automation Proposal revision is approved, a future Hub-owned
-producer may consume it only through `withApprovedProposalAtRevision`. The
+After an exact automation Proposal revision is approved, the Hub-owned producer
+core can consume it only through `withApprovedProposalAtRevision`. The
 producer supplies the Hub-generated artifact ID and timestamps, copies the
 approved title/summary/content without reinterpretation, creates revision one,
-and appends fresh Hub evidence/risk/authority assessments separately. The Agent,
+and will append fresh Hub evidence/risk/authority assessments separately once
+those Hub producers and the authority registry are implemented. The core remains
+deliberately unmounted until that coordination boundary exists. The Agent,
 Inbox, Skill, bridge, and plugin surfaces receive no Registry mutation method.
 
 ## Acceptance gates
