@@ -36,6 +36,7 @@ export const MAX_NEUTRAL_CONFLICTS = 20;
 export const MAX_NEUTRAL_OPERATIONS = 20;
 export const MAX_NEUTRAL_BLOCKING_REASONS = 20;
 export const MAX_NEUTRAL_ACTION_COMPATIBILITY = 4;
+export const MAX_NEUTRAL_PREDICATE_COMPATIBILITY = 12;
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const URL_PATTERN = /(?:\b[a-z][a-z0-9+.-]*:\/\/|\b(?:data|javascript|mailto):|\bwww\.)/iu;
@@ -246,15 +247,82 @@ const neutralActionCompatibilityListSchema = z.array(neutralActionCompatibilityO
     }
   });
 
+const neutralPredicateCompatibilityObjectSchema = z.object({
+  phase: z.enum(["condition", "postcondition"]),
+  order: positiveSafeIntegerSchema,
+  status: z.enum(["compatible", "incompatible", "unavailable"]),
+  reason: closedReasonCodeSchema.optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.status === "compatible" && value.reason !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["reason"], message: "Compatible predicate projections cannot carry a reason" });
+  }
+  if (value.status !== "compatible" && value.reason === undefined) {
+    ctx.addIssue({ code: "custom", path: ["reason"], message: "Incompatible or unavailable predicate projections require a closed reason" });
+  }
+});
+const neutralPredicateCompatibilitySchemaObjectWithPreflight = z.preprocess(
+  preflightForSchema,
+  neutralPredicateCompatibilityObjectSchema,
+);
+export const neutralPredicateCompatibilitySchema = neutralPredicateCompatibilitySchemaObjectWithPreflight;
+export const NeutralPredicateCompatibilitySchema = neutralPredicateCompatibilitySchema;
+export type NeutralPredicateCompatibility = z.infer<typeof neutralPredicateCompatibilityObjectSchema>;
+
+const neutralPredicateCompatibilityListSchema = z.array(neutralPredicateCompatibilityObjectSchema)
+  .max(MAX_NEUTRAL_PREDICATE_COMPATIBILITY)
+  .superRefine((values, ctx) => {
+    const keys = values.map((value) => `${value.phase}\u0000${value.order}`);
+    if (new Set(keys).size !== keys.length) {
+      ctx.addIssue({ code: "custom", message: "Predicate compatibility phase/order pairs must be unique" });
+    }
+    for (let index = 1; index < values.length; index += 1) {
+      const previous = values[index - 1]!;
+      const current = values[index]!;
+      if (comparePredicateCompatibility(previous, current) >= 0) {
+        ctx.addIssue({ code: "custom", message: "Predicate compatibility projections must be in canonical phase/order sequence" });
+        break;
+      }
+    }
+  });
+
+const neutralDeviceReadObjectSchema = z.union([
+  z.object({
+    status: z.literal("available"),
+    value: neutralScalarSchema,
+  }).strict(),
+  z.object({
+    status: z.enum(["unsupported", "unavailable"]),
+    reason: closedReasonCodeSchema,
+  }).strict(),
+]);
+const neutralDeviceReadSchemaWithPreflight = z.preprocess(
+  preflightForSchema,
+  neutralDeviceReadObjectSchema,
+);
+export const neutralDeviceReadSchema = neutralDeviceReadSchemaWithPreflight;
+export const NeutralDeviceReadSchema = neutralDeviceReadSchema;
+export type NeutralDeviceRead = z.infer<typeof neutralDeviceReadObjectSchema>;
+
 const neutralDeviceSummaryObjectSchema = z.object({
   hwCapabilityId: boundedIdSchema,
   schema: schemaNameSchema,
   schemaVersion: semverSchema,
   semanticKind: capabilitySemanticKindSchema.optional(),
-  currentValue: neutralScalarSchema.optional(),
+  read: neutralDeviceReadObjectSchema,
   validity: z.enum(["valid", "stale", "invalid", "invalid-source", "present-but-invalid", "unavailable"]),
   actionCompatibility: neutralActionCompatibilityListSchema,
-}).strict();
+  predicateCompatibility: neutralPredicateCompatibilityListSchema,
+}).strict().superRefine((value, ctx) => {
+  if (value.read.status === "available" && value.validity !== "valid") {
+    ctx.addIssue({ code: "custom", path: ["read", "status"], message: "An available read requires valid device validity" });
+  }
+  if (value.read.status === "unavailable" && value.validity === "valid") {
+    ctx.addIssue({ code: "custom", path: ["read", "status"], message: "An unavailable read cannot claim valid device validity" });
+  }
+  if (value.validity !== "valid" && value.read.status !== "unavailable") {
+    ctx.addIssue({ code: "custom", path: ["read", "status"], message: "Non-valid device state requires an unavailable read" });
+  }
+});
 
 const neutralDeviceSummarySchemaObject = z.preprocess(
   preflightForSchema,
@@ -356,11 +424,18 @@ export type NeutralConflictResult = z.infer<typeof neutralConflictResultObjectSc
 const neutralConflictInputObjectSchema = z.object({
   bridgeId: boundedIdSchema,
   epochId: boundedIdSchema,
+  watermark: neutralWatermarkSchema,
   catalogIdentity: digestSchema,
   status: z.enum(["current", "unavailable"]),
   findings: z.array(neutralConflictFindingObjectSchema).max(MAX_NEUTRAL_CONFLICTS),
 }).strict().superRefine((value, ctx) => {
   try {
+    if (value.watermark.bridgeId !== value.bridgeId) {
+      ctx.addIssue({ code: "custom", path: ["watermark", "bridgeId"], message: "Conflict watermark bridge must match bridgeId" });
+    }
+    if (value.watermark.epochId !== value.epochId) {
+      ctx.addIssue({ code: "custom", path: ["watermark", "epochId"], message: "Conflict watermark epoch must match epochId" });
+    }
     validateUnique(value.findings.map((finding) => findingIdentity(finding)), "finding");
     if (!isCanonicalFindingOrder(value.findings)) {
       ctx.addIssue({ code: "custom", path: ["findings"], message: "Conflict input findings must be in canonical order" });
@@ -380,25 +455,64 @@ export const neutralConflictInputSchema = neutralConflictInputSchemaObjectWithPr
 export const NeutralConflictInputSchema = neutralConflictInputSchema;
 export type NeutralConflictInput = z.infer<typeof neutralConflictInputObjectSchema>;
 
-const neutralDiffOperationObjectSchema = z.object({
-  order: positiveSafeIntegerSchema,
-  kind: z.enum(["set_level", "set_boolean", "notify_local"]),
-  hwCapabilityId: boundedIdSchema.optional(),
-  actionAuthorityCandidateId: boundedIdSchema.optional(),
-  before: neutralScalarSchema.optional(),
-  after: neutralScalarSchema.optional(),
+const neutralCurrentConflictObjectSchema = z.object({
+  sourceIdentity: digestSchema,
+  result: neutralConflictResultObjectSchema,
+}).strict();
+const neutralCurrentConflictSchemaWithPreflight = z.preprocess(
+  preflightForSchema,
+  neutralCurrentConflictObjectSchema,
+);
+export const neutralCurrentConflictSchema = neutralCurrentConflictSchemaWithPreflight;
+export const NeutralCurrentConflictSchema = neutralCurrentConflictSchema;
+export type NeutralCurrentConflict = z.infer<typeof neutralCurrentConflictObjectSchema>;
+
+const neutralSetLevelDiffOperationSchema = z.object({
+  actionOrder: positiveSafeIntegerSchema,
+  kind: z.literal("set_level"),
+  hwCapabilityId: boundedIdSchema,
+  actionAuthorityCandidateId: boundedIdSchema,
+  before: neutralScalarSchema,
+  after: neutralScalarSchema,
 }).strict().superRefine((value, ctx) => {
-  const isNotify = value.kind === "notify_local";
-  if (isNotify && (value.hwCapabilityId !== undefined || value.actionAuthorityCandidateId !== undefined)) {
-    ctx.addIssue({ code: "custom", message: "notify_local diff operations cannot contain a device target or authority candidate" });
+  if (!isNormalizedLevel(value.before)) {
+    ctx.addIssue({ code: "custom", path: ["before"], message: "set_level diff before value must be finite and within 0..1" });
   }
-  if (!isNotify && value.hwCapabilityId === undefined) {
-    ctx.addIssue({ code: "custom", message: "device diff operations require a capability ID" });
+  if (!isNormalizedLevel(value.after)) {
+    ctx.addIssue({ code: "custom", path: ["after"], message: "set_level diff after value must be finite and within 0..1" });
   }
-  if (isNotify && value.actionAuthorityCandidateId !== undefined) {
-    ctx.addIssue({ code: "custom", message: "notify_local diff operations cannot contain an authority candidate" });
+  if (value.before === value.after) {
+    ctx.addIssue({ code: "custom", path: ["after"], message: "A set_level diff operation must change the value" });
   }
 });
+const neutralSetBooleanDiffOperationSchema = z.object({
+  actionOrder: positiveSafeIntegerSchema,
+  kind: z.literal("set_boolean"),
+  hwCapabilityId: boundedIdSchema,
+  actionAuthorityCandidateId: boundedIdSchema,
+  before: neutralScalarSchema,
+  after: neutralScalarSchema,
+}).strict().superRefine((value, ctx) => {
+  if (typeof value.before !== "boolean") {
+    ctx.addIssue({ code: "custom", path: ["before"], message: "set_boolean diff before value must be boolean" });
+  }
+  if (typeof value.after !== "boolean") {
+    ctx.addIssue({ code: "custom", path: ["after"], message: "set_boolean diff after value must be boolean" });
+  }
+  if (value.before === value.after) {
+    ctx.addIssue({ code: "custom", path: ["after"], message: "A set_boolean diff operation must change the value" });
+  }
+});
+const neutralNotifyDiffOperationSchema = z.object({
+  actionOrder: positiveSafeIntegerSchema,
+  kind: z.literal("notify_local"),
+  after: boundedTextSchema,
+}).strict();
+const neutralDiffOperationObjectSchema = z.union([
+  neutralSetLevelDiffOperationSchema,
+  neutralSetBooleanDiffOperationSchema,
+  neutralNotifyDiffOperationSchema,
+]);
 const neutralDiffOperationSchemaObjectWithPreflight = z.preprocess(
   preflightForSchema,
   neutralDiffOperationObjectSchema,
@@ -414,8 +528,8 @@ const neutralDiffObjectSchema = z.object({
   redacted: z.literal(true),
 }).strict().superRefine((value, ctx) => {
   for (let index = 0; index < value.operations.length; index += 1) {
-    if (value.operations[index]?.order !== index + 1) {
-      ctx.addIssue({ code: "custom", path: ["operations", index, "order"], message: "Diff operation order must be consecutive from 1" });
+    if (index > 0 && value.operations[index - 1]!.actionOrder >= value.operations[index]!.actionOrder) {
+      ctx.addIssue({ code: "custom", path: ["operations", index, "actionOrder"], message: "Diff actionOrder values must be strictly increasing" });
     }
   }
   if (value.status === "no_change" && value.operations.length !== 0) {
@@ -424,11 +538,28 @@ const neutralDiffObjectSchema = z.object({
   if (value.status === "changes" && value.operations.length === 0) {
     ctx.addIssue({ code: "custom", path: ["operations"], message: "A changes diff requires an operation" });
   }
+  if (value.status === "unavailable" && value.operations.length !== 0) {
+    ctx.addIssue({ code: "custom", path: ["operations"], message: "An unavailable diff cannot contain operations" });
+  }
 });
 const neutralDiffSchemaObjectWithPreflight = z.preprocess(preflightForSchema, neutralDiffObjectSchema);
 export const neutralDiffSchema = neutralDiffSchemaObjectWithPreflight;
 export const NeutralDiffSchema = neutralDiffSchema;
 export type NeutralDiff = z.infer<typeof neutralDiffObjectSchema>;
+type NeutralDiffOperationInput = {
+  readonly actionOrder: number;
+  readonly kind: "set_level" | "set_boolean" | "notify_local";
+  readonly hwCapabilityId?: string;
+  readonly actionAuthorityCandidateId?: string;
+  readonly before?: NeutralScalar;
+  readonly after?: NeutralScalar;
+};
+type NeutralDiffInput = {
+  readonly status: "no_change" | "changes" | "unavailable";
+  readonly operations: readonly NeutralDiffOperationInput[];
+  readonly unchangedCount: number;
+  readonly redacted: true;
+};
 
 const neutralPlanSchemaObject = artifactContentSchema;
 export const neutralPlanSchema = neutralPlanSchemaObject;
@@ -477,6 +608,7 @@ const compileInputBodySchema = z.object({
   evidence: artifactEvidenceAttestationSchema,
   risk: artifactRiskAssessmentSchema,
   authority: artifactAuthorityAssessmentSchema,
+  currentConflict: neutralCurrentConflictObjectSchema,
   worldCut: neutralWorldCutSchemaObject,
   foreignCatalogIdentity: digestSchema,
   foreignRuleChecks: z.array(neutralConflictInputObjectSchema).max(MAX_NEUTRAL_CONFLICTS),
@@ -490,6 +622,7 @@ const neutralWorldCutCreateSchema = z.object({
 const neutralConflictInputCreateSchema = z.object({
   bridgeId: boundedIdSchema,
   epochId: boundedIdSchema,
+  watermark: neutralWatermarkSchema,
   catalogIdentity: digestSchema,
   status: z.enum(["current", "unavailable"]),
   findings: z.array(neutralConflictFindingObjectSchema).max(MAX_NEUTRAL_CONFLICTS),
@@ -500,6 +633,7 @@ const compileInputCreateBodySchema = z.object({
   evidence: artifactEvidenceAttestationSchema,
   risk: artifactRiskAssessmentSchema,
   authority: artifactAuthorityAssessmentSchema,
+  currentConflict: neutralCurrentConflictObjectSchema,
   worldCut: neutralWorldCutCreateSchema,
   foreignCatalogIdentity: digestSchema,
   foreignRuleChecks: z.array(neutralConflictInputCreateSchema).max(MAX_NEUTRAL_CONFLICTS),
@@ -523,6 +657,47 @@ export const ArtifactCompileInputSchema = artifactCompileInputSchema;
 export type ArtifactCompileInput = z.infer<typeof compileInputObjectSchema>;
 export type ArtifactCompileInputDraft = z.input<typeof compileInputCreateBodySchema>;
 
+const neutralActionAuthorityBindingObjectSchema = z.object({
+  actionOrder: positiveSafeIntegerSchema,
+  kind: z.enum(["set_level", "set_boolean"]),
+  hwCapabilityId: boundedIdSchema,
+  actionAuthorityCandidateId: boundedIdSchema,
+}).strict();
+const neutralActionAuthorityBindingListSchema = z.array(neutralActionAuthorityBindingObjectSchema)
+  .max(MAX_NEUTRAL_ACTION_COMPATIBILITY)
+  .superRefine((values, ctx) => {
+    const orders = values.map((value) => value.actionOrder);
+    if (new Set(orders).size !== orders.length) {
+      ctx.addIssue({ code: "custom", message: "Action authority binding actionOrder values must be unique" });
+    }
+    for (let index = 1; index < orders.length; index += 1) {
+      if (orders[index - 1]! >= orders[index]!) {
+        ctx.addIssue({ code: "custom", message: "Action authority bindings must be in ascending actionOrder" });
+        break;
+      }
+    }
+  });
+export const neutralActionAuthorityBindingSchema = z.preprocess(
+  preflightForSchema,
+  neutralActionAuthorityBindingObjectSchema,
+);
+export const NeutralActionAuthorityBindingSchema = neutralActionAuthorityBindingSchema;
+export type NeutralActionAuthorityBinding = z.infer<typeof neutralActionAuthorityBindingObjectSchema>;
+
+const canonicalBlockingReasonsSchema = z.array(closedReasonCodeSchema)
+  .max(MAX_NEUTRAL_BLOCKING_REASONS)
+  .superRefine((values, ctx) => {
+    if (new Set(values).size !== values.length) {
+      ctx.addIssue({ code: "custom", message: "Blocking reasons must be unique" });
+    }
+    for (let index = 1; index < values.length; index += 1) {
+      if (compareUnicodeCodePoints(values[index - 1]!, values[index]!) >= 0) {
+        ctx.addIssue({ code: "custom", message: "Blocking reasons must be in canonical order" });
+        break;
+      }
+    }
+  });
+
 const compileAttestationBodySchema = z.object({
   kind: z.literal("compile-attestation"),
   artifact: z.object({ artifactId: boundedIdSchema, revision: positiveSafeIntegerSchema, contentHash: digestSchema }).strict(),
@@ -540,10 +715,11 @@ const compileAttestationBodySchema = z.object({
   status: z.enum(["compiled", "rejected", "unavailable"]),
   compiler: compilerIdVersionSchema,
   usedWatermarks: canonicalWatermarksSchema,
+  actionAuthorityBindings: neutralActionAuthorityBindingListSchema,
   plan: neutralPlanSchemaObject.optional(),
   diff: neutralDiffObjectSchema,
   conflicts: neutralConflictResultObjectSchema,
-  blockingReasons: z.array(closedReasonCodeSchema).max(MAX_NEUTRAL_BLOCKING_REASONS),
+  blockingReasons: canonicalBlockingReasonsSchema,
 }).strict().superRefine((value, ctx) => {
   validateCompileAttestationSemantics(value, ctx);
   try {
@@ -578,6 +754,7 @@ const dryRunAttestationBodySchema = z.object({
   status: z.enum(["passed", "failed", "unavailable"]),
   compiler: compilerIdVersionSchema,
   checkedWatermarks: canonicalWatermarksSchema,
+  actionAuthorityBindings: neutralActionAuthorityBindingListSchema,
   diff: neutralDiffObjectSchema,
   conflicts: neutralConflictResultObjectSchema,
   writesPerformed: z.literal(false),
@@ -646,6 +823,22 @@ export function parseNeutralActionCompatibility(input: unknown): NeutralActionCo
 }
 export const createNeutralActionCompatibilityResult = createNeutralActionCompatibility;
 export const parseNeutralActionCompatibilityResult = parseNeutralActionCompatibility;
+
+export function createNeutralPredicateCompatibility(input: NeutralPredicateCompatibility): NeutralPredicateCompatibility {
+  return freezeDeep(parseWithSchema(neutralPredicateCompatibilityObjectSchema, input));
+}
+
+export function parseNeutralPredicateCompatibility(input: unknown): NeutralPredicateCompatibility {
+  return freezeDeep(parseWithSchema(neutralPredicateCompatibilitySchema, input));
+}
+
+export function createNeutralDeviceRead(input: NeutralDeviceRead): NeutralDeviceRead {
+  return freezeDeep(parseWithSchema(neutralDeviceReadObjectSchema, input));
+}
+
+export function parseNeutralDeviceRead(input: unknown): NeutralDeviceRead {
+  return freezeDeep(parseWithSchema(neutralDeviceReadSchema, input));
+}
 
 export function createNeutralPlan(input: NeutralPlan): NeutralPlan {
   return freezeDeep(parseWithSchema(neutralPlanSchemaObject, input));
@@ -727,6 +920,21 @@ export function parseNeutralConflictInput(input: unknown): NeutralConflictInput 
   return freezeDeep(parseWithSchema(neutralConflictInputSchema, input));
 }
 
+/** Aggregate the complete, sorted foreign-rule checks into one catalog identity. */
+export function computeNeutralForeignCatalogIdentity(checks: readonly NeutralConflictInput[]): string {
+  const payload = sortConflictInputs(checks).map((check) => ({
+    bridgeId: check.bridgeId,
+    epochId: check.epochId,
+    watermark: identityWatermark(check.watermark),
+    catalogIdentity: check.catalogIdentity,
+    status: check.status,
+    findings: sortFindings(check.findings),
+  }));
+  return digestCanonical({ kind: "neutral-foreign-catalog", input: payload });
+}
+export const computeForeignCatalogIdentity = computeNeutralForeignCatalogIdentity;
+export const neutralForeignCatalogIdentity = computeNeutralForeignCatalogIdentity;
+
 export function createNeutralConflictResult(input: NeutralConflictResult): NeutralConflictResult {
   const candidate = { ...input, findings: sortFindings(input.findings) };
   const parsed = parseWithSchema(neutralConflictResultObjectSchema, candidate);
@@ -737,7 +945,7 @@ export function parseNeutralConflictResult(input: unknown): NeutralConflictResul
   return freezeDeep(parseWithSchema(neutralConflictResultSchema, input));
 }
 
-export function createNeutralDiff(input: NeutralDiff): NeutralDiff {
+export function createNeutralDiff(input: NeutralDiffInput): NeutralDiff {
   const parsed = parseWithSchema(neutralDiffObjectSchema, input);
   return freezeDeep(neutralDiffObjectSchema.parse(parsed));
 }
@@ -761,7 +969,7 @@ export function parseArtifactCompileInput(input: unknown): ArtifactCompileInput 
 }
 
 /** Canonical M3c dynamic input identity; assessment/cut timestamps are not included. */
-export function neutralCompileInputIdentity(input: Pick<ArtifactCompileInput, "artifact" | "proposal" | "evidence" | "risk" | "authority" | "worldCut" | "foreignCatalogIdentity" | "foreignRuleChecks" | "compiler">): string {
+export function neutralCompileInputIdentity(input: Pick<ArtifactCompileInput, "artifact" | "proposal" | "evidence" | "risk" | "authority" | "currentConflict" | "worldCut" | "foreignCatalogIdentity" | "foreignRuleChecks" | "compiler">): string {
   const candidate = hasOwnProperty(input, "inputIdentity")
     ? omitKey(input as Record<string, unknown>, "inputIdentity")
     : input;
@@ -772,6 +980,7 @@ export function neutralCompileInputIdentity(input: Pick<ArtifactCompileInput, "a
     evidence: evidenceIdentityRef(parsed.evidence),
     risk: riskIdentityRef(parsed.risk),
     authority: authorityIdentityRef(parsed.authority),
+    currentConflict: parsed.currentConflict,
     worldCutIdentity: parsed.worldCut.cutIdentity,
     foreignCatalogIdentity: parsed.foreignCatalogIdentity,
     foreignRuleChecks: sortConflictInputs(parsed.foreignRuleChecks),
@@ -786,7 +995,6 @@ export const computeCompileInputIdentity = neutralCompileInputIdentity;
 export interface ArtifactCompileAttestationDraft {
   readonly input: ArtifactCompileInput;
   readonly status: ArtifactCompileAttestation["status"];
-  readonly usedWatermarks: readonly NeutralWatermark[];
   readonly plan?: NeutralPlan;
   readonly diff: NeutralDiff;
   readonly conflicts: NeutralConflictResult;
@@ -796,10 +1004,30 @@ export interface ArtifactCompileAttestationDraft {
 export function createArtifactCompileAttestation(input: ArtifactCompileAttestationDraft): ArtifactCompileAttestation {
   const parsed = parseWithSchema(compileAttestationDraftSchema, input);
   const compileInput = parseArtifactCompileInput(parsed.input);
-  const usedWatermarks = sortWatermarks(parsed.usedWatermarks);
   const diff = parseNeutralDiff(parsed.diff);
   const conflicts = parseNeutralConflictResult(parsed.conflicts);
+  if (canonicalJson(conflicts) !== canonicalJson(compileInput.currentConflict.result)) {
+    throw new ArtifactCompilerContractError("invalid_contract", "Compile conflicts must equal the current conflict result");
+  }
+  const authorityResolution = deriveActionAuthorityBindings(compileInput.artifact.content.actions, compileInput.authority);
+  assertDiffBindings(compileInput.artifact.content.actions, diff, authorityResolution.bindings);
   const plan = parsed.plan === undefined ? undefined : parseWithSchema(artifactContentSchema, parsed.plan);
+  const blockingReasons = [...parsed.blockingReasons];
+  if (authorityResolution.unavailable && !blockingReasons.includes("authority_unavailable")) {
+    blockingReasons.push("authority_unavailable");
+  }
+  const dependencyUnavailable = authorityResolution.unavailable
+    || compileInput.currentConflict.result.status === "unavailable"
+    || compileInput.foreignRuleChecks.some((check) => check.status === "unavailable");
+  if (compileInput.currentConflict.result.status === "unavailable" && !blockingReasons.includes("foreign_catalog_unavailable")) {
+    blockingReasons.push("foreign_catalog_unavailable");
+  }
+  if (compileInput.foreignRuleChecks.some((check) => check.status === "unavailable") && !blockingReasons.includes("foreign_catalog_unavailable")) {
+    blockingReasons.push("foreign_catalog_unavailable");
+  }
+  if (dependencyUnavailable && parsed.status !== "unavailable") {
+    throw new ArtifactCompilerContractError("invalid_contract", "Unavailable compile dependencies require unavailable compile status");
+  }
   const body = {
     kind: "compile-attestation" as const,
     artifact: artifactRef(compileInput.artifact),
@@ -816,13 +1044,14 @@ export function createArtifactCompileAttestation(input: ArtifactCompileAttestati
     foreignCatalogIdentity: compileInput.foreignCatalogIdentity,
     status: parsed.status,
     compiler: compileInput.compiler,
-    usedWatermarks,
+    usedWatermarks: sortWatermarks(compileInput.worldCut.watermarks),
+    actionAuthorityBindings: [...authorityResolution.bindings],
     ...(plan === undefined ? {} : { plan }),
     diff,
     conflicts,
-    blockingReasons: [...parsed.blockingReasons],
+    blockingReasons: sortClosedReasons(blockingReasons),
   };
-  const resultId = neutralCompileResultIdentity(body);
+  const resultId = neutralCompileResultIdentity(body as unknown as Omit<ArtifactCompileAttestation, "resultId">);
   return freezeDeep(compileAttestationBodySchema.parse({ ...body, resultId }));
 }
 
@@ -849,6 +1078,7 @@ export function neutralCompileResultIdentity(input: Omit<ArtifactCompileAttestat
     status: input.status,
     compiler: input.compiler,
     usedWatermarks: identityWatermarks(input.usedWatermarks),
+    actionAuthorityBindings: input.actionAuthorityBindings,
     ...(input.plan === undefined ? {} : { plan: input.plan }),
     diff: input.diff,
     conflicts: input.conflicts,
@@ -862,7 +1092,6 @@ export const computeCompileResultIdentity = neutralCompileResultIdentity;
 export interface NeutralDryRunAttestationDraft {
   readonly compile: ArtifactCompileAttestation;
   readonly status: NeutralDryRunAttestation["status"];
-  readonly checkedWatermarks: readonly NeutralWatermark[];
   readonly diff: NeutralDiff;
   readonly conflicts: NeutralConflictResult;
   readonly summary: string;
@@ -871,9 +1100,18 @@ export interface NeutralDryRunAttestationDraft {
 export function createNeutralDryRunAttestation(input: NeutralDryRunAttestationDraft): NeutralDryRunAttestation {
   const parsed = parseWithSchema(dryRunAttestationDraftSchema, input);
   const compile = parseArtifactCompileAttestation(parsed.compile);
-  const checkedWatermarks = sortWatermarks(parsed.checkedWatermarks);
   const diff = parseNeutralDiff(parsed.diff);
   const conflicts = parseNeutralConflictResult(parsed.conflicts);
+  if (canonicalJson(diff) !== canonicalJson(compile.diff)) {
+    throw new ArtifactCompilerContractError("invalid_contract", "Dry-run diff must equal the compile diff");
+  }
+  if (canonicalJson(conflicts) !== canonicalJson(compile.conflicts)) {
+    throw new ArtifactCompilerContractError("invalid_contract", "Dry-run conflicts must equal the compile conflicts");
+  }
+  const expectedStatus = expectedDryRunStatus(compile);
+  if (parsed.status !== expectedStatus) {
+    throw new ArtifactCompilerContractError("invalid_contract", "Dry-run status must match compile status, diff, and conflicts");
+  }
   const body = {
     kind: "dry-run-attestation" as const,
     artifact: compile.artifact,
@@ -891,14 +1129,15 @@ export function createNeutralDryRunAttestation(input: NeutralDryRunAttestationDr
     foreignCatalogIdentity: compile.foreignCatalogIdentity,
     status: parsed.status,
     compiler: compile.compiler,
-    checkedWatermarks,
+    checkedWatermarks: compile.usedWatermarks,
+    actionAuthorityBindings: compile.actionAuthorityBindings,
     diff,
     conflicts,
     writesPerformed: false as const,
     summary: parsed.summary,
   };
-  const inputIdentity = neutralDryRunInputIdentity(body);
-  const resultId = neutralDryRunResultIdentity({ ...body, inputIdentity });
+  const inputIdentity = neutralDryRunInputIdentity(body as unknown as Parameters<typeof neutralDryRunInputIdentity>[0]);
+  const resultId = neutralDryRunResultIdentity({ ...body, inputIdentity } as unknown as Omit<NeutralDryRunAttestation, "resultId">);
   return freezeDeep(dryRunAttestationBodySchema.parse({ ...body, inputIdentity, resultId }));
 }
 
@@ -908,7 +1147,7 @@ export function parseNeutralDryRunAttestation(input: unknown): NeutralDryRunAtte
 export const createDryRunAttestation = createNeutralDryRunAttestation;
 export const parseDryRunAttestation = parseNeutralDryRunAttestation;
 
-export function neutralDryRunInputIdentity(input: Pick<NeutralDryRunAttestation, "artifact" | "compileAttestationId" | "compileInputIdentity" | "evidenceAttestationId" | "evidenceInputIdentity" | "riskAssessmentId" | "riskInputIdentity" | "authorityAssessmentId" | "authorityInputIdentity" | "worldCutIdentity" | "foreignCatalogIdentity" | "status" | "compiler" | "checkedWatermarks" | "diff" | "conflicts">): string {
+export function neutralDryRunInputIdentity(input: Pick<NeutralDryRunAttestation, "artifact" | "compileAttestationId" | "compileInputIdentity" | "evidenceAttestationId" | "evidenceInputIdentity" | "riskAssessmentId" | "riskInputIdentity" | "authorityAssessmentId" | "authorityInputIdentity" | "worldCutIdentity" | "foreignCatalogIdentity" | "status" | "compiler" | "checkedWatermarks" | "actionAuthorityBindings" | "diff" | "conflicts">): string {
   return digestCanonical({ kind: "neutral-dry-run-input", input: {
     artifact: input.artifact,
     compileAttestationId: input.compileAttestationId,
@@ -921,6 +1160,7 @@ export function neutralDryRunInputIdentity(input: Pick<NeutralDryRunAttestation,
     status: input.status,
     compiler: input.compiler,
     checkedWatermarks: identityWatermarks(input.checkedWatermarks),
+    actionAuthorityBindings: input.actionAuthorityBindings,
     diff: input.diff,
     conflicts: input.conflicts,
   } });
@@ -947,6 +1187,7 @@ export function neutralDryRunResultIdentity(input: Omit<NeutralDryRunAttestation
     status: input.status,
     compiler: input.compiler,
     checkedWatermarks: identityWatermarks(input.checkedWatermarks),
+    actionAuthorityBindings: input.actionAuthorityBindings,
     diff: input.diff,
     conflicts: input.conflicts,
     writesPerformed: input.writesPerformed,
@@ -972,7 +1213,6 @@ const compileInputDraftSchema = compileInputObjectSchema;
 const compileAttestationDraftSchema = z.object({
   input: compileInputDraftSchema,
   status: z.enum(["compiled", "rejected", "unavailable"]),
-  usedWatermarks: canonicalWatermarksSchema,
   plan: neutralPlanSchemaObject.optional(),
   diff: neutralDiffObjectSchema,
   conflicts: neutralConflictResultObjectSchema,
@@ -981,7 +1221,6 @@ const compileAttestationDraftSchema = z.object({
 const dryRunAttestationDraftSchema = z.object({
   compile: compileAttestationBodySchema,
   status: z.enum(["passed", "failed", "unavailable"]),
-  checkedWatermarks: canonicalWatermarksSchema,
   diff: neutralDiffObjectSchema,
   conflicts: neutralConflictResultObjectSchema,
   summary: z.string().min(1).max(1_000),
@@ -1003,7 +1242,7 @@ function normalizeCompileInput(input: z.output<typeof compileInputCreateBodySche
 }
 
 function validateCompileBindings(
-  value: Pick<ArtifactCompileInput, "artifact" | "proposal" | "evidence" | "risk" | "authority" | "worldCut" | "foreignCatalogIdentity" | "foreignRuleChecks">,
+  value: Pick<ArtifactCompileInput, "artifact" | "proposal" | "evidence" | "risk" | "authority" | "currentConflict" | "worldCut" | "foreignCatalogIdentity" | "foreignRuleChecks">,
   ctx: z.RefinementCtx,
 ): void {
   const artifactReference = artifactRef(value.artifact);
@@ -1022,9 +1261,24 @@ function validateCompileBindings(
   if (value.risk.authority.assessmentId !== value.authority.assessmentId || value.risk.authority.inputIdentity !== value.authority.inputIdentity) {
     addIssue(ctx, ["risk", "authority"], "Risk authority identity does not match the compiler authority");
   }
-  for (const [index, check] of value.foreignRuleChecks.entries()) {
-    if (check.catalogIdentity !== value.foreignCatalogIdentity) addIssue(ctx, ["foreignRuleChecks", index, "catalogIdentity"], "Foreign rule check is bound to another catalog identity");
+  if (value.risk.conflictInputIdentity !== value.currentConflict.sourceIdentity) {
+    addIssue(ctx, ["risk", "conflictInputIdentity"], "Risk conflict identity must match the current conflict source identity");
   }
+  validateWatermarkBindings(value.authority.checkedWatermarks, value.worldCut.watermarks, ctx);
+  for (const [index, check] of value.foreignRuleChecks.entries()) {
+    if (check.watermark.bridgeId !== check.bridgeId) addIssue(ctx, ["foreignRuleChecks", index, "watermark", "bridgeId"], "Foreign rule watermark bridge must match its check bridge");
+    if (check.watermark.epochId !== check.epochId) addIssue(ctx, ["foreignRuleChecks", index, "watermark", "epochId"], "Foreign rule watermark epoch must match its check epoch");
+  }
+  if (new Set(value.foreignRuleChecks.map((check) => check.bridgeId)).size !== value.foreignRuleChecks.length) {
+    addIssue(ctx, ["foreignRuleChecks"], "Foreign rule checks must have unique bridges");
+  }
+  if (!isCanonicalConflictInputOrder(value.foreignRuleChecks)) {
+    addIssue(ctx, ["foreignRuleChecks"], "Foreign rule checks must be in canonical bridge order");
+  }
+  if (computeNeutralForeignCatalogIdentity(value.foreignRuleChecks) !== value.foreignCatalogIdentity) {
+    addIssue(ctx, ["foreignCatalogIdentity"], "Foreign catalog identity must match the complete canonical foreign checks");
+  }
+  validateForeignRuleCoverage(value.evidence.watermarks, value.worldCut.watermarks, value.foreignRuleChecks, ctx);
   const capabilityScope = deriveArtifactCapabilityScope(value.artifact.content);
   if (!sameStringSequence(value.worldCut.devices.map((device) => device.hwCapabilityId), capabilityScope)) {
     addIssue(ctx, ["worldCut", "devices"], "World-cut device IDs must exactly match the artifact capability scope");
@@ -1034,6 +1288,38 @@ function validateCompileBindings(
   }
   validateWatermarkBindings(value.evidence.watermarks, value.worldCut.watermarks, ctx);
   validateActionCompatibilityBindings(value.artifact.content.actions, value.worldCut.devices, ctx);
+  validatePredicateCompatibilityBindings(value.artifact.content, value.worldCut.devices, ctx);
+}
+
+function validateForeignRuleCoverage(
+  evidenceWatermarks: readonly NeutralWatermark[],
+  worldCutWatermarks: readonly NeutralWatermark[],
+  checks: readonly NeutralConflictInput[],
+  ctx: z.RefinementCtx,
+): void {
+  const expected = new Map(worldCutWatermarks.map((watermark) => [watermark.bridgeId, watermark]));
+  if (evidenceWatermarks.length !== worldCutWatermarks.length) {
+    addIssue(ctx, ["foreignRuleChecks"], "Foreign rule checks must cover the exact evidence/world-cut watermark vector");
+  }
+  if (checks.length !== expected.size) {
+    addIssue(ctx, ["foreignRuleChecks"], "Foreign rule checks must cover every evidence/world-cut watermark bridge exactly once");
+  }
+  const seen = new Set<string>();
+  for (const [index, check] of checks.entries()) {
+    if (seen.has(check.bridgeId)) continue;
+    seen.add(check.bridgeId);
+    const watermark = expected.get(check.bridgeId);
+    if (watermark === undefined) {
+      addIssue(ctx, ["foreignRuleChecks", index, "bridgeId"], "Foreign rule check bridge is outside the evidence/world-cut watermark vector");
+      continue;
+    }
+    if (check.epochId !== watermark.epochId || !sameWatermarkSemantics(check.watermark, watermark)) {
+      addIssue(ctx, ["foreignRuleChecks", index, "watermark"], "Foreign rule check watermark must exactly match the world-cut watermark");
+    }
+  }
+  for (const bridgeId of expected.keys()) {
+    if (!seen.has(bridgeId)) addIssue(ctx, ["foreignRuleChecks"], `Missing foreign rule check for watermark bridge ${bridgeId}`);
+  }
 }
 
 function validateWatermarkBindings(
@@ -1113,13 +1399,137 @@ function validateActionCompatibilityBindings(
   }
 }
 
+function validatePredicateCompatibilityBindings(
+  content: ArtifactContent,
+  devices: readonly NeutralDeviceSummary[],
+  ctx: z.RefinementCtx,
+): void {
+  const devicesByCapability = new Map(devices.map((device, index) => [device.hwCapabilityId, { device, index }]));
+  const expectedByCapability = new Map<string, readonly { phase: "condition" | "postcondition"; order: number }[]>();
+  for (const [index, condition] of content.conditions.entries()) {
+    const existing = expectedByCapability.get(condition.source.hwCapabilityId) ?? [];
+    expectedByCapability.set(condition.source.hwCapabilityId, [...existing, { phase: "condition", order: index + 1 }]);
+  }
+  for (const [index, postcondition] of content.postconditions.entries()) {
+    const existing = expectedByCapability.get(postcondition.source.hwCapabilityId) ?? [];
+    expectedByCapability.set(postcondition.source.hwCapabilityId, [...existing, { phase: "postcondition", order: index + 1 }]);
+  }
+
+  for (const [capabilityId, entry] of devicesByCapability) {
+    const expected = expectedByCapability.get(capabilityId) ?? [];
+    const projections = entry.device.predicateCompatibility;
+    if (expected.length !== projections.length) {
+      addIssue(ctx, ["worldCut", "devices", entry.index, "predicateCompatibility"], "Device predicate compatibility projection count must match artifact predicates");
+      continue;
+    }
+    for (let projectionIndex = 0; projectionIndex < projections.length; projectionIndex += 1) {
+      const projection = projections[projectionIndex]!;
+      const expectedPredicate = expected[projectionIndex]!;
+      if (projection.phase !== expectedPredicate.phase) {
+        addIssue(ctx, ["worldCut", "devices", entry.index, "predicateCompatibility", projectionIndex, "phase"], "Predicate compatibility phase must match the artifact predicate");
+      }
+      if (projection.order !== expectedPredicate.order) {
+        addIssue(ctx, ["worldCut", "devices", entry.index, "predicateCompatibility", projectionIndex, "order"], "Predicate compatibility order must match the artifact phase order");
+      }
+    }
+  }
+  for (const [capabilityId] of expectedByCapability) {
+    if (!devicesByCapability.has(capabilityId)) {
+      addIssue(ctx, ["worldCut", "devices"], `Missing NeutralDeviceSummary for artifact predicate source ${capabilityId}`);
+    }
+  }
+}
+
 function sameStringSequence(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sortClosedReasons(reasons: readonly ClosedReasonCode[]): ClosedReasonCode[] {
+  return [...reasons].sort(compareUnicodeCodePoints);
+}
+
+function deriveActionAuthorityBindings(
+  actions: ArtifactContent["actions"],
+  authority: ArtifactAuthorityAssessment,
+): { readonly bindings: readonly NeutralActionAuthorityBinding[]; readonly unavailable: boolean } {
+  const bindings: NeutralActionAuthorityBinding[] = [];
+  let unavailable = false;
+  for (const [index, action] of actions.entries()) {
+    if (action.kind === "notify_local") continue;
+    const candidates = authority.candidates.filter((candidate) =>
+      candidate.hwCapabilityId === action.target.hwCapabilityId && candidate.status === "available",
+    );
+    if (candidates.length !== 1) {
+      unavailable = true;
+      continue;
+    }
+    bindings.push({
+      actionOrder: index + 1,
+      kind: action.kind,
+      hwCapabilityId: action.target.hwCapabilityId,
+      actionAuthorityCandidateId: candidates[0]!.actionAuthorityCandidateId,
+    });
+  }
+  return { bindings: unavailable ? [] : bindings, unavailable };
+}
+
+function assertDiffBindings(
+  actions: ArtifactContent["actions"],
+  diff: NeutralDiff,
+  actionAuthorityBindings: readonly NeutralActionAuthorityBinding[],
+): void {
+  if (diff.operations.length + diff.unchangedCount > actions.length) {
+    throw new ArtifactCompilerContractError("invalid_contract", "Diff operation and unchanged counts exceed artifact actions");
+  }
+  if (diff.status === "no_change") {
+    const deviceActionCount = actions.filter((action) => action.kind !== "notify_local").length;
+    if (diff.unchangedCount !== deviceActionCount) {
+      throw new ArtifactCompilerContractError("invalid_contract", "A no_change diff must account for every device action");
+    }
+    if (deviceActionCount === 0) {
+      throw new ArtifactCompilerContractError("invalid_contract", "A notify-only artifact cannot produce a no_change diff");
+    }
+  }
+  if (diff.status === "unavailable" && diff.operations.length !== 0) {
+    throw new ArtifactCompilerContractError("invalid_contract", "An unavailable diff cannot contain operations");
+  }
+  for (const operation of diff.operations) {
+    const action = actions[operation.actionOrder - 1];
+    if (action === undefined) {
+      throw new ArtifactCompilerContractError("invalid_contract", "Diff actionOrder must reference an artifact action");
+    }
+    if (operation.kind !== action.kind) {
+      throw new ArtifactCompilerContractError("invalid_contract", "Diff operation kind must match its artifact action");
+    }
+    if (action.kind === "notify_local") {
+      if (operation.after !== action.message) {
+        throw new ArtifactCompilerContractError("invalid_contract", "Notify diff after value must match its artifact message");
+      }
+      continue;
+    }
+    if (operation.kind === "notify_local" || operation.hwCapabilityId !== action.target.hwCapabilityId) {
+      throw new ArtifactCompilerContractError("invalid_contract", "Diff operation target must match its artifact action");
+    }
+    const binding = actionAuthorityBindings.find((candidate) => candidate.actionOrder === operation.actionOrder);
+    if (binding === undefined || operation.actionAuthorityCandidateId !== binding.actionAuthorityCandidateId) {
+      throw new ArtifactCompilerContractError("invalid_contract", "Diff operation candidate must match its action authority binding");
+    }
+    if (operation.after !== action.value) {
+      throw new ArtifactCompilerContractError("invalid_contract", "Diff operation after value must match its artifact action value");
+    }
+  }
+}
+
+function expectedDryRunStatus(compile: ArtifactCompileAttestation): NeutralDryRunAttestation["status"] {
+  if (compile.status === "unavailable") return "unavailable";
+  if (compile.status === "rejected") return "failed";
+  return compile.diff.status !== "unavailable" && compile.conflicts.status === "none" ? "passed" : "failed";
 }
 
 function validateCompileAttestationSemantics(value: Pick<ArtifactCompileAttestation, "status" | "plan" | "blockingReasons" | "diff" | "conflicts">, ctx: z.RefinementCtx): void {
   if (value.status === "compiled" && value.plan === undefined) addIssue(ctx, ["plan"], "Compiled output requires a neutral plan");
   if (value.status === "compiled" && value.blockingReasons.length !== 0) addIssue(ctx, ["blockingReasons"], "Compiled output cannot have blocking reasons");
+  if (value.status !== "compiled" && value.blockingReasons.length === 0) addIssue(ctx, ["blockingReasons"], "Rejected or unavailable output requires blocking reasons");
   if (value.status !== "compiled" && value.plan !== undefined) addIssue(ctx, ["plan"], "Rejected or unavailable output cannot carry a compiled plan");
   if (value.status === "compiled" && value.diff.status === "unavailable") addIssue(ctx, ["diff", "status"], "Compiled output cannot have an unavailable diff");
   if (value.status === "compiled" && value.conflicts.status === "unavailable") addIssue(ctx, ["conflicts", "status"], "Compiled output cannot hide unavailable conflicts");
@@ -1128,6 +1538,7 @@ function validateCompileAttestationSemantics(value: Pick<ArtifactCompileAttestat
 function validateDryRunAttestationSemantics(value: Pick<NeutralDryRunAttestation, "status" | "diff" | "conflicts">, ctx: z.RefinementCtx): void {
   if (value.status === "passed" && value.diff.status === "unavailable") addIssue(ctx, ["diff", "status"], "A passed dry-run cannot have an unavailable diff");
   if (value.status === "passed" && value.conflicts.status === "unavailable") addIssue(ctx, ["conflicts", "status"], "A passed dry-run cannot hide unavailable conflicts");
+  if (value.status === "passed" && value.conflicts.status !== "none") addIssue(ctx, ["conflicts", "status"], "A passed dry-run requires no conflicts");
 }
 
 function artifactRef(value: Pick<ArtifactRevision, "artifactId" | "revision" | "contentHash">): ArtifactRef {
@@ -1151,7 +1562,11 @@ function sameArtifactRef(left: ArtifactRef, right: ArtifactRef): boolean {
 }
 
 function identityWatermarks(watermarks: readonly NeutralWatermark[]): readonly unknown[] {
-  return sortWatermarks(watermarks).map(({ bridgeId, epochId, lastSeq, freshness, gapCount }) => ({ bridgeId, epochId, lastSeq, freshness, gapCount }));
+  return sortWatermarks(watermarks).map(identityWatermark);
+}
+
+function identityWatermark({ bridgeId, epochId, lastSeq, freshness, gapCount }: NeutralWatermark): unknown {
+  return { bridgeId, epochId, lastSeq, freshness, gapCount };
 }
 
 function sortDevices<T extends { readonly hwCapabilityId: string }>(devices: readonly T[]): T[] {
@@ -1167,6 +1582,13 @@ function sortConflictInputs(inputs: readonly NeutralConflictInput[]): NeutralCon
     `${left.bridgeId}\u0000${left.epochId}\u0000${left.catalogIdentity}`,
     `${right.bridgeId}\u0000${right.epochId}\u0000${right.catalogIdentity}`,
   ));
+}
+
+function isCanonicalConflictInputOrder(inputs: readonly NeutralConflictInput[]): boolean {
+  return inputs.every((input, index) => index === 0 || compareUnicodeCodePoints(
+    `${inputs[index - 1]!.bridgeId}\u0000${inputs[index - 1]!.epochId}\u0000${inputs[index - 1]!.catalogIdentity}`,
+    `${input.bridgeId}\u0000${input.epochId}\u0000${input.catalogIdentity}`,
+  ) <= 0);
 }
 
 function sortFindings(findings: readonly NeutralConflictFinding[]): NeutralConflictFinding[] {
@@ -1200,6 +1622,19 @@ function addIssue(ctx: z.RefinementCtx, path: (string | number)[], message: stri
 
 function isNormalizedLevel(value: NeutralScalar): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function predicateCompatibilityOrder(value: Pick<NeutralPredicateCompatibility, "phase" | "order">): [number, number] {
+  return [value.phase === "condition" ? 0 : 1, value.order];
+}
+
+function comparePredicateCompatibility(
+  left: Pick<NeutralPredicateCompatibility, "phase" | "order">,
+  right: Pick<NeutralPredicateCompatibility, "phase" | "order">,
+): number {
+  const [leftPhase, leftOrder] = predicateCompatibilityOrder(left);
+  const [rightPhase, rightOrder] = predicateCompatibilityOrder(right);
+  return leftPhase - rightPhase || leftOrder - rightOrder;
 }
 
 function hasOwnProperty(value: object, key: string): boolean {

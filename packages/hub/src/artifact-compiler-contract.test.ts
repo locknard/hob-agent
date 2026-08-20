@@ -10,7 +10,9 @@ import {
   createNeutralDeviceSummary,
   createNeutralDiff,
   createNeutralDryRunAttestation,
+  createNeutralPredicateCompatibility,
   createNeutralWorldCut,
+  computeNeutralForeignCatalogIdentity,
   neutralCompileInputIdentity,
   parseArtifactCompileAttestation,
   parseArtifactCompileInput,
@@ -19,6 +21,7 @@ import {
   parseNeutralDryRunAttestation,
   parseArtifactCompileInputJson,
   deriveArtifactCapabilityScope,
+  type NeutralDiff,
 } from "./artifact-compiler-contract.js";
 import { createArtifactEvidenceAttestation, createArtifactRiskAssessment, createArtifactAuthorityAssessment } from "./artifact-assessments.js";
 import { createArtifactRevision, type ArtifactRevision } from "./neutral-artifact.js";
@@ -117,7 +120,11 @@ function boundAssessments(artifact: ArtifactRevision) {
     policyVersion: "1.0.0",
     assessedAt: capturedAt,
   });
-  return { artifactRef, evidence, risk, authority, watermark, capabilityScope };
+  const currentConflict = {
+    sourceIdentity: digest("c"),
+    result: createNeutralConflictResult({ status: "none", findings: [] }),
+  };
+  return { artifactRef, evidence, risk, authority, watermark, capabilityScope, currentConflict };
 }
 
 function curtainInput() {
@@ -128,7 +135,7 @@ function curtainInput() {
     schema: "hob.cover.level",
     schemaVersion: "1.0.0",
     semanticKind: "cover",
-    currentValue: 0.2,
+    read: { status: "available", value: 0.2 },
     validity: "valid",
     actionCompatibility: [{
       order: 1,
@@ -136,11 +143,13 @@ function curtainInput() {
       status: "incompatible",
       reason: "set_level_unsupported",
     }],
+    predicateCompatibility: [{ phase: "postcondition", order: 1, status: "compatible" }],
   });
   const worldCut = createNeutralWorldCut({ devices: [device], watermarks: [bound.watermark] });
   const conflict = createNeutralConflictInput({
     bridgeId: bound.watermark.bridgeId,
     epochId: bound.watermark.epochId,
+    watermark: bound.watermark,
     catalogIdentity: digest("f"),
     status: "current",
     findings: [],
@@ -151,8 +160,9 @@ function curtainInput() {
     evidence: bound.evidence,
     risk: bound.risk,
     authority: bound.authority,
+    currentConflict: bound.currentConflict,
     worldCut,
-    foreignCatalogIdentity: digest("f"),
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([conflict]),
     foreignRuleChecks: [conflict],
     compiler: { id: "neutral-compiler", version: "1.0.0" },
   });
@@ -167,20 +177,191 @@ test("builds a frozen curtain compile input with a deterministic neutral identit
   assert.deepEqual(parseArtifactCompileInput(input), input);
 });
 
-test("preserves action order in a bounded neutral diff and supports missing-before unavailable", () => {
+test("binds the explicit neutral device read status and rejects stale-value tampering", () => {
+  const input = curtainInput();
+  const device = input.worldCut.devices[0]!;
+  assert.deepEqual(device.read, { status: "available", value: 0.2 });
+  assert.equal(Object.isFrozen(device.read), true);
+  assert.throws(() => createNeutralDeviceSummary({
+    ...device,
+    currentValue: 0.2,
+  }));
+  assert.throws(() => createNeutralDeviceSummary({
+    ...device,
+    validity: "stale",
+  }));
+  const changedDevice = createNeutralDeviceSummary({
+    ...device,
+    read: { status: "available", value: 0.3 },
+  });
+  assert.deepEqual(changedDevice.read, { status: "available", value: 0.3 });
+  assert.throws(() => createNeutralDeviceSummary({
+    ...device,
+    read: { status: "unavailable", reason: "state_missing" },
+    validity: "valid",
+  }));
+  const unsupportedDevice = createNeutralDeviceSummary({
+    ...device,
+    read: { status: "unsupported", reason: "schema_unsupported" },
+  });
+  assert.equal(unsupportedDevice.validity, "valid");
+  const changedWorldCut = createNeutralWorldCut({
+    devices: [{ ...device, read: { status: "available", value: 0.3 } }],
+    watermarks: input.worldCut.watermarks,
+  });
+  assert.notEqual(changedWorldCut.cutIdentity, input.worldCut.cutIdentity);
+  const { inputIdentity: _identity, ...draft } = input;
+  const changedInput = createArtifactCompileInput({ ...draft, worldCut: changedWorldCut });
+  assert.notEqual(changedInput.inputIdentity, input.inputIdentity);
+});
+
+test("preserves action order in a bounded neutral diff and keeps unavailable output empty", () => {
   const diff = createNeutralDiff({
-    status: "unavailable",
+    status: "changes",
     operations: [
-      { order: 1, kind: "set_level", hwCapabilityId: "hwc-curtain-level", actionAuthorityCandidateId: "candidate-curtain", after: 0.65 },
-      { order: 2, kind: "notify_local", after: "Curtain state needs review." },
+      { actionOrder: 1, kind: "set_level", hwCapabilityId: "hwc-curtain-level", actionAuthorityCandidateId: "candidate-curtain", before: 0.2, after: 0.65 },
+      { actionOrder: 2, kind: "notify_local", after: "Curtain state needs review." },
     ],
     unchangedCount: 0,
     redacted: true,
   });
-  assert.deepEqual(diff.operations.map((operation) => operation.order), [1, 2]);
-  assert.equal(diff.operations[0]?.before, undefined);
+  assert.deepEqual(diff.operations.map((operation) => operation.actionOrder), [1, 2]);
+  assert.equal(diff.operations[0]?.before, 0.2);
   assert.deepEqual(parseNeutralDiff(diff), diff);
   assert.throws(() => createNeutralDiff({ ...diff, operations: [diff.operations[1]!, diff.operations[0]!] }));
+});
+
+test("fails closed for incomplete, unchanged, and unavailable diff operations", () => {
+  const base = {
+    status: "changes" as const,
+    unchangedCount: 0,
+    redacted: true as const,
+  };
+  assert.throws(() => createNeutralDiff({
+    ...base,
+    operations: [{ actionOrder: 1, kind: "set_level", hwCapabilityId: "hwc-curtain-level", after: 0.65 }],
+  }));
+  assert.throws(() => createNeutralDiff({
+    ...base,
+    operations: [{ actionOrder: 1, kind: "set_boolean", hwCapabilityId: "hwc-curtain-level", actionAuthorityCandidateId: "candidate", before: "false", after: true }],
+  }));
+  assert.throws(() => createNeutralDiff({
+    ...base,
+    operations: [{ actionOrder: 1, kind: "set_level", hwCapabilityId: "hwc-curtain-level", actionAuthorityCandidateId: "candidate", before: 0.65, after: 1.1 }],
+  }));
+  assert.throws(() => createNeutralDiff({
+    ...base,
+    operations: [{ actionOrder: 1, kind: "set_level", hwCapabilityId: "hwc-curtain-level", actionAuthorityCandidateId: "candidate", before: 0.65, after: 0.65 }],
+  }));
+  assert.throws(() => createNeutralDiff({
+    ...base,
+    operations: [{ actionOrder: 1, kind: "notify_local", after: "" }],
+  }));
+  const notifyDiff = createNeutralDiff({
+    ...base,
+    operations: [{ actionOrder: 1, kind: "notify_local", after: "Review the curtain position." }],
+  });
+  assert.throws(() => createNeutralDiff({
+    ...notifyDiff,
+    operations: [{ ...notifyDiff.operations[0]!, before: "unexpected" }],
+  } as unknown as NeutralDiff));
+  assert.throws(() => createNeutralDiff({
+    status: "unavailable",
+    operations: [{ actionOrder: 1, kind: "set_level", hwCapabilityId: "hwc-curtain-level", actionAuthorityCandidateId: "candidate", before: 0.2, after: 0.65 }],
+    unchangedCount: 0,
+    redacted: true,
+  }));
+});
+
+test("compile verifies diff authority, values, and action accounting", () => {
+  const input = curtainInput();
+  const conflicts = input.currentConflict.result;
+  const candidate = "candidate-artifact-curtain-compiler-1-hwc-curtain-level";
+  const validDiff = createNeutralDiff({
+    status: "changes",
+    operations: [{
+      actionOrder: 1,
+      kind: "set_level",
+      hwCapabilityId: "hwc-curtain-level",
+      actionAuthorityCandidateId: candidate,
+      before: 0.2,
+      after: 0.65,
+    }],
+    unchangedCount: 0,
+    redacted: true,
+  });
+  const createRejected = (diff: typeof validDiff) => createArtifactCompileAttestation({
+    input,
+    status: "rejected",
+    diff,
+    conflicts,
+    blockingReasons: ["set_level_unsupported"],
+  });
+  assert.equal(createRejected(validDiff).status, "rejected");
+  assert.throws(() => createRejected(createNeutralDiff({
+    ...validDiff,
+    operations: [{ ...validDiff.operations[0]!, actionAuthorityCandidateId: "candidate-other" }],
+  })));
+  assert.throws(() => createRejected(createNeutralDiff({
+    ...validDiff,
+    operations: [{ ...validDiff.operations[0]!, after: 0.55 }],
+  })));
+  assert.throws(() => createRejected(createNeutralDiff({
+    ...validDiff,
+    unchangedCount: 1,
+  })));
+  const notify = notifyArtifact();
+  const notifyInput = (() => {
+    const bound = boundAssessments(notify);
+    const watermark = bound.watermark;
+    const check = createNeutralConflictInput({
+      bridgeId: watermark.bridgeId,
+      epochId: watermark.epochId,
+      watermark,
+      catalogIdentity: digest("e"),
+      status: "unavailable",
+      findings: [{ kind: "foreign_rule", severity: "blocking", reason: "foreign_catalog_unavailable", reference: "notify-diff-check" }],
+    });
+    const authority = createArtifactAuthorityAssessment({
+      artifact: bound.artifactRef,
+      assessmentId: "authority-notify-diff",
+      authorityRegistryIdentity: digest("a"),
+      candidates: [],
+      checkedWatermarks: [watermark],
+      assessedAt: capturedAt,
+    }, { hwCapabilityIds: [] });
+    const risk = createArtifactRiskAssessment({
+      artifact: bound.artifactRef,
+      assessmentId: "risk-notify-diff",
+      evidence: { attestationId: bound.evidence.attestationId, inputIdentity: bound.evidence.inputIdentity },
+      authority: { assessmentId: authority.assessmentId, inputIdentity: authority.inputIdentity },
+      conflictInputIdentity: bound.currentConflict.sourceIdentity,
+      class: "observe_or_notify",
+      reasons: ["Notify diff accounting fixture."],
+      policyId: "policy-home-v1",
+      policyVersion: "1.0.0",
+      assessedAt: capturedAt,
+    });
+    return createArtifactCompileInput({
+      artifact: notify,
+      proposal: { id: notify.sourceProposal.proposalId, revision: notify.sourceProposal.proposalRevision, status: "approved" },
+      evidence: bound.evidence,
+      risk,
+      authority,
+      currentConflict: { sourceIdentity: bound.currentConflict.sourceIdentity, result: createNeutralConflictResult({ status: "unavailable", findings: [{ kind: "foreign_rule", severity: "blocking", reason: "foreign_catalog_unavailable", reference: "notify-diff-check" }] }) },
+      worldCut: createNeutralWorldCut({ devices: [], watermarks: [watermark] }),
+      foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([check]),
+      foreignRuleChecks: [check],
+      compiler: { id: "neutral-compiler", version: "1.0.0" },
+    });
+  })();
+  assert.throws(() => createArtifactCompileAttestation({
+    input: notifyInput,
+    status: "unavailable",
+    diff: createNeutralDiff({ status: "no_change", operations: [], unchangedCount: 1, redacted: true }),
+    conflicts: notifyInput.currentConflict.result,
+    blockingReasons: ["foreign_catalog_unavailable"],
+  }));
 });
 
 test("rejects the curtain set_level projection instead of fabricating a compiled result", () => {
@@ -194,9 +375,8 @@ test("rejects the curtain set_level projection instead of fabricating a compiled
   const result = createArtifactCompileAttestation({
     input,
     status: "rejected",
-    usedWatermarks: input.worldCut.watermarks,
     diff,
-    conflicts: createNeutralConflictResult({ status: "none", findings: [] }),
+    conflicts: input.currentConflict.result,
     blockingReasons: ["set_level_unsupported"],
   });
   assert.equal(result.status, "rejected");
@@ -243,7 +423,7 @@ test("accepts the reviewed MIoT boolean compatibility projection with neutral be
     assessmentId: "risk-miot-bool",
     evidence: { attestationId: bound.evidence.attestationId, inputIdentity: bound.evidence.inputIdentity },
     authority: { assessmentId: authority.assessmentId, inputIdentity: authority.inputIdentity },
-    conflictInputIdentity: digest("d"),
+    conflictInputIdentity: bound.currentConflict.sourceIdentity,
     class: "comfort_reversible",
     reasons: ["Reviewed boolean compatibility fixture."],
     policyId: "policy-home-v1",
@@ -255,7 +435,7 @@ test("accepts the reviewed MIoT boolean compatibility projection with neutral be
     schema: "miot.property",
     schemaVersion: "1.0.0",
     semanticKind: "switch",
-    currentValue: true,
+    read: { status: "available", value: true },
     validity: "valid",
     actionCompatibility: [{
       order: 1,
@@ -264,12 +444,14 @@ test("accepts the reviewed MIoT boolean compatibility projection with neutral be
       before: true,
       after: false,
     }],
+    predicateCompatibility: [{ phase: "postcondition", order: 1, status: "compatible" }],
   });
   const watermark = bound.watermark;
   const worldCut = createNeutralWorldCut({ devices: [device], watermarks: [watermark] });
   const conflict = createNeutralConflictInput({
     bridgeId: watermark.bridgeId,
     epochId: watermark.epochId,
+    watermark,
     catalogIdentity: digest("d"),
     status: "current",
     findings: [],
@@ -280,8 +462,9 @@ test("accepts the reviewed MIoT boolean compatibility projection with neutral be
     evidence: bound.evidence,
     risk,
     authority,
+    currentConflict: bound.currentConflict,
     worldCut,
-    foreignCatalogIdentity: digest("d"),
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([conflict]),
     foreignRuleChecks: [conflict],
     compiler: { id: "neutral-compiler", version: "1.0.0" },
   });
@@ -322,9 +505,10 @@ test("keeps compatibility projection values closed by status and action kind", (
     schema: "miot.property",
     schemaVersion: "1.0.0",
     semanticKind: "switch" as const,
-    currentValue: true,
+    read: { status: "available", value: true },
     validity: "valid" as const,
     actionCompatibility: [{ order: 1, kind: "set_boolean" as const, status: "compatible" as const, before: true, after: false }],
+    predicateCompatibility: [],
   };
   assert.throws(() => createNeutralDeviceSummary({
     ...boolean,
@@ -348,6 +532,55 @@ test("keeps compatibility projection values closed by status and action kind", (
   }));
 });
 
+test("keeps predicate compatibility closed and bound by phase/order/source", () => {
+  assert.throws(() => createNeutralPredicateCompatibility({ phase: "condition", order: 1, status: "compatible", reason: "operator_unsupported" }));
+  assert.throws(() => createNeutralPredicateCompatibility({ phase: "condition", order: 1, status: "incompatible" }));
+  const input = curtainInput();
+  const device = input.worldCut.devices[0]!;
+  const { inputIdentity: _identity, ...draft } = input;
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    worldCut: createNeutralWorldCut({
+      devices: [{ ...device, predicateCompatibility: [] }],
+      watermarks: input.worldCut.watermarks,
+    }),
+  }));
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    worldCut: createNeutralWorldCut({
+      devices: [{ ...device, predicateCompatibility: [{ phase: "condition", order: 1, status: "compatible" }] }],
+      watermarks: input.worldCut.watermarks,
+    }),
+  }));
+});
+
+test("permits no-op diff gaps but binds every shown operation to its artifact action", () => {
+  const gap = createNeutralDiff({
+    status: "changes",
+    operations: [
+      { actionOrder: 1, kind: "set_level", hwCapabilityId: "hwc-curtain-level", actionAuthorityCandidateId: "candidate-gap", before: 0.2, after: 0.65 },
+      { actionOrder: 3, kind: "notify_local", after: "Review the curtain position." },
+    ],
+    unchangedCount: 1,
+    redacted: true,
+  });
+  assert.deepEqual(gap.operations.map((operation) => operation.actionOrder), [1, 3]);
+  assert.throws(() => createNeutralDiff({ ...gap, operations: [{ ...gap.operations[0]!, actionOrder: 1 }, { ...gap.operations[1]!, actionOrder: 1 }] }));
+  const input = curtainInput();
+  assert.throws(() => createArtifactCompileAttestation({
+    input,
+    status: "rejected",
+    diff: createNeutralDiff({
+      status: "changes",
+      operations: [{ actionOrder: 1, kind: "set_boolean", hwCapabilityId: "hwc-curtain-level", after: true }],
+      unchangedCount: 0,
+      redacted: true,
+    }),
+    conflicts: createNeutralConflictResult({ status: "none", findings: [] }),
+    blockingReasons: ["set_level_unsupported"],
+  }));
+});
+
 test("binds every compatibility projection change into the world-cut and compile identities", () => {
   const input = curtainInput();
   const device = input.worldCut.devices[0]!;
@@ -362,6 +595,101 @@ test("binds every compatibility projection change into the world-cut and compile
   const { inputIdentity: _identity, ...draft } = input;
   const changedInput = createArtifactCompileInput({ ...draft, worldCut: changedWorldCut });
   assert.notEqual(changedInput.inputIdentity, input.inputIdentity);
+});
+
+test("binds current conflict source/result and the aggregate foreign catalog identity", () => {
+  const input = curtainInput();
+  assert.equal(input.risk.conflictInputIdentity, input.currentConflict.sourceIdentity);
+  assert.equal(input.foreignCatalogIdentity, computeNeutralForeignCatalogIdentity(input.foreignRuleChecks));
+  const { inputIdentity: _identity, ...draft } = input;
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    foreignCatalogIdentity: digest("z"),
+  }));
+  assert.throws(() => createArtifactCompileInput({
+    ...draft,
+    risk: createArtifactRiskAssessment({
+      artifact: input.risk.artifact,
+      assessmentId: "risk-current-conflict-mismatch",
+      evidence: input.risk.evidence,
+      authority: input.risk.authority,
+      conflictInputIdentity: digest("z"),
+      class: input.risk.class,
+      reasons: ["Mismatched current conflict source."],
+      policyId: input.risk.policyId,
+      policyVersion: input.risk.policyVersion,
+      assessedAt: capturedAt,
+    }),
+  }));
+});
+
+test("derives one available authority binding per device action and copies it to dry-run", () => {
+  const input = curtainInput();
+  const compile = createArtifactCompileAttestation({
+    input,
+    status: "rejected",
+    diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
+    conflicts: input.currentConflict.result,
+    blockingReasons: ["set_level_unsupported"],
+  });
+  assert.deepEqual(compile.actionAuthorityBindings, [{
+    actionOrder: 1,
+    kind: "set_level",
+    hwCapabilityId: "hwc-curtain-level",
+    actionAuthorityCandidateId: "candidate-artifact-curtain-compiler-1-hwc-curtain-level",
+  }]);
+  const dryRun = createNeutralDryRunAttestation({
+    compile,
+    status: "failed",
+    diff: compile.diff,
+    conflicts: compile.conflicts,
+    summary: "The rejected compile was not eligible for a passed dry-run.",
+  });
+  assert.deepEqual(dryRun.checkedWatermarks, compile.usedWatermarks);
+  assert.deepEqual(dryRun.actionAuthorityBindings, compile.actionAuthorityBindings);
+});
+
+test("requires unavailable output when an action has no unique available authority candidate", () => {
+  const input = curtainInput();
+  const authority = createArtifactAuthorityAssessment({
+    artifact: input.authority.artifact,
+    assessmentId: "authority-missing-candidate",
+    authorityRegistryIdentity: digest("a"),
+    candidates: [],
+    checkedWatermarks: input.worldCut.watermarks,
+    assessedAt: capturedAt,
+  }, { hwCapabilityIds: ["hwc-curtain-level"] });
+  const risk = createArtifactRiskAssessment({
+    artifact: input.risk.artifact,
+    assessmentId: "risk-missing-candidate",
+    evidence: input.risk.evidence,
+    authority: { assessmentId: authority.assessmentId, inputIdentity: authority.inputIdentity },
+    conflictInputIdentity: input.currentConflict.sourceIdentity,
+    class: input.risk.class,
+    reasons: ["Missing action authority candidate."],
+    policyId: input.risk.policyId,
+    policyVersion: input.risk.policyVersion,
+    assessedAt: capturedAt,
+  });
+  const { inputIdentity: _identity, ...draft } = input;
+  const unavailableInput = createArtifactCompileInput({ ...draft, authority, risk });
+  const compile = createArtifactCompileAttestation({
+    input: unavailableInput,
+    status: "unavailable",
+    diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
+    conflicts: unavailableInput.currentConflict.result,
+    blockingReasons: ["foreign_catalog_unavailable"],
+  });
+  assert.deepEqual(compile.actionAuthorityBindings, []);
+  assert.ok(compile.blockingReasons.includes("authority_unavailable"));
+  assert.throws(() => createArtifactCompileAttestation({
+    input: unavailableInput,
+    status: "compiled",
+    plan: unavailableInput.artifact.content,
+    diff: createNeutralDiff({ status: "no_change", operations: [], unchangedCount: 1, redacted: true }),
+    conflicts: unavailableInput.currentConflict.result,
+    blockingReasons: [],
+  }));
 });
 
 test("derives the complete canonical capability scope and binds both sides exactly", () => {
@@ -402,9 +730,10 @@ test("derives the complete canonical capability scope and binds both sides exact
     schema: "miot.property",
     schemaVersion: "1.0.0",
     semanticKind: "switch",
-    currentValue: false,
+    read: { status: "unsupported", reason: "schema_unsupported" },
     validity: "valid",
     actionCompatibility: [],
+    predicateCompatibility: [],
   });
   assert.throws(() => createArtifactCompileInput({
     ...draft,
@@ -427,8 +756,9 @@ test("creates a notify-only compile and a read-only dry-run attestation", () => 
   const bound = boundAssessments(artifact);
   const worldCut = createNeutralWorldCut({ devices: [], watermarks: [bound.watermark] });
   const conflict = createNeutralConflictInput({
-    bridgeId: "bridge-notify",
-    epochId: "epoch-notify",
+    bridgeId: bound.watermark.bridgeId,
+    epochId: bound.watermark.epochId,
+    watermark: bound.watermark,
     catalogIdentity: digest("b"),
     status: "unavailable",
     findings: [{ kind: "foreign_rule", severity: "blocking", reason: "foreign_catalog_unavailable", reference: "foreign-check-notify" }],
@@ -438,7 +768,7 @@ test("creates a notify-only compile and a read-only dry-run attestation", () => 
     assessmentId: "authority-notify",
     authorityRegistryIdentity: digest("a"),
     candidates: [],
-    checkedWatermarks: [],
+    checkedWatermarks: [bound.watermark],
     assessedAt: capturedAt,
   }, { hwCapabilityIds: [] });
   const risk = createArtifactRiskAssessment({
@@ -453,14 +783,19 @@ test("creates a notify-only compile and a read-only dry-run attestation", () => 
     policyVersion: "1.0.0",
     assessedAt: capturedAt,
   });
+  const currentConflict = {
+    sourceIdentity: digest("b"),
+    result: createNeutralConflictResult({ status: "unavailable", findings: [{ kind: "foreign_rule", severity: "blocking", reason: "foreign_catalog_unavailable", reference: "foreign-check-notify" }] }),
+  };
   const input = createArtifactCompileInput({
     artifact,
     proposal: { id: artifact.sourceProposal.proposalId, revision: artifact.sourceProposal.proposalRevision, status: "approved" },
     evidence: bound.evidence,
     risk,
     authority,
+    currentConflict,
     worldCut,
-    foreignCatalogIdentity: digest("b"),
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([conflict]),
     foreignRuleChecks: [conflict],
     compiler: { id: "neutral-compiler", version: "1.0.0" },
   });
@@ -471,15 +806,13 @@ test("creates a notify-only compile and a read-only dry-run attestation", () => 
   const compile = createArtifactCompileAttestation({
     input,
     status: "unavailable",
-    usedWatermarks: [],
     diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
-    conflicts: createNeutralConflictResult({ status: "unavailable", findings: [{ kind: "foreign_rule", severity: "blocking", reason: "foreign_catalog_unavailable", reference: "foreign-check-notify" }] }),
+    conflicts: input.currentConflict.result,
     blockingReasons: ["foreign_catalog_unavailable"],
   });
   const dryRun = createNeutralDryRunAttestation({
     compile,
     status: "unavailable",
-    checkedWatermarks: [],
     diff: compile.diff,
     conflicts: compile.conflicts,
     summary: "Foreign rule catalog is unavailable; no simulation was performed.",
@@ -487,6 +820,117 @@ test("creates a notify-only compile and a read-only dry-run attestation", () => 
   assert.equal(dryRun.writesPerformed, false);
   assert.equal(dryRun.status, "unavailable");
   assert.deepEqual(parseNeutralDryRunAttestation(dryRun), dryRun);
+});
+
+test("requires canonical blocking reasons and exact dry-run status relation", () => {
+  const input = curtainInput();
+  assert.throws(() => createArtifactCompileAttestation({
+    input,
+    status: "rejected",
+    diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
+    conflicts: input.currentConflict.result,
+    blockingReasons: [],
+  }));
+  assert.throws(() => createArtifactCompileAttestation({
+    input,
+    status: "rejected",
+    diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
+    conflicts: input.currentConflict.result,
+    blockingReasons: ["set_level_unsupported", "set_level_unsupported"],
+  }));
+  const compile = createArtifactCompileAttestation({
+    input,
+    status: "rejected",
+    diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
+    conflicts: input.currentConflict.result,
+    blockingReasons: ["authority_unavailable", "set_level_unsupported"],
+  });
+  assert.deepEqual(compile.blockingReasons, ["authority_unavailable", "set_level_unsupported"]);
+  assert.throws(() => createNeutralDryRunAttestation({
+    compile,
+    status: "passed",
+    diff: compile.diff,
+    conflicts: compile.conflicts,
+    summary: "A rejected compile cannot pass dry-run.",
+  }));
+  assert.throws(() => createNeutralDryRunAttestation({
+    compile,
+    status: "failed",
+    diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
+    conflicts: createNeutralConflictResult({ status: "unavailable", findings: [{ kind: "foreign_rule", severity: "blocking", reason: "foreign_catalog_unavailable", reference: "mismatched-conflict" }] }),
+    summary: "A dry-run cannot replace the compile conflict result.",
+  }));
+});
+
+test("allows passed dry-run only for a compiled, usable, conflict-free result", () => {
+  const artifact = booleanArtifact();
+  const bound = boundAssessments(artifact);
+  const authority = createArtifactAuthorityAssessment({
+    artifact: bound.artifactRef,
+    assessmentId: "authority-miot-bool-passed",
+    authorityRegistryIdentity: digest("a"),
+    candidates: [{ actionAuthorityCandidateId: "candidate-miot-bool-passed", hwCapabilityId: "hwc-miot-bool", status: "available" }],
+    checkedWatermarks: [bound.watermark],
+    assessedAt: capturedAt,
+  }, { hwCapabilityIds: ["hwc-miot-bool"] });
+  const risk = createArtifactRiskAssessment({
+    artifact: bound.artifactRef,
+    assessmentId: "risk-miot-bool-passed",
+    evidence: { attestationId: bound.evidence.attestationId, inputIdentity: bound.evidence.inputIdentity },
+    authority: { assessmentId: authority.assessmentId, inputIdentity: authority.inputIdentity },
+    conflictInputIdentity: bound.currentConflict.sourceIdentity,
+    class: "comfort_reversible",
+    reasons: ["Passed fixture."],
+    policyId: "policy-home-v1",
+    policyVersion: "1.0.0",
+    assessedAt: capturedAt,
+  });
+  const device = createNeutralDeviceSummary({
+    hwCapabilityId: "hwc-miot-bool",
+    schema: "miot.property",
+    schemaVersion: "1.0.0",
+    semanticKind: "switch",
+    read: { status: "available", value: true },
+    validity: "valid",
+    actionCompatibility: [{ order: 1, kind: "set_boolean", status: "compatible", before: true, after: false }],
+    predicateCompatibility: [{ phase: "postcondition", order: 1, status: "compatible" }],
+  });
+  const conflict = createNeutralConflictInput({
+    bridgeId: bound.watermark.bridgeId,
+    epochId: bound.watermark.epochId,
+    watermark: bound.watermark,
+    catalogIdentity: digest("d"),
+    status: "current",
+    findings: [],
+  });
+  const input = createArtifactCompileInput({
+    artifact,
+    proposal: { id: artifact.sourceProposal.proposalId, revision: artifact.sourceProposal.proposalRevision, status: "approved" },
+    evidence: bound.evidence,
+    risk,
+    authority,
+    currentConflict: bound.currentConflict,
+    worldCut: createNeutralWorldCut({ devices: [device], watermarks: [bound.watermark] }),
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([conflict]),
+    foreignRuleChecks: [conflict],
+    compiler: { id: "neutral-compiler", version: "1.0.0" },
+  });
+  const compile = createArtifactCompileAttestation({
+    input,
+    status: "compiled",
+    plan: artifact.content,
+    diff: createNeutralDiff({ status: "no_change", operations: [], unchangedCount: 1, redacted: true }),
+    conflicts: input.currentConflict.result,
+    blockingReasons: [],
+  });
+  const dryRun = createNeutralDryRunAttestation({
+    compile,
+    status: "passed",
+    diff: compile.diff,
+    conflicts: compile.conflicts,
+    summary: "Compiled neutral plan passed a read-only dry-run.",
+  });
+  assert.equal(dryRun.status, "passed");
 });
 
 test("replays identities across object key insertion order but changes them for dynamic cuts", () => {
@@ -498,6 +942,7 @@ test("replays identities across object key insertion order but changes them for 
     foreignCatalogIdentity: input.foreignCatalogIdentity,
     worldCut: { ...input.worldCut, devices: input.worldCut.devices.map((device) => ({ ...device })) },
     authority: input.authority,
+    currentConflict: input.currentConflict,
     risk: input.risk,
     evidence: input.evidence,
     proposal: input.proposal,
@@ -513,24 +958,17 @@ test("replays identities across object key insertion order but changes them for 
 
 test("canonicalizes non-semantic world and foreign-check order without reordering actions", () => {
   const input = curtainInput();
-  const secondCheck = createNeutralConflictInput({
-    bridgeId: "bridge-compiler-2",
-    epochId: "epoch-compiler-2",
-    catalogIdentity: input.foreignCatalogIdentity,
-    status: "current",
-    findings: [],
-  });
   const { inputIdentity: _identity, ...draft } = input;
   const first = createArtifactCompileInput({
     ...draft,
-    foreignRuleChecks: [input.foreignRuleChecks[0]!, secondCheck],
+    foreignRuleChecks: [input.foreignRuleChecks[0]!],
   });
   const second = createArtifactCompileInput({
     ...draft,
-    foreignRuleChecks: [secondCheck, input.foreignRuleChecks[0]!],
+    foreignRuleChecks: [input.foreignRuleChecks[0]!],
   });
   assert.equal(first.inputIdentity, second.inputIdentity);
-  assert.deepEqual(first.foreignRuleChecks.map((check) => check.bridgeId), ["bridge-compiler-1", "bridge-compiler-2"]);
+  assert.deepEqual(first.foreignRuleChecks.map((check) => check.bridgeId), ["bridge-compiler-1"]);
   assert.deepEqual(first.artifact.content.actions.map((action) => action.kind), ["set_level"]);
 });
 
