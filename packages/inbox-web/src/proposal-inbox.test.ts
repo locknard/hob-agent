@@ -116,6 +116,105 @@ const proposalWithArtifactCandidate: InboxProposal = {
   artifactCandidate,
 };
 
+const artifactReview = {
+  artifact: {
+    artifactId: "artifact-review-<long-id>",
+    revision: 4,
+    contentHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
+  compile: {
+    status: "compiled" as const,
+    resultId: "compile-result-<opaque>",
+    inputIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    compiler: { id: "neutral-compiler", version: "1.2.3" },
+    usedWatermarks: [{ bridgeId: "bridge-<opaque>", epochId: "epoch-1", lastSeq: 42, freshness: "fresh", gapCount: 0 }],
+    actionAuthorityBindings: [],
+    blockingReasons: [] as const,
+    diff: {
+      status: "changes" as const,
+      operations: [{
+        actionOrder: 1,
+        kind: "set_level" as const,
+        hwCapabilityId: "hwc-review-light",
+        actionAuthorityCandidateId: "candidate-<opaque>",
+        before: 0.2,
+        after: 0.8,
+      }, {
+        actionOrder: 3,
+        kind: "notify_local" as const,
+        after: "A neutral reminder",
+      }],
+      unchangedCount: 1,
+      redacted: true as const,
+    },
+    conflicts: {
+      status: "possible_overlap" as const,
+      findings: [{
+        kind: "foreign_rule" as const,
+        severity: "warning" as const,
+        hwCapabilityId: "hwc-review-light",
+        reference: "foreign-rule-<opaque>",
+        reason: "possible_overlap",
+      }],
+    },
+  },
+  dryRun: {
+    status: "passed" as const,
+    resultId: "dry-run-result-<opaque>",
+    inputIdentity: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    compileAttestationId: "compile-result-<opaque>",
+    compileInputIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    checkedWatermarks: [{ bridgeId: "bridge-<opaque>", epochId: "epoch-1", lastSeq: 42, freshness: "fresh", gapCount: 0 }],
+    actionAuthorityBindings: [],
+    diff: {
+      status: "changes" as const,
+      operations: [{
+        actionOrder: 1,
+        kind: "set_level" as const,
+        hwCapabilityId: "hwc-review-light",
+        actionAuthorityCandidateId: "candidate-<opaque>",
+        before: 0.2,
+        after: 0.8,
+      }, {
+        actionOrder: 3,
+        kind: "notify_local" as const,
+        after: "A neutral reminder",
+      }],
+      unchangedCount: 1,
+      redacted: true as const,
+    },
+    conflicts: {
+      status: "possible_overlap" as const,
+      findings: [{
+        kind: "foreign_rule" as const,
+        severity: "warning" as const,
+        hwCapabilityId: "hwc-review-light",
+        reference: "foreign-rule-<opaque>",
+        reason: "possible_overlap",
+      }],
+    },
+    writesPerformed: false as const,
+    summary: "Read-only neutral check completed.",
+  },
+  writesPerformed: false as const,
+};
+
+const proposalWithArtifactReview: InboxProposal = {
+  ...proposalWithArtifactCandidate,
+  artifactReview,
+};
+
+const proposalWithUnexpectedDryRunBlockingReasons = {
+  ...proposalWithArtifactCandidate,
+  artifactReview: {
+    ...artifactReview,
+    dryRun: {
+      ...artifactReview.dryRun,
+      blockingReasons: ["dry_run_reason_should_not_render"],
+    },
+  },
+} as unknown as InboxProposal;
+
 test("lists and renders untrusted proposal content without creating an application path", async () => {
   const reviews: unknown[] = [];
   const controller = new ProposalInboxController({
@@ -294,6 +393,72 @@ test("renders an exact neutral artifact candidate in household language without 
   const secondAction = html.indexOf("Send a local notification");
   assert.ok(firstCondition >= 0 && firstCondition < secondCondition);
   assert.ok(firstAction >= 0 && firstAction < secondAction);
+});
+
+test("renders an artifact review as an accessible read-only automation check with diagnostics kept opaque", () => {
+  const html = renderProposalDetail({ proposal: proposalWithUnexpectedDryRunBlockingReasons });
+
+  assert.match(html, /Unverified automation candidate/i);
+  assert.match(html, /Read-only automation check/i);
+  assert.ok(html.indexOf("Unverified automation candidate") < html.indexOf("Read-only automation check"));
+  assert.match(html, /<caption>.*automation check.*<\/caption>/i);
+  assert.match(html, /<th scope="col">/);
+  assert.match(html, /Compiled/i);
+  assert.match(html, /Passed/i);
+  assert.match(html, /No household changes were made/i);
+  assert.match(html, /writesPerformed: false/i);
+  assert.match(html, /possible overlap/i);
+  assert.match(html, /not prove non-interference|cannot confirm that no other rule overlaps/i);
+  assert.match(html, /<details class="artifact-review-diagnostics"><summary>Technical diagnostics<\/summary>/);
+
+  const diagnostics = html.indexOf("Technical diagnostics");
+  assert.ok(diagnostics >= 0);
+  for (const opaqueValue of [
+    "artifact-review-&lt;long-id&gt;",
+    "compile-result-&lt;opaque&gt;",
+    "dry-run-result-&lt;opaque&gt;",
+    "candidate-&lt;opaque&gt;",
+    "bridge-&lt;opaque&gt;",
+    "possible_overlap",
+    "actionOrder",
+  ]) {
+    assert.ok(html.indexOf(opaqueValue) >= diagnostics, `${opaqueValue} must stay in diagnostics`);
+  }
+  assert.ok(html.indexOf("actionOrder 1") < html.indexOf("actionOrder 3"));
+  const dryRunDiagnostics = html.indexOf("dry-run-diagnostics-heading");
+  assert.ok(dryRunDiagnostics >= 0);
+  assert.equal(html.slice(dryRunDiagnostics).includes("dry_run_reason_should_not_render"), false);
+  assert.equal(html.slice(dryRunDiagnostics).includes("Blocking reasons"), false);
+  assert.equal(html.includes("<script>"), false);
+  assert.equal(html.includes("provider"), false);
+  assert.equal(html.includes("native"), false);
+  assert.equal(html.includes("secret"), false);
+  assert.equal(/<(?:button|form)[^>]*(?:apply|install|enable|execute)/iu.test(html), false);
+});
+
+test("renders the minimal not-run review shape without inventing diagnostics", () => {
+  const html = renderProposalDetail({
+    proposal: {
+      ...proposal,
+      artifactReview: {
+        artifact: {
+          artifactId: "artifact-not-run",
+          revision: 1,
+          contentHash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        },
+        compile: { status: "not_run" },
+        dryRun: { status: "not_run", writesPerformed: false },
+        writesPerformed: false,
+      },
+    },
+  });
+
+  assert.match(html, /Household-language compilation[\s\S]*Not run/i);
+  assert.match(html, /Read-only dry run[\s\S]*Not run/i);
+  assert.match(html, /No exact compile result is recorded/i);
+  assert.match(html, /No exact dry-run result is recorded/i);
+  assert.match(html, /No household changes were made/i);
+  assert.equal(html.includes("undefined"), false);
 });
 
 test("renders the recorded structured household feedback without treating it as authority", () => {

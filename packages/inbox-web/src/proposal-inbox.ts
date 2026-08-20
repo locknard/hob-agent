@@ -90,6 +90,115 @@ export interface InboxArtifactCandidate {
   readonly content: InboxArtifactContent;
 }
 
+/**
+ * Inbox-owned structural projection of the Hub's read-only artifact check.
+ *
+ * Keep this seam deliberately independent from the Hub compiler contracts:
+ * no plan, native binding, provider payload, or execution input crosses into
+ * the review surface.
+ */
+export interface InboxArtifactReviewRef {
+  readonly artifactId: string;
+  readonly revision: number;
+  readonly contentHash: string;
+}
+
+export interface InboxArtifactReviewWatermark {
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly lastSeq: number;
+  readonly freshness: string;
+  readonly gapCount: number;
+}
+
+export type InboxArtifactReviewDiffOperation =
+  | {
+      readonly actionOrder: number;
+      readonly kind: "set_level" | "set_boolean";
+      readonly hwCapabilityId: string;
+      readonly actionAuthorityCandidateId: string;
+      readonly before?: InboxArtifactScalar;
+      readonly after?: InboxArtifactScalar;
+    }
+  | {
+      readonly actionOrder: number;
+      readonly kind: "notify_local";
+      readonly after?: InboxArtifactScalar;
+    };
+
+export interface InboxArtifactReviewDiff {
+  readonly status: "no_change" | "changes" | "unavailable";
+  readonly operations: readonly InboxArtifactReviewDiffOperation[];
+  readonly unchangedCount: number;
+  readonly redacted: true;
+}
+
+export type InboxArtifactReviewConflictStatus = "none" | "duplicate" | "possible_overlap" | "unavailable";
+
+export interface InboxArtifactReviewConflictFinding {
+  readonly kind: "existing_artifact" | "foreign_rule" | "stale_evidence" | "authority_unavailable" | "target_invalid" | "policy_blocked";
+  readonly severity: "blocking" | "warning";
+  readonly hwCapabilityId?: string;
+  readonly reference?: string;
+  readonly reason: string;
+}
+
+export interface InboxArtifactReviewConflicts {
+  readonly status: InboxArtifactReviewConflictStatus;
+  readonly findings: readonly InboxArtifactReviewConflictFinding[];
+}
+
+export interface InboxArtifactReviewActionAuthorityBinding {
+  readonly actionOrder: number;
+  readonly kind: "set_level" | "set_boolean";
+  readonly hwCapabilityId: string;
+  readonly actionAuthorityCandidateId: string;
+}
+
+export interface InboxArtifactReviewCompiler {
+  readonly id: string;
+  readonly version: string;
+}
+
+export type InboxArtifactCompileReview =
+  | { readonly status: "not_run" }
+  | {
+      readonly status: "compiled" | "rejected" | "unavailable";
+      readonly resultId?: string;
+      readonly inputIdentity?: string;
+      readonly compiler?: InboxArtifactReviewCompiler;
+      readonly usedWatermarks: readonly InboxArtifactReviewWatermark[];
+      readonly actionAuthorityBindings: readonly InboxArtifactReviewActionAuthorityBinding[];
+      readonly blockingReasons: readonly string[];
+      readonly diff: InboxArtifactReviewDiff;
+      readonly conflicts: InboxArtifactReviewConflicts;
+    };
+
+export type InboxArtifactDryRunReview =
+  | { readonly status: "not_run"; readonly writesPerformed: false }
+  | {
+      readonly status: "passed" | "failed" | "unavailable";
+      readonly resultId?: string;
+      readonly inputIdentity?: string;
+      readonly compileAttestationId?: string;
+      readonly compileInputIdentity?: string;
+      readonly compiler?: InboxArtifactReviewCompiler;
+      readonly checkedWatermarks: readonly InboxArtifactReviewWatermark[];
+      readonly actionAuthorityBindings: readonly InboxArtifactReviewActionAuthorityBinding[];
+      readonly diff: InboxArtifactReviewDiff;
+      readonly conflicts: InboxArtifactReviewConflicts;
+      readonly writesPerformed: false;
+      readonly summary?: string;
+    };
+
+/** Read-only, exact proposal-scoped review projection owned by Inbox. */
+export interface InboxArtifactReviewSnapshot {
+  readonly artifact: InboxArtifactReviewRef;
+  readonly compile: InboxArtifactCompileReview;
+  readonly dryRun: InboxArtifactDryRunReview;
+  readonly writesPerformed: false;
+}
+
 export interface InboxProposal {
   readonly id: string;
   readonly revision: number;
@@ -145,6 +254,7 @@ export interface InboxProposal {
     readonly uncertainties: readonly string[];
   };
   readonly artifactCandidate?: InboxArtifactCandidate;
+  readonly artifactReview?: InboxArtifactReviewSnapshot;
   readonly spaceCoverage?: {
     readonly selectedDevices: number;
     readonly devicesWithSingleSpace: number;
@@ -485,6 +595,7 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   const artifactCandidate = proposal.artifactCandidate === undefined
     ? "<section class=\"artifact-candidate legacy-candidate\" aria-label=\"Automation candidate\"><h2>Proposed behavior</h2><p>No exact neutral behavior candidate is recorded for this legacy proposal.</p></section>"
     : renderArtifactCandidate(proposal.artifactCandidate);
+  const artifactReview = proposal.artifactReview === undefined ? "" : renderArtifactReview(proposal.artifactReview);
   const spaceCoverage = proposal.spaceCoverage === undefined
     ? "<section aria-label=\"Selected-device space coverage\"><h2>Selected-device space coverage</h2><p>Not recorded in this legacy proposal.</p></section>"
     : `<section aria-label="Selected-device space coverage"><h2>Selected-device space coverage</h2><p>Hub-produced mapping coverage; this is separate from the Agent's rationale.</p><dl><dt>Selected devices</dt><dd>${proposal.spaceCoverage.selectedDevices}</dd><dt>Single-space suggestions</dt><dd>${proposal.spaceCoverage.devicesWithSingleSpace}</dd><dt>Unassigned</dt><dd>${proposal.spaceCoverage.devicesWithoutSpace}</dd><dt>Multiple spaces</dt><dd>${proposal.spaceCoverage.devicesWithMultipleSpaces}</dd></dl></section>`;
@@ -515,7 +626,7 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   const ledgerCoverage = proposal.evidence.temporal?.coverage.map((coverage) => `<li class="ledger-item" data-coverage="${escapeHtml(coverage.status)}"><span class="ledger-marker" aria-hidden="true"></span><div><p><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}</p><p class="ledger-meta">${coverage.reasons.length === 0 ? "No recorded coverage warnings" : coverage.reasons.map(escapeHtml).join(", ")}</p></div></li>`).join("") ?? "";
   return `<main id="main-content" class="proposal-detail review-desk" data-status="${escapeHtml(proposal.status)}">
     <header><a class="back-link" href="/proposals">← Back to reviews</a><p class="eyebrow">Household proposal</p><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p><div class="status-line"><span class="status-chip">Risk: ${escapeHtml(proposal.risk.level)}</span><span class="muted">Updated ${escapeHtml(proposal.updatedAt)}</span></div></header>
-    <div class="review-columns"><div class="proposal-case">${rationale}${artifactCandidate}
+    <div class="review-columns"><div class="proposal-case">${rationale}${artifactCandidate}${artifactReview}
     <section aria-label="Intent"><h2>Intended change</h2><p>${escapeHtml(proposal.intent.description)}</p><h3>Rollback</h3><p>${escapeHtml(proposal.intent.rollback)}</p></section>
     <section aria-label="Dry run"><h2>Dry run: ${escapeHtml(proposal.dryRun.status)}</h2><p>${escapeHtml(proposal.dryRun.summary)}</p></section>
     <section aria-label="Risk"><h2>Risk: ${escapeHtml(proposal.risk.level)}</h2><ul class="risk-list">${risks}</ul></section>
@@ -539,6 +650,159 @@ function renderArtifactCandidate(candidate: InboxArtifactCandidate): string {
     : `<ol>${content.postconditions.map((postcondition) => `<li>${renderArtifactPostcondition(postcondition)}</li>`).join("")}</ol>`;
 
   return `<section class="artifact-candidate" aria-label="Automation candidate"><p class="eyebrow">Unverified automation candidate</p><h2>Proposed behavior</h2><p>Approval records this reviewed intent only. This candidate cannot install, enable, or execute anything.</p><h3>When it runs</h3><p>${renderArtifactTrigger(content.trigger)}</p><h3>When all conditions are met</h3>${conditions}<h3>What would happen</h3>${actions}<h3>How it could be undone</h3><p>${rollback}</p><h3>What should be true afterward</h3>${postconditions}</section>`;
+}
+
+function renderArtifactReview(review: InboxArtifactReviewSnapshot): string {
+  const compile = review.compile;
+  const dryRun = review.dryRun;
+  const compileConflict = compile.status === "not_run"
+    ? "Not run; no conflict-free conclusion is available."
+    : renderArtifactReviewConflictSummary(compile.conflicts);
+  const dryRunConflict = dryRun.status === "not_run"
+    ? "Not run; no conflict-free conclusion is available."
+    : renderArtifactReviewConflictSummary(dryRun.conflicts);
+  const compileDiff = compile.status === "not_run"
+    ? "Not run; no diff is available."
+    : renderArtifactReviewDiffSummary(compile.diff);
+  const dryRunDiff = dryRun.status === "not_run"
+    ? "Not run; no diff is available."
+    : renderArtifactReviewDiffSummary(dryRun.diff);
+  const compileDescription = artifactCompileStatusDescription(compile.status);
+  const dryRunDescription = artifactDryRunStatusDescription(dryRun.status);
+
+  return `<section class="artifact-review" aria-labelledby="artifact-review-heading"><p class="eyebrow">Read-only check</p><h2 id="artifact-review-heading">Read-only automation check</h2><p>This check only reviews a neutral candidate for this proposal revision. It cannot install, enable, apply, or execute anything.</p><table class="artifact-review-status"><caption>Read-only automation check status</caption><thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">What this means at home</th></tr></thead><tbody><tr><th scope="row">Household-language compilation</th><td>${artifactReviewStatusChip(compile.status, artifactCompileStatusLabel(compile.status))}</td><td>${compileDescription}</td></tr><tr><th scope="row">Read-only dry run</th><td>${artifactReviewStatusChip(dryRun.status, artifactDryRunStatusLabel(dryRun.status))}</td><td>${dryRunDescription}</td></tr></tbody></table><p class="no-household-writes"><strong>No household changes were made.</strong> This review is read-only; <code>writesPerformed: false</code>.</p><section class="artifact-review-summary" aria-labelledby="artifact-review-findings-heading"><h3 id="artifact-review-findings-heading">What the check found</h3><dl><dt>Compilation diff</dt><dd>${compileDiff}</dd><dt>Compilation conflicts</dt><dd>${compileConflict}</dd><dt>Dry-run diff</dt><dd>${dryRunDiff}</dd><dt>Dry-run conflicts</dt><dd>${dryRunConflict}</dd></dl></section>${renderArtifactReviewDiagnostics(review)}</section>`;
+}
+
+function artifactReviewStatusChip(status: string, label: string): string {
+  return `<span class="status-chip" data-status="${escapeHtml(status)}">${escapeHtml(label)}</span>`;
+}
+
+function artifactCompileStatusLabel(status: InboxArtifactCompileReview["status"]): string {
+  switch (status) {
+    case "not_run": return "Not run";
+    case "compiled": return "Compiled";
+    case "rejected": return "Rejected";
+    case "unavailable": return "Unavailable";
+  }
+}
+
+function artifactCompileStatusDescription(status: InboxArtifactCompileReview["status"]): string {
+  switch (status) {
+    case "not_run": return "No exact compile result is recorded for this proposal revision.";
+    case "compiled": return "The neutral behavior was prepared for household review.";
+    case "rejected": return "The candidate did not pass the neutral review checks.";
+    case "unavailable": return "The check lacked trustworthy information to prepare a review.";
+  }
+}
+
+function artifactDryRunStatusLabel(status: InboxArtifactDryRunReview["status"]): string {
+  switch (status) {
+    case "passed": return "Passed";
+    case "failed": return "Failed";
+    case "unavailable": return "Unavailable";
+    case "not_run": return "Not run";
+  }
+}
+
+function artifactDryRunStatusDescription(status: InboxArtifactDryRunReview["status"]): string {
+  switch (status) {
+    case "passed": return "The read-only simulation completed for this exact review input.";
+    case "failed": return "The read-only simulation found a blocking problem for this input.";
+    case "unavailable": return "The read-only simulation could not use a complete, trustworthy input.";
+    case "not_run": return "No exact dry-run result is recorded for this proposal revision.";
+  }
+}
+
+function artifactReviewDiffStatusLabel(status: InboxArtifactReviewDiff["status"]): string {
+  switch (status) {
+    case "no_change": return "No change";
+    case "changes": return "Changes";
+    case "unavailable": return "Unavailable";
+  }
+}
+
+function renderArtifactReviewDiffSummary(diff: InboxArtifactReviewDiff): string {
+  switch (diff.status) {
+    case "no_change":
+      return `No change is reported by this read-only diff; ${diff.unchangedCount} action${diff.unchangedCount === 1 ? "" : "s"} remain unchanged.`;
+    case "changes":
+      return `${diff.operations.length} neutral change${diff.operations.length === 1 ? "" : "s"} is recorded; ${diff.unchangedCount} action${diff.unchangedCount === 1 ? "" : "s"} remain unchanged.`;
+    case "unavailable":
+      return "The diff is unavailable; no change is assumed.";
+  }
+}
+
+function renderArtifactReviewConflictSummary(conflicts: InboxArtifactReviewConflicts): string {
+  const findingCount = conflicts.findings.length;
+  switch (conflicts.status) {
+    case "none":
+      return "No conflicts were recorded for this check; this does not prove non-interference.";
+    case "duplicate":
+      return `Duplicate conflict found (${findingCount} finding${findingCount === 1 ? "" : "s"}); review is not clear.`;
+    case "possible_overlap":
+      return `Possible overlap found (${findingCount} finding${findingCount === 1 ? "" : "s"}); this does not prove non-interference.`;
+    case "unavailable":
+      return "Conflict check unavailable; no conflict-free conclusion is available.";
+  }
+}
+
+function renderArtifactReviewDiagnostics(review: InboxArtifactReviewSnapshot): string {
+  const compile = review.compile;
+  const dryRun = review.dryRun;
+  const compileDiagnostics = compile.status === "not_run"
+    ? "<p>Status: <code>not_run</code>; no exact compile row is recorded.</p>"
+    : `<dl><dt>Status</dt><dd><code>${escapeHtml(compile.status)}</code></dd>${diagnosticValue("Result identity", compile.resultId)}${diagnosticValue("Input identity", compile.inputIdentity)}${compile.compiler === undefined ? "" : `<dt>Compiler</dt><dd><code class="diagnostic-id">${escapeHtml(compile.compiler.id)}</code> · version <code>${escapeHtml(compile.compiler.version)}</code></dd>`}</dl>${renderArtifactReviewWatermarks(compile.usedWatermarks)}${renderArtifactReviewBlockingReasons(compile.blockingReasons)}${renderArtifactReviewBindings(compile.actionAuthorityBindings ?? [])}${renderArtifactReviewDiffDiagnostics("Compilation diff", compile.diff)}${renderArtifactReviewConflictDiagnostics("Compilation conflicts", compile.conflicts)}`;
+  const dryRunDiagnostics = dryRun.status === "not_run"
+    ? `<section aria-labelledby="dry-run-diagnostics-heading"><h3 id="dry-run-diagnostics-heading">Dry-run result</h3><p>Status: <code>not_run</code></p><p>Exact artifact: <code class="diagnostic-id">${escapeHtml(review.artifact.artifactId)}</code> · revision ${review.artifact.revision} · hash <code class="diagnostic-id">${escapeHtml(review.artifact.contentHash)}</code></p></section>`
+    : `<section aria-labelledby="dry-run-diagnostics-heading"><h3 id="dry-run-diagnostics-heading">Dry-run result</h3><dl><dt>Status</dt><dd><code>${escapeHtml(dryRun.status)}</code></dd>${diagnosticValue("Result identity", dryRun.resultId)}${diagnosticValue("Input identity", dryRun.inputIdentity)}${diagnosticValue("Compile result identity", dryRun.compileAttestationId)}${dryRun.compiler === undefined ? "" : `<dt>Compiler</dt><dd><code class="diagnostic-id">${escapeHtml(dryRun.compiler.id)}</code> · version <code>${escapeHtml(dryRun.compiler.version)}</code></dd>`}<dt>writesPerformed</dt><dd><code>false</code></dd></dl>${renderArtifactReviewWatermarks(dryRun.checkedWatermarks)}${renderArtifactReviewBindings(dryRun.actionAuthorityBindings ?? [])}${renderArtifactReviewDiffDiagnostics("Dry-run diff", dryRun.diff)}${renderArtifactReviewConflictDiagnostics("Dry-run conflicts", dryRun.conflicts)}</section>`;
+  return `<details class="artifact-review-diagnostics"><summary>Technical diagnostics</summary><div class="artifact-review-diagnostics-body"><section aria-labelledby="artifact-diagnostics-heading"><h3 id="artifact-diagnostics-heading">Artifact identity</h3><dl><dt>Artifact ID</dt><dd><code class="diagnostic-id">${escapeHtml(review.artifact.artifactId)}</code></dd><dt>Artifact revision</dt><dd>${review.artifact.revision}</dd><dt>Content hash</dt><dd><code class="diagnostic-id">${escapeHtml(review.artifact.contentHash)}</code></dd></dl></section><section aria-labelledby="compile-diagnostics-heading"><h3 id="compile-diagnostics-heading">Compile result</h3>${compileDiagnostics}</section>${dryRunDiagnostics}</div></details>`;
+}
+
+function diagnosticValue(label: string, value: string | undefined): string {
+  return value === undefined ? "" : `<dt>${escapeHtml(label)}</dt><dd><code class="diagnostic-id">${escapeHtml(value)}</code></dd>`;
+}
+
+function renderArtifactReviewWatermarks(watermarks: readonly InboxArtifactReviewWatermark[]): string {
+  if (watermarks.length === 0) return "<p>No semantic watermarks were recorded.</p>";
+  return `<h4>Semantic watermarks</h4><table class="artifact-review-watermarks"><caption>Semantic watermarks used by this read-only check</caption><thead><tr><th scope="col">Bridge</th><th scope="col">Epoch</th><th scope="col">Last sequence</th><th scope="col">Freshness</th><th scope="col">Gaps</th></tr></thead><tbody>${watermarks.map((watermark) => `<tr><th scope="row"><code class="diagnostic-id">${escapeHtml(watermark.bridgeId)}</code></th><td><code class="diagnostic-id">${escapeHtml(watermark.epochId)}</code></td><td>${watermark.lastSeq}</td><td>${escapeHtml(watermark.freshness)}</td><td>${watermark.gapCount}</td></tr>`).join("")}</tbody></table>`;
+}
+
+function renderArtifactReviewBlockingReasons(reasons: readonly string[]): string {
+  if (reasons.length === 0) return "<p>Blocking reasons: none.</p>";
+  return `<h4>Blocking reasons</h4><ul>${reasons.map((reason) => `<li><code>${escapeHtml(reason)}</code></li>`).join("")}</ul>`;
+}
+
+function renderArtifactReviewBindings(bindings: readonly InboxArtifactReviewActionAuthorityBinding[]): string {
+  if (bindings.length === 0) return "<p>No opaque action authority candidates were recorded.</p>";
+  return `<h4>Action authority candidates</h4><table class="artifact-review-bindings"><caption>Opaque action authority candidates by artifact action order</caption><thead><tr><th scope="col">Action order</th><th scope="col">Kind</th><th scope="col">Capability</th><th scope="col">Candidate</th></tr></thead><tbody>${bindings.map((binding) => `<tr><th scope="row">actionOrder ${binding.actionOrder}</th><td><code>${escapeHtml(binding.kind)}</code></td><td><code class="diagnostic-id">${escapeHtml(binding.hwCapabilityId)}</code></td><td><code class="diagnostic-id">${escapeHtml(binding.actionAuthorityCandidateId)}</code></td></tr>`).join("")}</tbody></table>`;
+}
+
+function renderArtifactReviewDiffDiagnostics(heading: string, diff: InboxArtifactReviewDiff): string {
+  const operations = diff.operations.length === 0
+    ? "<p>No diff operations were recorded.</p>"
+    : `<table class="artifact-review-diff"><caption>${escapeHtml(heading)} operations</caption><thead><tr><th scope="col">Action order</th><th scope="col">Kind</th><th scope="col">Capability</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Opaque candidate</th></tr></thead><tbody>${diff.operations.map(renderArtifactReviewDiffOperation).join("")}</tbody></table>`;
+  return `<section aria-label="${escapeHtml(heading)}"><h4>${escapeHtml(heading)}</h4><p>Diff status: <code>${escapeHtml(diff.status)}</code> · ${artifactReviewDiffStatusLabel(diff.status)} · unchanged count ${diff.unchangedCount} · redacted <code>true</code></p>${operations}</section>`;
+}
+
+function renderArtifactReviewDiffOperation(operation: InboxArtifactReviewDiffOperation): string {
+  const before = "before" in operation && operation.before !== undefined
+    ? `<code>${formatArtifactScalar(operation.before)}</code>`
+    : "absent";
+  const after = operation.after === undefined ? "absent" : `<code>${formatArtifactScalar(operation.after)}</code>`;
+  const capability = "hwCapabilityId" in operation
+    ? `<code class="diagnostic-id">${escapeHtml(operation.hwCapabilityId)}</code>`
+    : "not applicable";
+  const candidate = "actionAuthorityCandidateId" in operation
+    ? `<code class="diagnostic-id">${escapeHtml(operation.actionAuthorityCandidateId)}</code>`
+    : "not applicable";
+  return `<tr><th scope="row">actionOrder ${operation.actionOrder}</th><td><code>${escapeHtml(operation.kind)}</code></td><td>${capability}</td><td>${before}</td><td>${after}</td><td>${candidate}</td></tr>`;
+}
+
+function renderArtifactReviewConflictDiagnostics(heading: string, conflicts: InboxArtifactReviewConflicts): string {
+  const findings = conflicts.findings.length === 0
+    ? "<p>No findings were recorded for this conflict result.</p>"
+    : `<ul>${conflicts.findings.map((finding) => `<li><code>${escapeHtml(finding.kind)}</code> · ${escapeHtml(finding.severity)} · reason <code>${escapeHtml(finding.reason)}</code>${finding.hwCapabilityId === undefined ? "" : ` · capability <code class="diagnostic-id">${escapeHtml(finding.hwCapabilityId)}</code>`}${finding.reference === undefined ? "" : ` · reference <code class="diagnostic-id">${escapeHtml(finding.reference)}</code>`}</li>`).join("")}</ul>`;
+  return `<section aria-label="${escapeHtml(heading)}"><h4>${escapeHtml(heading)}</h4><p>Conflict status: <code>${escapeHtml(conflicts.status)}</code></p>${findings}</section>`;
 }
 
 function renderArtifactTrigger(trigger: InboxArtifactTrigger): string {
