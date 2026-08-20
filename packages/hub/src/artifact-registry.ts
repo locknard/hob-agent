@@ -602,6 +602,12 @@ export class ArtifactRegistry {
       if (current.status === "superseded") {
         throw new ArtifactRegistryError("revision_conflict", "Superseded artifact revisions cannot receive assessments");
       }
+      if (kind === "risk-assessment") {
+        if (assessment.kind !== "risk-assessment") {
+          throw new ArtifactRegistryError("corrupt_record", "Risk assessment kind does not match its payload");
+        }
+        this.assertRiskDependencies(assessment);
+      }
 
       const recordedAt = this.now();
       this.db.prepare(`INSERT INTO artifact_assessments
@@ -875,6 +881,9 @@ export class ArtifactRegistry {
     const artifact = assessment.artifact;
     const storedArtifact = this.requireEntry(artifact.artifactId, artifact.revision).artifact;
     assertArtifactRefMatches(storedArtifact, artifact);
+    if (assessment.kind === "risk-assessment") {
+      this.assertRiskDependencies(assessment);
+    }
     const recordId = textColumn(row, "record_id");
     if (recordId !== assessmentRecordId(assessment)
       || textColumn(row, "kind") !== assessment.kind
@@ -907,6 +916,45 @@ export class ArtifactRegistry {
       assessment,
       audit: audit.map(toAudit),
     };
+  }
+
+  private assertRiskDependencies(assessment: ArtifactRiskAssessment): void {
+    this.assertAssessmentDependency(
+      "evidence-attestation",
+      assessment.evidence.attestationId,
+      assessment.artifact,
+      assessment.evidence.inputIdentity,
+    );
+    this.assertAssessmentDependency(
+      "authority-assessment",
+      assessment.authority.assessmentId,
+      assessment.artifact,
+      assessment.authority.inputIdentity,
+    );
+  }
+
+  private assertAssessmentDependency(
+    kind: "evidence-attestation" | "authority-assessment",
+    recordId: string,
+    artifact: ArtifactRef,
+    inputIdentity: string,
+  ): void {
+    const row = this.findAssessmentByRecordId(recordId);
+    if (row === undefined) {
+      throw new ArtifactRegistryError("not_found", "Risk assessment dependency was not found");
+    }
+    if (textColumn(row, "kind") !== kind) {
+      throw new ArtifactRegistryError("revision_conflict", "Risk assessment dependency kind does not match");
+    }
+    const dependency = this.assessmentEntryFromRow(row);
+    if (dependency.artifact.artifactId !== artifact.artifactId
+      || dependency.artifact.revision !== artifact.revision
+      || dependency.artifact.contentHash !== artifact.contentHash) {
+      throw new ArtifactRegistryError("revision_conflict", "Risk assessment dependency artifact does not match");
+    }
+    if (dependency.inputIdentity !== inputIdentity) {
+      throw new ArtifactRegistryError("revision_conflict", "Risk assessment dependency identity does not match");
+    }
   }
 
   private readStatus(artifactId: string, revision: number): { status: ArtifactRegistryStatus; tombstone: boolean } {

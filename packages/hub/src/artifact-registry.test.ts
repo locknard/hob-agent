@@ -61,12 +61,12 @@ function content(target = "hwc-cover-1"): ArtifactRevision["content"] {
 
 function artifact(
   revision = 1,
-  options: { readonly title?: string; readonly target?: string } = {},
+  options: { readonly artifactId?: string; readonly title?: string; readonly target?: string } = {},
 ): ArtifactRevision {
   return createArtifactRevision({
     schemaVersion: "1",
     kind: "event-condition-action",
-    artifactId: "artifact-registry-fixture",
+    artifactId: options.artifactId ?? "artifact-registry-fixture",
     revision,
     title: options.title ?? "Morning comfort",
     summary: "A bounded reversible level change.",
@@ -118,13 +118,19 @@ function riskAssessment(
   ref: ReturnType<typeof artifactRef>,
   assessmentId = "risk-registry-fixture-1",
   policyVersion = "1.0.0",
+  dependencies: {
+    readonly evidence?: ArtifactEvidenceAttestation;
+    readonly authority?: ArtifactAuthorityAssessment;
+  } = {},
 ): ArtifactRiskAssessment {
+  const evidence = dependencies.evidence ?? evidenceAssessment(ref);
+  const authority = dependencies.authority ?? authorityAssessment(ref);
   return createArtifactRiskAssessment({
     artifact: ref,
     assessmentId,
     assessedAt: "2026-08-20T01:00:00.000Z",
-    evidence: { attestationId: "evidence-registry-fixture-1", inputIdentity: `sha256:${"e".repeat(64)}` },
-    authority: { assessmentId: "authority-registry-fixture-1", inputIdentity: `sha256:${"d".repeat(64)}` },
+    evidence: { attestationId: evidence.attestationId, inputIdentity: evidence.inputIdentity },
+    authority: { assessmentId: authority.assessmentId, inputIdentity: authority.inputIdentity },
     conflictInputIdentity: `sha256:${"c".repeat(64)}`,
     class: "comfort_reversible",
     reasons: ["Bounded reversible level change with restore."],
@@ -150,6 +156,23 @@ function authorityAssessment(
     }],
     checkedWatermarks: [assessmentWatermark(lastSeq)],
   }, { hwCapabilityIds: ["hwc-cover-1"] });
+}
+
+function recordRiskDependencies(
+  registry: ArtifactRegistry,
+  ref: ReturnType<typeof artifactRef>,
+): { readonly evidence: ArtifactEvidenceAttestation; readonly authority: ArtifactAuthorityAssessment } {
+  const evidence = evidenceAssessment(ref);
+  const authority = authorityAssessment(ref);
+  registry.recordEvidenceAttestation({
+    assessment: evidence,
+    idempotencyKey: "idem-risk-default-evidence",
+  });
+  registry.recordAuthorityAssessment({
+    assessment: authority,
+    idempotencyKey: "idem-risk-default-authority",
+  });
+  return { evidence, authority };
 }
 
 function openRegistry(path: string): ArtifactRegistry {
@@ -464,21 +487,21 @@ test("persists all three Hub assessments as immutable metadata-only rows", () =>
     const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-assessment-artifact" });
     const ref = artifactRef(created.artifact);
     const evidence = evidenceAssessment(ref);
-    const risk = riskAssessment(ref);
     const authority = authorityAssessment(ref);
+    const risk = riskAssessment(ref, "risk-registry-fixture-1", "1.0.0", { evidence, authority });
 
     const evidenceRow = registry.recordEvidenceAttestation({
       assessment: evidence,
       idempotencyKey: "idem-assessment-evidence",
       actor: "hub-assessment",
     });
-    const riskRow = registry.recordRiskAssessment({
-      assessment: risk,
-      idempotencyKey: "idem-assessment-risk",
-    });
     const authorityRow = registry.recordAuthorityAssessment({
       assessment: authority,
       idempotencyKey: "idem-assessment-authority",
+    });
+    const riskRow = registry.recordRiskAssessment({
+      assessment: risk,
+      idempotencyKey: "idem-assessment-risk",
     });
 
     for (const [row, expected, recordId] of [
@@ -502,6 +525,77 @@ test("persists all three Hub assessments as immutable metadata-only rows", () =>
     assert.deepEqual(registry.latestAttestation({ kind: "authority-assessment", artifact: ref }), authorityRow);
     assert.equal(registry.audit({ limit: 200 }).filter((entry) => entry.action === "assessment_recorded").length, 3);
     assert.deepEqual(registry.getRevision(ref.artifactId, ref.revision)?.audit.map((entry) => entry.action), ["created"]);
+  });
+});
+
+test("requires risk evidence and authority dependencies to be persisted and exact", () => {
+  withRegistry("assessment-risk-dependencies", (registry) => {
+    const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-risk-dependency-artifact" });
+    const ref = artifactRef(created.artifact);
+
+    assert.throws(
+      () => registry.recordRiskAssessment({
+        assessment: riskAssessment(ref, "risk-missing-dependencies"),
+        idempotencyKey: "idem-risk-missing-dependencies",
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "not_found",
+    );
+
+    const evidence = registry.recordEvidenceAttestation({
+      assessment: evidenceAssessment(ref, "evidence-risk-dependency"),
+      idempotencyKey: "idem-evidence-risk-dependency",
+    });
+    const authority = registry.recordAuthorityAssessment({
+      assessment: authorityAssessment(ref, "authority-risk-dependency"),
+      idempotencyKey: "idem-authority-risk-dependency",
+    });
+    const valid = registry.recordRiskAssessment({
+      assessment: riskAssessment(ref, "risk-valid-dependencies", "1.0.0", {
+        evidence: evidence.assessment,
+        authority: authority.assessment,
+      }),
+      idempotencyKey: "idem-risk-valid-dependencies",
+    });
+    assert.equal(valid.assessment.evidence.attestationId, evidence.assessment.attestationId);
+    assert.equal(valid.assessment.evidence.inputIdentity, evidence.assessment.inputIdentity);
+    assert.equal(valid.assessment.authority.assessmentId, authority.assessment.assessmentId);
+    assert.equal(valid.assessment.authority.inputIdentity, authority.assessment.inputIdentity);
+
+    assert.throws(
+      () => registry.recordRiskAssessment({
+        assessment: riskAssessment(ref, "risk-wrong-evidence", "1.0.0", {
+          evidence: { ...evidence.assessment, inputIdentity: `sha256:${"f".repeat(64)}` },
+          authority: authority.assessment,
+        }),
+        idempotencyKey: "idem-risk-wrong-evidence",
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "revision_conflict",
+    );
+    assert.throws(
+      () => registry.recordRiskAssessment({
+        assessment: riskAssessment(ref, "risk-wrong-authority", "1.0.0", {
+          evidence: evidence.assessment,
+          authority: { ...authority.assessment, inputIdentity: `sha256:${"f".repeat(64)}` },
+        }),
+        idempotencyKey: "idem-risk-wrong-authority",
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "revision_conflict",
+    );
+
+    const other = registry.createDraft({
+      artifact: artifact(1, { artifactId: "artifact-registry-other", title: "Other artifact", target: "hwc-other" }),
+      idempotencyKey: "idem-risk-dependency-other-artifact",
+    });
+    assert.throws(
+      () => registry.recordRiskAssessment({
+        assessment: riskAssessment(artifactRef(other.artifact), "risk-cross-artifact", "1.0.0", {
+          evidence: evidence.assessment,
+          authority: authority.assessment,
+        }),
+        idempotencyKey: "idem-risk-cross-artifact",
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "revision_conflict",
+    );
   });
 });
 
@@ -552,6 +646,11 @@ test("deduplicates assessment identity independent of caller record id and binds
       (error: unknown) => error instanceof ArtifactRegistryError && error.code === "revision_conflict",
     );
 
+    const authority = registry.recordAuthorityAssessment({
+      assessment: authorityAssessment(ref),
+      idempotencyKey: "idem-risk-dedup-authority",
+    });
+
     const sameIdRisk = riskAssessment(ref, "evidence-original", "1.0.1");
     assert.throws(
       () => registry.recordRiskAssessment({ assessment: sameIdRisk, idempotencyKey: "idem-risk-collision" }),
@@ -559,12 +658,18 @@ test("deduplicates assessment identity independent of caller record id and binds
     );
 
     const firstRisk = registry.recordRiskAssessment({
-      assessment: riskAssessment(ref, "risk-original", "1.0.0"),
+      assessment: riskAssessment(ref, "risk-original", "1.0.0", {
+        evidence: first.assessment,
+        authority: authority.assessment,
+      }),
       idempotencyKey: "idem-shared-content",
     });
     assert.throws(
       () => registry.recordRiskAssessment({
-        assessment: riskAssessment(ref, "risk-new-input", "1.0.1"),
+        assessment: riskAssessment(ref, "risk-new-input", "1.0.1", {
+          evidence: first.assessment,
+          authority: authority.assessment,
+        }),
         idempotencyKey: "idem-shared-content",
       }),
       (error: unknown) => error instanceof ArtifactRegistryError && error.code === "revision_conflict",
@@ -631,8 +736,9 @@ test("restores assessments, bounds queries, and fails closed on tampered payload
     const first = openRegistry(temporary.path);
     const created = first.createDraft({ artifact: artifact(), idempotencyKey: "idem-assessment-artifact" });
     const ref = artifactRef(created.artifact);
+    const dependencies = recordRiskDependencies(first, ref);
     const recorded = first.recordRiskAssessment({
-      assessment: riskAssessment(ref),
+      assessment: riskAssessment(ref, "risk-registry-fixture-1", "1.0.0", dependencies),
       idempotencyKey: "idem-assessment-restart",
     });
     first.close();
@@ -640,7 +746,7 @@ test("restores assessments, bounds queries, and fails closed on tampered payload
     const second = openRegistry(temporary.path);
     try {
       assert.deepEqual(second.latestAttestation({ kind: "risk-assessment", artifact: ref }), recorded);
-      assert.equal(second.listAttestations({ limit: 200 }).length, 1);
+      assert.equal(second.listAttestations({ limit: 200 }).length, 3);
       assert.throws(() => second.listAttestations({ limit: 201 }), (error: unknown) => (
         error instanceof ArtifactRegistryError && error.code === "invalid_input"
       ));
@@ -689,7 +795,11 @@ test("assessment reads fail closed when the referenced artifact is deleted or co
       const seed = openRegistry(temporary.path);
       const created = seed.createDraft({ artifact: artifact(), idempotencyKey: `idem-${mode}-artifact` });
       const ref = artifactRef(created.artifact);
-      seed.recordRiskAssessment({ assessment: riskAssessment(ref), idempotencyKey: `idem-${mode}-risk` });
+      const dependencies = recordRiskDependencies(seed, ref);
+      seed.recordRiskAssessment({
+        assessment: riskAssessment(ref, "risk-registry-fixture-1", "1.0.0", dependencies),
+        idempotencyKey: `idem-${mode}-risk`,
+      });
       seed.close();
       const tamper = new DatabaseSync(temporary.path);
       try {
@@ -725,8 +835,9 @@ test("fails closed when an assessment idempotency row points at another valid as
     const seed = openRegistry(temporary.path);
     const created = seed.createDraft({ artifact: artifact(), idempotencyKey: "idem-operation-corrupt-artifact" });
     const ref = artifactRef(created.artifact);
-    const first = riskAssessment(ref, "risk-operation-first", "1.0.0");
-    const second = riskAssessment(ref, "risk-operation-second", "1.0.1");
+    const dependencies = recordRiskDependencies(seed, ref);
+    const first = riskAssessment(ref, "risk-operation-first", "1.0.0", dependencies);
+    const second = riskAssessment(ref, "risk-operation-second", "1.0.1", dependencies);
     seed.recordRiskAssessment({ assessment: first, idempotencyKey: "idem-operation-first" });
     seed.recordRiskAssessment({ assessment: second, idempotencyKey: "idem-operation-second" });
     seed.close();
@@ -759,7 +870,11 @@ test("rejects assessment audit rows without exact assessment metadata", () => {
     const seed = openRegistry(temporary.path);
     const created = seed.createDraft({ artifact: artifact(), idempotencyKey: "idem-audit-corrupt-artifact" });
     const ref = artifactRef(created.artifact);
-    seed.recordRiskAssessment({ assessment: riskAssessment(ref), idempotencyKey: "idem-audit-corrupt-risk" });
+    const dependencies = recordRiskDependencies(seed, ref);
+    seed.recordRiskAssessment({
+      assessment: riskAssessment(ref, "risk-registry-fixture-1", "1.0.0", dependencies),
+      idempotencyKey: "idem-audit-corrupt-risk",
+    });
     seed.close();
     const tamper = new DatabaseSync(temporary.path);
     try {
@@ -799,8 +914,9 @@ test("rolls back an injected assessment write without a partial audit", () => {
   try {
     const seed = openRegistry(temporary.path);
     const created = seed.createDraft({ artifact: artifact(), idempotencyKey: "idem-assessment-artifact" });
-    seed.close();
     const ref = artifactRef(created.artifact);
+    const dependencies = recordRiskDependencies(seed, ref);
+    seed.close();
     const failing = new ArtifactRegistry({
       path: temporary.path,
       now: () => "2026-08-20T01:00:00.000Z",
@@ -810,7 +926,7 @@ test("rolls back an injected assessment write without a partial audit", () => {
     });
     try {
       assert.throws(() => failing.recordRiskAssessment({
-        assessment: riskAssessment(ref),
+        assessment: riskAssessment(ref, "risk-registry-fixture-1", "1.0.0", dependencies),
         idempotencyKey: "idem-assessment-crash",
       }));
     } finally {
@@ -818,8 +934,8 @@ test("rolls back an injected assessment write without a partial audit", () => {
     }
     const recovered = openRegistry(temporary.path);
     try {
-      assert.deepEqual(recovered.listAttestations({ limit: 200 }), []);
-      assert.equal(recovered.audit({ limit: 200 }).filter((entry) => entry.action === "assessment_recorded").length, 0);
+      assert.equal(recovered.listAttestations({ kind: "risk-assessment", limit: 200 }).length, 0);
+      assert.equal(recovered.audit({ limit: 200 }).filter((entry) => entry.action === "assessment_recorded").length, 2);
     } finally {
       recovered.close();
     }

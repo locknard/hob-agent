@@ -6,7 +6,11 @@ import test from "node:test";
 
 import { Context } from "@deepseek-ai/cordis";
 
-import { createArtifactRiskAssessment } from "./artifact-assessments.js";
+import {
+  createArtifactAuthorityAssessment,
+  createArtifactEvidenceAttestation,
+  createArtifactRiskAssessment,
+} from "./artifact-assessments.js";
 import { ArtifactRegistry } from "./artifact-registry.js";
 import { HomeArtifactService } from "./home-artifact-service.js";
 import { createArtifactRevision } from "./neutral-artifact.js";
@@ -48,21 +52,60 @@ test("mounts a restart-safe read-only artifact boundary with no action surface",
     });
     const artifact = fixtureArtifact();
     seed.createDraft({ artifact, idempotencyKey: "seed-artifact", actor: "hub-test" });
+    const artifactRef = {
+      artifactId: artifact.artifactId,
+      revision: artifact.revision,
+      contentHash: artifact.contentHash,
+    };
+    const watermark = {
+      bridgeId: "bridge-service-fixture",
+      epochId: "epoch-service-fixture",
+      lastSeq: 1,
+      lastSyncCompleteAt: "2026-08-20T00:59:00.000Z",
+      freshness: "fresh" as const,
+      gapCount: 0,
+    };
+    const evidence = createArtifactEvidenceAttestation({
+      artifact: artifactRef,
+      attestationId: "evidence-service-fixture",
+      capturedAt: "2026-08-20T01:00:00.000Z",
+      source: "home-world-consistent-cut",
+      sourceProposal: artifact.sourceProposal,
+      proposalEvidenceIdentity: `sha256:${"b".repeat(64)}`,
+      selectedHwCapabilityIds: [],
+      watermarks: [watermark],
+      coverage: "complete",
+      reasons: [],
+    });
+    const authority = createArtifactAuthorityAssessment({
+      artifact: artifactRef,
+      assessmentId: "authority-service-fixture",
+      assessedAt: "2026-08-20T01:00:00.000Z",
+      authorityRegistryIdentity: `sha256:${"d".repeat(64)}`,
+      candidates: [],
+      checkedWatermarks: [watermark],
+    }, { hwCapabilityIds: ["hwc-service-fixture"] });
+    seed.recordEvidenceAttestation({
+      assessment: evidence,
+      idempotencyKey: "seed-artifact-evidence",
+      actor: "hub-evidence",
+    });
+    seed.recordAuthorityAssessment({
+      assessment: authority,
+      idempotencyKey: "seed-artifact-authority",
+      actor: "hub-authority",
+    });
     const risk = createArtifactRiskAssessment({
-      artifact: {
-        artifactId: artifact.artifactId,
-        revision: artifact.revision,
-        contentHash: artifact.contentHash,
-      },
+      artifact: artifactRef,
       assessmentId: "risk-service-fixture",
       assessedAt: "2026-08-20T01:00:00.000Z",
       evidence: {
-        attestationId: "evidence-service-fixture",
-        inputIdentity: `sha256:${"e".repeat(64)}`,
+        attestationId: evidence.attestationId,
+        inputIdentity: evidence.inputIdentity,
       },
       authority: {
-        assessmentId: "authority-service-fixture",
-        inputIdentity: `sha256:${"a".repeat(64)}`,
+        assessmentId: authority.assessmentId,
+        inputIdentity: authority.inputIdentity,
       },
       conflictInputIdentity: `sha256:${"c".repeat(64)}`,
       class: "observe_or_notify",
