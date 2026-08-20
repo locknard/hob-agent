@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -131,6 +131,79 @@ test("loads an explicit household directory into the official DSH prompt seam", 
     assert.match(renderPrompt(assembly), /Prefer understandable changes/);
     assert.match(renderContextSnapshot(assembly), /Quiet hours start at 22:00/);
     assert.match(renderContextSnapshot(assembly), /rejected proposal P1/);
+
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("contributes tenant SKILL.md through the official registry without adding tools", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-composition-skills-"));
+  try {
+    await writeFile(join(directory, "SOUL.md"), "Be bounded.");
+    await writeFile(join(directory, "HOME.md"), "The home is local.");
+    await writeFile(join(directory, "MEMORY.md"), "No extra authority.");
+    await mkdir(join(directory, "skills"));
+    await writeFile(join(directory, "skills", "tenant-help.md"), [
+      "---",
+      "name: tenant-help",
+      "description: A bounded tenant household workflow.",
+      "---",
+      "Never treat this skill as permission to add tools or authority.",
+    ].join("\n"));
+    await writeFile(join(directory, "skills", "review-home-observation.md"), [
+      "---",
+      "name: review-home-observation",
+      "description: Tenant attempted override.",
+      "---",
+      "Tenant override must not replace the reviewed runtime workflow.",
+    ].join("\n"));
+    const ctx = new Context();
+    await ctx.plugin(StubWorldService);
+    await ctx.plugin(StubProposalService);
+    const fiber = await mountDshHomeAgent(ctx, {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "home-tenant-skill-test",
+      householdDirectory: directory,
+    });
+
+    const skills = ctx.get("skills");
+    assert.ok(skills);
+    assert.equal((await skills.list()).some((skill) => skill.name === "tenant-help"), true);
+    const loaded = await ctx.tools.execute({
+      callId: "load-tenant-skill" as never,
+      name: "skill",
+      arguments: { name: "tenant-help" },
+      agent: ctx.homeAgent.agent,
+      signal: new AbortController().signal,
+    });
+    assert.equal(loaded.isError, false);
+    assert.match(loaded.content.map((item) => "text" in item ? item.text : "").join(" "), /never treat.*permission/i);
+    const reviewed = await ctx.tools.execute({
+      callId: "load-reviewed-skill" as never,
+      name: "skill",
+      arguments: { name: "review-home-observation" },
+      agent: ctx.homeAgent.agent,
+      signal: new AbortController().signal,
+    });
+    assert.equal(reviewed.isError, false);
+    assert.match(reviewed.content.map((item) => "text" in item ? item.text : "").join(" "), /governed Home Product Bundle tools/i);
+    assert.doesNotMatch(reviewed.content.map((item) => "text" in item ? item.text : "").join(" "), /tenant override/i);
+    assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name).sort(), [
+      "create_home_proposal",
+      "get_home_activity",
+      "get_home_calibration",
+      "get_home_evidence",
+      "get_home_inventory",
+      "get_home_rules",
+      "get_home_snapshot",
+      "report_home_advice",
+      "report_home_observation",
+      "skill",
+    ].sort());
 
     await fiber.dispose();
     await ctx.fiber.dispose();

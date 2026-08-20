@@ -42,6 +42,7 @@ import {
   type HomeAdviceReport,
 } from "./dsh-home-advice-report.js";
 import * as HomeSkills from "./dsh-home-skills.js";
+import * as HomeSkillProvider from "./dsh-home-skill-provider.js";
 import {
   AgentLoopTraceService,
   type AgentLoopTrace,
@@ -85,6 +86,8 @@ export interface DshHomeAgentOptions {
   /** Official DSH SQLite store. Omit only for isolated in-memory tests. */
   readonly sessionPersistencePath?: string;
   readonly householdContext?: HouseholdPromptContext;
+  /** Optional absolute tenant `<household>/skills` directory for the official DSH registry. */
+  readonly householdSkillDirectory?: string;
   readonly systemPrompt?: string;
   /** Isolated-test override for the product-owned observation deadline. */
   readonly observationTimeoutMs?: number;
@@ -348,6 +351,9 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(HomeObservationReportService);
     await this.ctx.plugin(SkillRegistry);
     await this.ctx.plugin(HomeSkills);
+    if (this.options.householdSkillDirectory !== undefined) {
+      await this.ctx.plugin(HomeSkillProvider, { directory: this.options.householdSkillDirectory });
+    }
     await this.ctx.plugin(AgentRegistry);
     await this.ctx.plugin(AgentInvariant);
     await this.ctx.plugin(ScopeInvariant);

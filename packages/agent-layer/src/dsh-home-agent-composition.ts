@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import { Context, Service } from "@deepseek-ai/cordis";
 import LlmRuntime from "@deepseek-ai/dsh-llm";
 import * as PiAiPlugin from "@deepseek-ai/dsh-llm-pi-ai";
@@ -72,6 +74,9 @@ class DshHomeAgentComposition extends Service {
         ? {}
         : { sessionPersistencePath: this.options.sessionPersistencePath }),
       ...(householdContext === undefined ? {} : { householdContext }),
+      ...(this.options.householdDirectory === undefined
+        ? {}
+        : { householdSkillDirectory: join(this.options.householdDirectory, "skills") }),
       ...(this.options.systemPrompt === undefined ? {} : { systemPrompt: this.options.systemPrompt }),
     });
   }
