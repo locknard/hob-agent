@@ -575,7 +575,9 @@ type ArtifactCompileAttestation = {
 或 compiler version 时，Hub 生成新的 assessment/compile result identity，原
 `ArtifactRevision` 的 ref/hash 不变。provider-specific compilation（未来可能有多个 adapter）
 留在 Hub 内部 typed adapter seam；其结果必须再投影为本 contract 的 neutral diff，不能把
-平台对象加入 artifact bytes 或 Agent output。
+平台对象加入 artifact bytes 或 Agent output。M3c 首先完成这一 neutral plan/diff contract，
+不宣称已经生成 HA automation；HA-specific translation 只在 M3e 经过审查的内部
+`artifactHost@1` seam 后开始，并继续投影回本文的中立结果。
 
 ## 7. Dry-run、diff 和 conflict semantics
 
@@ -635,16 +637,17 @@ type NeutralDiff = {
     actionAuthorityCandidateId?: BoundedHubId;
     before?: NeutralScalar;
     after?: NeutralScalar;
-  }[];                                // max 20，按 canonical order
+  }[];                                // max 20，保留 artifact action order
   unchangedCount: NonNegativeSafeInteger;
   redacted: true;
 };
 ```
 
 Diff 只展示 neutral capability ID、bounded scalar、candidate opaque ID 和 action kind；不得
-展示 native route、provider error、secret、raw attrs 或不受控的 URL。`operations` 按
-`order` 和 canonical target/key 稳定排序；当前值缺失时使用 `before` absent 并把覆盖状态
-标为 unavailable/stale，不猜测“无变化”。
+展示 native route、provider error、secret、raw attrs 或不受控的 URL。`operations` 必须保留
+artifact action order，并生成从 1 开始的连续 `order`；不能为了 target/key canonicalization
+重排有语义的 action array。当前值缺失时使用 `before` absent 并把覆盖状态标为
+unavailable/stale，不猜测“无变化”。
 
 ### 7.3 Conflict
 
@@ -669,7 +672,9 @@ Conflict 规则：
 - 目标、时间窗、条件或 action 与现有 artifact/foreign rule 可能重叠但无法证明互斥时是
   `possible_overlap`。它应阻止 `passed` 或要求明确 review，不能用零 match 宣称无干涉；
 - foreign rule catalog 必须是当前 bridge committed epoch 的完整可用 catalog；缺失、部分、
-  epoch mismatch、restart 或 truncation 是 `unavailable`，不是零 rules；
+  epoch mismatch、restart 或 truncation 是 `unavailable`，不是零 rules。M3c capture 必须把
+  bounded canonical catalog identity 与 capture 前后 exact bridge watermark 一起绑定；只有
+  epoch 而没有稳定 catalog/watermark identity 时，不得把结果宣称为 current；
 - stale/gapped/partial evidence、目标 present-but-invalid、candidate 不可用或 policy
   缺失是 blocking finding；旧 artifact 不因为新 bridge epoch 自动重新有效；
 - findings 使用 bounded neutral reason code，不把原生 provider error、rule ID、URL 或模型

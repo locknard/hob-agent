@@ -140,9 +140,11 @@ approval UI state as authority.
 
 1. **M3b — artifact contract and registry:** freeze the Zod-first neutral
    artifact, canonical hashing, immutable revisions, and non-applying registry.
-2. **M3c — compiler and simulation:** compile one neutral artifact to HA in
-   memory, render an exact diff, evaluate existing-rule overlap, and persist no
-   remote change.
+2. **M3c — neutral compiler and simulation:** compile one neutral artifact to a
+   provider-independent in-memory plan, render an exact neutral diff, evaluate
+   current existing-rule overlap, and persist no remote change. HA-specific
+   rendering begins behind the later reviewed `artifactHost@1` seam in M3e; it
+   is not part of the Agent-facing or neutral M3c contract.
 3. **M3d — approval ticket and executor shell:** issue one-use exact tickets,
    persist execution audit, atomically claim the complete ticket tuple, recover
    orphaned `executing` rows as `indeterminate`, and use a synthetic bridge plus
