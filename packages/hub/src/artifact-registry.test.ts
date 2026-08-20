@@ -19,6 +19,18 @@ import {
   type ArtifactRevision,
 } from "./neutral-artifact.js";
 import {
+  computeNeutralForeignCatalogIdentity,
+  computeArtifactCompileResultIdentity,
+  createArtifactCompileAttestation,
+  createArtifactCompileInput,
+  createNeutralConflictInput,
+  createNeutralConflictResult,
+  createNeutralDeviceSummary,
+  createNeutralDiff,
+  createNeutralDryRunAttestation,
+  createNeutralWorldCut,
+} from "./artifact-compiler-contract.js";
+import {
   ArtifactRegistry,
   ArtifactRegistryError,
   type ArtifactRegistryEntry,
@@ -173,6 +185,71 @@ function recordRiskDependencies(
     idempotencyKey: "idem-risk-default-authority",
   });
   return { evidence, authority };
+}
+
+function compilerResultFixtures(value: ArtifactRevision): {
+  readonly compile: import("./artifact-compiler-contract.js").ArtifactCompileAttestation;
+  readonly dryRun: import("./artifact-compiler-contract.js").NeutralDryRunAttestation;
+} {
+  const ref = artifactRef(value);
+  const evidence = evidenceAssessment(ref);
+  const authority = authorityAssessment(ref);
+  const risk = riskAssessment(ref, "risk-registry-compiler", "1.0.0", { evidence, authority });
+  const currentConflict = {
+    sourceIdentity: risk.conflictInputIdentity,
+    result: createNeutralConflictResult({ status: "none", findings: [] }),
+  };
+  const watermark = assessmentWatermark();
+  const foreignCheck = createNeutralConflictInput({
+    bridgeId: watermark.bridgeId,
+    epochId: watermark.epochId,
+    watermark,
+    catalogIdentity: `sha256:${"f".repeat(64)}`,
+    status: "current",
+    findings: [],
+  });
+  const worldCut = createNeutralWorldCut({
+    devices: [createNeutralDeviceSummary({
+      hwCapabilityId: "hwc-cover-1",
+      schema: "hob.cover.level",
+      schemaVersion: "1.0.0",
+      semanticKind: "cover",
+      read: { status: "available", value: 0.2 },
+      validity: "valid",
+      actionCompatibility: [{ order: 1, kind: "set_level", status: "incompatible", reason: "set_level_unsupported" }],
+      predicateCompatibility: [{ phase: "postcondition", order: 1, status: "compatible" }],
+    })],
+    watermarks: [watermark],
+  });
+  const input = createArtifactCompileInput({
+    artifact: value,
+    proposal: { id: value.sourceProposal.proposalId, revision: value.sourceProposal.proposalRevision, status: "approved" },
+    evidence,
+    risk,
+    authority,
+    currentConflict,
+    worldCut,
+    foreignCatalogIdentity: computeNeutralForeignCatalogIdentity([foreignCheck]),
+    foreignRuleChecks: [foreignCheck],
+    compiler: { id: "neutral-compiler", version: "1.0.0" },
+  });
+  const compile = createArtifactCompileAttestation({
+    input,
+    status: "unavailable",
+    diff: createNeutralDiff({ status: "unavailable", operations: [], unchangedCount: 0, redacted: true }),
+    conflicts: input.currentConflict.result,
+    blockingReasons: ["set_level_unsupported"],
+  });
+  return {
+    compile,
+    dryRun: createNeutralDryRunAttestation({
+      compile,
+      status: "unavailable",
+      diff: compile.diff,
+      conflicts: compile.conflicts,
+      summary: "The compiler dependency is unavailable.",
+    }),
+  };
 }
 
 function openRegistry(path: string): ArtifactRegistry {
@@ -405,12 +482,250 @@ test("fails closed when a persisted artifact row is corrupted", () => {
   }
 });
 
-test("has no compile, apply, bridge, credential, or action surface", () => {
+test("has no apply, bridge, credential, or action surface", () => {
   withRegistry("surface", (registry) => {
-    for (const forbidden of ["compile", "apply", "execute", "bridge", "credential", "action"]) {
+    for (const forbidden of ["apply", "execute", "bridge", "credential", "action"]) {
       assert.equal(forbidden in registry, false, forbidden);
     }
   });
+});
+
+test("exposes the M3c append-only compiler result surface", () => {
+  withRegistry("compiler-result-surface", (registry) => {
+    assert.equal("recordCompile" in registry, true);
+    assert.equal("recordDryRun" in registry, true);
+    assert.equal("listResults" in registry, true);
+    assert.equal("latestResult" in registry, true);
+    assert.equal("resultByInput" in registry, true);
+    assert.equal("resultById" in registry, true);
+  });
+});
+
+test("records compile and dry-run rows with exact refs, sequence latest, and bounded reads", () => {
+  withRegistry("compiler-results", (registry) => {
+    const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-compiler-artifact" });
+    const ref = artifactRef(created.artifact);
+    const dependencies = recordRiskDependencies(registry, ref);
+    const fixtures = compilerResultFixtures(created.artifact);
+    registry.recordRiskAssessment({
+      assessment: riskAssessment(ref, "risk-registry-compiler", "1.0.0", dependencies),
+      idempotencyKey: "idem-compiler-risk",
+    });
+
+    const compile = registry.recordCompile({ result: fixtures.compile, idempotencyKey: "idem-compiler-result" });
+    const dryRun = registry.recordDryRun({ result: fixtures.dryRun, idempotencyKey: "idem-dry-run-result" });
+
+    assert.equal(compile.kind, "compile-attestation");
+    assert.equal(compile.resultId, fixtures.compile.resultId);
+    assert.equal(compile.recordId, fixtures.compile.resultId);
+    assert.deepEqual(compile.artifact, ref);
+    assert.equal(dryRun.kind, "dry-run-attestation");
+    assert.equal(dryRun.sequence > compile.sequence, true);
+    assert.deepEqual(registry.listResults({ artifact: ref }).map((row) => row.kind), ["dry-run-attestation", "compile-attestation"]);
+    assert.deepEqual(registry.latestResult({ kind: "compile-attestation", artifact: ref }), compile);
+    assert.deepEqual(registry.resultByInput({ kind: "compile-attestation", artifact: ref, inputIdentity: fixtures.compile.inputIdentity }), compile);
+    assert.deepEqual(registry.resultById({ kind: "dry-run-attestation", artifact: ref, resultId: fixtures.dryRun.resultId }), dryRun);
+    assert.equal(registry.audit({ limit: 200 }).filter((entry) => entry.action === "compile_recorded").length, 1);
+    assert.equal(registry.audit({ limit: 200 }).filter((entry) => entry.action === "dry_run_recorded").length, 1);
+  });
+});
+
+test("replays the same compiler input without audit duplication and conflicts on a different output", () => {
+  withRegistry("compiler-idempotency", (registry) => {
+    const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-compiler-idempotency-artifact" });
+    const ref = artifactRef(created.artifact);
+    const dependencies = recordRiskDependencies(registry, ref);
+    const fixtures = compilerResultFixtures(created.artifact);
+    registry.recordRiskAssessment({
+      assessment: riskAssessment(ref, "risk-registry-compiler", "1.0.0", dependencies),
+      idempotencyKey: "idem-compiler-idempotency-risk",
+    });
+
+    const first = registry.recordCompile({ result: fixtures.compile, idempotencyKey: "idem-compiler-first" });
+    const replay = registry.recordCompile({ attestation: fixtures.compile, idempotencyKey: "idem-compiler-replay" });
+    assert.deepEqual(replay, first);
+    assert.equal(registry.listResults({ kind: "compile-attestation", artifact: ref }).length, 1);
+    assert.equal(registry.audit({ limit: 200 }).filter((entry) => entry.action === "compile_recorded").length, 1);
+
+    const differentOutputWithoutId = {
+      ...fixtures.compile,
+      blockingReasons: ["authority_unavailable" as const],
+    };
+    const differentOutput = {
+      ...differentOutputWithoutId,
+      resultId: computeArtifactCompileResultIdentity(differentOutputWithoutId),
+    };
+    assert.throws(
+      () => registry.recordCompile({ result: differentOutput, idempotencyKey: "idem-compiler-different-output" }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "revision_conflict",
+    );
+  });
+});
+
+test("rolls back a result row when a compiler result fault fires before operation and audit", () => {
+  const temporary = temporaryPath("compiler-result-rollback");
+  try {
+    const seed = openRegistry(temporary.path);
+    const created = seed.createDraft({ artifact: artifact(), idempotencyKey: "idem-result-rollback-artifact" });
+    const ref = artifactRef(created.artifact);
+    const dependencies = recordRiskDependencies(seed, ref);
+    const fixtures = compilerResultFixtures(created.artifact);
+    seed.recordRiskAssessment({
+      assessment: riskAssessment(ref, "risk-registry-compiler", "1.0.0", dependencies),
+      idempotencyKey: "idem-result-rollback-risk",
+    });
+    seed.close();
+
+    let faultPoint: ArtifactRegistryFaultPoint | undefined;
+    const failing = new ArtifactRegistry({
+      path: temporary.path,
+      now: () => "2026-08-20T01:00:00.000Z",
+      fault: (point) => {
+        faultPoint = point;
+        if (point === "after-result-row") throw new Error("injected result crash");
+      },
+    });
+    try {
+      assert.throws(() => failing.recordCompile({ result: fixtures.compile, idempotencyKey: "idem-result-crash" }));
+      assert.equal(faultPoint, "after-result-row");
+    } finally {
+      failing.close();
+    }
+
+    const recovered = openRegistry(temporary.path);
+    try {
+      assert.deepEqual(recovered.listResults({ artifact: ref }), []);
+      assert.equal(recovered.audit({ limit: 200 }).filter((entry) => entry.action === "compile_recorded").length, 0);
+    } finally {
+      recovered.close();
+    }
+  } finally {
+    temporary.cleanup();
+  }
+});
+
+test("fails closed when result payload, operation, audit, or dependency rows are tampered", () => {
+  for (const mode of ["payload", "operation", "audit", "dependency"] as const) {
+    const temporary = temporaryPath(`compiler-result-${mode}`);
+    try {
+      const seed = openRegistry(temporary.path);
+      const created = seed.createDraft({ artifact: artifact(), idempotencyKey: `idem-${mode}-artifact` });
+      const ref = artifactRef(created.artifact);
+      const dependencies = recordRiskDependencies(seed, ref);
+      const fixtures = compilerResultFixtures(created.artifact);
+      seed.recordRiskAssessment({
+        assessment: riskAssessment(ref, "risk-registry-compiler", "1.0.0", dependencies),
+        idempotencyKey: `idem-${mode}-risk`,
+      });
+      const recorded = seed.recordCompile({ result: fixtures.compile, idempotencyKey: `idem-${mode}-compile` });
+      seed.close();
+
+      const tamper = new DatabaseSync(temporary.path);
+      try {
+        if (mode === "payload") {
+          tamper.prepare("UPDATE artifact_compiler_results SET payload_json = ? WHERE result_id = ?")
+            .run("{}", recorded.resultId);
+        } else if (mode === "operation") {
+          tamper.prepare("UPDATE artifact_operations SET record_id = ? WHERE idempotency_key = ?")
+            .run(`sha256:${"e".repeat(64)}`, `idem-${mode}-compile`);
+        } else if (mode === "audit") {
+          tamper.prepare("UPDATE artifact_audit SET idempotency_key = ? WHERE action = 'compile_recorded'")
+            .run("idem-missing-audit-operation");
+        } else {
+          tamper.prepare("DELETE FROM artifact_assessments WHERE record_id = ?").run(dependencies.evidence.attestationId);
+        }
+      } finally {
+        tamper.close();
+      }
+
+      const reopened = openRegistry(temporary.path);
+      try {
+        assert.throws(
+          () => reopened.resultByInput({ kind: "compile-attestation", artifact: ref, inputIdentity: fixtures.compile.inputIdentity }),
+          (error: unknown) => error instanceof ArtifactRegistryError && (error.code === "corrupt_record" || error.code === "not_found"),
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      temporary.cleanup();
+    }
+  }
+});
+
+test("initializes user_version and atomically migrates a validated legacy v0 registry", () => {
+  const temporary = temporaryPath("compiler-schema-migration");
+  try {
+    const first = openRegistry(temporary.path);
+    const created = first.createDraft({ artifact: artifact(), idempotencyKey: "idem-schema-artifact" });
+    first.close();
+
+    const legacy = new DatabaseSync(temporary.path);
+    try {
+      legacy.exec("DROP INDEX artifact_compiler_results_by_ref; DROP INDEX artifact_compiler_results_by_input; DROP INDEX artifact_compiler_results_by_result; DROP TABLE artifact_compiler_results; PRAGMA user_version = 0;");
+      assert.equal((legacy.prepare("PRAGMA user_version").get() as { user_version?: unknown }).user_version, 0);
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = openRegistry(temporary.path);
+    try {
+      assert.deepEqual(migrated.getRevision(created.artifact.artifactId, 1)?.artifact, created.artifact);
+      const inspect = new DatabaseSync(temporary.path);
+      try {
+        assert.equal((inspect.prepare("PRAGMA user_version").get() as { user_version?: unknown }).user_version, 1);
+        assert.equal((inspect.prepare("SELECT strict FROM pragma_table_list WHERE name = 'artifact_compiler_results'").get() as { strict?: unknown }).strict, 1);
+      } finally {
+        inspect.close();
+      }
+    } finally {
+      migrated.close();
+    }
+  } finally {
+    temporary.cleanup();
+  }
+});
+
+test("rejects future versions and weakened current-version result schemas before exposing the registry", () => {
+  for (const mode of ["future", "missing-result-table", "missing-kind-check", "wrong-column-type", "nullable-kind", "missing-sequence-pk"] as const) {
+    const temporary = temporaryPath(`compiler-schema-${mode}`);
+    try {
+      const seed = openRegistry(temporary.path);
+      seed.close();
+      const tamper = new DatabaseSync(temporary.path);
+      try {
+        if (mode === "future") {
+          tamper.exec("PRAGMA user_version = 99");
+        } else if (mode === "missing-result-table") {
+          tamper.exec("DROP INDEX artifact_compiler_results_by_ref; DROP INDEX artifact_compiler_results_by_input; DROP INDEX artifact_compiler_results_by_result; DROP TABLE artifact_compiler_results");
+        } else {
+          tamper.exec("DROP INDEX artifact_compiler_results_by_ref; DROP INDEX artifact_compiler_results_by_input; DROP INDEX artifact_compiler_results_by_result; DROP TABLE artifact_compiler_results");
+          const sequence = mode === "wrong-column-type" ? "sequence TEXT PRIMARY KEY" : mode === "missing-sequence-pk" ? "sequence INTEGER NOT NULL" : "sequence INTEGER PRIMARY KEY AUTOINCREMENT";
+          const kind = mode === "nullable-kind" ? "kind TEXT" : "kind TEXT NOT NULL";
+          const check = mode === "missing-kind-check" ? "" : " CHECK (kind IN ('compile-attestation', 'dry-run-attestation'))";
+          tamper.exec(`CREATE TABLE artifact_compiler_results (
+            ${sequence},
+            ${kind}${check},
+            artifact_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            input_identity TEXT NOT NULL,
+            result_id TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+          ) STRICT`);
+        }
+      } finally {
+        tamper.close();
+      }
+      assert.throws(
+        () => openRegistry(temporary.path),
+        (error: unknown) => error instanceof ArtifactRegistryError && error.code === "write_failed",
+      );
+    } finally {
+      temporary.cleanup();
+    }
+  }
 });
 
 test("bounds list and audit enumeration with explicit defaults and maximums", () => {
