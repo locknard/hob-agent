@@ -5,6 +5,7 @@ import {
   ArtifactValidationError,
   artifactRevisionSchema,
   createArtifactRevision,
+  parseArtifactContent,
   parseArtifactJson,
   parseArtifactRevision,
   verifyArtifactRevision,
@@ -77,6 +78,26 @@ test("creates a valid closed neutral artifact with a computed hash", () => {
   assert.deepEqual(parseArtifactRevision(artifact), artifact);
   assert.equal("evidence" in artifact, false);
   assert.equal("risk" in artifact, false);
+});
+
+test("validates review-only content with the same closed ECA and resource budget", () => {
+  const content = baseInput().content;
+  assert.deepEqual(parseArtifactContent(content), content);
+  assert.throws(
+    () => parseArtifactContent({
+      ...content,
+      actions: [{
+        kind: "set_level",
+        target: { hwCapabilityId: "hwc-cover-1", entityId: "cover.native" },
+        value: 0.5,
+      }],
+    }),
+    hasCode("invalid_artifact"),
+  );
+  assert.throws(
+    () => parseArtifactContent({ ...content, extra: "x".repeat(70 * 1024) }),
+    hasCode("resource_exhausted"),
+  );
 });
 
 test("canonical hash is stable when object insertion order changes", () => {
@@ -300,6 +321,24 @@ test("requires no-remote-change for pure notifications and rejects device action
     kind: "no_remote_change",
   };
   assert.throws(() => parseArtifactRevision(deviceWithNoRemoteChange), hasCode("invalid_artifact"));
+});
+
+test("rejects URLs embedded in neutral behavior content", () => {
+  const notification = baseInput();
+  notification.content = {
+    ...notification.content,
+    actions: [{ kind: "notify_local", message: "Open https://example.invalid/command" }],
+    rollback: { kind: "no_remote_change" },
+    postconditions: [],
+  };
+  assert.throws(() => createArtifactRevision(notification), hasCode("invalid_artifact"));
+
+  const condition = cloned(baseInput().content);
+  (condition.conditions as Array<Record<string, unknown>>)[0]!.value = "custom://opaque-payload";
+  assert.throws(
+    () => artifactWith({ content: condition }),
+    hasCode("invalid_artifact"),
+  );
 });
 
 test("rejects resource exhaustion before deep artifact admission", () => {

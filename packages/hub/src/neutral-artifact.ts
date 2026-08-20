@@ -31,6 +31,11 @@ const safePositiveInteger = z.number()
   .positive();
 const isoTimestamp = z.iso.datetime({ offset: true });
 const contentHash = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+const urlLikeLocator = /(?:\b[a-z][a-z0-9+.-]*:\/\/|\b(?:data|javascript|mailto):|\bwww\.)/iu;
+const neutralContentString = z.string().max(512)
+  .refine((value) => !urlLikeLocator.test(value), "neutral behavior content cannot contain a URL");
+const neutralNotificationText = boundedText(512)
+  .refine((value) => !urlLikeLocator.test(value), "neutral behavior content cannot contain a URL");
 
 export const artifactRefSchema = z.object({
   artifactId: boundedId,
@@ -42,7 +47,7 @@ export const ArtifactRefSchema = artifactRefSchema;
 export type ArtifactRef = z.infer<typeof artifactRefSchema>;
 
 const scalar = z.union([
-  z.string().max(512),
+  neutralContentString,
   finiteNumber,
   z.boolean(),
   z.null(),
@@ -90,7 +95,7 @@ const action = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({
     kind: z.literal("notify_local"),
-    message: boundedText(512),
+    message: neutralNotificationText,
   }).strict(),
 ]);
 
@@ -111,7 +116,7 @@ const postcondition = z.object({
   withinSeconds: safePositiveInteger.max(300),
 }).strict();
 
-const artifactContent = z.object({
+const artifactContentObjectSchema = z.object({
   trigger,
   conditions: z.array(condition).max(8),
   actions: z.array(action).min(1).max(4),
@@ -144,6 +149,17 @@ const artifactContent = z.object({
   }
 });
 
+export const artifactContentSchema = z.preprocess((value, ctx) => {
+  const budget = inspectResourceBudget(value);
+  if (!budget.ok) {
+    ctx.addIssue({ code: "custom", message: budget.code });
+    return z.NEVER;
+  }
+  return value;
+}, artifactContentObjectSchema);
+
+export const ArtifactContentSchema = artifactContentSchema;
+
 const sourceProposal = z.object({
   proposalId: boundedId,
   proposalRevision: safePositiveInteger,
@@ -157,7 +173,7 @@ const artifactRevisionObjectSchema = z.object({
   title: boundedText(120),
   summary: boundedText(1_000),
   sourceProposal,
-  content: artifactContent,
+  content: artifactContentSchema,
   createdAt: isoTimestamp,
   contentHash,
 }).strict();
@@ -180,7 +196,7 @@ export const ARTIFACT_RESOURCE_BUDGET = Object.freeze({
 
 export type ArtifactRevision = z.infer<typeof artifactRevisionObjectSchema>;
 export type CreateArtifactRevisionInput = Omit<ArtifactRevision, "contentHash">;
-export type ArtifactContent = z.infer<typeof artifactContent>;
+export type ArtifactContent = z.infer<typeof artifactContentSchema>;
 export type ArtifactTrigger = z.infer<typeof trigger>;
 export type ArtifactCondition = z.infer<typeof condition>;
 export type ArtifactAction = z.infer<typeof action>;
@@ -221,6 +237,16 @@ export function createArtifactRevision(input: CreateArtifactRevisionInput): Arti
     ...parsed,
     contentHash: hashStablePayload(parsed),
   };
+}
+
+/** Validates one review-only ECA content candidate without creating an Artifact revision. */
+export function parseArtifactContent(value: unknown): ArtifactContent {
+  assertResourceBudget(value);
+  const parsed = artifactContentObjectSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new ArtifactValidationError("invalid_artifact", "artifact content does not match the closed schema");
+  }
+  return parsed.data;
 }
 
 /** Parses and verifies one complete immutable revision, including its hash. */

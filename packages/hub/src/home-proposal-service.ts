@@ -13,6 +13,10 @@ import {
   type SqliteProposalStoreOptions,
 } from "./proposal-store.js";
 import type { HomeWorldService } from "./home-world-service.js";
+import {
+  parseArtifactContent,
+  type ArtifactContent,
+} from "./neutral-artifact.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
@@ -38,7 +42,7 @@ export class HomeProposalService extends Service {
   }
 
   async createDraft(input: CreateHomeProposalDraftInput): Promise<ProposalEnvelope> {
-    validateDraftInput(input);
+    const artifactCandidate = validateDraftInput(input);
     const pending = this.store.list({ status: "pending_review", limit: 1 })[0];
     if (pending !== undefined) {
       if (pending.provenance.producer === input.provenance.producer
@@ -54,6 +58,31 @@ export class HomeProposalService extends Service {
     const selectedDevices = snapshot.devices.filter((device) => selected.has(device.hwId));
     if (selectedDevices.length !== selected.size) {
       throw new TypeError("home proposal selected devices are unavailable");
+    }
+    if (artifactCandidate !== undefined
+      && selectedDevices.some((device) => device.validity !== "valid")) {
+      throw new TypeError("home proposal artifact candidate selected devices are not valid");
+    }
+    const selectedCapabilities = new Map(selectedDevices.flatMap((device) =>
+      device.capabilities.map((capability) => [capability.hwCapabilityId, capability] as const)));
+    const candidateCapabilityIds = artifactCandidate === undefined
+      ? []
+      : artifactCapabilityIds(artifactCandidate.content);
+    const candidateCapabilityIdSet = new Set(candidateCapabilityIds);
+    if (artifactCandidate !== undefined) {
+      if (candidateCapabilityIds.some((id) => !selectedCapabilities.has(id))) {
+        throw new TypeError("home proposal artifact candidate capabilities must belong to selected devices");
+      }
+      const unsafeTarget = artifactCandidate.content.actions.some((action) =>
+        action.kind !== "notify_local"
+        && selectedCapabilities.get(action.target.hwCapabilityId)?.semanticKind === "lock");
+      if (unsafeTarget) {
+        throw new TypeError("home proposal artifact candidate cannot target a safety-sensitive capability");
+      }
+      if (input.selectedHwCapabilityIds !== undefined
+        && candidateCapabilityIds.some((id) => !input.selectedHwCapabilityIds!.includes(id))) {
+        throw new TypeError("home proposal artifact candidate lacks selected temporal evidence");
+      }
     }
     const activeSpaceIds = new Set(snapshot.spaces.map((space) => space.hwSpaceId));
     const selectedDeviceSpaceCounts = selectedDevices.map((device) =>
@@ -77,7 +106,7 @@ export class HomeProposalService extends Service {
         .map((rule) => ({ identity: rule.ruleRef, relation: "possible_overlap" as const }))
       : [];
     const diagnostics = new Map(snapshot.diagnostics.map((item) => [item.bridgeId, item]));
-    const currentReferences = selectedDevices.flatMap((device) => {
+    const currentReferenceCandidates: CreateProposalInput["evidence"]["references"] = selectedDevices.flatMap((device) => {
       if (device.capabilities.length === 0) {
         const bridgeId = device.bindings[0]?.bridgeId;
         return bridgeId === undefined ? [] : [{
@@ -103,7 +132,13 @@ export class HomeProposalService extends Service {
           source: "current-state" as const,
         }];
       });
-    }).slice(0, 50);
+    });
+    const candidateCurrentReferences = currentReferenceCandidates.filter((reference) =>
+      reference.capabilityId !== undefined && candidateCapabilityIdSet.has(reference.capabilityId));
+    const candidateCurrentIds = new Set(candidateCurrentReferences.map((reference) => reference.capabilityId));
+    if (candidateCapabilityIds.some((id) => !candidateCurrentIds.has(id))) {
+      throw new TypeError("home proposal artifact candidate lacks current capability evidence");
+    }
     const temporalEvidence = input.selectedHwCapabilityIds === undefined ? undefined : (() => {
       const selectedCapabilities = new Set(selectedDevices
         .flatMap((device) => device.capabilities.map((capability) => capability.hwCapabilityId)));
@@ -116,9 +151,7 @@ export class HomeProposalService extends Service {
         limit: 50,
       });
     })();
-    const references = temporalEvidence === undefined
-      ? currentReferences
-      : temporalEvidence.events.map((event) => ({
+    const temporalReferences = temporalEvidence?.events.map((event) => ({
         bridgeId: event.provenance.bridgeId,
         hwId: event.hwId,
         capabilityId: event.hwCapabilityId,
@@ -126,7 +159,19 @@ export class HomeProposalService extends Service {
         source: "post-baseline-event" as const,
         epochId: event.provenance.epochId,
         seq: event.provenance.seq,
-      }));
+      })) ?? [];
+    const temporalCandidateIds = new Set(temporalReferences.flatMap((reference) =>
+      candidateCapabilityIdSet.has(reference.capabilityId) ? [reference.capabilityId] : []));
+    const missingTemporalCandidateReferences = candidateCurrentReferences.filter((reference) =>
+      reference.capabilityId !== undefined && !temporalCandidateIds.has(reference.capabilityId));
+    const referenceCandidates = temporalEvidence === undefined
+      ? [
+          ...candidateCurrentReferences,
+          ...currentReferenceCandidates.filter((reference) =>
+            reference.capabilityId === undefined || !candidateCapabilityIdSet.has(reference.capabilityId)),
+        ]
+      : [...missingTemporalCandidateReferences, ...temporalReferences];
+    const references = referenceCandidates.slice(0, 50);
     const watermarks = snapshot.bridgeWatermarks.map((watermark) => {
       const diagnostic = diagnostics.get(watermark.bridgeId);
       const bridgeDiagnostic = snapshot.bridges[watermark.bridgeId]?.diagnostics;
@@ -171,6 +216,7 @@ export class HomeProposalService extends Service {
       },
       risk: { ...input.risk, requiresHumanApproval: true },
       intent: input.intent,
+      artifactCandidate,
       rationale: input.rationale,
       spaceCoverage: {
         selectedDevices: selectedDevices.length,
@@ -229,11 +275,30 @@ export interface CreateHomeProposalDraftInput {
   readonly evidenceLookbackHours?: number;
   readonly risk: Omit<CreateProposalInput["risk"], "requiresHumanApproval">;
   readonly intent: CreateProposalInput["intent"];
+  readonly artifactCandidate?: NonNullable<CreateProposalInput["artifactCandidate"]>;
   readonly rationale: NonNullable<CreateProposalInput["rationale"]>;
 }
 
-function validateDraftInput(input: CreateHomeProposalDraftInput): void {
+function validateDraftInput(
+  input: CreateHomeProposalDraftInput,
+): NonNullable<CreateProposalInput["artifactCandidate"]> | undefined {
   if (!input || typeof input !== "object") throw new TypeError("home proposal draft is required");
+  if (input.kind === "automation-draft" && input.artifactCandidate === undefined) {
+    throw new TypeError("home proposal automation draft requires an artifact candidate");
+  }
+  if (input.kind !== "automation-draft" && input.artifactCandidate !== undefined) {
+    throw new TypeError("home proposal artifact candidate is only valid for automation drafts");
+  }
+  let artifactCandidate: NonNullable<CreateProposalInput["artifactCandidate"]> | undefined;
+  if (input.artifactCandidate !== undefined) {
+    if (input.artifactCandidate.schemaVersion !== "1") {
+      throw new TypeError("home proposal artifact candidate schema is invalid");
+    }
+    artifactCandidate = {
+      schemaVersion: "1",
+      content: parseArtifactContent(input.artifactCandidate.content),
+    };
+  }
   const rationale = input.rationale;
   if (!rationale || typeof rationale !== "object"
     || !boundedRationaleText(rationale.householdValue)
@@ -263,6 +328,19 @@ function validateDraftInput(input: CreateHomeProposalDraftInput): void {
       || input.evidenceLookbackHours! > 168))) {
     throw new TypeError("home proposal temporal evidence selection is invalid or unbounded");
   }
+  return artifactCandidate;
+}
+
+function artifactCapabilityIds(content: ArtifactContent): readonly string[] {
+  const ids = new Set<string>();
+  if (content.trigger.kind === "capability_changed") ids.add(content.trigger.source.hwCapabilityId);
+  for (const condition of content.conditions) ids.add(condition.source.hwCapabilityId);
+  for (const action of content.actions) {
+    if (action.kind !== "notify_local") ids.add(action.target.hwCapabilityId);
+  }
+  if (content.rollback.kind === "restore_previous_state") ids.add(content.rollback.target.hwCapabilityId);
+  for (const postcondition of content.postconditions) ids.add(postcondition.source.hwCapabilityId);
+  return [...ids];
 }
 
 function boundedRationaleText(value: unknown): value is string {

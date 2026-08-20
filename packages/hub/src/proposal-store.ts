@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
 import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
+import { artifactContentSchema } from "./neutral-artifact.js";
 
 const boundedId = z.string().trim().min(1).max(200);
 const boundedText = z.string().trim().min(1).max(1_000);
@@ -131,6 +132,11 @@ const spaceCoverageSchema = z.object({
   }
 });
 
+const artifactCandidateSchema = z.object({
+  schemaVersion: z.literal("1"),
+  content: artifactContentSchema,
+}).strict();
+
 const createProposalInputSchema = z.object({
   kind: z.enum([
     "automation-draft",
@@ -150,7 +156,18 @@ const createProposalInputSchema = z.object({
   intent: intentSchema,
   rationale: rationaleSchema.optional(),
   spaceCoverage: spaceCoverageSchema.optional(),
+  artifactCandidate: artifactCandidateSchema.optional(),
 }).strict();
+
+const admittedProposalInputSchema = createProposalInputSchema.superRefine((proposal, ctx) => {
+  if (proposal.kind !== "automation-draft" && proposal.artifactCandidate !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["artifactCandidate"],
+      message: "artifact candidate is only valid for an automation draft",
+    });
+  }
+});
 
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
 export type ProposalStatus = "pending_review" | "approved" | "rejected" | "expired";
@@ -259,6 +276,7 @@ export type HubVerifiedProposalSource = DeepReadonly<{
   readonly evidence: CreateProposalInput["evidence"];
   readonly conflictCheck: CreateProposalInput["conflictCheck"];
   readonly risk: CreateProposalInput["risk"];
+  readonly artifactCandidate: NonNullable<CreateProposalInput["artifactCandidate"]>;
 }>;
 
 const proposalAuditEventSchema = z.object({
@@ -388,7 +406,7 @@ export class SqliteProposalStore {
   }
 
   create(candidate: CreateProposalInput): ProposalEnvelope {
-    const parsed = createProposalInputSchema.safeParse(candidate);
+    const parsed = admittedProposalInputSchema.safeParse(candidate);
     if (!parsed.success) {
       throw new ProposalStoreError("invalid_proposal", "Proposal does not match the bounded v1 envelope");
     }
@@ -513,7 +531,8 @@ export class SqliteProposalStore {
         || proposal.status !== "approved"
         || proposal.applicationStatus !== "not_available"
         || proposal.review?.decision !== "approved"
-        || proposal.review.feedbackCode !== "useful_as_is") {
+        || proposal.review.feedbackCode !== "useful_as_is"
+        || proposal.artifactCandidate === undefined) {
         throw new ProposalStoreError("source_unavailable", "Proposal is not an approved automation source");
       }
       validateApprovedAuditChain(proposal);
@@ -529,6 +548,7 @@ export class SqliteProposalStore {
         evidence: proposal.evidence,
         conflictCheck: proposal.conflictCheck,
         risk: proposal.risk,
+        artifactCandidate: proposal.artifactCandidate,
       });
       callbackStarted = true;
       const result = operation(source);

@@ -12,6 +12,23 @@ const rationale = {
   uncertainties: ["Whether this behavior reflects an intentional preference."],
 } as const;
 
+const automationCandidate = {
+  schemaVersion: "1" as const,
+  content: {
+    trigger: { kind: "capability_changed" as const, source: { hwCapabilityId: "hwc-1" } },
+    conditions: [],
+    actions: [{ kind: "set_boolean" as const, target: { hwCapabilityId: "hwc-1" }, value: false }],
+    rollback: { kind: "restore_previous_state" as const, target: { hwCapabilityId: "hwc-1" }, maxAgeSeconds: 3_600 },
+    postconditions: [{
+      kind: "capability_value" as const,
+      source: { hwCapabilityId: "hwc-1" },
+      operator: "equals" as const,
+      value: false,
+      withinSeconds: 30,
+    }],
+  },
+};
+
 const candidate: CreateProposalInput = {
   kind: "household-insight",
   title: "Review unavailable device coverage",
@@ -49,6 +66,7 @@ class StubHomeWorld extends Service {
   evidenceQueries: unknown[] = [];
   includeUnavailableBridge = false;
   includeUnavailableDevice = false;
+  extraCapabilities = 0;
 
   constructor(ctx: Context) {
     super(ctx, "homeWorld");
@@ -57,6 +75,7 @@ class StubHomeWorld extends Service {
   snapshot() {
     const unavailableDevice = {
       hwId: "hw-2",
+      validity: "valid" as const,
       bindings: [{ bridgeId: "bridge-b", nativeId: "native-2", nativeInstanceId: "entity-2" }],
       capabilities: [],
       states: [],
@@ -80,16 +99,36 @@ class StubHomeWorld extends Service {
       ],
       devices: [{
         hwId: "hw-1",
+        validity: "valid" as const,
         bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
         capabilities: [{
           hwCapabilityId: "hwc-1",
+          hwId: "hw-1",
+          schema: "fixture.boolean",
+          schemaVersion: "1.0.0",
+          semanticKind: "light" as const,
           bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
-        }],
+        }, ...Array.from({ length: this.extraCapabilities }, (_, index) => ({
+          hwCapabilityId: `hwc-${index + 2}`,
+          hwId: "hw-1",
+          schema: "fixture.boolean",
+          schemaVersion: "1.0.0",
+          semanticKind: "light" as const,
+          bindings: [{
+            bridgeId: "bridge-a",
+            nativeId: "native-1",
+            nativeInstanceId: `entity-${index + 2}`,
+          }],
+        }))],
         states: [{
           nativeId: "native-1",
           nativeInstanceId: "entity-1",
           time: { sourceTs: "2026-08-19T00:59:00.000Z" },
-        }],
+        }, ...Array.from({ length: this.extraCapabilities }, (_, index) => ({
+          nativeId: "native-1",
+          nativeInstanceId: `entity-${index + 2}`,
+          time: { sourceTs: "2026-08-19T00:59:00.000Z" },
+        }))],
       }, ...(this.includeUnavailableDevice ? [unavailableDevice] : [])],
     };
   }
@@ -217,6 +256,7 @@ test("exposes the synchronous approved source gate without accepting caller evid
     kind: "automation-draft",
     intent: { ...candidate.intent, type: "automation-draft" },
     idempotencyKey: "source-gate:automation:v1",
+    artifactCandidate: automationCandidate,
   });
   const approved = ctx.homeProposals.review({
     proposalId: created.id,
@@ -236,6 +276,167 @@ test("exposes the synchronous approved source gate without accepting caller evid
   assert.deepEqual(source.evidence, approved.evidence);
   assert.equal(Object.isFrozen(source), true);
 
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("requires a Hub-verifiable artifact candidate for new automation drafts", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const base = {
+    kind: "automation-draft" as const,
+    title: "Review one bounded light trial",
+    summary: "A closed candidate for household review only.",
+    idempotencyKey: "candidate-required:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    rationale,
+    risk: { level: "low" as const, reasons: [] },
+    intent: {
+      type: "automation-draft",
+      description: "Review a bounded light change.",
+      rollback: "Restore the previous state.",
+    },
+  };
+  await assert.rejects(() => ctx.homeProposals.createDraft(base), /artifact candidate/i);
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    ...base,
+    idempotencyKey: "candidate-foreign-target:v1",
+    artifactCandidate: {
+      ...automationCandidate,
+      content: {
+        ...automationCandidate.content,
+        actions: [{ kind: "set_boolean" as const, target: { hwCapabilityId: "hwc-foreign" }, value: false }],
+        rollback: { kind: "restore_previous_state" as const, target: { hwCapabilityId: "hwc-foreign" }, maxAgeSeconds: 3_600 },
+        postconditions: [{
+          kind: "capability_value" as const,
+          source: { hwCapabilityId: "hwc-foreign" },
+          operator: "equals" as const,
+          value: false,
+          withinSeconds: 30,
+        }],
+      },
+    },
+  }), /selected devices/i);
+  const proposal = await ctx.homeProposals.createDraft({ ...base, artifactCandidate: automationCandidate });
+  assert.deepEqual(proposal.artifactCandidate, automationCandidate);
+  ctx.homeProposals.review({
+    proposalId: proposal.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+    feedbackCode: "not_useful",
+  });
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    ...base,
+    kind: "household-insight",
+    idempotencyKey: "candidate-on-insight:v1",
+    artifactCandidate: automationCandidate,
+  }), /artifact candidate/i);
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("snapshots an admitted artifact candidate before awaiting external catalogs", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  const originalCatalog = world.foreignRuleCatalog.bind(world);
+  const mutableCandidate = structuredClone(automationCandidate) as unknown as {
+    schemaVersion: "1";
+    content: {
+      trigger: { kind: "capability_changed"; source: { hwCapabilityId: string } };
+      conditions: [];
+      actions: Array<{ kind: "set_boolean"; target: { hwCapabilityId: string }; value: boolean }>;
+      rollback: { kind: "restore_previous_state"; target: { hwCapabilityId: string }; maxAgeSeconds: number };
+      postconditions: Array<{
+        kind: "capability_value";
+        source: { hwCapabilityId: string };
+        operator: "equals";
+        value: boolean;
+        withinSeconds: number;
+      }>;
+    };
+  };
+  world.foreignRuleCatalog = async () => {
+    mutableCandidate.content.trigger.source.hwCapabilityId = "hwc-foreign";
+    mutableCandidate.content.actions[0]!.target.hwCapabilityId = "hwc-foreign";
+    mutableCandidate.content.rollback.target.hwCapabilityId = "hwc-foreign";
+    mutableCandidate.content.postconditions[0]!.source.hwCapabilityId = "hwc-foreign";
+    return originalCatalog();
+  };
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+
+  const proposal = await ctx.homeProposals.createDraft({
+    kind: "automation-draft",
+    title: "Review one immutable candidate",
+    summary: "The admitted behavior must not change while the Hub awaits a catalog.",
+    idempotencyKey: "candidate-await-snapshot:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: {
+      type: "automation-draft",
+      description: "Review a bounded light change.",
+      rollback: "Restore the previous state.",
+    },
+    artifactCandidate: mutableCandidate,
+  });
+
+  assert.equal(proposal.artifactCandidate?.content.actions[0]?.kind, "set_boolean");
+  assert.equal(
+    proposal.artifactCandidate?.content.actions[0]?.kind === "set_boolean"
+      ? proposal.artifactCandidate.content.actions[0].target.hwCapabilityId
+      : undefined,
+    "hwc-1",
+  );
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("retains current evidence for an exact candidate capability beyond the general reference cap", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.extraCapabilities = 50;
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const target = { hwCapabilityId: "hwc-51" };
+  const proposal = await ctx.homeProposals.createDraft({
+    kind: "automation-draft",
+    title: "Review one late catalog capability",
+    summary: "The reviewed target must remain in bounded current evidence.",
+    idempotencyKey: "candidate-evidence-priority:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: {
+      type: "automation-draft",
+      description: "Review a bounded light change.",
+      rollback: "Restore the previous state.",
+    },
+    artifactCandidate: {
+      schemaVersion: "1",
+      content: {
+        trigger: { kind: "capability_changed", source: target },
+        conditions: [],
+        actions: [{ kind: "set_boolean", target, value: false }],
+        rollback: { kind: "restore_previous_state", target, maxAgeSeconds: 3_600 },
+        postconditions: [{
+          kind: "capability_value",
+          source: target,
+          operator: "equals",
+          value: false,
+          withinSeconds: 30,
+        }],
+      },
+    },
+  });
+
+  assert.equal(proposal.evidence.references.length, 50);
+  assert.equal(proposal.evidence.references.some((reference) => reference.capabilityId === "hwc-51"), true);
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
@@ -262,6 +463,7 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
     rationale,
     selectedHwCapabilityIds: ["hwc-1"],
     evidenceLookbackHours: 24,
+    artifactCandidate: automationCandidate,
     risk: { level: "medium", reasons: ["Could overlap an existing rule"] },
     intent: {
       type: "automation-draft",

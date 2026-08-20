@@ -13,6 +13,23 @@ import {
 
 const createdAt = "2026-08-19T01:00:00.000Z";
 
+const artifactCandidate = {
+  schemaVersion: "1" as const,
+  content: {
+    trigger: { kind: "capability_changed" as const, source: { hwCapabilityId: "hwc-4" } },
+    conditions: [],
+    actions: [{ kind: "set_boolean" as const, target: { hwCapabilityId: "hwc-4" }, value: false }],
+    rollback: { kind: "restore_previous_state" as const, target: { hwCapabilityId: "hwc-4" }, maxAgeSeconds: 3_600 },
+    postconditions: [{
+      kind: "capability_value" as const,
+      source: { hwCapabilityId: "hwc-4" },
+      operator: "equals" as const,
+      value: false,
+      withinSeconds: 30,
+    }],
+  },
+};
+
 function input(overrides: Partial<CreateProposalInput> = {}): CreateProposalInput {
   return {
     kind: "automation-draft",
@@ -91,6 +108,27 @@ test("persists a bounded pending proposal and append-only creation audit across 
   await rm(directory, { recursive: true, force: true });
 });
 
+test("persists a strict review-only artifact candidate without treating it as an artifact", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  const proposal = store.create(input({ artifactCandidate }));
+  assert.deepEqual(proposal.artifactCandidate, artifactCandidate);
+  assert.equal("artifactId" in proposal.artifactCandidate!, false);
+  assert.equal("contentHash" in proposal.artifactCandidate!, false);
+  assert.throws(
+    () => store.create(input({ artifactCandidate: { ...artifactCandidate, contentHash: "forged" } as never })),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+  );
+  assert.throws(
+    () => store.create(input({
+      kind: "household-insight",
+      idempotencyKey: "candidate-on-insight:v1",
+      artifactCandidate,
+    })),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+  );
+  store.close();
+});
+
 test("deduplicates a producer idempotency key without adding another audit event", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
 
@@ -120,7 +158,7 @@ test("rejects an asynchronous retention evidence callback before committing", ()
 test("reviews with optimistic concurrency and never treats approval as application", () => {
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
-  const proposal = store.create(input());
+  const proposal = store.create(input({ artifactCandidate }));
   now = "2026-08-19T01:05:00.000Z";
 
   const approved = store.review({
@@ -165,7 +203,7 @@ test("reviews with optimistic concurrency and never treats approval as applicati
 test("projects a deeply frozen Hub-verified source only for the current approved automation revision", () => {
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
-  const proposal = store.create(input());
+  const proposal = store.create(input({ artifactCandidate }));
   now = "2026-08-19T01:05:00.000Z";
   const approved = store.review({
     proposalId: proposal.id,
@@ -187,6 +225,7 @@ test("projects a deeply frozen Hub-verified source only for the current approved
     assert.deepEqual(value.evidence, approved.evidence);
     assert.deepEqual(value.conflictCheck, approved.conflictCheck);
     assert.deepEqual(value.risk, approved.risk);
+    assert.deepEqual(value.artifactCandidate, artifactCandidate);
     assert.equal(Object.isFrozen(value), true);
     assert.equal(Object.isFrozen(value.evidence), true);
     assert.equal(Object.isFrozen(value.evidence.references), true);
@@ -204,7 +243,7 @@ test("projects a deeply frozen Hub-verified source only for the current approved
 
 test("fails closed for missing, non-current, pending, and non-approved source revisions", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
-  const pending = store.create(input({ idempotencyKey: "source-pending" }));
+  const pending = store.create(input({ idempotencyKey: "source-pending", artifactCandidate }));
   assert.throws(
     () => store.withApprovedProposalAtRevision(pending.id, pending.revision, () => undefined),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "source_unavailable",
@@ -236,6 +275,18 @@ test("fails closed for missing, non-current, pending, and non-approved source re
   });
   assert.throws(
     () => store.withApprovedProposalAtRevision(rejectedRevision.id, rejectedRevision.revision, () => undefined),
+    (error: unknown) => error instanceof ProposalStoreError && error.code === "source_unavailable",
+  );
+  const legacy = store.create(input({ idempotencyKey: "source-legacy-without-candidate" }));
+  const legacyApproved = store.review({
+    proposalId: legacy.id,
+    expectedRevision: 1,
+    decision: "approved",
+    reviewer: "household-owner",
+    feedbackCode: "useful_as_is",
+  });
+  assert.throws(
+    () => store.withApprovedProposalAtRevision(legacyApproved.id, legacyApproved.revision, () => undefined),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "source_unavailable",
   );
   store.close();
