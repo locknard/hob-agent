@@ -339,9 +339,21 @@ rows from a failed run remain explicitly incomplete and require an explicit
 idempotent retry; no startup replay or outbox is introduced before an external
 side effect exists. Root production invocation and fresh current-catalog
 conflict refresh are still absent. Agent, Inbox, bridge, and plugin contexts
-must remain unable to discover that mutation seam. M3c
-compiler/dry-run and the action plane remain later, pure-read or unimplemented
-work; device writes remain unavailable.
+must remain unable to discover that mutation seam. M3c compiler/dry-run cores
+and durable results exist behind an unmounted private coordinator; production
+coordination and the action plane remain unavailable, and device writes remain
+disabled.
+
+Production startup now admits one fixed, owner-only
+`<HOB_DATA_DIR>/action-authority.json` source. The loader rejects symlinks,
+wide permissions, duplicate JSON keys, unknown/provider-shaped fields, and
+unsafe IDs, then computes per-capability Hub-owned configuration identities.
+Only the resulting private coordinator map reaches `HomeWorldService`; the
+Agent, Inbox, Artifact, plugins, and bridges never receive the file or bridge
+selection. Exact adapter schema and schema version are included in the private
+binding digest, so a version-only mapping change cannot silently reuse an old
+candidate. Candidate production and compiler coordination remain unmounted,
+and no executor or action route exists.
 
 ### Implemented foundation — canonical ingest-journal retention
 

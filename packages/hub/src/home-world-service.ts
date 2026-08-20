@@ -903,6 +903,22 @@ export class HomeWorldService extends Service {
     if (selectedBindings.length !== 1 || this.registry === undefined) return undefined;
     const [selectedBinding] = selectedBindings;
     if (selectedBinding === undefined) return undefined;
+    const runtime = this.runtimesById.get(selectedBinding.bridgeId);
+    let descriptorRef: DeviceDescriptor["capabilities"][number] | undefined;
+    try {
+      const device = runtime?.ingest.worldSnapshot().get(selectedBinding.nativeId);
+      const refs = device?.descriptor.capabilities.filter((ref) => (
+        ref.nativeInstanceId === selectedBinding.nativeInstanceId
+      ));
+      if (refs === undefined || refs.length !== 1) return undefined;
+      [descriptorRef] = refs;
+    } catch {
+      return undefined;
+    }
+    if (descriptorRef === undefined
+      || descriptorRef.schema !== capability.schema
+      || typeof descriptorRef.schemaVersion !== "string"
+      || descriptorRef.schemaVersion.length === 0) return undefined;
     const registration = this.registry.binding(selectedBinding.bridgeId);
     if (registration === undefined
       || registration.remoteInstanceId === undefined
@@ -924,6 +940,8 @@ export class HomeWorldService extends Service {
         bridgeId: selectedBinding.bridgeId,
         nativeId: selectedBinding.nativeId,
         nativeInstanceId: selectedBinding.nativeInstanceId,
+        schema: descriptorRef.schema,
+        schemaVersion: descriptorRef.schemaVersion,
         hwSpaceId: selectedBinding.hwSpaceId ?? null,
         remoteBound: registration.remoteInstanceId !== undefined,
         remoteInstanceId: registration.remoteInstanceId,

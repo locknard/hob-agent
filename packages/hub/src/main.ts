@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { isAbsolute, resolve } from "node:path";
 
@@ -16,10 +17,14 @@ import {
   readHomeHubLaunchConfig,
   type LaunchEnvironment,
 } from "./launch-config.js";
+import { loadActionAuthorityConfiguration } from "./action-authority-config.js";
+import type { ActionAuthorityConfiguration } from "./authority-coordinator.js";
 import {
   loadSelectedModelCredential,
   type SelectedModelCredential,
 } from "./model-credential-profile.js";
+
+type ActionAuthorityConfig = Readonly<Record<string, ActionAuthorityConfiguration>>;
 
 export interface HomeHubMainOptions {
   readonly env?: LaunchEnvironment;
@@ -45,6 +50,7 @@ export interface HomeHubProcessOptions {
 export function createHomeHubProcessOptions(
   environment: LaunchEnvironment,
   selectedCredential?: SelectedModelCredential,
+  actionAuthorityConfig: ActionAuthorityConfig = Object.freeze({}),
 ): HomeHubProcessOptions {
   const config = readHomeHubLaunchConfig(environment, selectedCredential);
   return {
@@ -56,6 +62,7 @@ export function createHomeHubProcessOptions(
         journalDirectory: config.journalDirectory,
         registryPath: config.registryPath,
         worldModelPath: config.worldModelPath,
+        actionAuthorityConfig,
       },
       homeProposals: { path: config.proposalPath },
       homeArtifacts: { path: config.artifactPath },
@@ -92,7 +99,27 @@ export async function resolveHomeHubProcessOptions(
     return createHomeHubProcessOptions(environment);
   }
   const selectedCredential = await loadSelectedModelCredential(dataDirectory, provider, vault);
-  return createHomeHubProcessOptions(environment, selectedCredential);
+  // Validate the complete launch contract before touching the optional
+  // authority file so malformed bridge/model input keeps its bounded error.
+  readHomeHubLaunchConfig(environment, selectedCredential);
+  const actionAuthorityConfig = await loadActionAuthorityConfigurationIfConfigured(dataDirectory);
+  return createHomeHubProcessOptions(environment, selectedCredential, actionAuthorityConfig);
+}
+
+async function loadActionAuthorityConfigurationIfConfigured(
+  dataDirectory: string,
+): Promise<ActionAuthorityConfig> {
+  try {
+    await lstat(dataDirectory);
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") return Object.freeze({});
+    throw error;
+  }
+  return loadActionAuthorityConfiguration(dataDirectory);
+}
+
+function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value;
 }
 
 /** Starts the one executable Home Hub process after validating its launch env. */

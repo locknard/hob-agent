@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -47,6 +47,53 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   assert.equal(options.runtime.launchEnvironment.get("OPENAI_API_KEY")?.value, "openai-secret");
   assert.equal(JSON.stringify(options.runtime.homeWorld.bridges).includes("home-assistant-secret"), false);
   assert.equal(options.runtime.inboxHttp, undefined);
+});
+
+test("passes generated action authority only to HomeWorld and never to the Agent runtime", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-action-authority-"));
+  try {
+    await writeFile(join(dataDirectory, "action-authority.json"), JSON.stringify({
+      version: 1,
+      bindings: [{
+        hwCapabilityId: "hwc-example",
+        bridgeId: "ha-main",
+        approved: true,
+        revision: 4,
+      }],
+    }), { mode: 0o600 });
+
+    const options = await resolveHomeHubProcessOptions({
+      ...ENV,
+      HOB_DATA_DIR: dataDirectory,
+    });
+
+    const actionAuthority = options.runtime.homeWorld.actionAuthorityConfig;
+    assert.equal(actionAuthority?.["hwc-example"]?.bridgeId, "ha-main");
+    assert.equal(actionAuthority?.["hwc-example"]?.configRevision, 4);
+    assert.equal("actionAuthorityConfig" in options.runtime.agent, false);
+    assert.equal("actionAuthorityConfig" in options.runtime, false);
+    assert.equal(JSON.stringify(options.runtime.agent).includes("hwc-example"), false);
+    assert.equal(JSON.stringify(options.runtime.homeWorld).includes("action-authority.json"), false);
+    assert.equal(JSON.stringify(options.runtime.homeWorld).includes('"bindings"'), false);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test("passes an empty action-authority map to HomeWorld when the fixed file is absent", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-action-authority-empty-"));
+  try {
+    const options = await resolveHomeHubProcessOptions({
+      ...ENV,
+      HOB_DATA_DIR: dataDirectory,
+    });
+
+    assert.deepEqual(options.runtime.homeWorld.actionAuthorityConfig, {});
+    assert.equal("actionAuthorityConfig" in options.runtime.agent, false);
+    assert.equal("actionAuthorityConfig" in options.runtime, false);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
 });
 
 test("forwards only the Inbox verifier and port into the process composition", () => {

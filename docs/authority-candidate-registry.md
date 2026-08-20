@@ -2,8 +2,11 @@
 
 Status: the Hub-private registry core, an unmounted authority-assessment
 producer, and an unmounted HomeWorld binding source are implemented and tested
-in isolation as M3b/M3c prerequisites. Production-root integration is not wired
-yet.
+in isolation as M3b/M3c prerequisites. Production startup now loads the strict,
+private, read-only authority selection described in
+[`action-authority-configuration.md`](./action-authority-configuration.md) into
+`HomeWorldService`; candidate production and the compile pipeline remain
+unmounted.
 
 The isolated core persists opaque candidate identities, lifecycle transitions,
 idempotent operations, and metadata-only audit in private SQLite. It is not an
@@ -97,9 +100,9 @@ prevents an available assessment.
 The candidate-registry core above is currently a private, isolated seam. It is
 consumed only by the unmounted `ArtifactAuthorityProducer` through its narrow
 resolve seam. The unmounted `HomeWorldAuthorityBindingSource` creates an exact
-fresh-world input for that producer from neutral snapshots and Hub-private
-authority selectors; it exposes neither native routes nor control. The next
-integration boundary is private production coordination and fresh
+fresh-world input for that producer from neutral snapshots and the production-
+loaded Hub-private authority selectors; it exposes neither native routes nor
+control. The next integration boundary is private production coordination and fresh
 current-catalog conflict refresh, not a public mutation service. The initial
 unmounted conflict source already binds the approved Proposal's checked rule
 evidence and bounded existing Artifact overlap into the fixed risk producer;

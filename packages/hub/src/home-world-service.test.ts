@@ -34,12 +34,22 @@ const schema = {
   canonicalHash: "synthetic-light-v1",
 } as never;
 
-function registration(factory: AdapterRegistration<Record<string, never>>["factory"]): AdapterRegistration<Record<string, never>> {
+const alternateSchema = {
+  schema: "synthetic.other",
+  majorVersion: 1,
+  attrsSchema: z.record(z.string(), z.unknown()),
+  canonicalHash: "synthetic-other-v1",
+} as never;
+
+function registration(
+  factory: AdapterRegistration<Record<string, never>>["factory"],
+  capabilitySchemas: AdapterRegistration<Record<string, never>>["capabilitySchemas"] = [schema],
+): AdapterRegistration<Record<string, never>> {
   return {
     adapterType: "synthetic",
     configSchema: z.object({}).strict(),
     credentialRequirements: [],
-    capabilitySchemas: [schema],
+    capabilitySchemas,
     factory,
   };
 }
@@ -61,7 +71,12 @@ function syncStart(epochId: string, remoteInstanceId: string): Envelope {
   });
 }
 
-function snapshotFor(bridgeId: string, remoteInstanceId: string): Envelope[] {
+function snapshotFor(
+  bridgeId: string,
+  remoteInstanceId: string,
+  schemaVersion = "1.0.0",
+  capabilitySchema = "synthetic.light",
+): Envelope[] {
   return [
     syncStart(`${bridgeId}-epoch`, remoteInstanceId),
     eventEnvelope(`${bridgeId}-epoch`, 2, {
@@ -71,8 +86,8 @@ function snapshotFor(bridgeId: string, remoteInstanceId: string): Envelope[] {
         name: `${bridgeId} lamp`,
         capabilities: [{
           nativeInstanceId: `${bridgeId}-lamp:main`,
-          schema: "synthetic.light",
-          schemaVersion: "1.0.0",
+          schema: capabilitySchema,
+          schemaVersion,
           semanticKind: "light",
           space: { nativeSpaceId: `${bridgeId}-living`, name: "Living room" },
         }],
@@ -110,6 +125,24 @@ function deterministicIdentityManager(): WorldIdentityManager {
       proposal: "proposal-test",
       audit: "audit-test",
     })[kind],
+  });
+}
+
+function schemaChangingIdentityManager(): WorldIdentityManager {
+  let capabilitySequence = 0;
+  return new WorldIdentityManager({
+    idFactory: (kind) => {
+      if (kind === "hwCapability") {
+        capabilitySequence += 1;
+        return capabilitySequence === 1 ? "hwc-light" : "hwc-replacement";
+      }
+      return ({
+        hw: "hw-device",
+        hwSpace: "hws-living",
+        proposal: "proposal-test",
+        audit: "audit-test",
+      })[kind];
+    },
   });
 }
 
@@ -283,6 +316,151 @@ test("projects a private authority candidate input with revision-bound opaque id
     const changedRemote = ctx.homeWorld.resolveAuthorityCandidateInput("hwc-light");
     assert.notEqual(changedRemote?.bindingIdentity, firstBindingIdentity);
     assert.doesNotMatch(JSON.stringify(changedRemote), /remote-authority-rotated/);
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("changes the authority binding identity when the selected runtime schema version changes", async () => {
+  const catalog = new BridgeCatalog();
+  const adapters = new Map<string, SyntheticBridge>();
+  catalog.register(registration((ctx) => adapters.get(ctx.bridgeId)!));
+  const registryStore = new MemoryBridgeRegistryStore([{
+    bridgeId: "bridge-authority-versioned",
+    adapterType: "synthetic",
+    createdAt: "2026-08-20T00:00:00.000Z",
+    generation: 7,
+    remoteInstanceId: "remote-authority-versioned",
+  }]);
+  const registry = new BridgeRegistry({ catalog, store: registryStore });
+  const identityManager = deterministicIdentityManager();
+  const actionAuthorityConfig = {
+    "hwc-light": {
+      bridgeId: "bridge-authority-versioned",
+      approved: true,
+      configIdentity: `sha256:${"a".repeat(64)}`,
+      configRevision: 4,
+    },
+  };
+  const bridges = [entry("bridge-authority-versioned")];
+  const firstContext = new Context();
+  adapters.set(
+    "bridge-authority-versioned",
+    syntheticBridge(
+      "bridge-authority-versioned",
+      "remote-authority-versioned",
+      snapshotFor("bridge-authority-versioned", "remote-authority-versioned", "1.0.0"),
+    ),
+  );
+  const firstFiber = await firstContext.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    bridges,
+    adapters,
+    { identityManager, actionAuthorityConfig, monitorIntervalMs: 0 },
+  ));
+  let firstInput: ReturnType<HomeWorldService["resolveAuthorityCandidateInput"]>;
+  try {
+    await waitFor(() => firstContext.homeWorld.snapshot().bridges["bridge-authority-versioned"]?.diagnostics.connectionState === "ready");
+    firstInput = firstContext.homeWorld.resolveAuthorityCandidateInput("hwc-light");
+  } finally {
+    await firstFiber.dispose();
+  }
+
+  const secondContext = new Context();
+  adapters.set(
+    "bridge-authority-versioned",
+    syntheticBridge(
+      "bridge-authority-versioned",
+      "remote-authority-versioned",
+      snapshotFor("bridge-authority-versioned", "remote-authority-versioned", "1.1.0"),
+    ),
+  );
+  const secondFiber = await secondContext.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    bridges,
+    adapters,
+    { identityManager, actionAuthorityConfig, monitorIntervalMs: 0 },
+  ));
+  try {
+    await waitFor(() => secondContext.homeWorld.snapshot().bridges["bridge-authority-versioned"]?.diagnostics.connectionState === "ready");
+    const secondInput = secondContext.homeWorld.resolveAuthorityCandidateInput("hwc-light");
+    assert.equal(secondInput?.hwCapabilityId, firstInput?.hwCapabilityId);
+    assert.equal(secondInput?.registrationGeneration, firstInput?.registrationGeneration);
+    assert.notEqual(secondInput?.bindingIdentity, firstInput?.bindingIdentity);
+  } finally {
+    await secondFiber.dispose();
+  }
+});
+
+test("fails closed when the selected runtime descriptor is missing, ambiguous, or schema-mismatched", async () => {
+  const catalog = new BridgeCatalog();
+  const adapters = new Map<string, SyntheticBridge>();
+  catalog.register(registration((ctx) => adapters.get(ctx.bridgeId)!, [schema, alternateSchema]));
+  const registryStore = new MemoryBridgeRegistryStore([{
+    bridgeId: "bridge-authority-descriptor-guards",
+    adapterType: "synthetic",
+    createdAt: "2026-08-20T00:00:00.000Z",
+    generation: 7,
+    remoteInstanceId: "remote-authority-descriptor-guards",
+  }]);
+  const registry = new BridgeRegistry({ catalog, store: registryStore });
+  const bridgeId = "bridge-authority-descriptor-guards";
+  const nativeId = `${bridgeId}-lamp`;
+  const nativeInstanceId = `${nativeId}:main`;
+  const actionAuthorityConfig = {
+    "hwc-light": {
+      bridgeId,
+      approved: true,
+      configIdentity: `sha256:${"b".repeat(64)}`,
+      configRevision: 4,
+    },
+  };
+  const bridge = syntheticBridge(bridgeId, "remote-authority-descriptor-guards", snapshotFor(bridgeId, "remote-authority-descriptor-guards"));
+  adapters.set(bridgeId, bridge);
+  const context = new Context();
+  const fiber = await context.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry(bridgeId)],
+    adapters,
+    {
+      identityManager: schemaChangingIdentityManager(),
+      actionAuthorityConfig,
+      monitorIntervalMs: 0,
+    },
+  ));
+  try {
+    await waitFor(() => context.homeWorld.snapshot().bridges[bridgeId]?.diagnostics.connectionState === "ready");
+    assert.equal(context.homeWorld.resolveAuthorityCandidateInput("hwc-light")?.available, true);
+
+    await context.homeWorld.runtime(bridgeId)!.ingest.ingest(eventEnvelope(`${bridgeId}-epoch`, 5, {
+      kind: "device-removed",
+      nativeId,
+    }));
+    assert.equal(context.homeWorld.resolveAuthorityCandidateInput("hwc-light"), undefined);
+
+    await context.homeWorld.runtime(bridgeId)!.ingest.ingest(eventEnvelope(`${bridgeId}-epoch`, 6, {
+      kind: "device-upserted",
+      device: {
+        nativeId,
+        capabilities: [
+          { nativeInstanceId, schema: "synthetic.light", schemaVersion: "1.0.0" },
+          { nativeInstanceId, schema: "synthetic.light", schemaVersion: "1.1.0" },
+        ],
+      },
+    }));
+    assert.equal(context.homeWorld.resolveAuthorityCandidateInput("hwc-light"), undefined);
+
+    await context.homeWorld.runtime(bridgeId)!.ingest.ingest(eventEnvelope(`${bridgeId}-epoch`, 7, {
+      kind: "device-upserted",
+      device: {
+        nativeId,
+        capabilities: [{ nativeInstanceId, schema: "synthetic.other", schemaVersion: "1.0.0" }],
+      },
+    }));
+    assert.equal(context.homeWorld.resolveAuthorityCandidateInput("hwc-light"), undefined);
   } finally {
     await fiber.dispose();
   }
