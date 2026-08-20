@@ -43,9 +43,13 @@ class StubMediaPlayerService extends Service {
     super(ctx, "homeMediaPlayers");
   }
 
-  list() {
-    return { players: [] };
+  snapshot() {
+    return { readCut: "opaquePlayerReadCut0001", inventory: { players: [] } };
   }
+
+  advance() {}
+
+  release() {}
 }
 
 class RecordingAdapter extends LlmAdapter {

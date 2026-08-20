@@ -21,7 +21,12 @@ interface ToolModule {
   readonly apply: (ctx: CordisContext) => void;
   readonly pageHomeMediaPlayers: (
     value: { readonly players: readonly Player[] },
-    query: { readonly hwSpaceIds?: readonly string[]; readonly limit?: number; readonly afterHwCapabilityId?: string },
+    query: {
+      readonly readCut: string;
+      readonly hwSpaceIds?: readonly string[];
+      readonly limit?: number;
+      readonly afterHwCapabilityId?: string;
+    },
   ) => unknown;
 }
 
@@ -73,15 +78,35 @@ function players(): Player[] {
 }
 
 class StubMediaPlayers extends Service {
-  readonly signals: Array<AbortSignal | undefined> = [];
+  readonly snapshots: Array<{
+    readonly readCut?: string;
+    readonly hwSpaceIds?: readonly string[];
+    readonly signal: AbortSignal;
+  }> = [];
+  readonly releases: string[] = [];
+  readonly advances: Array<{ readonly readCut: string; readonly nextAfterHwCapabilityId: string }> = [];
 
   constructor(ctx: Context) {
     super(ctx, "homeMediaPlayers");
   }
 
-  list(signal?: AbortSignal) {
-    this.signals.push(signal);
-    return { players: players() };
+  snapshot(input: {
+    readonly readCut?: string;
+    readonly hwSpaceIds?: readonly string[];
+    readonly signal: AbortSignal;
+  }) {
+    this.snapshots.push(input);
+    const readCut = input.readCut ?? "opaquePlayerReadCut0001";
+    if (readCut !== "opaquePlayerReadCut0001") throw new Error("read cut unavailable");
+    return { readCut, inventory: { players: players() } };
+  }
+
+  release(readCut: string) {
+    this.releases.push(readCut);
+  }
+
+  advance(readCut: string, nextAfterHwCapabilityId: string) {
+    this.advances.push({ readCut, nextAfterHwCapabilityId });
   }
 }
 
@@ -90,9 +115,10 @@ test("pages same-room player candidates without choosing between duplicate label
 
   assert.deepEqual(pageHomeMediaPlayers(
     { players: players() },
-    { hwSpaceIds: ["hws-media-room"], limit: 1 },
+    { readCut: "opaquePlayerReadCut0001", hwSpaceIds: ["hws-media-room"], limit: 1 },
   ), {
     players: [players()[1]],
+    readCut: "opaquePlayerReadCut0001",
     page: {
       limit: 1,
       returnedPlayers: 1,
@@ -102,7 +128,12 @@ test("pages same-room player candidates without choosing between duplicate label
   });
   assert.deepEqual(pageHomeMediaPlayers(
     { players: players() },
-    { hwSpaceIds: ["hws-media-room"], limit: 1, afterHwCapabilityId: "hwc-media-room-a" },
+    {
+      readCut: "opaquePlayerReadCut0001",
+      hwSpaceIds: ["hws-media-room"],
+      limit: 1,
+      afterHwCapabilityId: "hwc-media-room-a",
+    },
   ), {
     players: [players()[2]],
     page: { limit: 1, returnedPlayers: 1, totalMatchedPlayers: 2 },
@@ -115,8 +146,29 @@ test("rejects a player whose required neutral identity is missing", async () => 
   delete invalid.hwCapabilityId;
 
   assert.throws(
-    () => pageHomeMediaPlayers({ players: [invalid as unknown as Player] }, {}),
+    () => pageHomeMediaPlayers(
+      { players: [invalid as unknown as Player] },
+      { readCut: "opaquePlayerReadCut0001" },
+    ),
     /hwCapabilityId/i,
+  );
+});
+
+test("rejects a cursor or duplicate identity that cannot identify one position in the cut", async () => {
+  const { pageHomeMediaPlayers } = await loadTool();
+  assert.throws(
+    () => pageHomeMediaPlayers(
+      { players: players() },
+      { readCut: "opaquePlayerReadCut0001", afterHwCapabilityId: "hwc-missing" },
+    ),
+    /restart.*first page/i,
+  );
+  assert.throws(
+    () => pageHomeMediaPlayers(
+      { players: [players()[0], { ...players()[0] }] },
+      { readCut: "opaquePlayerReadCut0001" },
+    ),
+    /identity/i,
   );
 });
 
@@ -132,7 +184,10 @@ test("fails closed when one player cannot fit the model-visible output budget", 
   };
 
   assert.throws(
-    () => pageHomeMediaPlayers({ players: [huge] }, { limit: 1 }),
+    () => pageHomeMediaPlayers(
+      { players: [huge] },
+      { readCut: "opaquePlayerReadCut0001", limit: 1 },
+    ),
     /output budget/i,
   );
 });
@@ -153,25 +208,81 @@ test("registers one bounded read-only player inventory tool", async () => {
     assert.match(definition.description, /(?:no|does not grant).*authority/i);
     assert.deepEqual(
       Object.keys(definition.parameters.properties as Record<string, unknown>).sort(),
-      ["afterHwCapabilityId", "hwSpaceIds", "limit"],
+      ["afterHwCapabilityId", "hwSpaceIds", "limit", "readCut"],
     );
     const signal = new AbortController().signal;
-    const result = await ctx.tools.execute({
+    const first = await ctx.tools.execute({
       callId: "media-players-1" as never,
       name: "get_home_media_players",
-      arguments: { hwSpaceIds: ["hws-media-room"], limit: 2 },
+      arguments: { hwSpaceIds: ["hws-media-room"], limit: 1 },
       signal,
     });
-    assert.equal(result.isError, false);
-    assert.equal((ctx as unknown as { homeMediaPlayers: StubMediaPlayers }).homeMediaPlayers.signals[0], signal);
-    const textBlock = result.content.find((block) => block.type === "text");
+    assert.equal(first.isError, false);
+    const textBlock = first.content.find((block) => block.type === "text");
     assert.ok(textBlock && textBlock.type === "text");
-    const text = textBlock.text;
+    const firstPage = JSON.parse(textBlock.text) as {
+      readonly readCut: string;
+      readonly page: { readonly nextAfterHwCapabilityId: string };
+    };
+    assert.equal(firstPage.readCut, "opaquePlayerReadCut0001");
+    assert.equal(firstPage.page.nextAfterHwCapabilityId, "hwc-media-room-a");
+    const second = await ctx.tools.execute({
+      callId: "media-players-2" as never,
+      name: "get_home_media_players",
+      arguments: {
+        hwSpaceIds: ["hws-media-room"],
+        limit: 1,
+        afterHwCapabilityId: firstPage.page.nextAfterHwCapabilityId,
+        readCut: firstPage.readCut,
+      },
+      signal,
+    });
+    assert.equal(second.isError, false);
+    const secondBlock = second.content.find((block) => block.type === "text");
+    assert.ok(secondBlock && secondBlock.type === "text");
+    const finalPage = JSON.parse(secondBlock.text) as Record<string, unknown>;
+    assert.equal("readCut" in finalPage, false);
+    const service = (ctx as unknown as { homeMediaPlayers: StubMediaPlayers }).homeMediaPlayers;
+    assert.equal(service.snapshots[0]?.signal, signal);
+    assert.equal(service.snapshots[1]?.readCut, "opaquePlayerReadCut0001");
+    assert.deepEqual(service.advances, [{
+      readCut: "opaquePlayerReadCut0001",
+      nextAfterHwCapabilityId: "hwc-media-room-a",
+    }]);
+    assert.deepEqual(service.releases, ["opaquePlayerReadCut0001"]);
+    const text = `${textBlock.text}${secondBlock.text}`;
     assert.match(text, /hwc-media-room-a/);
     assert.match(text, /hwc-media-room-b/);
     for (const forbidden of ["nativeId", "nativeInstanceId", "service", "uri", "play_media", "invoke"]) {
       assert.equal(text.includes(forbidden), false, `tool leaked ${forbidden}`);
     }
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("rejects dangling cursors or read cuts before reading the Hub service", async () => {
+  const { apply, inject, name } = await loadTool();
+  const ctx = new Context();
+  await ctx.plugin(SystemPrompt, {});
+  await ctx.plugin(ToolRuntime);
+  await ctx.plugin(StubMediaPlayers);
+  const fiber = await ctx.plugin({ name, inject, apply });
+  try {
+    for (const arguments_ of [
+      { afterHwCapabilityId: "hwc-media-room-a" },
+      { readCut: "opaquePlayerReadCut0001" },
+    ]) {
+      const result = await ctx.tools.execute({
+        callId: "invalid-media-page" as never,
+        name: "get_home_media_players",
+        arguments: arguments_,
+        signal: new AbortController().signal,
+      });
+      assert.equal(result.isError, true);
+    }
+    assert.equal((ctx as unknown as { homeMediaPlayers: StubMediaPlayers }).homeMediaPlayers.snapshots.length, 0);
   } finally {
     await fiber.dispose();
     await ctx.fiber.dispose();

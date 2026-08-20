@@ -87,6 +87,15 @@ Missing or non-up bridge connection evidence also suppresses cached playback
 state and volume instead of treating absence of diagnostics as permission to
 reuse them.
 
+Media-player pagination uses a Hub-owned opaque read cut. The first page
+captures one bounded neutral inventory; a continuation cursor is valid only
+with the returned read-cut token, and later pages read that same immutable cut
+even if HomeWorld changes. Tokens encode no device or bridge data, have a short
+bounded lifetime, and are retained under a small in-memory cap. The final page
+releases its cut. Unknown, expired, or mismatched continuation state fails
+closed and tells the caller to restart from the first page; it never falls back
+to a fresh inventory behind an old cursor.
+
 The initial neutral media kinds are `artist`, `album`, `track`, `playlist`,
 `radio`, `audiobook`, `podcast`, `episode`, and `genre`. Search results carry an
 explicit `playable` flag because a useful discovery result is not necessarily a

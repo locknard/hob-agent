@@ -4,7 +4,16 @@ import test from "node:test";
 import { Context, Service } from "@deepseek-ai/cordis";
 
 interface MediaServicesModule {
-  readonly HomeMediaPlayerService: new (ctx: Context) => Service & { list(): unknown };
+  readonly HomeMediaPlayerService: new (ctx: Context, options?: Record<string, unknown>) => Service & {
+    snapshot(input: {
+      readonly readCut?: string;
+      readonly hwSpaceIds?: readonly string[];
+      readonly afterHwCapabilityId?: string;
+      readonly signal: AbortSignal;
+    }): unknown;
+    advance(readCut: string, nextAfterHwCapabilityId: string): void;
+    release(readCut: string): void;
+  };
   readonly HomeMediaCatalogService: new (ctx: Context, options: Record<string, unknown>) => Service & {
     search(input: Record<string, unknown>): Promise<unknown>;
   };
@@ -28,35 +37,72 @@ async function loadServices(): Promise<MediaServicesModule> {
 }
 
 class StubWorld extends Service {
+  includeSecondPlayer = false;
+
   constructor(ctx: Context) {
     super(ctx, "homeWorld");
   }
 
   snapshot() {
     const binding = { bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "instance-a", hwSpaceId: "hws-a" };
+    const devices: Record<string, unknown>[] = [{
+      hwId: "hw-a",
+      name: "房间音响",
+      validity: "valid",
+      capabilities: [{ hwCapabilityId: "hwc-a", hwId: "hw-a", semanticKind: "media", bindings: [binding] }],
+      states: [{ nativeId: "native-a", nativeInstanceId: "instance-a", attrs: { state: "idle" } }],
+    }];
+    if (this.includeSecondPlayer) {
+      const secondBinding = {
+        bridgeId: "bridge-a",
+        nativeId: "native-b",
+        nativeInstanceId: "instance-b",
+        hwSpaceId: "hws-a",
+      };
+      devices.push({
+        hwId: "hw-b",
+        name: "房间音响",
+        validity: "valid",
+        capabilities: [{ hwCapabilityId: "hwc-b", hwId: "hw-b", semanticKind: "media", bindings: [secondBinding] }],
+        states: [{ nativeId: "native-b", nativeInstanceId: "instance-b", attrs: { state: "idle" } }],
+      });
+    }
     return {
       bridges: { "bridge-a": { metrics: { connection: "up" } } },
       spaces: [{ hwSpaceId: "hws-a", name: "多媒体室" }],
-      devices: [{
-        hwId: "hw-a",
-        name: "房间音响",
-        validity: "valid",
-        capabilities: [{ hwCapabilityId: "hwc-a", hwId: "hw-a", semanticKind: "media", bindings: [binding] }],
-        states: [{ nativeId: "native-a", nativeInstanceId: "instance-a", attrs: { state: "idle" } }],
-      }],
+      devices,
     };
   }
 }
 
-test("mounts a Hub-owned read-only player inventory over HomeWorld", async () => {
+test("keeps one Hub-owned media-player read cut stable while HomeWorld changes", async () => {
   const { HomeMediaPlayerService } = await loadServices();
   const ctx = new Context();
   await ctx.plugin(StubWorld);
-  const fiber = await ctx.plugin(HomeMediaPlayerService);
+  let cutSequence = 0;
+  const fiber = await ctx.plugin(HomeMediaPlayerService, {
+    now: () => 1_000,
+    readCutFactory: () => `opaqueReadCut000${++cutSequence}`,
+    readCutTtlMs: 60_000,
+    maxReadCuts: 4,
+  });
   try {
-    const service = ctx.get("homeMediaPlayers") as unknown as { list(): { players: readonly Record<string, unknown>[] } };
-    assert.deepEqual(service.list(), {
-      players: [{
+    const service = ctx.get("homeMediaPlayers") as unknown as {
+      snapshot(input: {
+        readonly readCut?: string;
+        readonly hwSpaceIds?: readonly string[];
+        readonly afterHwCapabilityId?: string;
+        readonly signal: AbortSignal;
+      }): {
+        readonly readCut: string;
+        readonly inventory: { readonly players: readonly Record<string, unknown>[] };
+      };
+      advance(readCut: string, nextAfterHwCapabilityId: string): void;
+      release(readCut: string): void;
+    };
+    const first = service.snapshot({ signal: new AbortController().signal });
+    assert.equal(first.readCut, "opaqueReadCut0001");
+    assert.deepEqual(first.inventory, { players: [{
         hwCapabilityId: "hwc-a",
         hwId: "hw-a",
         spaces: [{ hwSpaceId: "hws-a", name: "多媒体室" }],
@@ -64,11 +110,72 @@ test("mounts a Hub-owned read-only player inventory over HomeWorld", async () =>
         availability: "available",
         playbackState: "idle",
         volume: { reported: false },
-      }],
+    }] });
+    (ctx.get("homeWorld") as unknown as StubWorld).includeSecondPlayer = true;
+    service.advance(first.readCut, "hwc-a");
+    assert.throws(
+      () => service.snapshot({ readCut: first.readCut, signal: new AbortController().signal }),
+      /read cut/i,
+    );
+    assert.throws(
+      () => service.snapshot({
+        readCut: first.readCut,
+        hwSpaceIds: ["hws-other"],
+        afterHwCapabilityId: "hwc-a",
+        signal: new AbortController().signal,
+      }),
+      /read cut/i,
+    );
+    const sameCut = service.snapshot({
+      readCut: first.readCut,
+      afterHwCapabilityId: "hwc-a",
+      signal: new AbortController().signal,
     });
+    assert.equal(sameCut.inventory.players.length, 1);
+    const nextCut = service.snapshot({ signal: new AbortController().signal });
+    assert.equal(nextCut.inventory.players.length, 2);
+    service.release(first.readCut);
+    assert.throws(
+      () => service.snapshot({ readCut: first.readCut, signal: new AbortController().signal }),
+      /read cut/i,
+    );
     for (const forbidden of ["play", "pause", "queue", "invoke", "resolveMediaRef"]) {
       assert.equal(forbidden in service, false, `player inventory exposed ${forbidden}`);
     }
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("bounds active media-player read cuts and expires abandoned cuts", async () => {
+  const { HomeMediaPlayerService } = await loadServices();
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  let now = 1_000;
+  let cutSequence = 0;
+  const fiber = await ctx.plugin(HomeMediaPlayerService, {
+    now: () => now,
+    readCutFactory: () => `boundedReadCut00${++cutSequence}`,
+    readCutTtlMs: 1_000,
+    maxReadCuts: 1,
+  });
+  try {
+    const service = ctx.get("homeMediaPlayers") as unknown as {
+      snapshot(input: { readonly readCut?: string; readonly signal: AbortSignal }): { readonly readCut: string };
+    };
+    const first = service.snapshot({ signal: new AbortController().signal });
+    assert.throws(
+      () => service.snapshot({ signal: new AbortController().signal }),
+      /read cut/i,
+    );
+    now = 2_000;
+    const afterExpiry = service.snapshot({ signal: new AbortController().signal });
+    assert.notEqual(afterExpiry.readCut, first.readCut);
+    assert.throws(
+      () => service.snapshot({ readCut: first.readCut, signal: new AbortController().signal }),
+      /read cut/i,
+    );
   } finally {
     await fiber.dispose();
     await ctx.fiber.dispose();
