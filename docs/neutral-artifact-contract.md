@@ -526,6 +526,10 @@ type ArtifactCompileInput = {
     cutIdentity: Sha256Digest;
     watermarks: readonly ArtifactEvidenceAttestation["watermarks"][number][];
   };
+  currentConflict: {
+    sourceIdentity: Sha256Digest;
+    result: NeutralConflictResult;
+  };
   foreignRuleChecks: readonly NeutralConflictInput[];
   compiler: { id: BoundedHubId; version: BoundedVersion };
 };
@@ -543,7 +547,10 @@ native binding、raw attrs 或 adapter payload 穿过 Agent-facing/compiler cont
 epoch 与 committed watermark 不一致时，输入保持 `unavailable`，不能伪造零 conflict。
 `evidence`、`risk` 和 `authority` 的 `artifact` 必须等于 `artifact` 的 `ArtifactRef`；
 compiler 只能消费 Hub 已生成的 assessment，不能接受 Agent 提供的 watermarks、risk 或
-candidate。Compiler input identity 是对 artifact ref、三类 attestation ID/input identity、
+candidate。`currentConflict` 是同一次 current-catalog capture 合成的完整结果，同时覆盖现有
+Artifact 与 foreign rule findings；`risk.conflictInputIdentity` 必须精确等于它的
+`sourceIdentity`，不能让 risk 与 compiler 消费不同切面。Compiler input identity 是对
+artifact ref、三类 attestation ID/input identity、current conflict、
 `worldCut.cutIdentity`、foreign-rule cut 和 compiler id/version 的 canonical hash；任何输入
 变化都会产生新的 compile result identity，但不会改变 artifact revision/hash。
 
