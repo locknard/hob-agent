@@ -151,6 +151,7 @@ export interface HomeWorldForeignRuleCatalog {
   readonly bridgeId: string;
   readonly status: "available" | "unavailable";
   readonly epochId?: string;
+  readonly lastSeq?: number;
   readonly rules: readonly ForeignRuleSummary[];
 }
 
@@ -517,21 +518,24 @@ export class HomeWorldService extends Service {
   async foreignRuleCatalog(): Promise<readonly HomeWorldForeignRuleCatalog[]> {
     const catalogs: HomeWorldForeignRuleCatalog[] = [];
     for (const runtime of [...this.runtimesById.values()].sort((left, right) => left.bridgeId.localeCompare(right.bridgeId))) {
-      if (runtime.extensionAvailability["foreignRules@1"] !== "available") {
+      if (runtime.extensionAvailability["foreignRules@2"] !== "available") {
         catalogs.push({ bridgeId: runtime.bridgeId, status: "unavailable", rules: [] });
         continue;
       }
       try {
-        const handle = runtime.adapter.extension("foreignRules@1");
+        const handle = runtime.adapter.extension("foreignRules@2");
         const parsed = foreignRuleCatalogSchema.safeParse(await handle?.catalog());
         if (!parsed.success) throw new Error("Invalid foreign rule catalog");
         if (!parsed.data.complete) throw new Error("Foreign rule catalog is incomplete");
         const watermark = runtime.journal.consistentWatermark?.(runtime.bridgeId);
-        if (watermark?.epochId !== parsed.data.epochId) throw new Error("Foreign rule epoch is not committed");
+        if (watermark?.epochId !== parsed.data.epochId || watermark.lastSeq !== parsed.data.lastSeq) {
+          throw new Error("Foreign rule catalog is not committed");
+        }
         catalogs.push({
           bridgeId: runtime.bridgeId,
           status: "available",
           epochId: parsed.data.epochId,
+          lastSeq: parsed.data.lastSeq,
           rules: parsed.data.rules,
         });
       } catch {

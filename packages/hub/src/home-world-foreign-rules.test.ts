@@ -17,7 +17,7 @@ test("queries a bounded foreign-rule catalog through the neutral optional extens
       coreVersion: "6.3.0",
       ecosystem: "test",
       heartbeatIntervalMs: 1_000,
-      extensions: [{ id: "foreignRules", version: "1.0.0" }],
+      extensions: [{ id: "foreignRules", version: "2.0.0" }],
     },
     events: async function* (signal) {
       yield {
@@ -33,8 +33,8 @@ test("queries a bounded foreign-rule catalog through the neutral optional extens
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
     control: { requestResync: async () => ({ status: "completed" }), dispose: async () => undefined },
-    extension: (name) => name === "foreignRules@1"
-      ? { catalog: async () => ({ epochId: "epoch-a", complete: true, rules: [{ ruleRef: "opaque-rule-1", name: "Arrival light", enabled: true }] }) } as never
+    extension: (name) => name === "foreignRules@2"
+      ? { catalog: async () => ({ epochId: "epoch-a", lastSeq: 2, complete: true, rules: [{ ruleRef: "opaque-rule-1", name: "Arrival light", enabled: true }] }) } as never
       : undefined,
   };
   const catalog = new BridgeCatalog();
@@ -59,11 +59,12 @@ test("queries a bounded foreign-rule catalog through the neutral optional extens
     bridgeId: "bridge-a",
     status: "available",
     epochId: "epoch-a",
+    lastSeq: 2,
     rules: [{ ruleRef: "opaque-rule-1", name: "Arrival light", enabled: true }],
   }]);
 
-  adapter.extension = ((name: string) => name === "foreignRules@1"
-    ? { catalog: async () => ({ epochId: "uncommitted-epoch", complete: true, rules: [] }) }
+  adapter.extension = ((name: string) => name === "foreignRules@2"
+    ? { catalog: async () => ({ epochId: "uncommitted-epoch", lastSeq: 2, complete: true, rules: [] }) }
     : undefined) as BridgeAdapter["extension"];
   assert.deepEqual(await ctx.homeWorld.foreignRuleCatalog(), [{
     bridgeId: "bridge-a",
@@ -71,10 +72,24 @@ test("queries a bounded foreign-rule catalog through the neutral optional extens
     rules: [],
   }]);
 
-  adapter.extension = ((name: string) => name === "foreignRules@1"
-    ? { catalog: async () => ({ epochId: "epoch-a", complete: false, rules: [] }) }
+  adapter.extension = ((name: string) => name === "foreignRules@2"
+    ? { catalog: async () => ({ epochId: "epoch-a", lastSeq: 2, complete: false, rules: [] }) }
     : undefined) as BridgeAdapter["extension"];
   assert.equal((await ctx.homeWorld.foreignRuleCatalog())[0]?.status, "unavailable");
+
+  adapter.extension = ((name: string) => name === "foreignRules@2"
+    ? { catalog: async () => ({ epochId: "epoch-a", lastSeq: 3, complete: true, rules: [] }) }
+    : undefined) as BridgeAdapter["extension"];
+  assert.equal((await ctx.homeWorld.foreignRuleCatalog())[0]?.status, "unavailable");
+
+  adapter.extension = ((name: string) => name === "foreignRules@1"
+    ? { catalog: async () => ({ epochId: "epoch-a", complete: true, rules: [] }) }
+    : undefined) as BridgeAdapter["extension"];
+  assert.deepEqual(await ctx.homeWorld.foreignRuleCatalog(), [{
+    bridgeId: "bridge-a",
+    status: "unavailable",
+    rules: [],
+  }]);
 
   await fiber.dispose();
 });

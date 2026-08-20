@@ -194,7 +194,7 @@ test("factory construction is synchronous and does not resolve credentials or to
     ecosystem: "home-assistant",
     heartbeatIntervalMs: 60_000,
     extensions: [
-      { id: "foreignRules", version: "1.0.0" },
+      { id: "foreignRules", version: "2.0.0" },
       { id: "orgHints", version: "1.0.0" },
     ],
   });
@@ -241,12 +241,17 @@ test("exposes existing automations through the bounded read-only foreignRules ex
   const first = iterator.next();
   await new Promise<void>((resolve) => setImmediate(resolve));
   respondToBootstrap(socket, "automation.arrival_light");
-  await first;
-
-  const handle = adapter.extension("foreignRules@1") as ForeignRulesHandle | undefined;
+  const handle = adapter.extension("foreignRules@2") as ForeignRulesHandle | undefined;
+  const events: Envelope[] = [(await first).value!];
+  assert.equal(events[0]?.event.kind, "sync-start");
+  assert.equal(await handle?.catalog(), undefined);
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
   const catalog = await handle?.catalog();
   const rules = catalog?.rules;
   assert.equal(typeof catalog?.epochId, "string");
+  assert.equal(catalog?.lastSeq, events.at(-1)?.seq);
   assert.equal(catalog?.complete, true);
   assert.equal(rules?.length, 1);
   assert.match(rules?.[0]?.ruleRef ?? "", /^ha-rule:/);
@@ -255,6 +260,8 @@ test("exposes existing automations through the bounded read-only foreignRules ex
     enabled: true,
   });
   assert.equal(JSON.stringify(rules).includes("automation.arrival_light"), false);
+  assert.equal(JSON.stringify(catalog).includes("must-not-cross-contract"), false);
+  assert.equal(adapter.extension("foreignRules@1" as never), undefined);
   await adapter.control.dispose();
 });
 
@@ -291,9 +298,12 @@ test("excludes restored unavailable ghost automations from the foreign-rule cata
         : [];
     socket.receive({ id: command.id, type: "result", success: true, result });
   }
-  await first;
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
 
-  const handle = adapter.extension("foreignRules@1") as ForeignRulesHandle | undefined;
+  const handle = adapter.extension("foreignRules@2") as ForeignRulesHandle | undefined;
   const rules = (await handle?.catalog())?.rules ?? [];
   assert.equal(rules.length, 1);
   assert.equal(rules[0]?.name, "Current rule");
@@ -430,7 +440,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
       stateEnvelopeCount: 1,
     },
     extensionHandles: [
-      { key: "foreignRules@1", available: true },
+      { key: "foreignRules@2", available: true },
       { key: "orgHints@1", available: false },
     ],
   });

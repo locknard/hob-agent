@@ -566,10 +566,11 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   }
 
   extension<K extends keyof ExtensionHandleRegistry>(name: K): ExtensionHandleRegistry[K] | undefined {
-    if (name !== "foreignRules@1") return undefined;
+    if (name !== "foreignRules@2") return undefined;
     const handle: ForeignRulesHandle = {
       catalog: async () => this.foreignRuleCatalog === undefined ? undefined : {
         epochId: this.foreignRuleCatalog.epochId,
+        lastSeq: this.foreignRuleCatalog.lastSeq,
         complete: this.foreignRuleCatalog.complete,
         rules: this.foreignRuleCatalog.rules.map((rule) => ({ ...rule })),
       },
@@ -664,7 +665,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     );
     const snapshotId = this.snapshotId();
     const epochId = `${this.context.bridgeId}:${snapshotId}:${++homeAssistantEpochCounter}`;
-    this.foreignRuleCatalog = { epochId, ...projectForeignRules(snapshot) };
+    const foreignRules = projectForeignRules(snapshot);
+    this.foreignRuleCatalog = undefined;
     const remoteInstanceId = deriveHomeAssistantRemoteInstanceId(
       this.context.config.baseUrl,
       this.context.config.authenticationPrincipal,
@@ -676,6 +678,9 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       epochId,
       remoteInstanceId,
       envelope: (event) => ({ epochId, seq: seq++, event }),
+      commitForeignRuleCatalog: (lastSeq) => {
+        this.foreignRuleCatalog = { epochId, lastSeq, ...foreignRules };
+      },
     };
   }
 
@@ -798,6 +803,7 @@ interface SnapshotEmission {
   readonly epochId: string;
   readonly remoteInstanceId: string;
   readonly envelope: (event: ContractBridgeEvent) => ContractEnvelope;
+  readonly commitForeignRuleCatalog: (lastSeq: number) => void;
 }
 
 function* snapshotEnvelopes(
@@ -825,10 +831,12 @@ function* snapshotEnvelopes(
     }
     yield emission.envelope({ kind: "device-health", nativeId: device.descriptor.nativeId, status: device.health });
   }
-  yield emission.envelope({
+  const complete = emission.envelope({
     kind: "sync-complete",
     manifest: { snapshotId: emission.snapshotId, deviceEnvelopeCount, stateEnvelopeCount },
   });
+  emission.commitForeignRuleCatalog(complete.seq);
+  yield complete;
 }
 
 function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
