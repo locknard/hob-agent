@@ -100,8 +100,8 @@ apply an artifact or control a device.
   Inbox without names or identifiers and without trusting the model to report
   its own context gap; legacy v1 proposals remain readable.
 - Proposal evidence, bridge watermarks, history gaps, and existing-rule
-  conflicts are hub-produced. `foreignRules@1` catalogs are accepted only when
-  their epoch matches the committed bridge watermark.
+  conflicts are hub-produced. `foreignRules@2` catalogs are accepted only when
+  their exact `epochId + lastSeq` matches the committed bridge watermark.
 - Proposal creation is idempotent per producer/key. Review uses optimistic
   revisions, terminal decisions are immutable, and approval has
   `applicationStatus: not_available`. New approve/reject decisions persist a
@@ -142,7 +142,7 @@ apply an artifact or control a device.
   consistent cut remains readable but cannot make validation, mapping, or
   observation race ahead of the new adapter bootstrap and its epoch-bound
   extension catalogs.
-- The DSH Agent can inspect the existing neutral `foreignRules@1` catalog
+- The DSH Agent can inspect the existing neutral `foreignRules@2` catalog
   through bounded `get_home_rules` pages before proposing an automation. An
   autonomous runtime gate requires a complete stable cursor sequence rather
   than trusting prompt compliance. The Hub still owns the authoritative

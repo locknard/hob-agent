@@ -11,9 +11,11 @@ and numeric controls (66). No household names, identifiers, or state values are
 recorded here.
 
 The later committed neutral cut still contains 75 devices, 540 states, and 779
-capabilities. Its `foreignRules@1` catalog exposes 12 configured rules after
-unavailable restored placeholders are excluded. The difference is filtering
-semantics, not evidence that three household rules were deleted.
+capabilities. Its `foreignRules@2` catalog exposes 12 configured rules after
+unavailable restored placeholders are excluded. HomeWorld accepts that catalog
+only when its exact `epochId + lastSeq` matches the bridge's committed
+watermark. The difference is filtering semantics, not evidence that three
+household rules were deleted.
 
 Schema provenance is correct but insufficient for a useful cross-ecosystem
 Home Agent. It cannot reliably group a light and a sensor without importing HA

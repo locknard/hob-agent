@@ -720,11 +720,12 @@ Conflict 规则：
 - 目标、时间窗、条件或 action 与现有 artifact/foreign rule 可能重叠但无法证明互斥时是
   `possible_overlap`。它应阻止 `passed` 或要求明确 review，不能用零 match 宣称无干涉；
 - foreign rule catalog 必须是当前 bridge committed epoch 的完整可用 catalog；缺失、部分、
-  epoch/sequence mismatch、restart 或 truncation 是 `unavailable`，不是零 rules。现有
-  `foreignRules@1` 只声明 epoch，无法证明同一 epoch 内 catalog 与 evidence sequence 同步，
-  因此不能进入 M3c 的 current conflict 证明。Bridge contract 直接升级到唯一的
-  `foreignRules@2`：catalog 必须携带它实际覆盖的 `epochId + lastSeq`；HomeWorld 只在该水位与
-  committed/evidence semantic watermark 精确相等时投影 `current`。不保留 v1/v2 双读路径。
+  epoch/sequence mismatch、restart 或 truncation 是 `unavailable`，不是零 rules。历史上的
+  `foreignRules@1` 只声明 epoch，无法证明同一 epoch 内 catalog 与 evidence sequence 同步；
+  它已淘汰且不受支持，不能进入 M3c 的 current conflict 证明。当前 Bridge contract 只支持
+  唯一的 `foreignRules@2`：catalog 必须携带它实际覆盖的 `epochId + lastSeq` exact watermark；
+  HomeWorld 只在该水位与 committed/evidence semantic watermark 精确相等时投影 `current`。
+  不保留 v1 兼容或 v1/v2 双读路径。
   M3c capture 必须把 bounded canonical catalog identity 与 capture 前后 exact bridge watermark
   一起绑定；只有 epoch 而没有稳定 catalog/watermark identity 时，不得把结果宣称为 current；
 - stale/gapped/partial evidence、目标 present-but-invalid、candidate 不可用或 policy

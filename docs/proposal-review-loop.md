@@ -111,11 +111,12 @@ bridge/device/capability identities, include bridge epoch and sequence
 provenance, and expose missing, gapped, baseline-limited, or truncated coverage.
 
 Existing platform rules arrive only through the optional neutral
-`foreignRules@1` extension. Its catalog declares the replay epoch that produced
-it; the hub accepts a conflict check only when that epoch exactly matches the
-bridge's committed consistent watermark. A restart, partial replay, missing
-extension, invalid/incomplete catalog, or epoch mismatch fails closed instead
-of reporting zero conflicts.
+`foreignRules@2` extension. Its catalog declares the replay epoch and exact
+last sequence (`epochId + lastSeq`) that produced it; the Hub accepts a conflict
+check only when that exact pair matches the bridge's committed consistent
+watermark. A restart, partial replay, missing extension, invalid/incomplete
+catalog, or epoch/sequence mismatch fails closed instead of reporting zero
+conflicts.
 Home Assistant entities explicitly marked as restored placeholders while
 unavailable are excluded because they no longer represent configured rules;
 ordinary disabled rules remain in the catalog and can still overlap a draft.

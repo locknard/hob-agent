@@ -3,8 +3,9 @@
 ## Evidence and API boundary
 
 The real Phase 0 household has roughly 12 active/configured Home Assistant
-automations. The neutral `foreignRules@1` extension exposes their bounded names,
-enabled state, timestamps, and opaque rule references. Until now, the trusted
+automations. The neutral `foreignRules@2` extension exposes their bounded names,
+enabled state, timestamps, and opaque rule references, with each complete
+catalog bound to an exact `epochId + lastSeq` watermark. Until now, the trusted
 prompt asked the Agent to inspect that catalog, but proposal creation did not
 prove that every page had been read.
 
@@ -38,4 +39,3 @@ This gate prevents skipped pages and prompt-only compliance. It does not claim
 that names prove semantic equivalence, and the existing Hub-owned name-overlap
 screen remains heuristic. No Bridge contract revision, write authority, or
 HA-specific Agent tool is introduced.
-

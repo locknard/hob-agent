@@ -188,9 +188,10 @@ bounded structured `get_home_calibration` review history,
 the bounded paginated read-only `get_home_snapshot` tool, the
 bounded read-only `get_home_evidence` tool, plus the review-only
 `get_home_rules` catalog inspection tool and `create_home_proposal` tool. Hub-owned evidence and
-`foreignRules@1` conflict checks are attached before a proposal enters the
-Inbox. Device actions, configuration writes, and proposal application remain
-deliberately unavailable.
+`foreignRules@2` conflict checks are attached before a proposal enters the
+Inbox. A catalog is usable only when its exact `epochId + lastSeq` matches the
+bridge's committed watermark. Device actions, configuration writes, and
+proposal application remain deliberately unavailable.
 
 The Hub also contains the first non-applying neutral Artifact foundation:
 strict immutable ECA revisions, stable canonical hashes, append-only lifecycle
