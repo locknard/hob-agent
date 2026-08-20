@@ -97,6 +97,10 @@ The M3c world-cut producer, not the compiler contract consumer, invokes this
 resolver while it still has a Hub-private verified snapshot. It projects the
 read result and one neutral action-compatibility result for each referenced
 device action, bound to that action's consecutive one-based artifact order.
+It also projects one predicate-compatibility result for each condition and
+postcondition, using an explicit phase plus the consecutive one-based order
+within that phase. A capability-change trigger is covered by the projected read
+result and does not invent a predicate.
 The projection contains only status, closed reason, and neutral
 `before`/`after` scalars. It never carries `attrs`, MIoT format/unit fields,
 HA service vocabulary, writable metadata, bindings, or native routes. The

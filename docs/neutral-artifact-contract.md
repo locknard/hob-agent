@@ -537,6 +537,8 @@ resolver 产生、按连续一基 action order 绑定的 compatibility 结果；
 reason 和 neutral `before`/`after`，不能含原生格式或 writable metadata。Compiler 不得从
 `semanticKind`、schema 名或 scalar shape 再推断动作能力。它不得把 `HomeWorldSnapshot` 中的
 native binding、raw attrs 或 adapter payload 穿过 Agent-facing/compiler contract。
+每个 condition/postcondition 也必须有 world-cut producer 生成的 predicate compatibility，
+按 `phase + order` 精确绑定；compiler 不重新解释 operator 或 operand 类型。
 `foreignRuleChecks` 缺失、未准备好或
 epoch 与 committed watermark 不一致时，输入保持 `unavailable`，不能伪造零 conflict。
 `evidence`、`risk` 和 `authority` 的 `artifact` 必须等于 `artifact` 的 `ArtifactRef`；
@@ -635,23 +637,29 @@ journal evidence、catalog 和已登记 conflict metadata。
 type NeutralDiff = {
   status: "no_change" | "changes" | "unavailable";
   operations: readonly {
-    order: PositiveSafeInteger;
+    actionOrder: PositiveSafeInteger;
     kind: "set_level" | "set_boolean" | "notify_local";
     hwCapabilityId?: BoundedHubId;
     actionAuthorityCandidateId?: BoundedHubId;
     before?: NeutralScalar;
     after?: NeutralScalar;
-  }[];                                // max 20，保留 artifact action order
+  }[];                                // max 20，按 artifact action order 严格递增
   unchangedCount: NonNegativeSafeInteger;
   redacted: true;
 };
 ```
 
 Diff 只展示 neutral capability ID、bounded scalar、candidate opaque ID 和 action kind；不得
-展示 native route、provider error、secret、raw attrs 或不受控的 URL。`operations` 必须保留
-artifact action order，并生成从 1 开始的连续 `order`；不能为了 target/key canonicalization
-重排有语义的 action array。当前值缺失时使用 `before` absent 并把覆盖状态标为
-unavailable/stale，不猜测“无变化”。
+展示 native route、provider error、secret、raw attrs 或不受控的 URL。`actionOrder` 是原
+artifact action 的一基位置，不是 diff 展示数组的连续序号；no-op action 可以不出现在
+operations 中，因此相邻 operation 可以有间隔，但必须严格递增。不能为了 target/key
+canonicalization 重排有语义的 action array。当前值缺失时使用 `before` absent 并把覆盖状态
+标为 unavailable/stale，不猜测“无变化”。
+
+Compile/dry-run attestation 还必须携带每个 device action 的
+`actionAuthorityBindings`（artifact `actionOrder`、kind、`hwCapabilityId`、opaque candidate
+ID）。它覆盖 no-op action，不能只依赖 diff operations；同一 action 恰好一个 available
+candidate，缺失或歧义都是 unavailable。Notify-only action 没有 authority binding。
 
 ### 7.3 Conflict
 
@@ -683,6 +691,17 @@ Conflict 规则：
   缺失是 blocking finding；旧 artifact 不因为新 bridge epoch 自动重新有效；
 - findings 使用 bounded neutral reason code，不把原生 provider error、rule ID、URL 或模型
   文字作为事实。
+
+每个 `NeutralConflictInput` 必须携带对应 bridge 的 exact semantic watermark（bridge、epoch、
+seq、freshness、gap），并与 world cut/evidence 一致。`foreignCatalogIdentity` 是完整、排序后
+per-bridge checks 的 aggregate identity。相关 bridge 缺行、重复行、watermark/epoch 不一致或
+capture unavailable 均 fail closed。Compile constructor 自行取 world-cut watermarks；dry-run
+constructor 自行取 compile watermarks，调用者不能另传一个看似新鲜的 vector。
+
+非 `compiled` compile attestation 必须有 canonical、unique blocking reasons；`compiled` 不得
+有 blocking reason。Dry-run status 必须与 compile status、diff 和 conflict 一致：compile
+`unavailable` 只能得到 dry-run `unavailable`，compile `rejected` 只能得到 `failed`；只有
+compiled、可用 diff 且 conflict `none` 才能 `passed`。
 
 ## 8. Approval 精确绑定（M3d seam）
 
