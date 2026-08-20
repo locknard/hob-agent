@@ -5,3 +5,5 @@ export type { WritableSecretVault } from "./macos-keychain-secret-vault.js";
 export { provisionApiKeyProfile } from "./api-key-profile-provisioner.js";
 export type { AuthProfile } from "./auth-profiles.js";
 export type { SecretVault } from "./secret-vault.js";
+export { parseSecretRef } from "./secret-ref.js";
+export type { SecretRef } from "./secret-ref.js";

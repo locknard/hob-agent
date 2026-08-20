@@ -9,6 +9,11 @@ import {
   providerSetup,
   type SupportedModelProvider,
 } from "@hob-agent/agent-layer/model-providers";
+import {
+  MacOSKeychainSecretVault,
+  parseSecretRef,
+  type SecretVault,
+} from "@hob-agent/agent-layer/model-credentials";
 import { isAbsolute, join } from "node:path";
 import {
   createInboxBasicAuthenticator,
@@ -22,7 +27,7 @@ import type { BridgeConfigEntry } from "./bridge-registry.js";
 import type { SelectedModelCredential } from "./model-credential-profile.js";
 
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
-const SECRET_CONFIG_KEY_PATTERN = /token|secret|password|private.?key|credential/i;
+const SECRET_CONFIG_KEY_PATTERN = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
 const REQUIRED_HOME_ENV = ["HOB_DATA_DIR", "HOB_BRIDGES", "HOB_MODEL"] as const;
 
 export type LaunchEnvironment = Readonly<Record<string, string | undefined>>;
@@ -100,7 +105,10 @@ export function readHomeInboxLaunchConfig(environment: LaunchEnvironment): HomeI
 }
 
 /** Reads only the neutral HomeWorld launch slice; no model credential is required. */
-export function readHomeWorldLaunchConfig(environment: LaunchEnvironment): HomeWorldLaunchConfig {
+export function readHomeWorldLaunchConfig(
+  environment: LaunchEnvironment,
+  bridgeCredentialVault: SecretVault = new MacOSKeychainSecretVault(),
+): HomeWorldLaunchConfig {
   const dataDirectory = requiredDataDirectory(environment);
   const bridgeEntries = parseBridgeEntries(requiredValue(environment, "HOB_BRIDGES"));
   const refsByBridge = new Map(bridgeEntries.map((entry) => [entry.bridgeId, entry.credentialRefs]));
@@ -110,7 +118,7 @@ export function readHomeWorldLaunchConfig(environment: LaunchEnvironment): HomeW
     registryPath: join(dataDirectory, "bridge-registry.sqlite"),
     worldModelPath: join(dataDirectory, "world-model.sqlite"),
     bridges: bridgeEntries.map(({ bridgeId, adapterType, config }) => ({ bridgeId, adapterType, config })),
-    bridgeCredentialSource: createBridgeCredentialSource(environment, refsByBridge),
+    bridgeCredentialSource: createBridgeCredentialSource(environment, refsByBridge, bridgeCredentialVault),
     catalog: createBuiltinBridgeCatalog(),
   };
 }
@@ -123,8 +131,9 @@ export function readHomeWorldLaunchConfig(environment: LaunchEnvironment): HomeW
 export function readHomeHubLaunchConfig(
   environment: LaunchEnvironment,
   selectedCredential?: SelectedModelCredential,
+  bridgeCredentialVault: SecretVault = new MacOSKeychainSecretVault(),
 ): HomeHubLaunchConfig {
-  const world = readHomeWorldLaunchConfig(environment);
+  const world = readHomeWorldLaunchConfig(environment, bridgeCredentialVault);
   const modelReference = requiredValue(environment, "HOB_MODEL");
 
   let model: ReturnType<typeof parseModelReference>;
@@ -295,12 +304,29 @@ function parseCredentialRefs(value: unknown, bridgeId: string): Readonly<Record<
     throw new Error(`Invalid HOB_BRIDGES credentialRefs for "${bridgeId}"`);
   }
   const refs: Record<string, string> = {};
-  for (const [alias, envNameValue] of Object.entries(value)) {
-    const envName = nonEmptyString(envNameValue);
-    if (alias.trim() === "" || envName === undefined || !ENV_NAME_PATTERN.test(envName)) {
+  for (const [alias, locatorValue] of Object.entries(value)) {
+    const locator = nonEmptyString(locatorValue);
+    if (alias.trim() === "" || locator === undefined) {
       throw new Error(`Invalid HOB_BRIDGES credentialRef for "${bridgeId}"`);
     }
-    refs[alias] = envName;
+    if (ENV_NAME_PATTERN.test(locator)) {
+      refs[alias] = `env:${locator}`;
+      continue;
+    }
+    let ref;
+    try {
+      ref = parseSecretRef(locator);
+    } catch {
+      throw new Error(`Invalid HOB_BRIDGES credentialRef for "${bridgeId}"`);
+    }
+    if (ref.source === "env") {
+      refs[alias] = locator;
+      continue;
+    }
+    if (ref.id !== `hob-agent/bridge:${bridgeId}:${alias}`) {
+      throw new Error(`Invalid HOB_BRIDGES credentialRef for "${bridgeId}"`);
+    }
+    refs[alias] = locator;
   }
   return Object.freeze(refs);
 }
@@ -320,26 +346,32 @@ function rejectSecretConfig(config: Record<string, unknown>, bridgeId: string): 
 function createBridgeCredentialSource(
   environment: LaunchEnvironment,
   refsByBridge: ReadonlyMap<string, Readonly<Record<string, string>>>,
+  vault: SecretVault,
 ): BridgeAwareCredentialSource {
   return Object.freeze({
     async resolveForBridge(bridgeId: string, alias: string) {
       const refs = refsByBridge.get(bridgeId);
-      const envName = refs !== undefined && Object.prototype.hasOwnProperty.call(refs, alias)
+      const locator = refs !== undefined && Object.prototype.hasOwnProperty.call(refs, alias)
         ? refs[alias]
         : undefined;
-      if (envName === undefined) return undefined;
-      const value = environment[envName];
+      if (locator === undefined) return undefined;
+      const ref = parseSecretRef(locator);
+      const value = ref.source === "env"
+        ? environment[ref.id]
+        : await vault.read(locator);
       return typeof value === "string" && value.trim() !== ""
         ? { kind: "secret_text" as const, value }
         : undefined;
     },
     async describeForBridge(bridgeId: string, alias: string) {
       const refs = refsByBridge.get(bridgeId);
-      const envName = refs !== undefined && Object.prototype.hasOwnProperty.call(refs, alias)
+      const locator = refs !== undefined && Object.prototype.hasOwnProperty.call(refs, alias)
         ? refs[alias]
         : undefined;
-      if (envName === undefined) return { configured: false };
-      const value = environment[envName];
+      if (locator === undefined) return { configured: false };
+      const ref = parseSecretRef(locator);
+      if (ref.source === "keychain") return { configured: true };
+      const value = environment[ref.id];
       return { configured: typeof value === "string" && value.trim() !== "" };
     },
   });

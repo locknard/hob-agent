@@ -20,11 +20,12 @@ interface TextOutput {
 export async function readSecretInput(
   input: TtySecretInput,
   promptOutput: TextOutput = process.stderr,
+  prompt = "Model API key: ",
 ): Promise<string> {
   const value = input.isTTY && input.setRawMode
-    ? await readHiddenTtySecret(input, promptOutput)
+    ? await readHiddenTtySecret(input, promptOutput, prompt)
     : await readPipedSecret(input);
-  if (value.length === 0) throw new Error("API key must not be empty");
+  if (value.length === 0) throw new Error("Credential must not be empty");
   return value;
 }
 
@@ -40,7 +41,7 @@ async function readPipedSecret(input: NodeJS.ReadableStream): Promise<string> {
   return stripOneLineEnding(Buffer.concat(chunks).toString("utf8"));
 }
 
-function readHiddenTtySecret(input: TtySecretInput, output: TextOutput): Promise<string> {
+function readHiddenTtySecret(input: TtySecretInput, output: TextOutput, prompt: string): Promise<string> {
   return new Promise((resolveSecret, rejectSecret) => {
     let value = "";
     const cleanup = () => {
@@ -69,7 +70,7 @@ function readHiddenTtySecret(input: TtySecretInput, output: TextOutput): Promise
         if (Buffer.byteLength(value) > MAX_SECRET_BYTES) return fail(new Error("API key input is too long"));
       }
     };
-    output.write("Model API key: ");
+    output.write(prompt);
     input.setRawMode?.(true);
     input.on("data", onData);
     input.resume();

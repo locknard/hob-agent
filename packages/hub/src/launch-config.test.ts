@@ -72,6 +72,56 @@ test("reads the HomeWorld validation slice without a model or provider credentia
   assert.equal("agent" in config, false);
 });
 
+test("resolves an explicitly scoped bridge credential from Keychain on demand", async () => {
+  const reads: string[] = [];
+  const vault = {
+    read: async (reference: string) => {
+      reads.push(reference);
+      return "home-assistant-keychain-secret";
+    },
+  };
+  const config = readHomeWorldLaunchConfig({
+    HOB_DATA_DIR: "/tmp/hob-agent-keychain-bridge-test",
+    HOB_BRIDGES: JSON.stringify([{
+      bridgeId: "ha-main",
+      adapterType: "home-assistant",
+      config: { baseUrl: "http://ha.local:8123", authenticationPrincipal: "owner-a" },
+      credentialRefs: {
+        "access-token": "keychain:hob-agent/bridge:ha-main:access-token",
+      },
+    }]),
+  }, vault);
+
+  assert.deepEqual(await config.bridgeCredentialSource.describeForBridge("ha-main", "access-token"), {
+    configured: true,
+  });
+  assert.deepEqual(reads, []);
+  assert.deepEqual(await config.bridgeCredentialSource.resolveForBridge("ha-main", "access-token"), {
+    kind: "secret_text",
+    value: "home-assistant-keychain-secret",
+  });
+  assert.deepEqual(reads, ["keychain:hob-agent/bridge:ha-main:access-token"]);
+  assert.equal(JSON.stringify(config.bridges).includes("keychain"), false);
+});
+
+test("rejects a Keychain bridge locator outside its exact bridge and alias scope", () => {
+  const unsafe = "keychain:hob-agent/bridge:other-home:access-token";
+  assert.throws(
+    () => readHomeWorldLaunchConfig({
+      HOB_DATA_DIR: "/tmp/hob-agent-keychain-scope-test",
+      HOB_BRIDGES: JSON.stringify([{
+        bridgeId: "ha-main",
+        adapterType: "home-assistant",
+        config: { baseUrl: "http://ha.local:8123", authenticationPrincipal: "owner-a" },
+        credentialRefs: { "access-token": unsafe },
+      }]),
+    }, { read: async () => "must-not-read" }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes("credentialRef")
+      && !error.message.includes(unsafe),
+  );
+});
+
 test("reads the standalone Inbox slice without bridge or model configuration", () => {
   const config = readHomeInboxLaunchConfig({
     HOB_DATA_DIR: "/tmp/hob-agent-inbox-test",
@@ -273,6 +323,21 @@ test("rejects malformed bridges and secret-like config fields without echoing th
     (error: unknown) => error instanceof Error
       && error.message.includes("Secret-like")
       && !error.message.includes("home-assistant-secret"),
+  );
+  const nestedApiKey = "must-never-enter-bridge-config";
+  assert.throws(
+    () => readHomeHubLaunchConfig({
+      ...BASE_ENV,
+      HOB_BRIDGES: JSON.stringify([{
+        bridgeId: "future-bridge",
+        adapterType: "synthetic",
+        config: { endpoints: [{ apiKey: nestedApiKey }] },
+        credentialRefs: {},
+      }]),
+    }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes("Secret-like")
+      && !error.message.includes(nestedApiKey),
   );
 });
 
