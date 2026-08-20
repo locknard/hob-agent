@@ -161,6 +161,15 @@ function makeSource(
   return { source: new ArtifactRiskConflictSource({ proposals, registry }), proposals, registry };
 }
 
+function withoutSourceIdentity(result: ArtifactRiskConflictResult): Omit<ArtifactRiskConflictResult, "sourceIdentity"> {
+  const { sourceIdentity: _sourceIdentity, ...withoutIdentity } = result;
+  return withoutIdentity;
+}
+
+function assertSourceIdentity(result: ArtifactRiskConflictResult): void {
+  assert.match(result.sourceIdentity, /^sha256:[0-9a-f]{64}$/);
+}
+
 test("reads the exact draft and approved proposal, then maps closed proposal conflicts", () => {
   const candidate = artifact();
   const environment = makeSource(candidate, [], [
@@ -174,7 +183,7 @@ test("reads the exact draft and approved proposal, then maps closed proposal con
     hwCapabilityIds: ["hwc-target", "hwc-trigger"],
   });
 
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutSourceIdentity(result), {
     status: "duplicate",
     findings: [
       { kind: "foreign_rule", severity: "blocking", reason: "duplicate", reference: "opaque-duplicate" },
@@ -182,6 +191,7 @@ test("reads the exact draft and approved proposal, then maps closed proposal con
       { kind: "foreign_rule", severity: "warning", reason: "possible_overlap", reference: "opaque-overlap" },
     ],
   });
+  assertSourceIdentity(result);
   assert.deepEqual(environment.proposals.calls, [{ proposalId: "proposal-source", revision: 2 }]);
   assert.deepEqual(environment.registry.listCalls, [{ limit: 200 }]);
   assert.equal(JSON.stringify(result).includes("Conflict source fixture"), false);
@@ -194,10 +204,11 @@ test("blocks exact behavior and conflicting target actions, but only warns for s
   const sharedOnly = artifact(deviceContent("hwc-other", 0.8, "hwc-target"), "artifact-shared");
 
   const duplicateEnvironment = makeSource(candidate, [duplicate]);
-  assert.deepEqual(duplicateEnvironment.source.assess({
+  const duplicateResult = duplicateEnvironment.source.assess({
     artifact: ref(candidate),
     hwCapabilityIds: ["hwc-target", "hwc-trigger"],
-  }), {
+  });
+  assert.deepEqual(withoutSourceIdentity(duplicateResult), {
     status: "duplicate",
     findings: [{
       kind: "existing_artifact",
@@ -206,12 +217,14 @@ test("blocks exact behavior and conflicting target actions, but only warns for s
       reference: duplicate.contentHash,
     }],
   });
+  assertSourceIdentity(duplicateResult);
 
   const conflictEnvironment = makeSource(candidate, [conflicting]);
-  assert.deepEqual(conflictEnvironment.source.assess({
+  const conflictResult = conflictEnvironment.source.assess({
     artifact: ref(candidate),
     hwCapabilityIds: ["hwc-target", "hwc-trigger"],
-  }), {
+  });
+  assert.deepEqual(withoutSourceIdentity(conflictResult), {
     status: "possible_overlap",
     findings: [{
       kind: "existing_artifact",
@@ -227,12 +240,14 @@ test("blocks exact behavior and conflicting target actions, but only warns for s
       reference: conflicting.contentHash,
     }],
   });
+  assertSourceIdentity(conflictResult);
 
   const sharedEnvironment = makeSource(candidate, [sharedOnly]);
-  assert.deepEqual(sharedEnvironment.source.assess({
+  const sharedResult = sharedEnvironment.source.assess({
     artifact: ref(candidate),
     hwCapabilityIds: ["hwc-target", "hwc-trigger"],
-  }), {
+  });
+  assert.deepEqual(withoutSourceIdentity(sharedResult), {
     status: "possible_overlap",
     findings: [{
       kind: "existing_artifact",
@@ -242,6 +257,7 @@ test("blocks exact behavior and conflicting target actions, but only warns for s
       reference: sharedOnly.contentHash,
     }],
   });
+  assertSourceIdentity(sharedResult);
 });
 
 test("excludes the exact self and superseded or tombstoned registry rows", () => {
@@ -255,10 +271,44 @@ test("excludes the exact self and superseded or tombstoned registry rows", () =>
     entry(tombstoned, "draft", true),
   ];
 
-  assert.deepEqual(environment.source.assess({
+  const result = environment.source.assess({
     artifact: ref(candidate),
     hwCapabilityIds: ["hwc-target", "hwc-trigger"],
-  }), { status: "none", findings: [] });
+  });
+  assert.deepEqual(withoutSourceIdentity(result), { status: "none", findings: [] });
+  assertSourceIdentity(result);
+});
+
+test("changes source identity when approved conflict inputs or scanned rows change without findings", () => {
+  const candidate = artifact();
+  const inert = artifact(deviceContent("hwc-unrelated", 0.8, "hwc-unrelated-trigger"), "artifact-inert");
+  const environment = makeSource(candidate);
+  const input = {
+    artifact: ref(candidate),
+    hwCapabilityIds: ["hwc-target", "hwc-trigger"],
+  } as const;
+
+  const first = environment.source.assess(input);
+  assert.deepEqual(withoutSourceIdentity(first), { status: "none", findings: [] });
+  assertSourceIdentity(first);
+  assert.equal(environment.source.assess(input).sourceIdentity, first.sourceIdentity);
+
+  environment.proposals.value = source(candidate);
+  environment.proposals.value = {
+    ...environment.proposals.value,
+    conflictCheck: {
+      ...environment.proposals.value.conflictCheck,
+      existingAutomationCount: 1,
+    },
+  };
+  const changedProposalCount = environment.source.assess(input);
+  assert.deepEqual(withoutSourceIdentity(changedProposalCount), { status: "none", findings: [] });
+  assert.notEqual(changedProposalCount.sourceIdentity, first.sourceIdentity);
+
+  environment.registry.entries = [entry(candidate), entry(inert)];
+  const changedRegistryRows = environment.source.assess(input);
+  assert.deepEqual(withoutSourceIdentity(changedRegistryRows), { status: "none", findings: [] });
+  assert.notEqual(changedRegistryRows.sourceIdentity, changedProposalCount.sourceIdentity);
 });
 
 test("returns unavailable for source faults, mismatches, malformed rows, and a bounded scan", () => {
@@ -291,6 +341,7 @@ test("returns unavailable for source faults, mismatches, malformed rows, and a b
   ];
   cases.push(() => truncated.source.assess({ artifact: ref(candidate), hwCapabilityIds: ["hwc-target", "hwc-trigger"] }));
 
+  let unavailableSourceIdentity: string | undefined;
   for (const run of cases) {
     const result = run();
     assert.equal(result.status, "unavailable");
@@ -299,6 +350,9 @@ test("returns unavailable for source faults, mismatches, malformed rows, and a b
       severity: "blocking",
       reason: "conflict_unavailable",
     }]);
+    assertSourceIdentity(result);
+    if (unavailableSourceIdentity === undefined) unavailableSourceIdentity = result.sourceIdentity;
+    else assert.equal(result.sourceIdentity, unavailableSourceIdentity);
     assert.equal(JSON.stringify(result).includes("provider"), false);
     assert.equal(JSON.stringify(result).includes("native"), false);
   }

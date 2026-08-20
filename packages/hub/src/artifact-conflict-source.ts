@@ -1,4 +1,4 @@
-import { canonicalAssessmentInput } from "./artifact-assessments.js";
+import { canonicalAssessmentInput, computeConflictInputIdentity } from "./artifact-assessments.js";
 import type { ArtifactRegistryEntry } from "./artifact-registry.js";
 import type {
   ArtifactRiskConflictFinding,
@@ -22,6 +22,28 @@ const MAX_SCAN_ENTRIES = 200;
 const MAX_FINDINGS = 20;
 const MAX_ID_BYTES = 200;
 const URL_LIKE = /(?:\b[a-z][a-z0-9+.-]*:\/\/|\b(?:data|javascript|mailto):|\bwww\.)/iu;
+const UNAVAILABLE_SOURCE_IDENTITY = `sha256:${"0".repeat(64)}`;
+
+type ProposalConflictCheckIdentity = {
+  readonly status: "checked";
+  readonly existingAutomationCount: number;
+  readonly matches: readonly ProposalConflictMatchIdentity[];
+};
+
+type ProposalConflictMatchIdentity = {
+  readonly identity: string;
+  readonly relation: "duplicate" | "conflict" | "possible_overlap";
+};
+
+type RegistryScanIdentity = {
+  readonly artifact: {
+    readonly artifactId: string;
+    readonly revision: number;
+    readonly contentHash: string;
+  };
+  readonly status: "draft" | "superseded";
+  readonly tombstone: boolean;
+};
 
 /** The read-only Artifact Registry seam used by the unmounted conflict source. */
 export interface ArtifactRiskConflictArtifactRegistry {
@@ -87,12 +109,23 @@ export class ArtifactRiskConflictSource implements ArtifactRiskConflictPort {
     const registry = this.readRegistryConflicts(query.artifact, artifact, capabilityIds);
     if (registry === undefined) return unavailableResult();
 
-    const findings = deduplicateFindings([...proposal.findings, ...registry]);
+    const findings = deduplicateFindings([...proposal.findings, ...registry.findings]);
     if (findings.length > MAX_FINDINGS) return unavailableResult();
-    return freezeResult({
-      status: statusForFindings(findings),
-      findings,
-    });
+    try {
+      return freezeResult({
+        status: statusForFindings(findings),
+        findings,
+        sourceIdentity: computeConflictInputIdentity({
+          artifact: query.artifact,
+          conflictCheck: proposal.conflictCheck,
+          // Hash each exact bounded row before composing the scan identity so
+          // the aggregate digest remains bounded even for max-length IDs.
+          registryScan: registry.scanIdentity.map((row) => computeConflictInputIdentity(row)),
+        }),
+      });
+    } catch {
+      return unavailableResult();
+    }
   }
 
   private readExactDraft(ref: ArtifactRef): ArtifactRevision | undefined {
@@ -117,7 +150,10 @@ export class ArtifactRiskConflictSource implements ArtifactRiskConflictPort {
 
   private readProposalConflict(
     artifact: ArtifactRevision,
-  ): { readonly findings: readonly ArtifactRiskConflictFinding[] } | undefined {
+  ): {
+    readonly findings: readonly ArtifactRiskConflictFinding[];
+    readonly conflictCheck: ProposalConflictCheckIdentity;
+  } | undefined {
     try {
       const result = this.proposals.withApprovedProposalAtRevision(
         artifact.sourceProposal.proposalId,
@@ -135,7 +171,10 @@ export class ArtifactRiskConflictSource implements ArtifactRiskConflictPort {
     requested: ArtifactRef,
     artifact: ArtifactRevision,
     capabilityIds: readonly string[],
-  ): readonly ArtifactRiskConflictFinding[] | undefined {
+  ): {
+    readonly findings: readonly ArtifactRiskConflictFinding[];
+    readonly scanIdentity: readonly RegistryScanIdentity[];
+  } | undefined {
     let rows: readonly ArtifactRegistryEntry[];
     try {
       rows = this.registry.list({ limit: MAX_SCAN_ENTRIES });
@@ -149,6 +188,7 @@ export class ArtifactRiskConflictSource implements ArtifactRiskConflictPort {
     const candidateActions = deviceActionsByTarget(artifact.content);
     const seenRevisions = new Set<string>();
     const findings: ArtifactRiskConflictFinding[] = [];
+    const scanIdentity: RegistryScanIdentity[] = [];
 
     for (const row of rows) {
       const normalized = normalizeRegistryEntry(row);
@@ -161,6 +201,15 @@ export class ArtifactRiskConflictSource implements ArtifactRiskConflictPort {
         return undefined;
       }
       seenRevisions.add(revisionKey);
+      scanIdentity.push({
+        artifact: {
+          artifactId: existing.artifactId,
+          revision: existing.revision,
+          contentHash: existing.contentHash,
+        },
+        status: normalized.status,
+        tombstone: normalized.tombstone,
+      });
 
       if (normalized.status !== "draft" || normalized.tombstone || sameArtifactRef(existing, requested)) {
         continue;
@@ -215,14 +264,20 @@ export class ArtifactRiskConflictSource implements ArtifactRiskConflictPort {
       }
     }
 
-    return findings;
+    return {
+      findings,
+      scanIdentity: scanIdentity.sort(compareRegistryScanIdentity),
+    };
   }
 }
 
 function translateProposalSource(
   source: HubVerifiedProposalSource,
   artifact: ArtifactRevision,
-): { readonly findings: readonly ArtifactRiskConflictFinding[] } {
+): {
+  readonly findings: readonly ArtifactRiskConflictFinding[];
+  readonly conflictCheck: ProposalConflictCheckIdentity;
+} {
   if (!isPlainObject(source)
     || !hasExactKeys(source, [
       "proposalId", "revision", "kind", "status", "applicationStatus", "title", "summary",
@@ -257,6 +312,7 @@ function translateProposalSource(
   }
 
   const findings: ArtifactRiskConflictFinding[] = [];
+  const matches: ProposalConflictMatchIdentity[] = [];
   const seen = new Set<string>();
   for (const match of conflictCheck.matches) {
     if (!isPlainObject(match)
@@ -267,6 +323,7 @@ function translateProposalSource(
     }
     if (seen.has(match.identity)) throw new Error("approved Proposal conflict match is duplicated");
     seen.add(match.identity);
+    matches.push({ identity: match.identity, relation: match.relation });
     findings.push(match.relation === "possible_overlap"
       ? {
           kind: "foreign_rule",
@@ -281,7 +338,14 @@ function translateProposalSource(
           reference: match.identity,
         });
   }
-  return { findings: sortFindings(findings) };
+  return {
+    findings: sortFindings(findings),
+    conflictCheck: {
+      status: "checked",
+      existingAutomationCount: conflictCheck.existingAutomationCount,
+      matches,
+    },
+  };
 }
 
 function normalizeQuery(value: unknown): ArtifactRiskConflictQuery {
@@ -379,6 +443,19 @@ function sameStringArray(left: readonly string[], right: readonly string[]): boo
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function compareRegistryScanIdentity(left: RegistryScanIdentity, right: RegistryScanIdentity): number {
+  const artifactIdDifference = compareCodePoints(left.artifact.artifactId, right.artifact.artifactId);
+  if (artifactIdDifference !== 0) return artifactIdDifference;
+  if (left.artifact.revision !== right.artifact.revision) {
+    return left.artifact.revision - right.artifact.revision;
+  }
+  const contentHashDifference = compareCodePoints(left.artifact.contentHash, right.artifact.contentHash);
+  if (contentHashDifference !== 0) return contentHashDifference;
+  const statusDifference = compareCodePoints(left.status, right.status);
+  if (statusDifference !== 0) return statusDifference;
+  return Number(left.tombstone) - Number(right.tombstone);
+}
+
 function statusForFindings(findings: readonly ArtifactRiskConflictFinding[]): "none" | "duplicate" | "possible_overlap" {
   if (findings.length === 0) return "none";
   return findings.some((finding) => finding.reason === "duplicate") ? "duplicate" : "possible_overlap";
@@ -417,6 +494,7 @@ function unavailableResult(): ArtifactRiskConflictResult {
       severity: "blocking",
       reason: "conflict_unavailable",
     }],
+    sourceIdentity: UNAVAILABLE_SOURCE_IDENTITY,
   });
 }
 

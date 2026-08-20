@@ -23,6 +23,7 @@ import {
 } from "./artifact-risk-producer.js";
 
 const capturedAt = "2026-08-20T04:00:00.000Z";
+const conflictSourceIdentity = `sha256:${"1".repeat(64)}`;
 const watermark = {
   bridgeId: "bridge-risk-fixture",
   epochId: "epoch-risk-fixture",
@@ -113,7 +114,11 @@ function authorityAssessment(
 
 class StubConflictPort implements ArtifactRiskConflictPort {
   readonly calls: Array<{ artifact: ArtifactRef; hwCapabilityIds: readonly string[] }> = [];
-  result: ArtifactRiskConflictResult = { status: "none", findings: [] };
+  result: ArtifactRiskConflictResult = {
+    status: "none",
+    findings: [],
+    sourceIdentity: conflictSourceIdentity,
+  };
 
   assess(input: { artifact: ArtifactRef; hwCapabilityIds: readonly string[] }): ArtifactRiskConflictResult {
     this.calls.push(input);
@@ -304,10 +309,12 @@ test("fails closed for blocking and unavailable conflicts", () => {
     {
       status: "duplicate" as const,
       findings: [{ kind: "existing_artifact" as const, severity: "blocking" as const, reason: "existing_artifact" as const }],
+      sourceIdentity: conflictSourceIdentity,
     },
     {
       status: "unavailable" as const,
       findings: [{ kind: "stale_evidence" as const, severity: "warning" as const, reason: "stale_evidence" as const }],
+      sourceIdentity: conflictSourceIdentity,
     },
   ]) {
     const env = environment();
@@ -336,6 +343,7 @@ test("uses a deterministic conflict identity and returns the same immutable row 
     env.conflict.result = {
       status: "possible_overlap",
       findings: [{ kind: "foreign_rule", severity: "warning", reason: "foreign_rule" }],
+      sourceIdentity: `sha256:${"2".repeat(64)}`,
     };
     const changed = env.producer.produce(env.ref);
     assert.notEqual(changed.assessment.conflictInputIdentity, first.assessment.conflictInputIdentity);
@@ -343,6 +351,26 @@ test("uses a deterministic conflict identity and returns the same immutable row 
     assert.equal(env.registry.listAttestations({ kind: "risk-assessment", artifact: env.ref }).length, 2);
   } finally {
     env.close();
+  }
+});
+
+test("strictly rejects a conflict result without a valid opaque source identity", () => {
+  for (const result of [
+    { status: "none", findings: [] },
+    { status: "none", findings: [], sourceIdentity: "sha256:UPPER" },
+    { status: "none", findings: [], sourceIdentity: `sha256:${"0".repeat(63)}` },
+  ]) {
+    const env = environment();
+    try {
+      env.conflict.result = result as never;
+      assert.throws(
+        () => env.producer.produce(env.ref),
+        (error: unknown) => error instanceof ArtifactRiskProducerError && error.code === "conflict_unavailable",
+      );
+      assert.equal(env.registry.listAttestations({ kind: "risk-assessment", artifact: env.ref }).length, 0);
+    } finally {
+      env.close();
+    }
   }
 });
 
@@ -439,9 +467,14 @@ test("replays an older exact risk identity after a newer risk row exists", () =>
     env.conflict.result = {
       status: "possible_overlap",
       findings: [{ kind: "foreign_rule", severity: "warning", reason: "foreign_rule" }],
+      sourceIdentity: `sha256:${"3".repeat(64)}`,
     };
     env.producer.produce(env.ref);
-    env.conflict.result = { status: "none", findings: [] };
+    env.conflict.result = {
+      status: "none",
+      findings: [],
+      sourceIdentity: conflictSourceIdentity,
+    };
     const replay = env.producer.produce(env.ref);
 
     assert.deepEqual(replay, first);

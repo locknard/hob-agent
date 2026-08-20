@@ -64,6 +64,7 @@ export interface ArtifactRiskConflictFinding {
 export interface ArtifactRiskConflictResult {
   readonly status: ArtifactRiskConflictStatus;
   readonly findings: readonly ArtifactRiskConflictFinding[];
+  readonly sourceIdentity: string;
 }
 
 export interface ArtifactRiskConflictQuery {
@@ -426,8 +427,9 @@ function validateAuthority(
 
 function normalizeConflictResult(value: unknown, capabilityIds: readonly string[]): ArtifactRiskConflictResult {
   if (!isPlainObject(value)
-    || !hasExactKeys(value, ["status", "findings"])
+    || !hasExactKeys(value, ["status", "findings", "sourceIdentity"])
     || !isConflictStatus(value.status)
+    || !isConflictSourceIdentity(value.sourceIdentity)
     || !Array.isArray(value.findings)
     || value.findings.length > 20) {
     throw new ArtifactRiskProducerError("conflict_unavailable", "Conflict assessment is invalid");
@@ -448,6 +450,7 @@ function normalizeConflictResult(value: unknown, capabilityIds: readonly string[
   return {
     status: value.status,
     findings: normalized,
+    sourceIdentity: value.sourceIdentity,
   };
 }
 
@@ -555,6 +558,10 @@ function validateBoundedIdentifier(value: unknown, code: "conflict_unavailable")
 
 function isConflictStatus(value: unknown): value is ArtifactRiskConflictStatus {
   return value === "none" || value === "duplicate" || value === "possible_overlap" || value === "unavailable";
+}
+
+function isConflictSourceIdentity(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function isConflictKind(value: unknown): value is ArtifactRiskConflictKind {
