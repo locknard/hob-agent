@@ -122,9 +122,12 @@ must not discover on its own:
    record one structured household review.
 
 That outcome—not another synthetic loop—should decide the next product change.
-Production wiring for governed canonical-journal retention remains P1 before a
-longer unattended deployment, but the explicit operation and bounded quota are
-sufficient for this manual pilot.
+The governed canonical-journal retention coordinator and read-only capacity
+status are now mounted in production without a timer. Before a longer
+unattended deployment, exercise its aggregate local preview and finish the
+remaining incomplete-epoch and proposal-pin invariants before exposing any
+apply operation. The bounded quota remains sufficient for this manual pilot
+and must never trigger automatic deletion.
 
 After every run:
 

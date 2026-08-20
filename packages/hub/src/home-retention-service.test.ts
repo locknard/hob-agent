@@ -241,6 +241,35 @@ test("builds a deterministic policy from durable refs and rejects caller-supplie
   }
 });
 
+test("previews through the durable proposal snapshot without invoking retention apply", async () => {
+  const previewed: IngestJournalRetentionPolicy[] = [];
+  const applied: IngestJournalRetentionPolicy[] = [];
+  const journal = {
+    previewRetention(policy: IngestJournalRetentionPolicy) {
+      previewed.push(policy);
+      return result(policy);
+    },
+    applyRetention(policy: IngestJournalRetentionPolicy) {
+      applied.push(policy);
+      return result(policy);
+    },
+  } as unknown as IngestJournal;
+  const { ctx, proposals, fiber } = await serviceWith([reference], journal);
+  try {
+    const preview = (ctx.homeRetention as unknown as {
+      preview(input: typeof request): IngestJournalRetentionResult;
+    }).preview(request);
+    assert.equal(preview.skippedProposalEvidenceCount, 1);
+    assert.equal(previewed.length, 1);
+    assert.deepEqual(previewed[0]?.proposalEvidence, [reference]);
+    assert.deepEqual(applied, []);
+    assert.deepEqual(proposals.calls, [{ bridgeId: "bridge-a", limit: 1_000 }]);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("allows an empty durable evidence snapshot without inventing refs", async () => {
   const applied: IngestJournalRetentionPolicy[] = [];
   const { ctx, fiber } = await serviceWith([], fakeJournal(applied));
@@ -366,6 +395,8 @@ test("collects only exact durable refs for the current bridge without returning 
   const journal = new SqliteIngestJournal(":memory:");
   appendOld(journal, 1);
   appendOld(journal, 2);
+  journal.markConsistent("bridge-a", { epochId: "epoch-a", lastSeq: 2 });
+  journal.markConsistent("bridge-a", { epochId: "epoch-current", lastSeq: 0 });
   const world = ctx.homeWorld as unknown as StubWorld;
   world.journals.set("bridge-a", journal);
   await ctx.plugin(HomeProposalService, {

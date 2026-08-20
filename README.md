@@ -142,6 +142,20 @@ reports pending identity-governance work only as aggregate counts. Aggregate
 logical journal capacity makes the fail-closed ingest quota visible before an
 unattended pilot; it does not silently prune evidence.
 
+To preview canonical-journal retention without connecting a bridge, loading a
+model, deleting evidence, or writing a retention audit, reuse `HOB_DATA_DIR`
+and `HOB_BRIDGES` and select one configured bridge:
+
+```sh
+export HOB_RETENTION_BRIDGE_ID='ha-main'
+export HOB_RETENTION_REASON='manual aggregate preview before a longer pilot'
+pnpm retain:home
+```
+
+The command prints aggregate candidate/protection counts only. Apply is not
+available from this facade: `--apply` and confirmation variables fail closed
+until incomplete-epoch and cross-database proposal-pin safety is fully proven.
+
 After validation, one explicit paid/model-backed observation can be run without
 enabling the recurring scheduler or Inbox HTTP listener:
 

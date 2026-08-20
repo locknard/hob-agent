@@ -109,9 +109,18 @@ export class RetentionCoordinator {
   }
 
   retain(request: HomeRetentionRequest): IngestJournalRetentionResult {
+    return this.run(request, "apply");
+  }
+
+  preview(request: HomeRetentionRequest): IngestJournalRetentionResult {
+    return this.run(request, "preview");
+  }
+
+  private run(request: HomeRetentionRequest, mode: "preview" | "apply"): IngestJournalRetentionResult {
     const normalized = normalizeRequest(request, this.now);
     const journal = this.journals.journal(normalized.bridgeId);
-    if (journal === undefined || typeof journal.applyRetention !== "function") {
+    const operation = mode === "preview" ? journal?.previewRetention : journal?.applyRetention;
+    if (journal === undefined || typeof operation !== "function") {
       throw new HomeRetentionError("bridge_unavailable", "Retention journal is unavailable");
     }
 
@@ -131,7 +140,7 @@ export class RetentionCoordinator {
             proposalEvidence,
           };
           try {
-            return journal.applyRetention!(policy);
+            return operation.call(journal, policy);
           } catch {
             throw new HomeRetentionError("journal_failure", "Retention journal operation failed");
           }
@@ -182,6 +191,10 @@ export class HomeRetentionService extends Service {
 
   retain(request: HomeRetentionRequest): IngestJournalRetentionResult {
     return this.coordinator.retain(request);
+  }
+
+  preview(request: HomeRetentionRequest): IngestJournalRetentionResult {
+    return this.coordinator.preview(request);
   }
 
   status(): HomeRetentionOperationalStatus {

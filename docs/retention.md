@@ -1,6 +1,9 @@
 # Canonical ingest-journal retention
 
-Status: implemented as an explicit, per-bridge SQLite journal operation.
+Status: implemented as an explicit, per-bridge SQLite journal operation and
+mounted in the production Hub. The local operator facade exposes aggregate
+preview only; apply remains unavailable until incomplete-epoch preservation and
+cross-database proposal-pin races have a separately reviewed solution.
 
 `SqliteIngestJournal.applyRetention(policy)` is the only journal-level
 destructive entry point. It does not run from a timer and it does not infer
@@ -8,12 +11,24 @@ permission to delete history from quota pressure. At this boundary, a caller
 supplies a bounded policy id, operator, reason, and decision timestamp.
 Reusing a policy id fails closed.
 
+`SqliteIngestJournal.previewRetention(policy)` evaluates the same candidate and
+protection decision under a SQLite read-transaction snapshot, but never deletes
+an event, changes logical capacity or coverage, or writes an audit row. Preview
+is informational rather than a reservation. A future apply must use a fresh
+locked decision and may report different counts if bridge evidence, gaps,
+watermarks, or durable proposal pins changed after preview. The local operator
+command rejects every apply flag and confirmation setting. Preview is not
+exposed to the Agent, Inbox HTTP, Skills, plugins, or bridge adapters.
+
 ## Required preservation rules
 
 For the requested bridge, one operation:
 
 - keeps every event in the latest manifest-verified
   `consistentWatermark` epoch through that watermark;
+- keeps every event in an epoch that has never reached manifest-verified
+  consistency; historical consistency is recorded per exact bridge and epoch,
+  and an upgraded database backfills only the currently proven watermark;
 - keeps every event in an epoch with an open `history-gap`;
 - keeps every event named by the caller's durable proposal-evidence
   references (`bridgeId`, `epochId`, and sequence);
@@ -88,7 +103,22 @@ mount it because it has no HomeWorld journals; retention remains unavailable
 there rather than silently falling back to an in-memory or caller-supplied
 journal.
 
+The standalone local operator facade opens only the explicitly configured
+bridge journal and proposal database for the duration of one command. It does
+not start HomeWorld, connect a bridge, load a model, mount DSH, or read event
+payloads for output. Its result projection is aggregate-only and omits the
+internal policy id. The facade cannot apply retention. A future destructive
+operator action must never be invoked automatically during validation,
+startup, quota pressure, or a preview run.
+
 ## Conservative limits in this slice
+
+This policy governs the per-bridge canonical ingest journal only. The separate
+world-model raw-copy retention method does not share these bridge, epoch, gap,
+proposal-pin, or preview guarantees and is not invoked by the operator facade.
+It must remain unavailable as a production maintenance action until it has its
+own reviewed preservation contract; canonical retention must not silently
+chain into it.
 
 The existing rejection, history-gap, and compressed-heartbeat tables do not
 carry a receipt timestamp. This slice therefore never deletes those metadata

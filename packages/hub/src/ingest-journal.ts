@@ -165,6 +165,8 @@ export interface IngestJournal {
   heartbeatIntervals(bridgeId?: string): HeartbeatIntervalRecord[];
   /** Aggregate logical quota only; never returns journal records or household values. */
   capacity?(): JournalCapacityStatus;
+  /** Exact no-write retention decision preview; production SQLite journals implement it. */
+  previewRetention?(policy: IngestJournalRetentionPolicy): IngestJournalRetentionResult;
   applyRetention?(policy: IngestJournalRetentionPolicy): IngestJournalRetentionResult;
   coverage?(bridgeId: string): IngestJournalCoverage;
   retentionAudits?(bridgeId?: string): readonly IngestJournalRetentionAudit[];
@@ -183,6 +185,11 @@ type RetentionEventRow = {
   readonly receivedAt: string;
   readonly bytes: number;
 };
+
+interface RetentionDecision {
+  readonly result: IngestJournalRetentionResult;
+  readonly toDelete: readonly RetentionEventRow[];
+}
 
 const serializedBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
@@ -240,6 +247,10 @@ export class SqliteIngestJournal implements IngestJournal {
       CREATE TABLE IF NOT EXISTS ingest_consistent_watermarks (
         bridge_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, last_seq INTEGER NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS ingest_consistent_epochs (
+        bridge_id TEXT NOT NULL, epoch_id TEXT NOT NULL, last_seq INTEGER NOT NULL,
+        PRIMARY KEY (bridge_id, epoch_id)
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS ingest_retention_audits (
         policy_id TEXT PRIMARY KEY, bridge_id TEXT NOT NULL, applied_at TEXT NOT NULL,
         requested_by TEXT NOT NULL, reason TEXT NOT NULL, evidence_window_start TEXT NOT NULL,
@@ -250,6 +261,8 @@ export class SqliteIngestJournal implements IngestJournal {
         partial_coverage INTEGER NOT NULL
       ) STRICT;
     `);
+    this.db.exec(`INSERT OR IGNORE INTO ingest_consistent_epochs (bridge_id, epoch_id, last_seq)
+      SELECT bridge_id, epoch_id, last_seq FROM ingest_consistent_watermarks;`);
     this.usedBytes = this.readUsedBytes();
     this.ensurePrivateFile();
   }
@@ -383,16 +396,44 @@ export class SqliteIngestJournal implements IngestJournal {
   }
 
   markConsistent(bridgeId: string, watermark: JournalWatermark): void {
-    this.db.prepare(`INSERT INTO ingest_consistent_watermarks (bridge_id, epoch_id, last_seq)
-      VALUES (?, ?, ?)
-      ON CONFLICT(bridge_id) DO UPDATE SET epoch_id = excluded.epoch_id, last_seq = excluded.last_seq`)
-      .run(bridgeId, watermark.epochId, watermark.lastSeq);
-    this.ensurePrivateFile();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`INSERT INTO ingest_consistent_epochs (bridge_id, epoch_id, last_seq)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bridge_id, epoch_id) DO UPDATE SET last_seq = MAX(last_seq, excluded.last_seq)`)
+        .run(bridgeId, watermark.epochId, watermark.lastSeq);
+      this.db.prepare(`INSERT INTO ingest_consistent_watermarks (bridge_id, epoch_id, last_seq)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bridge_id) DO UPDATE SET epoch_id = excluded.epoch_id, last_seq = excluded.last_seq`)
+        .run(bridgeId, watermark.epochId, watermark.lastSeq);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.ensurePrivateFile();
+    }
+  }
+
+  previewRetention(policy: IngestJournalRetentionPolicy): IngestJournalRetentionResult {
+    const validated = validateRetentionPolicy(policy);
+    this.db.exec("BEGIN");
+    try {
+      const decision = this.readRetentionDecision(policy, validated);
+      this.db.exec("ROLLBACK");
+      return decision.result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original bounded preview failure.
+      }
+      throw error;
+    }
   }
 
   applyRetention(policy: IngestJournalRetentionPolicy): IngestJournalRetentionResult {
     const validated = validateRetentionPolicy(policy);
-    const evidenceWindowStart = new Date(Date.parse(policy.requestedAt) - validated.evidenceWindowMs).toISOString();
     const usedBytesBefore = this.usedBytes;
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -402,59 +443,13 @@ export class SqliteIngestJournal implements IngestJournal {
 
       // The lock must cover the complete decision snapshot. A second process
       // cannot commit a new gap/watermark between these reads and deletion.
-      const consistent = this.consistentWatermark(policy.bridgeId);
-      const openGapEpochs = new Set((this.db.prepare(`SELECT DISTINCT epoch_id
-        FROM ingest_history_gaps WHERE bridge_id = ? AND closed = 0`).all(policy.bridgeId) as SqlRow[])
-        .map((row) => String(row.epoch_id)));
-      const rows = this.db.prepare(`SELECT bridge_id, epoch_id, seq, received_at, bytes
-        FROM ingest_events WHERE bridge_id = ? ORDER BY rowid`).all(policy.bridgeId) as SqlRow[];
-      const references = validated.proposalEvidence;
-      const toDelete: RetentionEventRow[] = [];
-      let candidateCount = 0;
-      let skippedRecoveryCount = 0;
-      let skippedHistoryGapCount = 0;
-      let skippedProposalEvidenceCount = 0;
-      let skippedEvidenceWindowCount = 0;
+      const decision = this.readRetentionDecision(policy, validated);
 
-      for (const row of rows) {
-        const receivedAt = String(row.received_at);
-        const receivedAtMs = Date.parse(receivedAt);
-        if (!Number.isFinite(receivedAtMs) || receivedAtMs >= Date.parse(evidenceWindowStart)) {
-          skippedEvidenceWindowCount += 1;
-          continue;
-        }
-        const event: RetentionEventRow = {
-          bridgeId: String(row.bridge_id),
-          epochId: String(row.epoch_id),
-          seq: Number(row.seq),
-          receivedAt,
-          bytes: Number(row.bytes),
-        };
-        candidateCount += 1;
-        if (consistent !== undefined && event.epochId === consistent.epochId && event.seq <= consistent.lastSeq) {
-          skippedRecoveryCount += 1;
-        } else if (openGapEpochs.has(event.epochId)) {
-          skippedHistoryGapCount += 1;
-        } else if (references.some((reference) => (
-          reference.bridgeId === event.bridgeId
-          && reference.epochId === event.epochId
-          && event.seq === reference.seq
-        ))) {
-          skippedProposalEvidenceCount += 1;
-        } else {
-          toDelete.push(event);
-        }
-      }
-
-      for (const event of toDelete) {
+      for (const event of decision.toDelete) {
         this.db.prepare("DELETE FROM ingest_events WHERE bridge_id = ? AND epoch_id = ? AND seq = ?")
           .run(event.bridgeId, event.epochId, event.seq);
       }
-      const bytesDeleted = toDelete.reduce((sum, event) => sum + event.bytes, 0);
-      const coverageFloor = this.readCoverageFloor(policy.bridgeId);
-      const previousPartial = this.db.prepare(`SELECT COALESCE(MAX(partial_coverage), 0) AS partial
-        FROM ingest_retention_audits WHERE bridge_id = ?`).get(policy.bridgeId) as SqlRow;
-      const partialCoverage = Number(previousPartial.partial) !== 0 || toDelete.length > 0;
+      const result = decision.result;
       this.db.prepare(`INSERT INTO ingest_retention_audits
         (policy_id, bridge_id, applied_at, requested_by, reason, evidence_window_start,
          candidate_count, deleted_event_count, skipped_recovery_count, skipped_history_gap_count,
@@ -466,16 +461,16 @@ export class SqliteIngestJournal implements IngestJournal {
         policy.requestedAt,
         policy.requestedBy,
         policy.reason,
-        evidenceWindowStart,
-        candidateCount,
-        toDelete.length,
-        skippedRecoveryCount,
-        skippedHistoryGapCount,
-        skippedProposalEvidenceCount,
-        skippedEvidenceWindowCount,
-        bytesDeleted,
-        coverageFloor ?? null,
-        partialCoverage ? 1 : 0,
+        result.evidenceWindowStart,
+        result.candidateCount,
+        result.deletedEventCount,
+        result.skippedRecoveryCount,
+        result.skippedHistoryGapCount,
+        result.skippedProposalEvidenceCount,
+        result.skippedEvidenceWindowCount,
+        result.bytesDeleted,
+        result.coverageFloor ?? null,
+        result.partialCoverage ? 1 : 0,
       );
       const usedBytesAfter = this.readUsedBytes();
       // Check permissions while rollback is still possible. The commit below
@@ -483,7 +478,82 @@ export class SqliteIngestJournal implements IngestJournal {
       this.ensurePrivateFile();
       this.db.exec("COMMIT");
       this.usedBytes = usedBytesAfter;
-      return {
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure; SQLite will reject any future write if
+        // the transaction could not be rolled back.
+      }
+      this.usedBytes = usedBytesBefore;
+      throw error;
+    }
+  }
+
+  private readRetentionDecision(
+    policy: IngestJournalRetentionPolicy,
+    validated: ReturnType<typeof validateRetentionPolicy>,
+  ): RetentionDecision {
+    const evidenceWindowStart = new Date(Date.parse(policy.requestedAt) - validated.evidenceWindowMs).toISOString();
+    const consistent = this.consistentWatermark(policy.bridgeId);
+    const openGapEpochs = new Set((this.db.prepare(`SELECT DISTINCT epoch_id
+      FROM ingest_history_gaps WHERE bridge_id = ? AND closed = 0`).all(policy.bridgeId) as SqlRow[])
+      .map((row) => String(row.epoch_id)));
+    const consistentEpochs = new Set((this.db.prepare(`SELECT epoch_id
+      FROM ingest_consistent_epochs WHERE bridge_id = ?`).all(policy.bridgeId) as SqlRow[])
+      .map((row) => String(row.epoch_id)));
+    const rows = (this.db.prepare(`SELECT bridge_id, epoch_id, seq, received_at, bytes
+      FROM ingest_events WHERE bridge_id = ? ORDER BY rowid`).all(policy.bridgeId) as SqlRow[]).map((row) => ({
+      bridgeId: String(row.bridge_id),
+      epochId: String(row.epoch_id),
+      seq: Number(row.seq),
+      receivedAt: String(row.received_at),
+      bytes: Number(row.bytes),
+    }));
+    const toDelete: RetentionEventRow[] = [];
+    const proposalEvidenceKeys = new Set(validated.proposalEvidence.map((reference) => (
+      `${reference.bridgeId}\u0000${reference.epochId}\u0000${reference.seq}`
+    )));
+    let candidateCount = 0;
+    let skippedRecoveryCount = 0;
+    let skippedHistoryGapCount = 0;
+    let skippedProposalEvidenceCount = 0;
+    let skippedEvidenceWindowCount = 0;
+
+    for (const event of rows) {
+      const receivedAtMs = Date.parse(event.receivedAt);
+      if (!Number.isFinite(receivedAtMs) || receivedAtMs >= Date.parse(evidenceWindowStart)) {
+        skippedEvidenceWindowCount += 1;
+        continue;
+      }
+      candidateCount += 1;
+      if (consistent !== undefined && event.epochId === consistent.epochId && event.seq <= consistent.lastSeq) {
+        skippedRecoveryCount += 1;
+      } else if (openGapEpochs.has(event.epochId)) {
+        skippedHistoryGapCount += 1;
+      } else if (!consistentEpochs.has(event.epochId)) {
+        skippedRecoveryCount += 1;
+      } else if (proposalEvidenceKeys.has(`${event.bridgeId}\u0000${event.epochId}\u0000${event.seq}`)) {
+        skippedProposalEvidenceCount += 1;
+      } else {
+        toDelete.push(event);
+      }
+    }
+    const deletedKeys = new Set(toDelete.map((event) => `${event.epochId}\u0000${event.seq}`));
+    const retainedTimes = rows
+      .filter((event) => !deletedKeys.has(`${event.epochId}\u0000${event.seq}`))
+      .map((event) => event.receivedAt)
+      .filter((receivedAt) => Number.isFinite(Date.parse(receivedAt)))
+      .sort((left, right) => Date.parse(left) - Date.parse(right));
+    const coverageFloor = retainedTimes[0];
+    const previousPartial = this.db.prepare(`SELECT COALESCE(MAX(partial_coverage), 0) AS partial
+      FROM ingest_retention_audits WHERE bridge_id = ?`).get(policy.bridgeId) as SqlRow;
+    const bytesDeleted = toDelete.reduce((sum, event) => sum + event.bytes, 0);
+    const partialCoverage = Number(previousPartial.partial) !== 0 || toDelete.length > 0;
+    return {
+      toDelete,
+      result: {
         policyId: policy.policyId,
         bridgeId: policy.bridgeId,
         evidenceWindowStart,
@@ -496,17 +566,8 @@ export class SqliteIngestJournal implements IngestJournal {
         bytesDeleted,
         ...(coverageFloor === undefined ? {} : { coverageFloor }),
         partialCoverage,
-      };
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {
-        // Preserve the original failure; SQLite will reject any future write if
-        // the transaction could not be rolled back.
-      }
-      this.usedBytes = usedBytesBefore;
-      throw error;
-    }
+      },
+    };
   }
 
   coverage(bridgeId: string): IngestJournalCoverage {
