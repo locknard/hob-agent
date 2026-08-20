@@ -329,9 +329,17 @@ opaque inputs to fresh relevant bridge watermarks, and an unmounted
 authority, and Hub-private conflict input validation. The unmounted
 `ArtifactRiskConflictSource` rebinds the exact approved Proposal conflict check
 and scans a bounded read-only Artifact Registry view; incomplete scans and
-source mismatches stay unavailable. Root production coordination and fresh
-current-catalog conflict refresh are still absent. Agent, Inbox, bridge, and
-plugin contexts must remain unable to discover that mutation seam. M3c
+source mismatches stay unavailable. A required opaque source identity binds the
+full checked Proposal conflict input and every consulted Artifact row, so a
+zero-finding refresh is not mistaken for the previous catalog/Registry cut.
+An unmounted `ArtifactMutationCoordinator` now sequences exact Artifact,
+evidence, authority, and risk producers and returns a deeply frozen
+metadata-only receipt only after same-run dependencies agree. Earlier immutable
+rows from a failed run remain explicitly incomplete and require an explicit
+idempotent retry; no startup replay or outbox is introduced before an external
+side effect exists. Root production invocation and fresh current-catalog
+conflict refresh are still absent. Agent, Inbox, bridge, and plugin contexts
+must remain unable to discover that mutation seam. M3c
 compiler/dry-run and the action plane remain later, pure-read or unimplemented
 work; device writes remain unavailable.
 

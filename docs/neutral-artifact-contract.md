@@ -12,7 +12,8 @@
 > evidence+authority 的 exact cross-check）和私有 authority candidate registry core 已实现并
 > 测试。Artifact Registry 的只读查询已由 HomeArtifactService 接入生产；unmounted
 > HomeWorldAuthorityBindingSource、ArtifactRiskConflictSource 与 RiskProducer core 已实现，
-> fresh current-catalog conflict refresh、private coordinator 和 production mutation wiring 尚未接入。
+> unmounted private coordinator 已能顺序生成并交叉校验完整 receipt；fresh current-catalog
+> conflict refresh 和 production mutation wiring 尚未接入。
 > `ActionAuthorityConfiguration` 的 Hub-private projection 现在要求 `configIdentity` +
 > `configRevision`；compiler、dry-run、approval ticket 和执行器仍未实现。
 >
@@ -455,10 +456,14 @@ candidate lifecycle 和 metadata-only audit。未挂载的 `HomeWorldAuthorityBi
 未挂载的 `ArtifactRiskProducer` 只消费精确 persisted evidence、authority 与 Hub-private
 conflict input。未挂载的 `ArtifactRiskConflictSource` 从 exact approved Proposal 的冻结
 conflict check 与 bounded Artifact Registry scan 产生 closed findings；任何截断或 source
-mismatch 都保持 unavailable。fresh current-catalog conflict refresh、private production
-coordinator 和 mutation composition 尚未接入。Agent、Inbox 和 bridge 只通过窄的 typed
-service 接口访问。插件如果未来参与，只能提交 proposal/compiler candidate，不能拥有
-registry 或 audit。
+mismatch 都保持 unavailable。它生成的 opaque source identity 绑定完整 Proposal conflict
+input 和本次 scan 的每一个 Artifact row；即使 findings 仍为空，输入变化也会刷新 risk
+identity。fresh current-catalog conflict refresh、private coordinator 的 production invocation
+和 mutation composition 尚未接入。当前 unmounted `ArtifactMutationCoordinator` 只接受 exact approved
+Proposal identity 或 exact ArtifactRef，顺序调用 producer，并在 same-run risk dependencies
+与 receipt identity 全部一致后才返回 metadata-only success。Agent、Inbox 和 bridge 只通过
+窄的 typed service 接口访问。插件如果未来参与，只能提交 proposal/compiler candidate，
+不能拥有 registry 或 audit。
 
 ### 5.2 Lifecycle states
 
@@ -491,6 +496,14 @@ M3b 只允许 `draft`、`superseded`/tombstone 及对应的 non-applying audit�
 - `superseded`、policy revoke、evidence stale、authority rebind 都会阻止旧 revision 或旧
   attestation 进入新的 approval ticket；不自动迁移 grant、route 或 postcondition。旧 ticket
   仍必须失效并要求新的 Hub assessment 和人工审批，不能因为 revision 未变而复活。
+
+M3b 的私有协调器保持同步且没有外部副作用，因此不引入通用 outbox 或跨 Proposal/Artifact
+SQLite 的伪原子事务。每一个 immutable row 与对应 audit 仍在所属 Registry transaction 内
+原子提交；协调器只有在 evidence、authority、risk 的 exact same-run references 全部一致时
+才返回完整 receipt。中途失败可以留下可识别但不完整的 immutable rows，它们不会进入
+approval/compile 状态，也不会在启动时自动继续；只允许显式 Hub command 通过 producer-owned
+idempotency 重试。未来第一次加入异步远端副作用时，再单独设计 durable outbox/claim，而不
+把当前本地 assessment 链伪装成一次跨库事务。
 
 ## 6. Compiler input/output（M3c seam）
 

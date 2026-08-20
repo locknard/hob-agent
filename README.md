@@ -212,10 +212,15 @@ gap-free, binding-scoped opaque inputs without exposing native routes, and an
 unmounted `ArtifactRiskProducer` applies the fixed Hub risk policy only after
 exact evidence, authority, and conflict checks. An unmounted source-bound
 conflict reader maps the approved Proposal's checked foreign-rule evidence and
-bounded existing Artifact overlap into that closed conflict input. Fresh
-current-catalog conflict refresh and private production coordination remain
-unavailable. Compilation, simulation, approval tickets, and execution also
-remain unavailable; an approved proposal is not an installed automation.
+bounded existing Artifact overlap into that closed conflict input. Its opaque
+source identity changes when the checked rule input or any scanned Artifact row
+changes, even when the resulting findings remain empty. An unmounted
+Hub-private coordinator now exposes only exact approved-Proposal production and
+exact Artifact assessment refresh commands; it returns a metadata-only receipt
+only after evidence, authority, and risk rows agree. Fresh current-catalog
+conflict refresh and any production invocation remain unavailable. Compilation,
+simulation, approval tickets, and execution also remain unavailable; an
+approved proposal is not an installed automation.
 
 Long-running sessions use the official DSH compaction engine with its one
 supported summarizer hook replaced by a household checkpoint template; the

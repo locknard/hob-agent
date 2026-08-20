@@ -102,7 +102,9 @@ authority selectors; it exposes neither native routes nor control. The next
 integration boundary is private production coordination and fresh
 current-catalog conflict refresh, not a public mutation service. The initial
 unmounted conflict source already binds the approved Proposal's checked rule
-evidence and bounded existing Artifact overlap into the fixed risk producer.
+evidence and bounded existing Artifact overlap into the fixed risk producer;
+the unmounted coordinator can sequence this assessment chain but is not
+discoverable or invokable from the production root.
 
 Before M3d ticket claim, Hub resolves the latest candidate again to a final
 route and checks the same binding/config generation. The final route never
