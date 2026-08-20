@@ -11,6 +11,7 @@ import {
 
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { createHomeAgentRuntime } from "./home-agent-runtime.js";
+import { SyntheticMediaCatalogProvider } from "./home-media-services.js";
 import { SqliteProposalStore } from "./proposal-store.js";
 
 function launchEnvironment() {
@@ -47,8 +48,9 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 6), [
+  assert.deepEqual(pluginOrder.slice(0, 7), [
     "HomeWorldService",
+    "HomeMediaPlayerService",
     "HomeObservationAuditService",
     "HomeProposalService",
     "HomeArtifactService",
@@ -57,6 +59,10 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   ]);
   assert.equal(runtime.context.root, runtime.context);
   assert.equal(runtime.context.homeWorld.name, "homeWorld");
+  assert.equal(runtime.context.homeMediaPlayers.name, "homeMediaPlayers");
+  assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "get_home_media_players"), true);
+  assert.equal(runtime.context.homeMediaCatalog, undefined);
+  assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "search_home_media"), false);
   assert.equal(runtime.context.homeProposals.name, "homeProposals");
   assert.equal(runtime.context.homeObservationAudit.name, "homeObservationAudit");
   assert.equal(runtime.context.homeArtifacts.capabilities().canExecute, false);
@@ -70,6 +76,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
 
   assert.equal(runtime.status, "stopped");
   assert.equal(runtime.context.homeWorld, undefined);
+  assert.equal(runtime.context.homeMediaPlayers, undefined);
   assert.equal(runtime.context.homeProposals, undefined);
   assert.equal(runtime.context.homeObservationAudit, undefined);
   assert.equal(runtime.context.homeArtifacts, undefined);
@@ -78,6 +85,46 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
   await runtime.stop();
+});
+
+test("mounts an explicit synthetic media catalog before the DSH Agent", async () => {
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    mediaCatalog: {
+      tenantId: "household-test",
+      catalogId: "synthetic-test",
+      generation: 1,
+      sourceLabel: "Synthetic household library",
+      mediaRefTtlMs: 60_000,
+      maxQueryChars: 128,
+      maxResults: 3,
+      provider: new SyntheticMediaCatalogProvider([
+        { providerItemId: "jazz-1", title: "Late Night Jazz", kind: "playlist", playable: true },
+      ]),
+    },
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "media-runtime-test",
+    },
+  });
+  await runtime.start();
+  try {
+    assert.equal(runtime.context.homeMediaCatalog.name, "homeMediaCatalog");
+    assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "search_home_media"), true);
+    const result = await runtime.context.tools.execute({
+      callId: "synthetic-jazz-search" as never,
+      name: "search_home_media",
+      arguments: { query: "jazz", kinds: ["playlist"], limit: 1 },
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.isError, false);
+    assert.match(result.content.map((item) => "text" in item ? item.text : "").join(" "), /Late Night Jazz/);
+  } finally {
+    await runtime.stop();
+  }
+  assert.equal(runtime.context.homeMediaCatalog, undefined);
 });
 
 test("mounts the explicit retention coordinator without starting a timer", async () => {

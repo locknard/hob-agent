@@ -171,6 +171,30 @@ function respondToCoverBootstrap(
   }
 }
 
+function respondToMediaBootstrap(
+  socket: FakeSocket,
+  attributes: Record<string, unknown> = {},
+): void {
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  for (const command of commands) {
+    const result = command.type === "get_states"
+      ? [{
+          entity_id: "media_player.room",
+          state: "playing",
+          attributes,
+          last_updated: "2026-08-18T00:00:01.000Z",
+        }]
+      : command.type === "config/entity_registry/list"
+        ? [{ id: "entity-media-1", entity_id: "media_player.room", device_id: "device-media-1", name: "Room speaker" }]
+        : command.type === "config/device_registry/list"
+          ? [{ id: "device-media-1", name: "Room speaker" }]
+          : [];
+    socket.receive({ id: command.id, type: "result", success: true, result });
+  }
+}
+
 test("registers a separate strict cover schema and projects an integer position", async () => {
   assert.equal(
     HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH,
@@ -183,7 +207,7 @@ test("registers a separate strict cover schema and projects an integer position"
   const registrations = HOME_ASSISTANT_ADAPTER_REGISTRATION.capabilitySchemas;
   assert.deepEqual(
     registrations.map((registration) => [registration.schema, registration.majorVersion]),
-    [["ha.entity", 1], ["ha.cover", 1]],
+    [["ha.entity", 1], ["ha.cover", 1], ["ha.media-player", 1]],
   );
   const coverRegistration = registrations.find((registration) => registration.schema === "ha.cover");
   assert.notEqual(coverRegistration, undefined);
@@ -222,6 +246,57 @@ test("registers a separate strict cover schema and projects an integer position"
     unknownAttributeCount: 1,
   });
   assert.equal(JSON.stringify(state).includes("vendor_field"), false);
+});
+
+test("registers an exact read-only media-player schema with bounded volume state", async () => {
+  const registration = HOME_ASSISTANT_ADAPTER_REGISTRATION.capabilitySchemas
+    .find((candidate) => candidate.schema === "ha.media-player");
+  assert.notEqual(registration, undefined);
+  assert.equal(registration!.attrsSchema.safeParse({
+    state: "playing",
+    volumeLevel: 0.15,
+    available: true,
+    unknownAttributeCount: 2,
+  }).success, true);
+  assert.equal(registration!.attrsSchema.safeParse({ state: "playing", volumeLevel: -0.1 }).success, false);
+  assert.equal(registration!.attrsSchema.safeParse({ state: "playing", volumeLevel: 1.1 }).success, false);
+
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const events = await readSnapshot(adapter, socket, () => respondToMediaBootstrap(socket, {
+    volume_level: 0.15,
+    available: true,
+    supported_features: 15_233,
+    media_content_id: "private-provider-uri",
+  }));
+  const descriptor = (events[1]!.event as Extract<BridgeEvent, { kind: "device-upserted" }>).device;
+  assert.deepEqual(descriptor.capabilities[0], {
+    nativeInstanceId: "entity-media-1",
+    schema: "ha.media-player",
+    schemaVersion: "1.0.0",
+    semanticKind: "media",
+  });
+  const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+  assert.deepEqual(state.attrs, {
+    state: "playing",
+    volumeLevel: 0.15,
+    available: true,
+    unknownAttributeCount: 2,
+  });
+  assert.equal(JSON.stringify(state).includes("private-provider-uri"), false);
+  assert.equal(JSON.stringify(state).includes("15233"), false);
+});
+
+test("omits an invalid optional HA media volume instead of dropping the state", async () => {
+  for (const volumeLevel of [-0.1, 1.1, "0.15", null] as readonly unknown[]) {
+    const socket = new FakeSocket();
+    const { adapter } = createAdapter(socket);
+    const events = await readSnapshot(adapter, socket, () => respondToMediaBootstrap(socket, {
+      volume_level: volumeLevel,
+    }));
+    const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+    assert.deepEqual(state.attrs, { state: "playing" });
+  }
 });
 
 test("normalizes cover boundary positions without rounding and reports explicit support", async () => {

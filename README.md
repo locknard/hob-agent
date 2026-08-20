@@ -178,6 +178,13 @@ bounded read-only `search_home_media` tool. Deployments without a catalog keep
 the tool absent. Its model-facing projection removes expiry and all
 provider-native fields; `mediaRef` and `playable` remain discovery hints, not
 playback authority.
+The production Hub also mounts an authority-selected, neutral media-player
+inventory and exposes it through the read-only `get_home_media_players` DSH
+tool. The HA adapter uses a strict additive `ha.media-player@1` read schema;
+reported volume is evidence only, same-label endpoints remain distinct, and no
+playback or volume operation is introduced. A deterministic synthetic catalog
+can be mounted explicitly in component/runtime tests but is never enabled by
+the production launch parser.
 
 For behavioral evidence, keep the full runtime connected and use **Observe
 now** in its authenticated Inbox. This starts one paid turn through the same

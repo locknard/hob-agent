@@ -38,6 +38,16 @@ class StubMediaCatalogService extends Service {
   }
 }
 
+class StubMediaPlayerService extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeMediaPlayers");
+  }
+
+  list() {
+    return { players: [] };
+  }
+}
+
 class RecordingAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = [];
 
@@ -202,6 +212,21 @@ test("mounts media search only when a neutral media catalog is explicitly availa
   await withCatalog.fiber.dispose();
 });
 
+test("mounts player discovery only when a neutral player inventory is available", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  await ctx.plugin(StubMediaPlayerService);
+  const fiber = await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter: new RecordingAdapter(),
+  });
+  assert.equal(ctx.tools.schemas().some((schema) => schema.name === "get_home_media_players"), true);
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("mounts the sole production Agent through the DSH runtime", async () => {
   const ctx = new Context();
   await ctx.plugin(StubWorldService);
@@ -282,6 +307,8 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
 
   assert.equal(adapter.requests.length, 1);
   assert.match(adapter.requests[0]?.system ?? "", /cannot control devices/i);
+  assert.match(adapter.requests[0]?.system ?? "", /same.*media.*label.*not.*same.*endpoint/is);
+  assert.match(adapter.requests[0]?.system ?? "", /mediaRef.*does not grant.*authority/is);
   assert.match(adapter.requests[0]?.system ?? "", /window_before_baseline.*not observed/is);
   assert.match(adapter.requests[0]?.system ?? "", /prefer one exact hub device.*semantic kinds/is);
   assert.match(adapter.requests[0]?.system ?? "", /calm, reversible household suggestions/i);

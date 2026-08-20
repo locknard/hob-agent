@@ -46,6 +46,11 @@ import {
   mountDshHomeAgent,
   type DshHomeAgentCompositionOptions,
 } from "@hob-agent/agent-layer/composition";
+import {
+  HomeMediaCatalogService,
+  HomeMediaPlayerService,
+  type HomeMediaCatalogServiceOptions,
+} from "./home-media-services.js";
 
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
@@ -54,6 +59,8 @@ export interface HomeAgentRuntimeOptions {
   readonly homeAuthorityCandidates?: AuthorityCandidateRegistryOptions;
   readonly homeObservationAudit?: HomeObservationAuditServiceOptions;
   readonly homeAdvice?: HomeAdviceServiceOptions;
+  /** Explicit read-only media catalog. Omit to keep catalog search unavailable. */
+  readonly mediaCatalog?: HomeMediaCatalogServiceOptions;
   readonly inboxHttp?: ProposalInboxHttpOptions;
   readonly observation?: HomeObservationSchedulerOptions;
   readonly agent: DshHomeAgentCompositionOptions;
@@ -99,6 +106,7 @@ export class HomeAgentRuntime {
         this.options.homeAuthorityCandidates ?? { path: ":memory:" },
       );
       await this.context.plugin(HomeWorldService, this.options.homeWorld);
+      await this.context.plugin(HomeMediaPlayerService);
       await this.context.plugin(
         HomeObservationAuditService,
         this.options.homeObservationAudit ?? { path: ":memory:" },
@@ -123,6 +131,9 @@ export class HomeAgentRuntime {
       });
       await this.preparationRunner.start();
       await this.context.plugin(HomeRetentionService);
+      if (this.options.mediaCatalog !== undefined) {
+        await this.context.plugin(HomeMediaCatalogService, this.options.mediaCatalog);
+      }
       await mountDshHomeAgent(this.context, this.options.agent);
       await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
       await this.context.plugin(HomeObservationSchedulerService, this.options.observation ?? {});

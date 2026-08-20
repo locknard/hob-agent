@@ -398,6 +398,8 @@ export const HOME_ASSISTANT_ENTITY_SCHEMA = "ha.entity";
 export const HOME_ASSISTANT_ENTITY_SCHEMA_VERSION = "1.0.0";
 export const HOME_ASSISTANT_COVER_SCHEMA = "ha.cover";
 export const HOME_ASSISTANT_COVER_SCHEMA_VERSION = "1.0.0";
+export const HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA = "ha.media-player";
+export const HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA_VERSION = "1.0.0";
 /** Home Assistant's CoverEntityFeature.SET_POSITION bit. */
 export const HOME_ASSISTANT_COVER_SET_POSITION_FEATURE = 4;
 export const HOME_ASSISTANT_CORE_VERSION = "6.5.0";
@@ -481,6 +483,19 @@ export const HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH = `sha256:${createHash("
   .update(HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_FORM)
   .digest("hex")}`;
 
+const HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA_CANONICAL_FORM = [
+  "schema=ha.media-player",
+  "majorVersion=1",
+  "state=string",
+  "volumeLevel=number[0,1]",
+  "available=boolean",
+  "unknownAttributeCount=number",
+].join("|");
+
+export const HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA_CANONICAL_HASH = `sha256:${createHash("sha256")
+  .update(HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA_CANONICAL_FORM)
+  .digest("hex")}`;
+
 const homeAssistantEntityAttrsSchema = z
   .object({
     state: z.string(),
@@ -506,6 +521,15 @@ const homeAssistantCoverAttrsSchema = z
   })
   .strict();
 
+const homeAssistantMediaPlayerAttrsSchema = z
+  .object({
+    state: z.string(),
+    volumeLevel: z.number().finite().min(0).max(1).optional(),
+    available: z.boolean().optional(),
+    unknownAttributeCount: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
 export const HOME_ASSISTANT_ADAPTER_REGISTRATION: ContractAdapterRegistration<HomeAssistantAdapterConfig> = {
   adapterType: HOME_ASSISTANT_ADAPTER_TYPE,
   configSchema: homeAssistantConfigSchema,
@@ -523,6 +547,11 @@ export const HOME_ASSISTANT_ADAPTER_REGISTRATION: ContractAdapterRegistration<Ho
     majorVersion: 1,
     attrsSchema: homeAssistantCoverAttrsSchema,
     canonicalHash: HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH,
+  }, {
+    schema: HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA,
+    majorVersion: 1,
+    attrsSchema: homeAssistantMediaPlayerAttrsSchema,
+    canonicalHash: HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA_CANONICAL_HASH,
   }]),
   factory: (context) => new HomeAssistantBridgeAdapter(context),
 };
@@ -968,10 +997,15 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
     const capabilities = bindings.map((binding) => {
       const semanticKind = homeAssistantSemanticKind(binding.entityId);
       const cover = isHomeAssistantCoverEntity(binding.entityId);
+      const mediaPlayer = isHomeAssistantMediaPlayerEntity(binding.entityId);
       return {
         nativeInstanceId: binding.nativeInstanceId,
-        schema: cover ? HOME_ASSISTANT_COVER_SCHEMA : HOME_ASSISTANT_ENTITY_SCHEMA,
-        schemaVersion: cover ? HOME_ASSISTANT_COVER_SCHEMA_VERSION : HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
+        schema: cover
+          ? HOME_ASSISTANT_COVER_SCHEMA
+          : mediaPlayer ? HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA : HOME_ASSISTANT_ENTITY_SCHEMA,
+        schemaVersion: cover
+          ? HOME_ASSISTANT_COVER_SCHEMA_VERSION
+          : mediaPlayer ? HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA_VERSION : HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
         ...(semanticKind === undefined ? {} : { semanticKind }),
         ...(binding.nativeSpaceId === undefined
           ? {}
@@ -1043,6 +1077,11 @@ function isHomeAssistantCoverEntity(entityId: string): boolean {
   return separator > 0 && entityId.slice(0, separator) === "cover";
 }
 
+function isHomeAssistantMediaPlayerEntity(entityId: string): boolean {
+  const separator = entityId.indexOf(".");
+  return separator > 0 && entityId.slice(0, separator) === "media_player";
+}
+
 function projectDeviceIdentityClaims(raw: Record<string, unknown>): readonly ContractIdentityClaim[] {
   const claims: ContractIdentityClaim[] = [];
   const seen = new Set<string>();
@@ -1093,7 +1132,9 @@ function projectNativeState(nativeState: HomeAssistantNativeStateEvent, binding:
   if (nativeState.entityId !== binding.entityId || nativeState.state.trim() === "") return undefined;
   const attrs = isHomeAssistantCoverEntity(binding.entityId)
     ? projectCoverAttributes(nativeState.state, nativeState.attrs)
-    : projectKnownAttributes(nativeState.state, nativeState.attrs);
+    : isHomeAssistantMediaPlayerEntity(binding.entityId)
+      ? projectMediaPlayerAttributes(nativeState.state, nativeState.attrs)
+      : projectKnownAttributes(nativeState.state, nativeState.attrs);
   return {
     nativeId: binding.nativeId,
     nativeInstanceId: binding.nativeInstanceId,
@@ -1137,6 +1178,22 @@ function projectCoverAttributes(
 function normalizeCoverPosition(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > 100) return undefined;
   return value / 100;
+}
+
+function projectMediaPlayerAttributes(
+  state: string,
+  attributes: Record<string, unknown>,
+): Record<string, string | number | boolean | null> {
+  const projected: Record<string, string | number | boolean | null> = { state };
+  const knownKeys = new Set(["volume_level", "available"]);
+  const volume = attributes.volume_level;
+  if (typeof volume === "number" && Number.isFinite(volume) && volume >= 0 && volume <= 1) {
+    projected.volumeLevel = volume;
+  }
+  if (typeof attributes.available === "boolean") projected.available = attributes.available;
+  const unknownAttributeCount = Object.keys(attributes).filter((key) => !knownKeys.has(key)).length;
+  if (unknownAttributeCount > 0) projected.unknownAttributeCount = unknownAttributeCount;
+  return projected;
 }
 
 function coverSetLevelSupported(value: unknown): boolean | undefined {

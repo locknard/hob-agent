@@ -68,6 +68,22 @@ Player control and media discovery are separate capabilities:
 - `mediaCatalog@1` is a read-only catalog provider. It searches an authorized
   service or local library and returns bounded neutral candidates.
 
+The current HA adapter now declares an additive exact `ha.media-player@1`
+read schema for `semanticKind: media`. It carries only the normalized playback
+state, optional `[0,1]` reported volume, optional availability, and an unknown
+attribute count. HA feature masks, entity IDs, services, content IDs, and
+provider URIs remain adapter-private. Invalid optional volume data is omitted
+without dropping an otherwise usable state event.
+
+The Hub mounts `homeMediaPlayers` over the authority-selected HomeWorld read
+model and exposes a paged DSH `get_home_media_players` tool. A player entry has
+only `hwCapabilityId`, `hwId`, zero or more neutral spaces, an untrusted display
+label, normalized availability/playback state, and reported volume evidence.
+Reported volume does not assert that volume control is supported or authorized.
+Equal labels remain separate candidates because room names and display names
+are not identities. Stale or non-valid HomeWorld devices remain discoverable
+but their availability, playback state, and volume are projected as unknown.
+
 The initial neutral media kinds are `artist`, `album`, `track`, `playlist`,
 `radio`, `audiobook`, `podcast`, `episode`, and `genre`. Search results carry an
 explicit `playable` flag because a useful discovery result is not necessarily a
@@ -144,6 +160,45 @@ trusted Music Assistant adapter keeps them behind the Hub-issued `mediaRef` and
 player binding. Search results remain candidates; compatibility between a
 candidate and the selected player route is revalidated privately before an
 action ticket is issued.
+
+The neutral contract intentionally adopts only a reviewed subset of the Music
+Assistant model:
+
+- MA `MediaType` values `artist`, `album`, `track`, `playlist`, `radio`,
+  `audiobook`, `podcast`, and `genre` map directly. `podcast_episode` maps to
+  neutral `episode`. Provider folders, announcements, flow streams, audio
+  sources, and sound effects are not silently treated as ordinary playable
+  catalog results; each needs a separate product and policy decision.
+- MA `ProviderMapping`, item URI, provider instance, image path, and external
+  ids remain adapter-private. A Hub `mediaRef` represents one time-bounded
+  reviewed candidate, not a stable copy of an MA URI.
+- MA `Player` supplies useful state evidence. MA `OutputProtocol` confirms that
+  one physical output can have several routes. The neutral player identity is
+  therefore separate from its adapter-private routes. A route is selected and
+  revalidated during preparation; route ids and protocol priorities are not
+  offered to the model as alternate device identities.
+- MA feature flags describe what a route reports it can do. They do not grant
+  authority. A Hub operation is available only when the versioned neutral
+  contract, current selected route, household policy, and approval state all
+  permit it.
+
+Queue semantics use an explicit, lossless subset of MA `QueueOption`:
+
+| Neutral `queueMode` | Music Assistant adapter mapping | Meaning |
+| --- | --- | --- |
+| `replace_and_play` | `REPLACE` | Replace the whole queue and start the new selection. |
+| `play_next` | `NEXT` | Insert after the currently playing or buffered item. |
+| `add_to_queue` | `ADD` | Append according to the queue's current ordering rules. |
+
+MA `PLAY` inserts at the current position and starts immediately; it is not an
+alias for `REPLACE`. MA `REPLACE_NEXT` also has distinct destructive semantics.
+Neither operation is exposed by the first neutral contract. An adapter must
+fail closed instead of approximating either with a supported mode.
+
+MA browse trees, recommendations, current-media detail, and queue inspection
+are useful future read models, but they should not enlarge `search_home_media`
+implicitly. They require separate bounded projections and opaque cursors so a
+model never receives a provider path, raw current-media URI, or queue id.
 
 For the first real integration, a direct, explicitly configured Music
 Assistant client is preferred over converting a search into an arbitrary Home
@@ -255,11 +310,13 @@ the result is uncertain and does not retry automatically.
    cancellation, captions, optional TTS, and one DSH advice turn. This remains
    non-applying and can coexist with the Phase 0 document workflow only as an
    explicitly bounded experiment, not as a general chat runtime.
-3. **V2 — media discovery:** the Hub-owned `mediaCatalog@1` boundary and
-   conditional DSH read-only search tool are now in place. Next add neutral
-   player inventory and a synthetic provider. After the Phase 0 exit gate, add
-   an explicitly configured Music Assistant integration. Show choices and an
-   exact pending action, including queue behavior, but do not invoke a player.
+3. **V2 — media discovery:** the Hub-owned `mediaCatalog@1` boundary,
+   authority-selected neutral player inventory, HA exact read schema, two DSH
+   read-only tools, and an explicitly mounted synthetic provider are now in
+   place. The synthetic provider is never a production default or a Bridge
+   adapter. After the Phase 0 exit gate, add an explicitly configured Music
+   Assistant integration. Show choices and an exact pending action, including
+   queue behavior, but do not invoke a player.
 4. **V3 — governed playback:** after the real-household and action-plane entry
    gates, add `play_media` to the exact approval-ticket, executor,
    postcondition, and audit path. Start with one low-risk, reversible route and
