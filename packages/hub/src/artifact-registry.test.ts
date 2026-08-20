@@ -73,7 +73,13 @@ function content(target = "hwc-cover-1"): ArtifactRevision["content"] {
 
 function artifact(
   revision = 1,
-  options: { readonly artifactId?: string; readonly title?: string; readonly target?: string } = {},
+  options: {
+    readonly artifactId?: string;
+    readonly title?: string;
+    readonly target?: string;
+    readonly proposalId?: string;
+    readonly proposalRevision?: number;
+  } = {},
 ): ArtifactRevision {
   return createArtifactRevision({
     schemaVersion: "1",
@@ -82,7 +88,10 @@ function artifact(
     revision,
     title: options.title ?? "Morning comfort",
     summary: "A bounded reversible level change.",
-    sourceProposal: { proposalId: "proposal-fixture", proposalRevision: 2 },
+    sourceProposal: {
+      proposalId: options.proposalId ?? "proposal-fixture",
+      proposalRevision: options.proposalRevision ?? 2,
+    },
     content: content(options.target),
     createdAt: "2026-08-20T01:00:00.000Z",
   });
@@ -1083,6 +1092,126 @@ test("finds an exact assessment identity without depending on the bounded histor
       (error: unknown) => error instanceof ArtifactRegistryError && error.code === "invalid_input",
     );
   });
+});
+
+test("finds one exact current source proposal without scanning unrelated history", () => {
+  withRegistry("source-proposal-exact", (registry) => {
+    const superseded = registry.createDraft({
+      artifact: artifact(1, {
+        artifactId: "artifact-source-superseded",
+        proposalId: "proposal-source-target",
+      }),
+      idempotencyKey: "idem-source-superseded",
+    });
+    registry.markSuperseded({
+      artifactId: superseded.artifact.artifactId,
+      revision: superseded.artifact.revision,
+      idempotencyKey: "idem-source-supersede",
+    });
+
+    for (let index = 0; index <= 200; index += 1) {
+      registry.createDraft({
+        artifact: artifact(1, {
+          artifactId: `artifact-source-unrelated-${String(index).padStart(3, "0")}`,
+          proposalId: `proposal-source-unrelated-${index}`,
+        }),
+        idempotencyKey: `idem-source-unrelated-${index}`,
+      });
+    }
+
+    const current = registry.createDraft({
+      artifact: artifact(1, {
+        artifactId: "artifact-source-current",
+        proposalId: "proposal-source-target",
+      }),
+      idempotencyKey: "idem-source-current",
+    });
+    const lookup = registry.currentBySourceProposal({ proposalId: "proposal-source-target", proposalRevision: 2 });
+
+    assert.deepEqual(lookup, current);
+    assert.equal(lookup?.status, "draft");
+    assert.equal(lookup?.tombstone, false);
+    assert.equal(registry.currentBySourceProposal({ proposalId: "proposal-not-present", proposalRevision: 2 }), undefined);
+  });
+});
+
+test("fails closed for invalid or ambiguous current source proposal lookups", () => {
+  withRegistry("source-proposal-input", (registry) => {
+    const currentBySourceProposal = registry.currentBySourceProposal.bind(registry);
+    for (const query of [
+      undefined,
+      null,
+      { proposalId: "proposal-fixture" },
+      { proposalRevision: 2 },
+      { proposalId: "", proposalRevision: 2 },
+      { proposalId: " proposal-fixture", proposalRevision: 2 },
+      { proposalId: "proposal-fixture", proposalRevision: 0 },
+      { proposalId: "proposal-fixture", proposalRevision: 2.5 },
+      { proposalId: "proposal-fixture", proposalRevision: 2, extra: true },
+    ]) {
+      assert.throws(
+        () => currentBySourceProposal(query),
+        (error: unknown) => error instanceof ArtifactRegistryError && error.code === "invalid_input",
+      );
+    }
+
+    registry.createDraft({
+      artifact: artifact(1, { artifactId: "artifact-source-ambiguous-a" }),
+      idempotencyKey: "idem-source-ambiguous-a",
+    });
+    registry.createDraft({
+      artifact: artifact(1, { artifactId: "artifact-source-ambiguous-b" }),
+      idempotencyKey: "idem-source-ambiguous-b",
+    });
+    assert.throws(
+      () => currentBySourceProposal({ proposalId: "proposal-fixture", proposalRevision: 2 }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "corrupt_record",
+    );
+  });
+});
+
+test("revalidates artifact, audit, and status rows before returning a current source proposal", () => {
+  for (const mode of ["artifact", "audit", "status"] as const) {
+    const temporary = temporaryPath(`source-proposal-${mode}`);
+    try {
+      const seed = openRegistry(temporary.path);
+      const created = seed.createDraft({
+        artifact: artifact(1, { artifactId: `artifact-source-tampered-${mode}` }),
+        idempotencyKey: `idem-source-tampered-${mode}`,
+      });
+      seed.close();
+
+      const tamper = new DatabaseSync(temporary.path);
+      try {
+        if (mode === "artifact") {
+          tamper.prepare("UPDATE artifact_revisions SET artifact_json = ? WHERE artifact_id = ? AND revision = ?")
+            .run(JSON.stringify({ ...created.artifact, contentHash: `sha256:${"0".repeat(64)}` }), created.artifact.artifactId, created.artifact.revision);
+        } else if (mode === "audit") {
+          tamper.prepare("UPDATE artifact_audit SET action = ? WHERE artifact_id = ? AND revision = ?")
+            .run("not-a-lifecycle-action", created.artifact.artifactId, created.artifact.revision);
+        } else {
+          tamper.prepare(`INSERT INTO artifact_status_events
+            (artifact_id, revision, status, tombstone, reason, idempotency_key, created_at)
+            VALUES (?, ?, ?, ?, NULL, ?, ?)`)
+            .run(created.artifact.artifactId, created.artifact.revision, "not-a-status", 0, `tampered-${mode}`, created.artifact.createdAt);
+        }
+      } finally {
+        tamper.close();
+      }
+
+      const reopened = openRegistry(temporary.path);
+      try {
+        assert.throws(
+          () => reopened.currentBySourceProposal({ proposalId: "proposal-fixture", proposalRevision: 2 }),
+          (error: unknown) => error instanceof ArtifactRegistryError && error.code === "corrupt_record",
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      temporary.cleanup();
+    }
+  }
 });
 
 test("cross-checks assessment refs and blocks assessments for superseded revisions", () => {

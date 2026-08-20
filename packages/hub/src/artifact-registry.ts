@@ -114,6 +114,11 @@ export interface ArtifactRegistryListQuery {
   readonly limit?: number;
 }
 
+export interface ArtifactRegistrySourceProposalLookup {
+  readonly proposalId: string;
+  readonly proposalRevision: number;
+}
+
 export interface ArtifactRegistryAuditQuery {
   readonly limit?: number;
 }
@@ -814,6 +819,48 @@ export class ArtifactRegistry {
     return row === undefined ? undefined : this.entryFromRow(row);
   }
 
+  /**
+   * Returns the one current draft revision sourced by an exact Proposal
+   * revision. The source identity lives in the immutable JSON, so SQLite does
+   * the narrow match and the bounded LIMIT 2 result proves uniqueness before
+   * the candidate is exposed.
+   */
+  currentBySourceProposal(query: ArtifactRegistrySourceProposalLookup): ArtifactRegistryEntry | undefined {
+    this.ensureOpen();
+    const normalized = normalizeSourceProposalLookup(query);
+    let rows: SqlRow[];
+    try {
+      rows = this.db.prepare(`SELECT artifact_id, revision, content_hash, artifact_json, created_at
+        FROM artifact_revisions
+        WHERE json_extract(artifact_json, '$.sourceProposal.proposalId') = ?
+          AND json_extract(artifact_json, '$.sourceProposal.proposalRevision') = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM artifact_status_events AS status
+            WHERE status.artifact_id = artifact_revisions.artifact_id
+              AND status.revision = artifact_revisions.revision
+              AND status.status = 'superseded'
+              AND status.tombstone = 1
+          )
+        ORDER BY artifact_id, revision
+        LIMIT 2`).all(normalized.proposalId, normalized.proposalRevision) as SqlRow[];
+    } catch (error) {
+      if (error instanceof ArtifactRegistryError) throw error;
+      throw new ArtifactRegistryError("corrupt_record", "Artifact source proposal lookup failed");
+    }
+    if (rows.length > 1) {
+      throw new ArtifactRegistryError("corrupt_record", "Current source Proposal revision is ambiguous");
+    }
+    if (rows.length === 0) return undefined;
+
+    const entry = this.entryFromRow(rows[0]!);
+    if (entry.artifact.sourceProposal.proposalId !== normalized.proposalId
+      || entry.artifact.sourceProposal.proposalRevision !== normalized.proposalRevision) {
+      throw new ArtifactRegistryError("corrupt_record", "Artifact source Proposal identity is inconsistent");
+    }
+    this.assertCurrentDraftEntry(entry);
+    return entry;
+  }
+
   list(query: ArtifactRegistryListQuery = {}): readonly ArtifactRegistryEntry[] {
     this.ensureOpen();
     const artifactId = query.artifactId === undefined
@@ -1422,6 +1469,27 @@ export class ArtifactRegistry {
     };
   }
 
+  private assertCurrentDraftEntry(entry: ArtifactRegistryEntry): void {
+    if (entry.status !== "draft" || entry.tombstone) {
+      throw new ArtifactRegistryError("corrupt_record", "Current artifact lifecycle state is invalid");
+    }
+    const lifecycleAudit = entry.audit.length === 1 ? entry.audit[0] : undefined;
+    const expectedAction = entry.artifact.revision === 1 ? "created" : "revision_appended";
+    const expectedOperation = entry.artifact.revision === 1 ? "create" : "append";
+    if (lifecycleAudit === undefined || lifecycleAudit.action !== expectedAction) {
+      throw new ArtifactRegistryError("corrupt_record", "Current artifact lifecycle audit is invalid");
+    }
+    const operation = this.findOperation(lifecycleAudit.idempotencyKey);
+    if (operation === undefined
+      || operation.operation !== expectedOperation
+      || operation.artifactId !== entry.artifact.artifactId
+      || operation.revision !== entry.artifact.revision
+      || operation.contentHash !== entry.artifact.contentHash
+      || operation.actor !== lifecycleAudit.actor) {
+      throw new ArtifactRegistryError("corrupt_record", "Current artifact lifecycle audit is inconsistent");
+    }
+  }
+
   private assessmentEntryFromRow(row: SqlRow): ArtifactAssessmentEntry {
     const assessment = assessmentFromRow(row);
     const artifact = assessment.artifact;
@@ -1869,6 +1937,35 @@ function isCompilerResultKind(value: string): value is ArtifactCompilerResultKin
 
 function isCompilerResultOperation(value: string): boolean {
   return value === "compile-result" || value === "dry-run-result";
+}
+
+function normalizeSourceProposalLookup(query: unknown): ArtifactRegistrySourceProposalLookup {
+  if (query === null || typeof query !== "object" || Array.isArray(query)) {
+    throw new ArtifactRegistryError("invalid_input", "Source Proposal lookup is invalid");
+  }
+  let keys: readonly (string | symbol)[];
+  try {
+    keys = Reflect.ownKeys(query);
+  } catch {
+    throw new ArtifactRegistryError("invalid_input", "Source Proposal lookup is invalid");
+  }
+  if (keys.length !== 2 || !keys.every((key) => key === "proposalId" || key === "proposalRevision")) {
+    throw new ArtifactRegistryError("invalid_input", "Source Proposal lookup is invalid");
+  }
+  const value = query as {
+    readonly proposalId?: unknown;
+    readonly proposalRevision?: unknown;
+  };
+  const proposalId = validateBoundedText(value.proposalId, MAX_IDEMPOTENCY_KEY_LENGTH, "source Proposal id");
+  if (typeof value.proposalRevision !== "number"
+    || !Number.isSafeInteger(value.proposalRevision)
+    || value.proposalRevision < 1) {
+    throw new ArtifactRegistryError("invalid_input", "source Proposal revision is invalid");
+  }
+  return {
+    proposalId,
+    proposalRevision: value.proposalRevision,
+  };
 }
 
 function normalizeAssessmentQuery(query: ArtifactAssessmentListQuery, requireExact = false): {
