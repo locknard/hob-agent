@@ -1,4 +1,5 @@
 import type {
+  InboxArtifactReviewSnapshot,
   InboxObservationStatus,
   InboxProposalQualitySummary,
 } from "./proposal-inbox.js";
@@ -100,8 +101,37 @@ export interface ControlCenterArtifactSnapshot {
   readonly canExecute: false;
 }
 
+export interface ControlCenterAutomationCheck {
+  readonly status: ControlCenterCardStatus;
+  readonly result: "available" | "not_run" | "unavailable";
+  readonly compile: "compiled" | "rejected" | "failed" | "not_run" | "unavailable";
+  readonly dryRun: "passed" | "failed" | "not_run" | "unavailable";
+  readonly writesPerformed: false;
+}
+
 export interface ControlCenterArtifactSource {
   diagnostics(): ControlCenterArtifactSnapshot;
+}
+
+export interface ArtifactReviewReadSnapshot extends InboxArtifactReviewSnapshot {
+  readonly proposal: {
+    readonly id: string;
+    readonly revision: number;
+  };
+  readonly evidence?: {
+    readonly watermarks: readonly {
+      readonly bridgeId: string;
+      readonly epochId: string;
+      readonly lastSeq: number;
+      readonly freshness: string;
+      readonly gapCount: number;
+    }[];
+  };
+}
+
+/** Narrow structural seam for exact, read-only proposal artifact reviews. */
+export interface ArtifactReviewReadSource extends ControlCenterArtifactSource {
+  reviewForProposal(proposalId: string, proposalRevision: number): ArtifactReviewReadSnapshot | undefined;
 }
 
 export interface ControlCenterSources {
@@ -179,6 +209,7 @@ export interface ControlCenterSnapshot {
   readonly inbox: ControlCenterInboxStatus;
   readonly retention: ControlCenterRetentionSnapshot;
   readonly artifacts: ControlCenterArtifactSnapshot;
+  readonly automationCheck: ControlCenterAutomationCheck;
   readonly systemChecks: readonly ControlCenterSystemCheck[];
 }
 
@@ -198,6 +229,7 @@ export function projectControlCenter(
   const inbox = projectInbox(sources.proposals);
   const retention = projectRetention(sources.retention);
   const artifacts = projectArtifacts(sources.artifacts);
+  const automationCheck = projectAutomationCheck(artifacts);
   const systemChecks: ControlCenterSystemCheck[] = [
     { key: "bridges", status: bridgeCheckStatus(bridges) },
     { key: "model", status: model.status === "configured" ? "ready" : "unavailable" },
@@ -219,6 +251,7 @@ export function projectControlCenter(
     inbox,
     retention,
     artifacts,
+    automationCheck,
     systemChecks,
   };
 }
@@ -270,6 +303,7 @@ export function renderControlCenter(snapshot: ControlCenterSnapshot): string {
       ${serviceRow("Home map", snapshot.homeMap.status === "ready" ? "ready" : snapshot.homeMap.status === "unavailable" ? "unavailable" : "attention", homeMapDescription, snapshot.homeMap.status === "ready" ? `${snapshot.homeMap.devicesWithSingleSpace} devices have one confirmed space; ${snapshot.homeMap.proposedIdentityLinks} identity links await review.` : "Wait for a consistent home connection, then review unresolved spaces in local setup.")}
       ${serviceRow("Home Agent", snapshot.agent.status, agentDescription, snapshot.agent.status === "unavailable" ? "Start the full home runtime after connections and model setup are ready." : "The Agent can suggest review items but cannot apply household changes.")}
       ${serviceRow("Observation", observationCardStatus(snapshot.observation.status), observationDescription, "Observation is bounded, governed, and review-only.", observationStatusLabel(snapshot.observation.status))}
+      ${serviceRow("Automation checks", snapshot.automationCheck.status, automationCheckDescription(snapshot.automationCheck), automationCheckDetail(snapshot.automationCheck), "Read-only")}
     </ul></section>
     <details class="control-diagnostics"><summary>Technical diagnostics</summary><div class="control-diagnostics-body">${modelTechnical}<h2>System checks</h2><ul class="control-check-list">${checks}</ul>${artifactDetails}${retentionDetails}<div class="section-heading"><div><h2>Bridge instances</h2></div><p>${snapshot.bridges.length} configured in the live world</p></div><ul class="control-list">${bridgeItems}</ul></div></details>
     <section class="control-section control-note" aria-label="Control center boundary"><h2>You remain in control</h2><p>Everything above is a report. This page cannot edit setup, call a model, approve an idea, or control a device. Any future household change will require its own exact review.</p></section>
@@ -424,6 +458,41 @@ function unavailableArtifacts(): ControlCenterArtifactSnapshot {
     canSimulate: false,
     canExecute: false,
   };
+}
+
+function projectAutomationCheck(artifacts: ControlCenterArtifactSnapshot): ControlCenterAutomationCheck {
+  if (artifacts.status === "unavailable") {
+    return {
+      status: "unavailable",
+      result: "unavailable",
+      compile: "unavailable",
+      dryRun: "unavailable",
+      writesPerformed: false,
+    };
+  }
+  return {
+    status: "ready",
+    result: "not_run",
+    compile: "not_run",
+    dryRun: "not_run",
+    writesPerformed: false,
+  };
+}
+
+function automationCheckDescription(check: ControlCenterAutomationCheck): string {
+  switch (check.result) {
+    case "available": return "A bounded automation result is available for proposal review.";
+    case "not_run": return "Automation checks are proposal-scoped; open a proposal to see its exact result.";
+    case "unavailable": return "Automation checks are unavailable in this process.";
+  }
+}
+
+function automationCheckDetail(check: ControlCenterAutomationCheck): string {
+  return `No proposal is selected here · compile ${automationCheckStatusLabel(check.compile)} · dry-run ${automationCheckStatusLabel(check.dryRun)} · No household changes were made`;
+}
+
+function automationCheckStatusLabel(status: ControlCenterAutomationCheck["result"] | ControlCenterAutomationCheck["compile"] | ControlCenterAutomationCheck["dryRun"]): string {
+  return status.replaceAll("_", " ");
 }
 
 function safeCapacity(value: ControlCenterRetentionCapacity): ControlCenterRetentionCapacity {

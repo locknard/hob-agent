@@ -362,3 +362,32 @@ test("keeps the inert artifact registry in technical diagnostics without exposin
   assert.equal(html.includes("Private artifact title"), false);
   assert.equal(html.includes("Apply"), false);
 });
+
+test("shows one read-only automation check line while keeping artifact health independent", () => {
+  const snapshot = projectControlCenter({
+    world: { snapshot: () => worldSnapshot() },
+    artifacts: {
+      diagnostics: () => ({
+        status: "ready" as const,
+        schemaVersion: "1" as const,
+        lifecycleStates: ["draft", "superseded"] as const,
+        hasRecords: true,
+        canCompile: false as const,
+        canSimulate: false as const,
+        canExecute: false as const,
+      }),
+    },
+  });
+
+  assert.equal(snapshot.artifacts.status, "ready");
+  assert.equal(snapshot.automationCheck.status, "ready");
+  assert.equal(snapshot.automationCheck.result, "not_run");
+  const html = renderControlCenter(snapshot);
+  assert.match(html, /Automation checks/i);
+  assert.match(html, /No proposal is selected here/i);
+  assert.match(html, /compile not run/i);
+  assert.match(html, /dry-run not run/i);
+  assert.match(html, /No household changes/i);
+  assert.equal(html.includes("Apply"), false);
+  assert.equal(/<(?:button|form)[^>]*(?:compile|simulate|execute|install|enable)/iu.test(html), false);
+});

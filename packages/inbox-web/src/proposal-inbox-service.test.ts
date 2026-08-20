@@ -5,6 +5,85 @@ import { Context, Service } from "@deepseek-ai/cordis";
 
 import { ProposalInboxService } from "./proposal-inbox-service.js";
 
+const reviewFixture = {
+  artifact: {
+    artifactId: "artifact-review",
+    revision: 4,
+    contentHash: `sha256:${"a".repeat(64)}`,
+  },
+  compile: {
+    status: "compiled" as const,
+    resultId: "compile-result",
+    inputIdentity: `sha256:${"b".repeat(64)}`,
+    compiler: { id: "neutral-compiler", version: "1.2.3" },
+    usedWatermarks: [],
+    actionAuthorityBindings: [],
+    blockingReasons: [],
+    diff: { status: "unchanged" as const, operations: [], unchangedCount: 1, redacted: true as const },
+    conflicts: { status: "none" as const, findings: [] },
+  },
+  dryRun: {
+    status: "passed" as const,
+    resultId: "dry-run-result",
+    inputIdentity: `sha256:${"c".repeat(64)}`,
+    compileAttestationId: "compile-result",
+    compileInputIdentity: `sha256:${"b".repeat(64)}`,
+    checkedWatermarks: [],
+    actionAuthorityBindings: [],
+    diff: { status: "unchanged" as const, operations: [], unchangedCount: 1, redacted: true as const },
+    conflicts: { status: "none" as const, findings: [] },
+    writesPerformed: false as const,
+    summary: "Read-only neutral check completed.",
+  },
+  writesPerformed: false as const,
+};
+
+const reviewProposal = {
+  id: "proposal-review",
+  revision: 7,
+  status: "pending_review" as const,
+  applicationStatus: "not_available" as const,
+  kind: "automation-draft",
+  title: "Review a bounded automation",
+  summary: "A bounded candidate needs household review.",
+  createdAt: "2026-08-20T01:00:00.000Z",
+  updatedAt: "2026-08-20T01:00:00.000Z",
+  provenance: { producer: "test" },
+  evidence: { references: [], watermarks: [] },
+  conflictCheck: { status: "checked" as const, existingAutomationCount: 0, matches: [] },
+  dryRun: { status: "passed", summary: "No writes." },
+  risk: { level: "low", reasons: [], requiresHumanApproval: true },
+  intent: { type: "automation-draft", description: "Review only.", rollback: "Discard." },
+  audit: [],
+};
+
+class StubReviewedProposals extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeProposals");
+  }
+
+  list() { return [reviewProposal]; }
+  get(id: string) { return id === reviewProposal.id ? reviewProposal : undefined; }
+  review() { throw new Error("not used"); }
+  qualitySummary() {
+    return {
+      total: 1,
+      statuses: { pending_review: 1, approved: 0, rejected: 0, expired: 0 },
+      feedback: {
+        useful_as_is: 0,
+        already_covered: 0,
+        not_useful: 0,
+        incorrect_assumption: 0,
+        insufficient_evidence: 0,
+        household_preference: 0,
+        too_risky: 0,
+        other: 0,
+      },
+      reviewedWithoutFeedback: 0,
+    };
+  }
+}
+
 class StubProposals extends Service {
   constructor(ctx: Context) {
     super(ctx, "homeProposals");
@@ -302,6 +381,58 @@ test("passes only artifact capability diagnostics into the Control Center", asyn
   assert.match(html, /execution unavailable/);
   assert.equal(html.includes("Private artifact title"), false);
   assert.equal("apply" in ctx.homeInbox, false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("projects an exact bounded artifact review into proposal list and detail without a write path", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  const reviewCalls: unknown[][] = [];
+  const hubReview = {
+    ...reviewFixture,
+    proposal: { id: reviewProposal.id, revision: reviewProposal.revision },
+    evidence: { watermarks: [{ bridgeId: "bridge-private", epochId: "epoch-private", lastSeq: 8, freshness: "fresh", gapCount: 0 }] },
+    secret: "must-not-cross",
+  };
+  let reviewToReturn = hubReview;
+  ctx.provide("homeArtifacts", {
+    diagnostics: () => ({
+      status: "ready" as const,
+      schemaVersion: "1" as const,
+      lifecycleStates: ["draft", "superseded"] as const,
+      hasRecords: true,
+      canCompile: false as const,
+      canSimulate: false as const,
+      canExecute: false as const,
+    }),
+    reviewForProposal: (proposalId: string, proposalRevision: number) => {
+      reviewCalls.push([proposalId, proposalRevision]);
+      return reviewToReturn;
+    },
+  });
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const list = ctx.homeInbox.list();
+  assert.equal((list[0] as unknown as { artifactReview?: unknown }).artifactReview, undefined);
+  const detail = ctx.homeInbox.detail(reviewProposal.id);
+  assert.deepEqual(detail?.proposal.artifactReview, reviewFixture);
+  assert.equal(JSON.stringify(detail?.proposal.artifactReview).includes("must-not-cross"), false);
+  assert.equal(JSON.stringify(detail?.proposal.artifactReview).includes("proposal"), false);
+  assert.equal(JSON.stringify(detail?.proposal.artifactReview).includes("evidence"), false);
+  assert.equal(JSON.stringify(detail?.proposal.artifactReview).includes("compileInputIdentity"), true);
+  reviewToReturn = {
+    ...hubReview,
+    proposal: { id: "other-proposal", revision: 99 },
+  };
+  assert.equal(ctx.homeInbox.detail(reviewProposal.id)?.proposal.artifactReview, undefined);
+  assert.deepEqual(reviewCalls, [
+    [reviewProposal.id, reviewProposal.revision],
+    [reviewProposal.id, reviewProposal.revision],
+  ]);
+  assert.equal("apply" in ctx.homeInbox, false);
+  assert.equal("execute" in ctx.homeInbox, false);
 
   await fiber.dispose();
   await ctx.fiber.dispose();
