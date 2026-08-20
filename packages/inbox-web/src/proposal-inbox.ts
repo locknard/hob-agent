@@ -17,6 +17,79 @@ export type InboxRejectionFeedbackCode =
   | "other";
 export type InboxReviewFeedbackCode = InboxApprovalFeedbackCode | InboxRejectionFeedbackCode;
 
+export type InboxArtifactScalar = string | number | boolean | null;
+export type InboxArtifactValueOperator = "equals" | "not_equals" | "greater_than" | "less_than";
+
+export interface InboxArtifactCapabilityReference {
+  readonly hwCapabilityId: string;
+}
+
+export type InboxArtifactTrigger =
+  | {
+      readonly kind: "schedule";
+      readonly timezone: string;
+      readonly daysOfWeek: readonly number[];
+      readonly at: string;
+    }
+  | {
+      readonly kind: "capability_changed";
+      readonly source: InboxArtifactCapabilityReference;
+    };
+
+export interface InboxArtifactCondition {
+  readonly kind: "capability_value";
+  readonly source: InboxArtifactCapabilityReference;
+  readonly operator: InboxArtifactValueOperator;
+  readonly value: InboxArtifactScalar;
+}
+
+export type InboxArtifactAction =
+  | {
+      readonly kind: "set_level";
+      readonly target: InboxArtifactCapabilityReference;
+      readonly value: number;
+      readonly transitionSeconds?: number;
+    }
+  | {
+      readonly kind: "set_boolean";
+      readonly target: InboxArtifactCapabilityReference;
+      readonly value: boolean;
+    }
+  | {
+      readonly kind: "notify_local";
+      readonly message: string;
+    };
+
+export type InboxArtifactRollback =
+  | {
+      readonly kind: "restore_previous_state";
+      readonly target: InboxArtifactCapabilityReference;
+      readonly maxAgeSeconds: number;
+    }
+  | { readonly kind: "no_remote_change" };
+
+export interface InboxArtifactPostcondition {
+  readonly kind: "capability_value";
+  readonly source: InboxArtifactCapabilityReference;
+  readonly operator: InboxArtifactValueOperator;
+  readonly value: InboxArtifactScalar;
+  readonly withinSeconds: number;
+}
+
+export interface InboxArtifactContent {
+  readonly trigger: InboxArtifactTrigger;
+  readonly conditions: readonly InboxArtifactCondition[];
+  readonly actions: readonly InboxArtifactAction[];
+  readonly rollback: InboxArtifactRollback;
+  readonly postconditions: readonly InboxArtifactPostcondition[];
+}
+
+/** Structural seam for the persisted, optional neutral behavior candidate. */
+export interface InboxArtifactCandidate {
+  readonly schemaVersion: "1";
+  readonly content: InboxArtifactContent;
+}
+
 export interface InboxProposal {
   readonly id: string;
   readonly revision: number;
@@ -71,6 +144,7 @@ export interface InboxProposal {
     readonly whyNow: string;
     readonly uncertainties: readonly string[];
   };
+  readonly artifactCandidate?: InboxArtifactCandidate;
   readonly spaceCoverage?: {
     readonly selectedDevices: number;
     readonly devicesWithSingleSpace: number;
@@ -408,6 +482,9 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   const rationale = proposal.rationale === undefined
     ? "<section class=\"agent-authored\" aria-label=\"Agent proposal rationale\"><h2>Why this may help</h2><p>Agent reasoning was not recorded for this legacy proposal.</p></section>"
     : `<section class="agent-authored" aria-label="Agent proposal rationale"><p class="eyebrow">Agent-authored</p><h2>Why this may help</h2><p>These model-authored statements explain the Agent's case; they do not replace Hub evidence or household judgment.</p><h3>Expected household value</h3><p>${escapeHtml(proposal.rationale.householdValue)}</p><h3>Why now</h3><p>${escapeHtml(proposal.rationale.whyNow)}</p><h3>Agent-declared uncertainties</h3><ul class="uncertainty-list">${proposal.rationale.uncertainties.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`;
+  const artifactCandidate = proposal.artifactCandidate === undefined
+    ? "<section class=\"artifact-candidate legacy-candidate\" aria-label=\"Automation candidate\"><h2>Proposed behavior</h2><p>No exact neutral behavior candidate is recorded for this legacy proposal.</p></section>"
+    : renderArtifactCandidate(proposal.artifactCandidate);
   const spaceCoverage = proposal.spaceCoverage === undefined
     ? "<section aria-label=\"Selected-device space coverage\"><h2>Selected-device space coverage</h2><p>Not recorded in this legacy proposal.</p></section>"
     : `<section aria-label="Selected-device space coverage"><h2>Selected-device space coverage</h2><p>Hub-produced mapping coverage; this is separate from the Agent's rationale.</p><dl><dt>Selected devices</dt><dd>${proposal.spaceCoverage.selectedDevices}</dd><dt>Single-space suggestions</dt><dd>${proposal.spaceCoverage.devicesWithSingleSpace}</dd><dt>Unassigned</dt><dd>${proposal.spaceCoverage.devicesWithoutSpace}</dd><dt>Multiple spaces</dt><dd>${proposal.spaceCoverage.devicesWithMultipleSpaces}</dd></dl></section>`;
@@ -438,7 +515,7 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
   const ledgerCoverage = proposal.evidence.temporal?.coverage.map((coverage) => `<li class="ledger-item" data-coverage="${escapeHtml(coverage.status)}"><span class="ledger-marker" aria-hidden="true"></span><div><p><strong>${escapeHtml(coverage.bridgeId)}</strong> · ${escapeHtml(coverage.status)}</p><p class="ledger-meta">${coverage.reasons.length === 0 ? "No recorded coverage warnings" : coverage.reasons.map(escapeHtml).join(", ")}</p></div></li>`).join("") ?? "";
   return `<main id="main-content" class="proposal-detail review-desk" data-status="${escapeHtml(proposal.status)}">
     <header><a class="back-link" href="/proposals">← Back to reviews</a><p class="eyebrow">Household proposal</p><h1>${escapeHtml(proposal.title)}</h1><p>${escapeHtml(proposal.summary)}</p><div class="status-line"><span class="status-chip">Risk: ${escapeHtml(proposal.risk.level)}</span><span class="muted">Updated ${escapeHtml(proposal.updatedAt)}</span></div></header>
-    <div class="review-columns"><div class="proposal-case">${rationale}
+    <div class="review-columns"><div class="proposal-case">${rationale}${artifactCandidate}
     <section aria-label="Intent"><h2>Intended change</h2><p>${escapeHtml(proposal.intent.description)}</p><h3>Rollback</h3><p>${escapeHtml(proposal.intent.rollback)}</p></section>
     <section aria-label="Dry run"><h2>Dry run: ${escapeHtml(proposal.dryRun.status)}</h2><p>${escapeHtml(proposal.dryRun.summary)}</p></section>
     <section aria-label="Risk"><h2>Risk: ${escapeHtml(proposal.risk.level)}</h2><ul class="risk-list">${risks}</ul></section>
@@ -448,6 +525,79 @@ export function renderProposalDetail(detail: InboxProposalDetail): string {
     <section aria-label="Existing-rule overlap screen"><h2>Existing-rule overlap screen</h2><p>${proposal.conflictCheck.existingAutomationCount} existing automations · ${proposal.conflictCheck.matches.length} possible name overlaps</p><p>Metadata-only overlap screen; zero matches does not prove non-interference. Review existing rule logic before implementation.</p></section>
     ${timeline}</aside></div>
   </main>`;
+}
+
+function renderArtifactCandidate(candidate: InboxArtifactCandidate): string {
+  const { content } = candidate;
+  const conditions = content.conditions.length === 0
+    ? "<p>No additional conditions; the trigger alone starts this candidate.</p>"
+    : `<p>All conditions must be true.</p><ol>${content.conditions.map((condition) => `<li>${renderArtifactCondition(condition)}</li>`).join("")}</ol>`;
+  const actions = `<ol>${content.actions.map((action) => `<li>${renderArtifactAction(action)}</li>`).join("")}</ol>`;
+  const rollback = renderArtifactRollback(content.rollback);
+  const postconditions = content.postconditions.length === 0
+    ? "<p>No additional result is required.</p>"
+    : `<ol>${content.postconditions.map((postcondition) => `<li>${renderArtifactPostcondition(postcondition)}</li>`).join("")}</ol>`;
+
+  return `<section class="artifact-candidate" aria-label="Automation candidate"><p class="eyebrow">Unverified automation candidate</p><h2>Proposed behavior</h2><p>Approval records this reviewed intent only. This candidate cannot install, enable, or execute anything.</p><h3>When it runs</h3><p>${renderArtifactTrigger(content.trigger)}</p><h3>When all conditions are met</h3>${conditions}<h3>What would happen</h3>${actions}<h3>How it could be undone</h3><p>${rollback}</p><h3>What should be true afterward</h3>${postconditions}</section>`;
+}
+
+function renderArtifactTrigger(trigger: InboxArtifactTrigger): string {
+  if (trigger.kind === "schedule") {
+    const days = trigger.daysOfWeek.map((day) => artifactDayLabel(day)).join(", ");
+    return `At ${escapeHtml(trigger.at)} in ${escapeHtml(trigger.timezone)} on ${days}.`;
+  }
+  return `When capability ${escapeHtml(trigger.source.hwCapabilityId)} changes.`;
+}
+
+function renderArtifactCondition(condition: InboxArtifactCondition): string {
+  return `Capability ${escapeHtml(condition.source.hwCapabilityId)} ${artifactOperatorLabel(condition.operator)} ${formatArtifactScalar(condition.value)}.`;
+}
+
+function renderArtifactAction(action: InboxArtifactAction): string {
+  switch (action.kind) {
+    case "set_level":
+      return `Set capability ${escapeHtml(action.target.hwCapabilityId)} to ${formatArtifactScalar(action.value)}${action.transitionSeconds === undefined ? "" : ` over ${escapeHtml(String(action.transitionSeconds))} seconds`}.`;
+    case "set_boolean":
+      return `Set capability ${escapeHtml(action.target.hwCapabilityId)} to ${formatArtifactScalar(action.value)}.`;
+    case "notify_local":
+      return `Send a local notification: ${escapeHtml(action.message)}.`;
+  }
+}
+
+function renderArtifactRollback(rollback: InboxArtifactRollback): string {
+  if (rollback.kind === "no_remote_change") return "No remote change is made.";
+  return `Restore the previous value of capability ${escapeHtml(rollback.target.hwCapabilityId)} within ${escapeHtml(String(rollback.maxAgeSeconds))} seconds.`;
+}
+
+function renderArtifactPostcondition(postcondition: InboxArtifactPostcondition): string {
+  return `Capability ${escapeHtml(postcondition.source.hwCapabilityId)} should be ${artifactOperatorLabel(postcondition.operator)} ${formatArtifactScalar(postcondition.value)} within ${escapeHtml(String(postcondition.withinSeconds))} seconds.`;
+}
+
+function artifactOperatorLabel(operator: InboxArtifactValueOperator): string {
+  switch (operator) {
+    case "equals": return "is";
+    case "not_equals": return "is not";
+    case "greater_than": return "is greater than";
+    case "less_than": return "is less than";
+  }
+}
+
+function artifactDayLabel(day: number): string {
+  switch (day) {
+    case 0: return "Sunday";
+    case 1: return "Monday";
+    case 2: return "Tuesday";
+    case 3: return "Wednesday";
+    case 4: return "Thursday";
+    case 5: return "Friday";
+    case 6: return "Saturday";
+    default: return `day ${escapeHtml(String(day))}`;
+  }
+}
+
+function formatArtifactScalar(value: InboxArtifactScalar): string {
+  if (value === null) return "nothing";
+  return escapeHtml(String(value));
 }
 
 function observationOutcomeLabel(

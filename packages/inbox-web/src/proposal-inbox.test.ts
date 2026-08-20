@@ -67,6 +67,55 @@ const proposal: InboxProposal = {
   audit: [{ id: "audit-1", at: "2026-08-19T01:00:00.000Z", action: "created", actor: "dsh-home-agent", revision: 1 }],
 };
 
+const artifactCandidate = {
+  schemaVersion: "1" as const,
+  content: {
+    trigger: {
+      kind: "schedule" as const,
+      timezone: "Etc/UTC",
+      daysOfWeek: [1, 3, 5],
+      at: "07:30",
+    },
+    conditions: [{
+      kind: "capability_value" as const,
+      source: { hwCapabilityId: "hwc-light-context" },
+      operator: "less_than" as const,
+      value: 0.4,
+    }, {
+      kind: "capability_value" as const,
+      source: { hwCapabilityId: "hwc-<condition>" },
+      operator: "equals" as const,
+      value: true,
+    }],
+    actions: [{
+      kind: "set_level" as const,
+      target: { hwCapabilityId: "hwc-cover-1" },
+      value: 0.65,
+      transitionSeconds: 30,
+    }, {
+      kind: "notify_local" as const,
+      message: "<script>alert('unsafe')</script>",
+    }],
+    rollback: {
+      kind: "restore_previous_state" as const,
+      target: { hwCapabilityId: "hwc-cover-1" },
+      maxAgeSeconds: 900,
+    },
+    postconditions: [{
+      kind: "capability_value" as const,
+      source: { hwCapabilityId: "hwc-cover-1" },
+      operator: "equals" as const,
+      value: 0.65,
+      withinSeconds: 120,
+    }],
+  },
+};
+
+const proposalWithArtifactCandidate: InboxProposal = {
+  ...proposal,
+  artifactCandidate,
+};
+
 test("lists and renders untrusted proposal content without creating an application path", async () => {
   const reviews: unknown[] = [];
   const controller = new ProposalInboxController({
@@ -187,6 +236,7 @@ test("lists and renders untrusted proposal content without creating an applicati
   assert.match(detailHtml, /class="proposal-detail review-desk"/);
   assert.match(detailHtml, /class="evidence-ledger"/);
   assert.match(detailHtml, /Approval records intent only/i);
+  assert.match(detailHtml, /No exact neutral behavior candidate is recorded for this legacy proposal/i);
   assert.match(detailHtml, /<details class="agent-details">/);
   assert.match(detailHtml, /<summary>How the Agent reached this<\/summary>/);
 
@@ -206,6 +256,44 @@ test("lists and renders untrusted proposal content without creating an applicati
     feedbackCode: "useful_as_is",
   }]);
   assert.equal("apply" in controller, false);
+});
+
+test("renders an exact neutral artifact candidate in household language without adding an action path", () => {
+  const html = renderProposalDetail({ proposal: proposalWithArtifactCandidate });
+
+  assert.match(html, /Unverified automation candidate/i);
+  assert.match(html, /Approval records this reviewed intent only/i);
+  assert.match(html, /cannot install, enable, or execute anything/i);
+  assert.match(html, /When it runs/i);
+  assert.match(html, /07:30/);
+  assert.match(html, /Etc\/UTC/);
+  assert.match(html, /Monday/);
+  assert.match(html, /Wednesday/);
+  assert.match(html, /Friday/);
+  assert.match(html, /All conditions must be true/i);
+  assert.match(html, /hwc-light-context/);
+  assert.match(html, /less than/);
+  assert.match(html, /0\.4/);
+  assert.match(html, /hwc-&lt;condition&gt;/);
+  assert.match(html, /What would happen/i);
+  assert.match(html, /Set capability hwc-cover-1 to 0\.65/);
+  assert.match(html, /30 seconds/);
+  assert.match(html, /Send a local notification/);
+  assert.match(html, /&lt;script&gt;alert\(&#39;unsafe&#39;\)&lt;\/script&gt;/);
+  assert.match(html, /How it could be undone/i);
+  assert.match(html, /previous value/);
+  assert.match(html, /900 seconds/);
+  assert.match(html, /What should be true afterward/i);
+  assert.match(html, /within 120 seconds/);
+  assert.equal(html.includes("<script>alert('unsafe')</script>"), false);
+  assert.equal((html.match(/<button /g) ?? []).length, 2);
+
+  const firstCondition = html.indexOf("hwc-light-context");
+  const secondCondition = html.indexOf("hwc-&lt;condition&gt;");
+  const firstAction = html.indexOf("Set capability hwc-cover-1 to 0.65");
+  const secondAction = html.indexOf("Send a local notification");
+  assert.ok(firstCondition >= 0 && firstCondition < secondCondition);
+  assert.ok(firstAction >= 0 && firstAction < secondAction);
 });
 
 test("renders the recorded structured household feedback without treating it as authority", () => {

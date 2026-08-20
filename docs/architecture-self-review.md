@@ -285,6 +285,17 @@ returning a deeply frozen Hub projection. Non-current, pending, rejected,
 legacy-unreviewed, or corrupt sources fail closed. Retention projections now
 revalidate the owning proposal row before returning journal pins.
 
+New production automation drafts also carry the exact closed neutral ECA
+candidate that the household reviews. The Agent can author only trigger,
+conditions, ordered actions, rollback, and postconditions; it cannot supply an
+Artifact identity, hash, watermark, assessment, authority route, approval, or
+execution state. HomeProposalService re-validates the shared Artifact content
+schema, selected current devices, capability ownership, temporal evidence
+selection, and known safety-sensitive targets before persistence. The Inbox
+escapes and renders the exact candidate while exposing no install or execution
+path. Legacy Proposal rows remain readable but the source gate rejects those
+without a candidate.
+
 This still does not complete M3b. The next boundary must be a Hub-owned producer
 that consumes this gate, constructs the closed Artifact shape, creates fresh
 Hub evidence/risk/authority assessments, and registers their durable retention
