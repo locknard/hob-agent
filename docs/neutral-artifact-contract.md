@@ -4,7 +4,9 @@
 > 不可变 SQLite Registry、生产进程中的只读服务边界和精确 approved Proposal revision
 > source gate 已经落地。新的 automation Proposal 还必须携带一个经 Hub 重新校验、可在
 > Inbox 精确审阅的闭集中立 ECA candidate；旧 Proposal 仍可读取但不能成为 Artifact source。
-> Hub-owned Artifact producer、assessment 生成、compiler、dry-run、approval ticket 和执行器
+> Hub-only Artifact producer core 已能从精确 source gate 幂等生成 revision 1，但尚未挂入
+> 生产组合；三类 assessment 的动态输入 identity 已补全，实际 evidence/risk/authority
+> producer、私有 authority candidate registry、compiler、dry-run、approval ticket 和执行器
 > 仍未实现。
 >
 > 本文定义 M3b 之后第一版（下文称 Artifact Phase 1）的最小、可持久化、不可执行 artifact
@@ -307,6 +309,12 @@ type ArtifactEvidenceAttestation = {
   artifact: ArtifactRef;
   inputIdentity: Sha256Digest;       // Hub consistent-cut/query input
   source: "home-world-consistent-cut";
+  sourceProposal: {
+    proposalId: BoundedHubId;
+    proposalRevision: PositiveSafeInteger;
+  };
+  proposalEvidenceIdentity: Sha256Digest; // exact approved Proposal evidence envelope
+  selectedHwCapabilityIds: readonly BoundedHubId[]; // canonical unique behavior refs, max 16
   capturedAt: IsoTimestamp;
   watermarks: readonly {
     bridgeId: BoundedHubId;
@@ -324,6 +332,11 @@ type ArtifactEvidenceAttestation = {
 这里的 `HomeWorldEvidenceCoverageReason` 复用现有 HomeWorld 闭集，不另造
 artifact-specific reason vocabulary。`inputIdentity` 是 Hub 对 consistent-cut、proposal
 evidence references 和相关 world-model 输入的 canonical hash；它不是 artifact contentHash。
+`proposalEvidenceIdentity` 必须由 Hub 对 source gate 返回的完整 evidence envelope 计算，不能
+接受 Agent 提交的 digest；`selectedHwCapabilityIds` 必须由 ArtifactContent 的 trigger、条件、
+动作、rollback 和 postcondition 引用重新推导。二者都进入 `inputIdentity`，使 Registry 重启后
+仍能验证 attestation 自身没有遗漏这些依赖；producer/compiler 还必须回到 Proposal source gate
+交叉验证 digest，而不是把一个格式正确的 digest 当作权威事实。
 
 水位和 coverage 必须由 Hub 从当前 `HomeWorldSnapshot`、journal/world model 和 proposal
 evidence 重新绑定；Agent 不能提交或覆盖 `epochId`、`lastSeq`、gap、freshness、bridge
@@ -345,6 +358,15 @@ type ArtifactRiskAssessment = {
   assessmentId: BoundedHubId;
   artifact: ArtifactRef;
   inputIdentity: Sha256Digest;       // artifact ref + current policy/evidence inputs
+  evidence: {
+    attestationId: BoundedHubId;
+    inputIdentity: Sha256Digest;
+  };
+  authority: {
+    assessmentId: BoundedHubId;
+    inputIdentity: Sha256Digest;
+  };
+  conflictInputIdentity: Sha256Digest; // Hub hash of exact conflict assessment/query input
   class: "observe_or_notify" | "comfort_reversible";
   reasons: readonly BoundedText1000[]; // max 10，Hub policy 生成
   policyId: BoundedHubId;
@@ -369,6 +391,7 @@ type ArtifactAuthorityAssessment = {
   assessmentId: BoundedHubId;
   artifact: ArtifactRef;
   inputIdentity: Sha256Digest;       // registry/config/world-cut input
+  authorityRegistryIdentity: Sha256Digest; // Hub config/binding generation identity
   candidates: readonly {
     actionAuthorityCandidateId: BoundedHubId;
     hwCapabilityId: BoundedHubId;
@@ -383,7 +406,8 @@ Candidate 是 Hub 生成的 opaque assessment reference；它不把 final bridge
 adapter、registry generation 或 remote instance 放入 artifact。authority rebind、adapter
 migration、registry generation 变化时，Hub 追加新的 authority assessment；旧 assessment
 和任何引用它的 compile/dry-run/ticket 都保持不可变但变为 stale。最终 route 只在 M3d ticket
-中由 Hub 根据最新 candidate 和 binding 重新解析。
+中由 Hub 根据最新 candidate 和 binding 重新解析。稳定 candidate、rebind 和私有 route
+边界见 [`authority-candidate-registry.md`](authority-candidate-registry.md)。
 
 Evidence、risk、authority 三类记录都必须通过严格 schema 和同一 artifact ref/hash 校验；
 它们的刷新是新的 immutable assessment/attestation identity，而不是稳定行为意图的
@@ -637,7 +661,10 @@ approval principal + issuedAt + expiresAt + one-use nonce
 ```
 
 Artifact 内只保留 `hwCapabilityId`；candidate 只存在于 Hub authority assessment、compile/
-dry-run attestation 和 ticket。最终 authority target（bridgeId、catalog adapterType,
+dry-run attestation 和 ticket。`authorityRegistryIdentity` 只保存 Hub 对 authority config、
+binding generation 和适用 scope 的不可逆 identity，不暴露 route/native payload；当前
+AuthorityCoordinator 在提供这一 identity 之前不得生成可用 authority assessment。最终
+authority target（bridgeId、catalog adapterType,
 bridge-registry binding generation、remote-instance identity）由 Hub 在 ticket 中重新产生，
 永远不接受 model/plugin/artifact payload 提供的值。Candidate 被撤销、bridge rebind、adapter
 migration、registry generation 改变、watermark/coverage 变旧、policy assessment 变化、

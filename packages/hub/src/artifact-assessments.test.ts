@@ -8,12 +8,15 @@ import {
   artifactEvidenceAttestationSchema,
   artifactRiskAssessmentSchema,
   canonicalAssessmentInput,
+  computeConflictInputIdentity,
   computeAssessmentInputIdentity,
+  computeProposalEvidenceIdentity,
   createArtifactAuthorityAssessment,
   createArtifactEvidenceAttestation,
   createArtifactRiskAssessment,
   parseArtifactAuthorityAssessment,
   parseArtifactEvidenceAttestation,
+  parseArtifactRiskAssessment,
   preflightAssessmentInput,
 } from "./artifact-assessments.js";
 import type { HomeWorldEvidenceCoverageReason } from "./home-world-service.js";
@@ -40,8 +43,20 @@ const watermark = {
   gapCount: 0,
 };
 
+const sourceProposal = { proposalId: "proposal-17", proposalRevision: 2 };
+const proposalEvidenceIdentity = `sha256:${"b".repeat(64)}`;
+const selectedHwCapabilityIds = ["hwc-curtain-level"];
+const evidenceBindings = { sourceProposal, proposalEvidenceIdentity, selectedHwCapabilityIds };
+const riskBindings = {
+  evidence: { attestationId: "evidence-1", inputIdentity: `sha256:${"e".repeat(64)}` },
+  authority: { assessmentId: "authority-1", inputIdentity: `sha256:${"d".repeat(64)}` },
+  conflictInputIdentity: `sha256:${"c".repeat(64)}`,
+};
+const authorityBindings = { authorityRegistryIdentity: `sha256:${"d".repeat(64)}` };
+
 test("creates a strict evidence attestation with the closed coverage reason set", () => {
   const result = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-1",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -55,6 +70,9 @@ test("creates a strict evidence attestation with the closed coverage reason set"
   assert.equal(result.inputIdentity, computeAssessmentInputIdentity("evidence", {
     artifact,
     source: result.source,
+    sourceProposal: result.sourceProposal,
+    proposalEvidenceIdentity: result.proposalEvidenceIdentity,
+    selectedHwCapabilityIds: result.selectedHwCapabilityIds,
     watermarks: result.watermarks,
     coverage: result.coverage,
     reasons: result.reasons,
@@ -75,6 +93,7 @@ test("creates a strict evidence attestation with the closed coverage reason set"
 
 test("rejects evidence with an unknown coverage reason, duplicate bridge, or dishonest coverage", () => {
   assert.throws(() => createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-bad-reason",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -85,6 +104,7 @@ test("rejects evidence with an unknown coverage reason, duplicate bridge, or dis
   }));
 
   assert.throws(() => createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-duplicate-bridge",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -95,6 +115,7 @@ test("rejects evidence with an unknown coverage reason, duplicate bridge, or dis
   }));
 
   assert.throws(() => createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-dishonest",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -105,6 +126,7 @@ test("rejects evidence with an unknown coverage reason, duplicate bridge, or dis
   }));
 
   assert.throws(() => createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-stale-complete",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -117,6 +139,7 @@ test("rejects evidence with an unknown coverage reason, duplicate bridge, or dis
 
 test("creates only Hub-owned risk classes and forces human approval", () => {
   const result = createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-1",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -129,6 +152,7 @@ test("creates only Hub-owned risk classes and forces human approval", () => {
   assert.equal(result.requiresHumanApproval, true);
   assert.deepEqual(artifactRiskAssessmentSchema.parse(result), result);
   assert.throws(() => createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-model-claimed",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -142,6 +166,7 @@ test("creates only Hub-owned risk classes and forces human approval", () => {
 
 test("creates authority candidates scoped only to Hub capability IDs", () => {
   const result = createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-1",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -160,6 +185,7 @@ test("creates authority candidates scoped only to Hub capability IDs", () => {
   assert.equal(Object.isFrozen(result.checkedWatermarks[0]), true);
   assert.deepEqual(artifactAuthorityAssessmentSchema.parse(result), result);
   assert.throws(() => createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-route-leak",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -177,6 +203,7 @@ test("creates authority candidates scoped only to Hub capability IDs", () => {
   }, { hwCapabilityIds: ["hwc-curtain-level"] }));
 
   assert.throws(() => createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-duplicate-watermark-bridge",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -187,6 +214,7 @@ test("creates authority candidates scoped only to Hub capability IDs", () => {
 
 test("requires an explicit, bounded authority capability scope", () => {
   assert.throws(() => (createArtifactAuthorityAssessment as (...args: never[]) => unknown)({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-missing-scope",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -195,6 +223,7 @@ test("requires an explicit, bounded authority capability scope", () => {
   }));
 
   assert.throws(() => createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-duplicate-scope",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -205,6 +234,7 @@ test("requires an explicit, bounded authority capability scope", () => {
 
 test("rejects duplicate authority candidates and oversized assessment input", () => {
   assert.throws(() => createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-duplicates",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -216,6 +246,7 @@ test("rejects duplicate authority candidates and oversized assessment input", ()
   }, { hwCapabilityIds: ["hwc-1", "hwc-2"] }));
 
   assert.throws(() => createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-too-many-reasons",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -228,6 +259,7 @@ test("rejects duplicate authority candidates and oversized assessment input", ()
 
 test("rejects identifier whitespace instead of normalizing it and enforces UTF-8 byte bounds", () => {
   assert.throws(() => createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: " risk-whitespace ",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -238,6 +270,7 @@ test("rejects identifier whitespace instead of normalizing it and enforces UTF-8
   }));
 
   assert.throws(() => createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-whitespace ",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -249,6 +282,7 @@ test("rejects identifier whitespace instead of normalizing it and enforces UTF-8
 
   // 51 four-byte UTF-8 code points exceed 200 bytes but are under 200 UTF-16 units.
   assert.throws(() => createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-utf8-bound",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -262,6 +296,7 @@ test("rejects identifier whitespace instead of normalizing it and enforces UTF-8
 test("preserves bounded reason text and rejects reason edge whitespace", () => {
   const reason = "Keep the household note exactly as authored: café.";
   const result = createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-reason-text",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -273,6 +308,7 @@ test("preserves bounded reason text and rejects reason edge whitespace", () => {
 
   assert.equal(result.reasons[0], reason);
   assert.throws(() => createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-reason-leading-space",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -282,6 +318,7 @@ test("preserves bounded reason text and rejects reason edge whitespace", () => {
     policyVersion: "1.0.0",
   }));
   assert.throws(() => createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-reason-trailing-space",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -299,6 +336,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
   );
 
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-array",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -311,6 +349,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
   const tooManyFields: Record<string, unknown> = {};
   for (let index = 0; index < 129; index += 1) tooManyFields[`field-${index}`] = index;
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-fields",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -324,6 +363,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
     Array.from({ length: 5 }, (_, index) => [`array-${index}`, Array.from({ length: 64 }, () => "x")]),
   );
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-array-total",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -337,6 +377,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
     Array.from({ length: 5 }, (_, index) => [`string-${index}`, "x".repeat(16_000)]),
   );
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-string-total",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -353,6 +394,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
     cursor = cursor.next as Record<string, unknown>;
   }
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-depth",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -365,6 +407,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
   const cyclic: Record<string, unknown> = {};
   cyclic.self = cyclic;
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-cycle",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -375,6 +418,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
   }), unknownCycle: cyclic }, "invalid_assessment");
 
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-undefined",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -384,6 +428,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
     reasons: [],
   }), unknownUndefined: undefined }, "invalid_assessment");
   assertRejected({ ...createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-preflight-nonfinite",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -396,6 +441,7 @@ test("preflights resource limits and unsafe shapes before nested schema admissio
 
 test("exported schema safeParse converts preflight failures into ordinary validation failures", () => {
   const valid = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-safe-parse",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -457,8 +503,17 @@ test("canonical input identity is key-order stable but changes with dynamic inpu
   }));
 });
 
+test("domain-separates proposal evidence and conflict digests while rejecting forbidden keys", () => {
+  const input = { references: [{ capabilityId: "hwc-curtain-level" }], complete: true };
+  assert.notEqual(computeProposalEvidenceIdentity(input), computeConflictInputIdentity(input));
+  assert.match(computeProposalEvidenceIdentity(input), /^sha256:[0-9a-f]{64}$/);
+  assert.throws(() => computeProposalEvidenceIdentity({ nativeId: "entity.cover" }));
+  assert.throws(() => computeConflictInputIdentity({ secret: "not-for-hashing" }));
+});
+
 test("dynamic evidence refreshes change only the attestation identity, not the artifact ref", () => {
   const first = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-refresh-1",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -468,6 +523,7 @@ test("dynamic evidence refreshes change only the attestation identity, not the a
     reasons: [],
   });
   const refreshed = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact: first.artifact,
     attestationId: "evidence-refresh-2",
     capturedAt: "2026-08-20T01:05:00.000Z",
@@ -485,6 +541,7 @@ test("dynamic evidence refreshes change only the attestation identity, not the a
 test("dynamic watermark, gap, policy, and candidate status inputs get new identities", () => {
   const evidence = (next: Partial<typeof watermark>, coverage: "complete" | "partial", reasons: readonly string[]) =>
     createArtifactEvidenceAttestation({
+      ...evidenceBindings,
       artifact,
       attestationId: "evidence-property",
       capturedAt: "2026-08-20T01:00:00.000Z",
@@ -504,6 +561,7 @@ test("dynamic watermark, gap, policy, and candidate status inputs get new identi
   assert.deepEqual(gapChanged.artifact, artifact);
 
   const risk = (policyVersion: string) => createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-property",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -518,6 +576,7 @@ test("dynamic watermark, gap, policy, and candidate status inputs get new identi
   assert.deepEqual(riskOne.artifact, artifact);
 
   const authority = (status: "available" | "unavailable") => createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-property",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -534,6 +593,7 @@ test("canonicalizes watermark and candidate vectors independent of caller array 
   const firstWatermark = { ...watermark, bridgeId: "bridge-a" };
   const secondWatermark = { ...watermark, bridgeId: "bridge-b" };
   const evidenceFirst = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-order-1",
     capturedAt: "2026-08-20T01:00:00.000Z",
@@ -543,6 +603,7 @@ test("canonicalizes watermark and candidate vectors independent of caller array 
     reasons: [],
   });
   const evidenceSecond = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
     artifact,
     attestationId: "evidence-order-2",
     capturedAt: "2026-08-20T01:01:00.000Z",
@@ -556,6 +617,7 @@ test("canonicalizes watermark and candidate vectors independent of caller array 
   assert.deepEqual(evidenceFirst.watermarks.map((item) => item.bridgeId), ["bridge-a", "bridge-b"]);
 
   const authorityFirst = createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-order-1",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -566,6 +628,7 @@ test("canonicalizes watermark and candidate vectors independent of caller array 
     checkedWatermarks: [secondWatermark, firstWatermark],
   }, { hwCapabilityIds: ["hwc-a", "hwc-b"] });
   const authoritySecond = createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-order-2",
     assessedAt: "2026-08-20T01:01:00.000Z",
@@ -598,6 +661,7 @@ test("canonicalizes watermark and candidate vectors independent of caller array 
 
 test("authority candidate scope is explicit and rejects candidates for another capability", () => {
   assert.throws(() => createArtifactAuthorityAssessment({
+    ...authorityBindings,
     artifact,
     assessmentId: "authority-out-of-scope",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -612,6 +676,7 @@ test("authority candidate scope is explicit and rejects candidates for another c
 
 test("assessment outputs are immutable and never mutate the bound artifact ref", () => {
   const result = createArtifactRiskAssessment({
+    ...riskBindings,
     artifact,
     assessmentId: "risk-frozen",
     assessedAt: "2026-08-20T01:00:00.000Z",
@@ -628,4 +693,233 @@ test("assessment outputs are immutable and never mutate the bound artifact ref",
     (result.artifact as { revision: number }).revision = 2;
   }, TypeError);
   assert.equal(result.artifact.revision, 1);
+});
+
+test("binds evidence to the approved proposal evidence and canonical selected capability ids", () => {
+  const result = createArtifactEvidenceAttestation({
+    artifact,
+    attestationId: "evidence-proposal-binding",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    sourceProposal: { proposalId: "proposal-17", proposalRevision: 2 },
+    proposalEvidenceIdentity: `sha256:${"b".repeat(64)}`,
+    selectedHwCapabilityIds: ["hwc-z", "hwc-a"],
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  } as never);
+
+  assert.deepEqual(result.sourceProposal, { proposalId: "proposal-17", proposalRevision: 2 });
+  assert.equal(result.proposalEvidenceIdentity, `sha256:${"b".repeat(64)}`);
+  assert.deepEqual(result.selectedHwCapabilityIds, ["hwc-a", "hwc-z"]);
+});
+
+test("changes evidence, risk, and authority identity for every newly bound dependency", () => {
+  const evidence = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
+    artifact,
+    attestationId: "evidence-binding-identity",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  });
+  const evidenceWithProposalChange = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
+    sourceProposal: { proposalId: "proposal-other", proposalRevision: 2 },
+    artifact,
+    attestationId: "evidence-binding-identity-proposal",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  });
+  const evidenceWithProposalEvidenceChange = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
+    proposalEvidenceIdentity: `sha256:${"f".repeat(64)}`,
+    artifact,
+    attestationId: "evidence-binding-identity-evidence",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  });
+  const evidenceWithSelectionChange = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
+    selectedHwCapabilityIds: ["hwc-other"],
+    artifact,
+    attestationId: "evidence-binding-identity-selection",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  });
+  assert.notEqual(evidence.inputIdentity, evidenceWithProposalChange.inputIdentity);
+  assert.notEqual(evidence.inputIdentity, evidenceWithProposalEvidenceChange.inputIdentity);
+  assert.notEqual(evidence.inputIdentity, evidenceWithSelectionChange.inputIdentity);
+
+  const risk = createArtifactRiskAssessment({
+    ...riskBindings,
+    artifact,
+    assessmentId: "risk-binding-identity",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    class: "comfort_reversible",
+    reasons: ["Bounded reversible level change with restore."],
+    policyId: "policy-home-v1",
+    policyVersion: "1.0.0",
+  });
+  const riskWithEvidenceChange = createArtifactRiskAssessment({
+    ...riskBindings,
+    evidence: { ...riskBindings.evidence, inputIdentity: `sha256:${"f".repeat(64)}` },
+    artifact,
+    assessmentId: "risk-binding-identity-evidence",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    class: "comfort_reversible",
+    reasons: ["Bounded reversible level change with restore."],
+    policyId: "policy-home-v1",
+    policyVersion: "1.0.0",
+  });
+  const riskWithAuthorityChange = createArtifactRiskAssessment({
+    ...riskBindings,
+    authority: { ...riskBindings.authority, assessmentId: "authority-other" },
+    artifact,
+    assessmentId: "risk-binding-identity-authority",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    class: "comfort_reversible",
+    reasons: ["Bounded reversible level change with restore."],
+    policyId: "policy-home-v1",
+    policyVersion: "1.0.0",
+  });
+  const riskWithConflictChange = createArtifactRiskAssessment({
+    ...riskBindings,
+    conflictInputIdentity: `sha256:${"f".repeat(64)}`,
+    artifact,
+    assessmentId: "risk-binding-identity-conflict",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    class: "comfort_reversible",
+    reasons: ["Bounded reversible level change with restore."],
+    policyId: "policy-home-v1",
+    policyVersion: "1.0.0",
+  });
+  assert.notEqual(risk.inputIdentity, riskWithEvidenceChange.inputIdentity);
+  assert.notEqual(risk.inputIdentity, riskWithAuthorityChange.inputIdentity);
+  assert.notEqual(risk.inputIdentity, riskWithConflictChange.inputIdentity);
+
+  const authority = createArtifactAuthorityAssessment({
+    ...authorityBindings,
+    artifact,
+    assessmentId: "authority-binding-identity",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    candidates: [{
+      actionAuthorityCandidateId: "candidate-binding",
+      hwCapabilityId: "hwc-curtain-level",
+      status: "available",
+    }],
+    checkedWatermarks: [watermark],
+  }, { hwCapabilityIds: ["hwc-curtain-level"] });
+  const authorityWithRegistryChange = createArtifactAuthorityAssessment({
+    ...authorityBindings,
+    authorityRegistryIdentity: `sha256:${"f".repeat(64)}`,
+    artifact,
+    assessmentId: "authority-binding-identity-registry",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    candidates: [{
+      actionAuthorityCandidateId: "candidate-binding",
+      hwCapabilityId: "hwc-curtain-level",
+      status: "available",
+    }],
+    checkedWatermarks: [watermark],
+  }, { hwCapabilityIds: ["hwc-curtain-level"] });
+  assert.notEqual(authority.inputIdentity, authorityWithRegistryChange.inputIdentity);
+});
+
+test("missing or tampered assessment bindings fail closed", () => {
+  const evidence = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
+    artifact,
+    attestationId: "evidence-binding-tamper",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  });
+  const missingEvidenceProposal = { ...evidence } as Record<string, unknown>;
+  delete missingEvidenceProposal.sourceProposal;
+  assert.throws(() => parseArtifactEvidenceAttestation(missingEvidenceProposal), ArtifactAssessmentError);
+  assert.throws(() => parseArtifactEvidenceAttestation({
+    ...evidence,
+    selectedHwCapabilityIds: ["hwc-other"],
+  }), ArtifactAssessmentError);
+
+  const risk = createArtifactRiskAssessment({
+    ...riskBindings,
+    artifact,
+    assessmentId: "risk-binding-tamper",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    class: "comfort_reversible",
+    reasons: ["Bounded reversible level change with restore."],
+    policyId: "policy-home-v1",
+    policyVersion: "1.0.0",
+  });
+  const missingRiskEvidence = { ...risk } as Record<string, unknown>;
+  delete missingRiskEvidence.evidence;
+  assert.throws(() => parseArtifactRiskAssessment(missingRiskEvidence), ArtifactAssessmentError);
+  assert.throws(() => parseArtifactRiskAssessment({
+    ...risk,
+    conflictInputIdentity: `sha256:${"f".repeat(64)}`,
+  }), ArtifactAssessmentError);
+
+  const authority = createArtifactAuthorityAssessment({
+    ...authorityBindings,
+    artifact,
+    assessmentId: "authority-binding-tamper",
+    assessedAt: "2026-08-20T01:00:00.000Z",
+    candidates: [],
+    checkedWatermarks: [watermark],
+  }, { hwCapabilityIds: ["hwc-curtain-level"] });
+  const missingAuthorityRegistry = { ...authority } as Record<string, unknown>;
+  delete missingAuthorityRegistry.authorityRegistryIdentity;
+  assert.throws(() => parseArtifactAuthorityAssessment(missingAuthorityRegistry), ArtifactAssessmentError);
+  assert.throws(() => parseArtifactAuthorityAssessment({
+    ...authority,
+    authorityRegistryIdentity: `sha256:${"f".repeat(64)}`,
+  }), ArtifactAssessmentError);
+});
+
+test("requires selected capability ids to be unique and canonical on durable reads", () => {
+  assert.throws(() => createArtifactEvidenceAttestation({
+    ...evidenceBindings,
+    selectedHwCapabilityIds: ["hwc-curtain-level", "hwc-curtain-level"],
+    artifact,
+    attestationId: "evidence-duplicate-capability",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  }), (error: unknown) => error instanceof ArtifactAssessmentError && error.code === "duplicate_capability");
+
+  const canonical = createArtifactEvidenceAttestation({
+    ...evidenceBindings,
+    selectedHwCapabilityIds: ["hwc-z", "hwc-a"],
+    artifact,
+    attestationId: "evidence-selected-canonical",
+    capturedAt: "2026-08-20T01:00:00.000Z",
+    source: "home-world-consistent-cut",
+    watermarks: [watermark],
+    coverage: "complete",
+    reasons: [],
+  });
+  assert.deepEqual(canonical.selectedHwCapabilityIds, ["hwc-a", "hwc-z"]);
+  const unsorted = {
+    ...canonical,
+    selectedHwCapabilityIds: [...canonical.selectedHwCapabilityIds].reverse(),
+  };
+  assert.throws(() => artifactEvidenceAttestationSchema.parse(unsorted));
+  assert.throws(() => parseArtifactEvidenceAttestation(unsorted));
 });

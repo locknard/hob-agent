@@ -39,6 +39,7 @@ const boundedReason = z.string()
   .refine((value) => value === value.trim(), "reason must not have surrounding whitespace");
 const isoTimestamp = z.iso.datetime({ offset: true });
 const sha256Digest = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+const positiveSafeInteger = z.number().int().positive().safe();
 const forbiddenCanonicalKeys = new Set([
   "accessToken",
   "adapterType",
@@ -93,6 +94,26 @@ const coverageReasonSchema = z.enum(HOME_WORLD_EVIDENCE_COVERAGE_REASONS);
 const freshnessSchema = z.enum(["fresh", "stale", "unknown"]);
 const coverageSchema = z.enum(["complete", "partial", "unavailable"]);
 
+const sourceProposalSchema = z.object({
+  proposalId: boundedId,
+  proposalRevision: positiveSafeInteger,
+}).strict();
+
+const assessmentIdentityRefSchema = z.object({
+  attestationId: boundedId,
+  inputIdentity: sha256Digest,
+}).strict();
+
+const selectedHwCapabilityIdsSchema = z.array(boundedId).max(16);
+const canonicalSelectedHwCapabilityIdsSchema = selectedHwCapabilityIdsSchema.superRefine((ids, ctx) => {
+  if (new Set(ids).size !== ids.length) {
+    ctx.addIssue({ code: "custom", message: "selectedHwCapabilityIds must be unique" });
+  }
+  if (!isCanonicalStringOrder(ids)) {
+    ctx.addIssue({ code: "custom", message: "selectedHwCapabilityIds must be in canonical capability order" });
+  }
+});
+
 const watermarkSchema = z.object({
   bridgeId: boundedId,
   epochId: boundedId,
@@ -107,6 +128,9 @@ const evidenceInputSchema = z.object({
   attestationId: boundedId,
   capturedAt: isoTimestamp,
   source: z.literal("home-world-consistent-cut"),
+  sourceProposal: sourceProposalSchema,
+  proposalEvidenceIdentity: sha256Digest,
+  selectedHwCapabilityIds: selectedHwCapabilityIdsSchema,
   watermarks: z.array(watermarkSchema).min(1).max(MAX_ASSESSMENT_WATERMARKS),
   coverage: coverageSchema,
   reasons: z.array(coverageReasonSchema).max(HOME_WORLD_EVIDENCE_COVERAGE_REASONS.length),
@@ -118,6 +142,9 @@ const evidenceSchema = z.preprocess(preflightForSchema, z.object({
   artifact: artifactRefSchema,
   inputIdentity: sha256Digest,
   source: z.literal("home-world-consistent-cut"),
+  sourceProposal: sourceProposalSchema,
+  proposalEvidenceIdentity: sha256Digest,
+  selectedHwCapabilityIds: canonicalSelectedHwCapabilityIdsSchema,
   capturedAt: isoTimestamp,
   watermarks: z.array(watermarkSchema).min(1).max(MAX_ASSESSMENT_WATERMARKS),
   coverage: coverageSchema,
@@ -142,6 +169,12 @@ const riskInputSchema = z.object({
   artifact: artifactRefSchema,
   assessmentId: boundedId,
   assessedAt: isoTimestamp,
+  evidence: assessmentIdentityRefSchema,
+  authority: z.object({
+    assessmentId: boundedId,
+    inputIdentity: sha256Digest,
+  }).strict(),
+  conflictInputIdentity: sha256Digest,
   class: z.enum(["observe_or_notify", "comfort_reversible"]),
   reasons: z.array(boundedReason).max(MAX_ASSESSMENT_REASONS),
   policyId: boundedId,
@@ -153,6 +186,12 @@ const riskSchema = z.preprocess(preflightForSchema, z.object({
   assessmentId: boundedId,
   artifact: artifactRefSchema,
   inputIdentity: sha256Digest,
+  evidence: assessmentIdentityRefSchema,
+  authority: z.object({
+    assessmentId: boundedId,
+    inputIdentity: sha256Digest,
+  }).strict(),
+  conflictInputIdentity: sha256Digest,
   class: z.enum(["observe_or_notify", "comfort_reversible"]),
   reasons: z.array(boundedReason).max(MAX_ASSESSMENT_REASONS),
   policyId: boundedId,
@@ -180,6 +219,7 @@ const authorityInputSchema = z.object({
   artifact: artifactRefSchema,
   assessmentId: boundedId,
   assessedAt: isoTimestamp,
+  authorityRegistryIdentity: sha256Digest,
   candidates: z.array(authorityCandidateSchema).max(MAX_AUTHORITY_CANDIDATES),
   checkedWatermarks: z.array(watermarkSchema).max(MAX_ASSESSMENT_WATERMARKS),
 }).strict();
@@ -193,6 +233,7 @@ const authoritySchema = z.preprocess(preflightForSchema, z.object({
   assessmentId: boundedId,
   artifact: artifactRefSchema,
   inputIdentity: sha256Digest,
+  authorityRegistryIdentity: sha256Digest,
   candidates: z.array(authorityCandidateSchema).max(MAX_AUTHORITY_CANDIDATES),
   checkedWatermarks: z.array(watermarkSchema).max(MAX_ASSESSMENT_WATERMARKS),
   assessedAt: isoTimestamp,
@@ -241,6 +282,7 @@ export class ArtifactAssessmentError extends Error {
     | "duplicate_bridge"
     | "duplicate_reason"
     | "duplicate_candidate"
+    | "duplicate_capability"
     | "duplicate_scope"
     | "out_of_scope"
     | "identity_mismatch"
@@ -272,6 +314,21 @@ export function canonicalAssessmentInput(input: unknown): string {
   return encoded;
 }
 
+/** Computes the Hub-owned digest for the exact approved Proposal evidence envelope. */
+export function computeProposalEvidenceIdentity(input: unknown): string {
+  return computeCanonicalDigest({ kind: "proposal-evidence", input });
+}
+
+/** Computes the Hub-owned digest for the exact conflict assessment/query input. */
+export function computeConflictInputIdentity(input: unknown): string {
+  return computeCanonicalDigest({ kind: "conflict-input", input });
+}
+
+function computeCanonicalDigest(input: unknown): string {
+  const canonical = canonicalAssessmentInput(input);
+  return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+}
+
 /** Compute the stable identity of Hub-owned dynamic assessment inputs. */
 export function computeAssessmentInputIdentity(
   kind: "evidence" | "risk" | "authority",
@@ -286,14 +343,21 @@ export function createArtifactEvidenceAttestation(
 ): ArtifactEvidenceAttestation {
   const parsed = parseInput(evidenceInputSchema, input);
   const watermarks = sortWatermarks(parsed.watermarks);
+  validateUnique(parsed.selectedHwCapabilityIds, "capability");
+  const selectedHwCapabilityIds = sortCapabilityIds(parsed.selectedHwCapabilityIds);
   validateCoverage(parsed.coverage, parsed.reasons, watermarks);
   validateUnique(watermarks.map((item) => item.bridgeId), "bridge");
 
   const output = evidenceSchema.parse({
     kind: "evidence-attestation",
     ...parsed,
+    selectedHwCapabilityIds,
     watermarks,
-    inputIdentity: computeAssessmentInputIdentity("evidence", evidenceIdentityInput({ ...parsed, watermarks })),
+    inputIdentity: computeAssessmentInputIdentity("evidence", evidenceIdentityInput({
+      ...parsed,
+      selectedHwCapabilityIds,
+      watermarks,
+    })),
   });
   return freezeDeep(output);
 }
@@ -359,6 +423,7 @@ export const canonicalInputIdentity = computeAssessmentInputIdentity;
 export function parseArtifactEvidenceAttestation(input: unknown): ArtifactEvidenceAttestation {
   const parsed = parseInput(evidenceSchema, input);
   validateCoverage(parsed.coverage, parsed.reasons, parsed.watermarks);
+  validateUnique(parsed.selectedHwCapabilityIds, "capability");
   validateUnique(parsed.watermarks.map((item) => item.bridgeId), "bridge");
   assertInputIdentity(parsed.inputIdentity, "evidence", evidenceIdentityInput(parsed));
   return freezeDeep(parsed);
@@ -386,11 +451,14 @@ export const riskAssessmentSchema = artifactRiskAssessmentSchema;
 export const authorityAssessmentSchema = artifactAuthorityAssessmentSchema;
 
 function evidenceIdentityInput(
-  input: Pick<ArtifactEvidenceInput, "artifact" | "source" | "watermarks" | "coverage" | "reasons">,
+  input: Pick<ArtifactEvidenceInput, "artifact" | "source" | "sourceProposal" | "proposalEvidenceIdentity" | "selectedHwCapabilityIds" | "watermarks" | "coverage" | "reasons">,
 ): unknown {
   return {
     artifact: input.artifact,
     source: input.source,
+    sourceProposal: input.sourceProposal,
+    proposalEvidenceIdentity: input.proposalEvidenceIdentity,
+    selectedHwCapabilityIds: sortCapabilityIds(input.selectedHwCapabilityIds),
     watermarks: sortWatermarks(input.watermarks),
     coverage: input.coverage,
     reasons: input.reasons,
@@ -398,10 +466,13 @@ function evidenceIdentityInput(
 }
 
 function riskIdentityInput(
-  input: Pick<ArtifactRiskInput, "artifact" | "class" | "reasons" | "policyId" | "policyVersion">,
+  input: Pick<ArtifactRiskInput, "artifact" | "evidence" | "authority" | "conflictInputIdentity" | "class" | "reasons" | "policyId" | "policyVersion">,
 ): unknown {
   return {
     artifact: input.artifact,
+    evidence: input.evidence,
+    authority: input.authority,
+    conflictInputIdentity: input.conflictInputIdentity,
     class: input.class,
     reasons: input.reasons,
     policyId: input.policyId,
@@ -411,10 +482,11 @@ function riskIdentityInput(
 }
 
 function authorityIdentityInput(
-  input: Pick<ArtifactAuthorityInput, "artifact" | "candidates" | "checkedWatermarks">,
+  input: Pick<ArtifactAuthorityInput, "artifact" | "authorityRegistryIdentity" | "candidates" | "checkedWatermarks">,
 ): unknown {
   return {
     artifact: input.artifact,
+    authorityRegistryIdentity: input.authorityRegistryIdentity,
     candidates: sortAuthorityCandidates(input.candidates),
     checkedWatermarks: sortWatermarks(input.checkedWatermarks),
   };
@@ -445,6 +517,14 @@ function normalizeIdentityInput(
 
 function sortWatermarks<T extends { readonly bridgeId: string }>(watermarks: readonly T[]): T[] {
   return [...watermarks].sort((left, right) => compareUnicodeCodePoints(left.bridgeId, right.bridgeId));
+}
+
+function sortCapabilityIds(ids: readonly string[]): string[] {
+  return [...ids].sort(compareUnicodeCodePoints);
+}
+
+function isCanonicalStringOrder(values: readonly string[]): boolean {
+  return values.every((value, index) => index === 0 || compareUnicodeCodePoints(values[index - 1]!, value) <= 0);
 }
 
 function sortAuthorityCandidates<T extends {
@@ -525,7 +605,7 @@ function validateCoverage(
   }
 }
 
-function validateUnique(values: readonly string[], kind: "bridge" | "reason" | "candidate" | "scope"): void {
+function validateUnique(values: readonly string[], kind: "bridge" | "reason" | "candidate" | "capability" | "scope"): void {
   if (new Set(values).size === values.length) return;
   const code = kind === "bridge"
     ? "duplicate_bridge"
@@ -533,6 +613,8 @@ function validateUnique(values: readonly string[], kind: "bridge" | "reason" | "
       ? "duplicate_reason"
       : kind === "scope"
         ? "duplicate_scope"
+        : kind === "capability"
+          ? "duplicate_capability"
         : "duplicate_candidate";
   throw new ArtifactAssessmentError(code, `Assessment contains duplicate ${kind} entries`);
 }
