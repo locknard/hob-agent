@@ -4,6 +4,47 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 export const name = "dsh-home-proposal-tool";
 export const inject = ["tools", "homeProposals"] as const;
 
+type NeutralScalar = string | number | boolean | null;
+
+type ArtifactCapabilityRef = { readonly hwCapabilityId: string };
+
+type ArtifactCandidateContent = {
+  readonly trigger:
+    | { readonly kind: "schedule"; readonly timezone: string; readonly daysOfWeek: readonly number[]; readonly at: string }
+    | { readonly kind: "capability_changed"; readonly source: ArtifactCapabilityRef };
+  readonly conditions: readonly {
+    readonly kind: "capability_value";
+    readonly source: ArtifactCapabilityRef;
+    readonly operator: "equals" | "not_equals" | "greater_than" | "less_than";
+    readonly value: NeutralScalar;
+  }[];
+  readonly actions: readonly (
+    | {
+        readonly kind: "set_level";
+        readonly target: ArtifactCapabilityRef;
+        readonly value: number;
+        readonly transitionSeconds?: number;
+      }
+    | { readonly kind: "set_boolean"; readonly target: ArtifactCapabilityRef; readonly value: boolean }
+    | { readonly kind: "notify_local"; readonly message: string }
+  )[];
+  readonly rollback:
+    | { readonly kind: "restore_previous_state"; readonly target: ArtifactCapabilityRef; readonly maxAgeSeconds: number }
+    | { readonly kind: "no_remote_change" };
+  readonly postconditions: readonly {
+    readonly kind: "capability_value";
+    readonly source: ArtifactCapabilityRef;
+    readonly operator: "equals" | "not_equals" | "greater_than" | "less_than";
+    readonly value: NeutralScalar;
+    readonly withinSeconds: number;
+  }[];
+};
+
+type ArtifactCandidate = {
+  readonly schemaVersion: "1";
+  readonly content: ArtifactCandidateContent;
+};
+
 interface HomeProposalPort {
   createDraft(input: {
     kind: "automation-draft" | "household-insight";
@@ -14,6 +55,7 @@ interface HomeProposalPort {
     selectedHwIds: readonly string[];
     selectedHwCapabilityIds?: readonly string[];
     evidenceLookbackHours?: number;
+    artifactCandidate?: ArtifactCandidate;
     rationale: {
       householdValue: string;
       whyNow: string;
@@ -90,12 +132,158 @@ const OUTPUT_SCHEMA = {
   },
 } as const;
 
+const scalarParameter = {
+  oneOf: [
+    { type: "string" },
+    { type: "number" },
+    { type: "boolean" },
+    { type: "null" },
+  ],
+} as const;
+
+const capabilityRefParameter = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    hwCapabilityId: { type: "string", required: true },
+  },
+} as const;
+
+const triggerParameter = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", const: "schedule", required: true },
+        timezone: { type: "string", required: true },
+        daysOfWeek: { type: "array", items: { type: "integer" }, required: true },
+        at: { type: "string", required: true },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", const: "capability_changed", required: true },
+        source: { ...capabilityRefParameter, required: true },
+      },
+    },
+  ],
+} as const;
+
+const conditionParameter = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", const: "capability_value", required: true },
+    source: { ...capabilityRefParameter, required: true },
+    operator: {
+      type: "string",
+      enum: ["equals", "not_equals", "greater_than", "less_than"],
+      required: true,
+    },
+    value: { ...scalarParameter, required: true },
+  },
+} as const;
+
+const actionParameter = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", const: "set_level", required: true },
+        target: { ...capabilityRefParameter, required: true },
+        value: { type: "number", required: true },
+        transitionSeconds: { type: "number" },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", const: "set_boolean", required: true },
+        target: { ...capabilityRefParameter, required: true },
+        value: { type: "boolean", required: true },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", const: "notify_local", required: true },
+        message: { type: "string", required: true },
+      },
+    },
+  ],
+} as const;
+
+const rollbackParameter = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", const: "restore_previous_state", required: true },
+        target: { ...capabilityRefParameter, required: true },
+        maxAgeSeconds: { type: "integer", required: true },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", const: "no_remote_change", required: true },
+      },
+    },
+  ],
+} as const;
+
+const postconditionParameter = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", const: "capability_value", required: true },
+    source: { ...capabilityRefParameter, required: true },
+    operator: {
+      type: "string",
+      enum: ["equals", "not_equals", "greater_than", "less_than"],
+      required: true,
+    },
+    value: { ...scalarParameter, required: true },
+    withinSeconds: { type: "integer", required: true },
+  },
+} as const;
+
+const artifactCandidateContentParameter = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    trigger: { ...triggerParameter, required: true },
+    conditions: { type: "array", items: conditionParameter, required: true },
+    actions: { type: "array", items: actionParameter, required: true },
+    rollback: { ...rollbackParameter, required: true },
+    postconditions: { type: "array", items: postconditionParameter, required: true },
+  },
+} as const;
+
+const artifactCandidateParameter = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    schemaVersion: { type: "string", const: "1", required: true },
+    content: { ...artifactCandidateContentParameter, required: true },
+  },
+} as const;
+
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: "create_home_proposal",
     description: [
       "Create a local pending household proposal from bounded hub evidence.",
       "When the proposal relies on recent behavior, select current hub capability IDs and a lookback window; the Hub binds exact event provenance and coverage.",
+      "An artifact candidate is review-only intent; this tool cannot compile, approve, install, or execute it.",
       "This only adds an Inbox item; it cannot control a device or install an automation.",
     ].join(" "),
     parameters: {
@@ -109,6 +297,7 @@ export function apply(ctx: Context): void {
       selectedHwIds: { type: "array", items: { type: "string" }, required: true },
       selectedHwCapabilityIds: { type: "array", items: { type: "string" } },
       evidenceLookbackHours: { type: "integer" },
+      artifactCandidate: artifactCandidateParameter,
       riskLevel: { type: "string", enum: ["low", "medium", "high"], required: true },
       riskReasons: { type: "array", items: { type: "string" }, required: true },
       intentDescription: { type: "string", required: true },
@@ -119,6 +308,12 @@ export function apply(ctx: Context): void {
       render: (_args, value) => [{ type: "text" as const, text: JSON.stringify(value) }],
     },
     execute: async (args, exec) => {
+      if (args.kind === "automation-draft" && args.artifactCandidate === undefined) {
+        throw new TypeError("artifactCandidate is required for automation-draft");
+      }
+      if (args.kind !== "automation-draft" && args.artifactCandidate !== undefined) {
+        throw new TypeError("artifactCandidate is only allowed for automation-draft");
+      }
       ctx.get("homeCalibrationCoverage")?.assertProposalAllowed();
       ctx.get("homeInventoryCoverage")?.assertProposalAllowed();
       ctx.get("homeRulesCoverage")?.assertProposalAllowed();
@@ -135,6 +330,7 @@ export function apply(ctx: Context): void {
         selectedHwIds: args.selectedHwIds,
         ...(args.selectedHwCapabilityIds === undefined ? {} : { selectedHwCapabilityIds: args.selectedHwCapabilityIds }),
         ...(args.evidenceLookbackHours === undefined ? {} : { evidenceLookbackHours: args.evidenceLookbackHours }),
+        ...(args.artifactCandidate === undefined ? {} : { artifactCandidate: args.artifactCandidate }),
         rationale: {
           householdValue: args.householdValue,
           whyNow: args.whyNow,

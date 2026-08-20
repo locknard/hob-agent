@@ -186,6 +186,33 @@ class ObservationScriptAdapter {
         riskReasons: ["Observation may not represent household intent"],
         intentDescription: "Review the observation without applying any automation.",
         rollback: "Reject the proposal.",
+        artifactCandidate: {
+          schemaVersion: "1",
+          content: {
+            trigger: {
+              kind: "capability_changed",
+              source: { hwCapabilityId: "hwc-1" },
+            },
+            conditions: [],
+            actions: [{
+              kind: "set_boolean",
+              target: { hwCapabilityId: "hwc-1" },
+              value: false,
+            }],
+            rollback: {
+              kind: "restore_previous_state",
+              target: { hwCapabilityId: "hwc-1" },
+              maxAgeSeconds: 3600,
+            },
+            postconditions: [{
+              kind: "capability_value",
+              source: { hwCapabilityId: "hwc-1" },
+              operator: "equals",
+              value: false,
+              withinSeconds: 30,
+            }],
+          },
+        },
       });
       return;
     }
