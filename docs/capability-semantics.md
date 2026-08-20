@@ -162,3 +162,81 @@ Before implementing or widening the resolver, add deterministic Hub tests for:
 - The same compatible MIoT boolean with no configured authority: resolver
   compatibility is unchanged, while the separate authority assessment fails
   closed.
+
+## Reviewed HA cover-position mapping
+
+The next additive mapping does not widen `ha.entity@1.0.0`. Home Assistant
+cover capabilities use a separate exact adapter schema,
+`ha.cover@1.0.0`, while every non-cover HA capability remains on
+`ha.entity@1.0.0`. This keeps already persisted generic HA state truthful and
+prevents an optional attribute on an unrelated entity from becoming a level
+action claim.
+
+The adapter-owned `ha.cover@1.0.0` state projection is a closed object with:
+
+- `state: string`, retained as bounded read evidence;
+- optional `level: number`, emitted only when HA `current_position` is an
+  integer in `0..100`, normalized exactly as `current_position / 100`;
+- optional `setLevelSupported: boolean`, emitted only when HA
+  `supported_features` is a non-negative safe integer. It is `true` exactly
+  when the HA cover `SET_POSITION` feature bit is present and `false` when a
+  valid feature mask explicitly omits it;
+- optional `available: boolean`; and
+- optional non-negative `unknownAttributeCount`.
+
+Invalid, fractional, non-finite, string, or out-of-range native positions are
+omitted rather than clamped or coerced. A missing or invalid feature mask is
+also omitted rather than treated as writable. The schema does not expose the
+native feature mask, entity ID, service name, device class, route, or
+credential material. Tilt position is deliberately outside this first mapping.
+
+For `ha.cover@1.0.0`, the Hub-private primary read value is normalized
+`level`. A missing level makes numeric read/predicate semantics unavailable;
+the string `state` is not used as a type-changing fallback. `set_level` is
+compatible only when all of the following hold at the exact fresh world cut:
+
+1. `level` is present, finite, and within `0..1`;
+2. `setLevelSupported` is exactly `true`;
+3. the requested neutral level is finite, within `0..1`, and exactly
+   representable at HA's integer-percent step (`value * 100` is an integer).
+
+The compatibility result contains only the neutral normalized `before` and
+unchanged requested `after`. It never rounds an approved value. Missing
+position is unavailable; an explicit `setLevelSupported: false` is
+action-incompatible; missing support metadata remains an unreviewed action
+mapping. None of these results creates action authority.
+
+Action authority continues through the separate Hub-private configuration and
+opaque candidate registry. A candidate may exist for a `set_level` target
+while schema compatibility still fails, and compatible cover semantics may
+exist while authority is absent or unapproved. Both are required for a useful
+compile result. The future executor must re-resolve the exact candidate and
+private HA binding before translating neutral level to integer percent; no HA
+service vocabulary or route is added to Artifact, Agent, plugin, or Inbox
+surfaces here.
+
+Changing the adapter projection means existing `ha.entity@1.0.0` cover rows do
+not gain position evidence retroactively. A successful HA resync must produce
+a new epoch with `ha.cover@1.0.0` descriptors and states before a real-home
+world cut can use this mapping. Old cuts stay readable under their original
+exact schema and continue to reject `set_level`.
+
+### Additive TDD gate
+
+Before implementing this mapping, tests must prove:
+
+- only the `cover` entity domain selects `ha.cover@1.0.0`;
+- valid boundary positions `0` and `100` project to `0` and `1`, and a middle
+  integer percent projects without rounding;
+- missing, fractional, string, non-finite, and out-of-range positions do not
+  produce `level`;
+- a valid feature mask projects an explicit support boolean, while a missing
+  or invalid mask does not invent one;
+- generic HA entities, brightness, semantic hints, and string states still
+  cannot produce cover-level compatibility;
+- the exact cover schema admits numeric predicates and representable
+  `set_level` actions only with fresh valid state and explicit support;
+- missing position, missing support, explicit no-support, stale state, and
+  non-integer-percent requests all fail closed; and
+- compatibility remains independent of opaque authority candidate creation
+  and of any bridge control or execution route.
