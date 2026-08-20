@@ -105,6 +105,24 @@ pnpm credentials:test
 It sends the minimal DSH request and prints only model, classified status, and
 latency metadata.
 
+For the opt-in Music Assistant catalog credential, enter the token without
+echo:
+
+```sh
+pnpm credentials:music-assistant
+export HOB_MUSIC_ASSISTANT_BASE_URL='http://music-assistant.local:8095'
+export HOB_MUSIC_ASSISTANT_CREDENTIAL_REF='keychain:hob-agent/media:music-assistant:access-token'
+```
+
+The command writes only the fixed Keychain locator
+`keychain:hob-agent/media:music-assistant:access-token` and prints locator
+metadata. It never discovers or serializes `HOB_MUSIC_ASSISTANT_TOKEN`; an
+explicit development `env:HOB_MUSIC_ASSISTANT_TOKEN` reference is the only
+environment-backed alternative. Both launch settings are required; omitting
+both leaves Music Assistant unloaded, while providing only one fails startup.
+This integration currently adds bounded catalog search only—it does not expose
+Music Assistant players, queues, playback, or a generic command API.
+
 Before enabling the Agent or observation schedule, the same bridge and data
 configuration can be validated without `HOB_MODEL` or a model API key:
 

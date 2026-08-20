@@ -23,6 +23,8 @@ import {
   loadSelectedModelCredential,
   type SelectedModelCredential,
 } from "./model-credential-profile.js";
+import { MusicAssistantMediaCatalogProvider } from "./music-assistant-media-provider.js";
+import { MusicAssistantWebSocketSearchClient } from "./music-assistant-websocket-client.js";
 
 type ActionAuthorityConfig = Readonly<Record<string, ActionAuthorityConfiguration>>;
 
@@ -51,8 +53,24 @@ export function createHomeHubProcessOptions(
   environment: LaunchEnvironment,
   selectedCredential?: SelectedModelCredential,
   actionAuthorityConfig: ActionAuthorityConfig = Object.freeze({}),
+  bridgeCredentialVault?: SecretVault,
 ): HomeHubProcessOptions {
-  const config = readHomeHubLaunchConfig(environment, selectedCredential);
+  const config = readHomeHubLaunchConfig(environment, selectedCredential, bridgeCredentialVault);
+  const mediaCatalog = config.musicAssistant === undefined ? undefined : {
+    tenantId: "household",
+    catalogId: "music-assistant",
+    generation: 1,
+    sourceLabel: "Music Assistant",
+    mediaRefTtlMs: 300_000,
+    maxQueryChars: 128,
+    maxResults: 3,
+    provider: new MusicAssistantMediaCatalogProvider(
+      new MusicAssistantWebSocketSearchClient({
+        baseUrl: config.musicAssistant.baseUrl,
+        resolveToken: config.musicAssistant.resolveToken,
+      }),
+    ),
+  } as const;
   return {
     runtime: {
       homeWorld: {
@@ -78,6 +96,7 @@ export function createHomeHubProcessOptions(
       },
       ...(config.inboxHttp === undefined ? {} : { inboxHttp: config.inboxHttp }),
       ...(config.observation === undefined ? {} : { observation: config.observation }),
+      ...(mediaCatalog === undefined ? {} : { mediaCatalog }),
       launchEnvironment: config.launchEnvironment,
     },
   };
@@ -102,9 +121,9 @@ export async function resolveHomeHubProcessOptions(
   const selectedCredential = await loadSelectedModelCredential(dataDirectory, provider, vault);
   // Validate the complete launch contract before touching the optional
   // authority file so malformed bridge/model input keeps its bounded error.
-  readHomeHubLaunchConfig(environment, selectedCredential);
+  readHomeHubLaunchConfig(environment, selectedCredential, vault);
   const actionAuthorityConfig = await loadActionAuthorityConfigurationIfConfigured(dataDirectory);
-  return createHomeHubProcessOptions(environment, selectedCredential, actionAuthorityConfig);
+  return createHomeHubProcessOptions(environment, selectedCredential, actionAuthorityConfig, vault);
 }
 
 async function loadActionAuthorityConfigurationIfConfigured(

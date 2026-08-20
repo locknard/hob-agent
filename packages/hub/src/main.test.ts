@@ -26,6 +26,12 @@ const ENV = {
   OPENAI_API_KEY: "openai-secret",
 };
 
+const MUSIC_ASSISTANT_ENV = {
+  HOB_MUSIC_ASSISTANT_BASE_URL: "https://music.example.test",
+  HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: "env:HOB_MUSIC_ASSISTANT_TOKEN",
+  HOB_MUSIC_ASSISTANT_TOKEN: "music-assistant-private-token",
+};
+
 test("builds neutral HomeWorld process options from the allowlisted environment", () => {
   const options = createHomeHubProcessOptions(ENV);
 
@@ -48,6 +54,35 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   assert.equal(options.runtime.launchEnvironment.get("OPENAI_API_KEY")?.value, "openai-secret");
   assert.equal(JSON.stringify(options.runtime.homeWorld.bridges).includes("home-assistant-secret"), false);
   assert.equal(options.runtime.inboxHttp, undefined);
+  assert.equal(options.runtime.mediaCatalog, undefined);
+});
+
+test("mounts only the explicit Music Assistant read-only catalog composition", () => {
+  const options = createHomeHubProcessOptions({ ...ENV, ...MUSIC_ASSISTANT_ENV });
+  const mediaCatalog = options.runtime.mediaCatalog;
+
+  assert.equal(mediaCatalog?.catalogId, "music-assistant");
+  assert.equal(mediaCatalog?.sourceLabel, "Music Assistant");
+  assert.equal(mediaCatalog?.maxResults, 3);
+  assert.equal(mediaCatalog?.provider.constructor.name, "MusicAssistantMediaCatalogProvider");
+  const client = (mediaCatalog?.provider as unknown as { readonly client?: unknown }).client as {
+    readonly constructor: { readonly name: string };
+  } | undefined;
+  assert.equal(client?.constructor.name, "MusicAssistantWebSocketSearchClient");
+  assert.equal(options.runtime.launchEnvironment.get("HOB_MUSIC_ASSISTANT_TOKEN"), undefined);
+  assert.equal(JSON.stringify(options).includes("music-assistant-private-token"), false);
+});
+
+test("fails closed for incomplete Music Assistant production composition", () => {
+  for (const environment of [
+    { HOB_MUSIC_ASSISTANT_BASE_URL: MUSIC_ASSISTANT_ENV.HOB_MUSIC_ASSISTANT_BASE_URL },
+    { HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: MUSIC_ASSISTANT_ENV.HOB_MUSIC_ASSISTANT_CREDENTIAL_REF },
+  ]) {
+    assert.throws(
+      () => createHomeHubProcessOptions({ ...ENV, ...environment }),
+      /HOB_MUSIC_ASSISTANT_(BASE_URL|CREDENTIAL_REF)/,
+    );
+  }
 });
 
 test("passes generated action authority only to HomeWorld and never to the Agent runtime", async () => {

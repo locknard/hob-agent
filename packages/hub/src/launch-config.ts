@@ -25,6 +25,10 @@ import { createBuiltinBridgeCatalog } from "./bridge-bundle.js";
 import type { BridgeCatalog } from "./bridge-catalog.js";
 import type { BridgeConfigEntry } from "./bridge-registry.js";
 import type { SelectedModelCredential } from "./model-credential-profile.js";
+import {
+  parseMusicAssistantCredentialRef,
+} from "./music-assistant-credential-setup.js";
+import { toMusicAssistantWebSocketUrl } from "./music-assistant-websocket-client.js";
 
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const SECRET_CONFIG_KEY_PATTERN = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
@@ -69,6 +73,11 @@ export interface HomeHubLaunchConfig {
   readonly observation?: {
     readonly intervalMinutes: number;
     readonly runOnStart: boolean;
+  };
+  /** Explicit read-only Music Assistant transport; omitted unless both launch settings exist. */
+  readonly musicAssistant?: {
+    readonly baseUrl: string;
+    readonly resolveToken: (signal: AbortSignal) => Promise<string | undefined>;
   };
   /** DSH sees only the selected provider's standard credential alias. */
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
@@ -138,6 +147,7 @@ export function readHomeHubLaunchConfig(
   bridgeCredentialVault: SecretVault = new MacOSKeychainSecretVault(),
 ): HomeHubLaunchConfig {
   const world = readHomeWorldLaunchConfig(environment, bridgeCredentialVault);
+  const musicAssistant = parseMusicAssistantConfiguration(environment, bridgeCredentialVault);
   const modelReference = requiredValue(environment, "HOB_MODEL");
 
   let model: ReturnType<typeof parseModelReference>;
@@ -200,7 +210,49 @@ export function readHomeHubLaunchConfig(
     },
     ...(inboxHttp === undefined ? {} : { inboxHttp }),
     ...(observation === undefined ? {} : { observation }),
+    ...(musicAssistant === undefined ? {} : { musicAssistant }),
     launchEnvironment,
+  };
+}
+
+function parseMusicAssistantConfiguration(
+  environment: LaunchEnvironment,
+  vault: SecretVault,
+): HomeHubLaunchConfig["musicAssistant"] {
+  const baseUrlValue = environment.HOB_MUSIC_ASSISTANT_BASE_URL;
+  const credentialRefValue = environment.HOB_MUSIC_ASSISTANT_CREDENTIAL_REF;
+  const hasBaseUrl = typeof baseUrlValue === "string" && baseUrlValue.trim() !== "";
+  const hasCredentialRef = typeof credentialRefValue === "string" && credentialRefValue.trim() !== "";
+  if (!hasBaseUrl && !hasCredentialRef) return undefined;
+  if (!hasBaseUrl) {
+    throw new Error("HOB_MUSIC_ASSISTANT_BASE_URL is required with HOB_MUSIC_ASSISTANT_CREDENTIAL_REF");
+  }
+  if (!hasCredentialRef) {
+    throw new Error("HOB_MUSIC_ASSISTANT_CREDENTIAL_REF is required with HOB_MUSIC_ASSISTANT_BASE_URL");
+  }
+
+  const baseUrl = baseUrlValue.trim();
+  try {
+    toMusicAssistantWebSocketUrl(baseUrl);
+  } catch {
+    throw new Error("Invalid HOB_MUSIC_ASSISTANT_BASE_URL");
+  }
+  let credentialRef: ReturnType<typeof parseMusicAssistantCredentialRef>;
+  try {
+    credentialRef = parseMusicAssistantCredentialRef(credentialRefValue.trim());
+  } catch {
+    throw new Error("Invalid HOB_MUSIC_ASSISTANT_CREDENTIAL_REF");
+  }
+  return {
+    baseUrl,
+    resolveToken: async (signal) => {
+      if (signal.aborted) return undefined;
+      const value = credentialRef.startsWith("env:")
+        ? environment[credentialRef.slice("env:".length)]
+        : await vault.read(credentialRef);
+      if (signal.aborted) return undefined;
+      return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+    },
   };
 }
 

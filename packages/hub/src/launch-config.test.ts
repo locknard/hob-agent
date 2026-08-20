@@ -6,6 +6,10 @@ import {
   readHomeInboxLaunchConfig,
   readHomeWorldLaunchConfig,
 } from "./launch-config.js";
+import {
+  MUSIC_ASSISTANT_ENV_CREDENTIAL_REF,
+  MUSIC_ASSISTANT_KEYCHAIN_CREDENTIAL_REF,
+} from "./music-assistant-credential-setup.js";
 
 const BRIDGES = JSON.stringify([{
   bridgeId: "ha-main",
@@ -25,6 +29,9 @@ const BASE_ENV = {
   OPENAI_API_KEY: "openai-secret",
   DEEPSEEK_API_KEY: "must-not-enter-the-snapshot",
 };
+
+const MUSIC_ASSISTANT_BASE_URL = "https://music.example.test";
+const MUSIC_ASSISTANT_KEYCHAIN_REF = MUSIC_ASSISTANT_KEYCHAIN_CREDENTIAL_REF;
 
 test("reads neutral bridge entries and selected model credential without putting bridge secrets in config", async () => {
   const config = readHomeHubLaunchConfig(BASE_ENV);
@@ -56,6 +63,79 @@ test("reads neutral bridge entries and selected model credential without putting
     await config.bridgeCredentialSource.resolveForBridge("ha-main", "access-token"),
     { kind: "secret_text", value: "home-assistant-secret" },
   );
+});
+
+test("does not mount Music Assistant from Home Assistant or unrelated environment values", () => {
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_HA_TOKEN: "home-assistant-secret",
+    HOB_MUSIC_ASSISTANT_TOKEN: "must-not-be-inferred",
+  });
+
+  assert.equal(config.musicAssistant, undefined);
+  assert.equal(JSON.stringify(config).includes("must-not-be-inferred"), false);
+});
+
+test("requires the Music Assistant URL and credential reference as an explicit pair", () => {
+  for (const environment of [
+    { HOB_MUSIC_ASSISTANT_BASE_URL: MUSIC_ASSISTANT_BASE_URL },
+    { HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: MUSIC_ASSISTANT_KEYCHAIN_REF },
+    { HOB_MUSIC_ASSISTANT_BASE_URL: "   ", HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: MUSIC_ASSISTANT_KEYCHAIN_REF },
+    { HOB_MUSIC_ASSISTANT_BASE_URL: MUSIC_ASSISTANT_BASE_URL, HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: "   " },
+  ]) {
+    assert.throws(
+      () => readHomeHubLaunchConfig({ ...BASE_ENV, ...environment }),
+      (error: unknown) => error instanceof Error
+        && /HOB_MUSIC_ASSISTANT_(BASE_URL|CREDENTIAL_REF)/.test(error.message)
+        && !error.message.includes(MUSIC_ASSISTANT_KEYCHAIN_REF),
+    );
+  }
+});
+
+test("keeps the explicit Music Assistant credential lazy and out of launch JSON", async () => {
+  const token = "music-assistant-private-token";
+  const reads: string[] = [];
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_MUSIC_ASSISTANT_BASE_URL: MUSIC_ASSISTANT_BASE_URL,
+    HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: MUSIC_ASSISTANT_KEYCHAIN_REF,
+  }, undefined, {
+    read: async (reference: string) => {
+      reads.push(reference);
+      return token;
+    },
+  });
+
+  assert.equal(config.musicAssistant?.baseUrl, MUSIC_ASSISTANT_BASE_URL);
+  assert.deepEqual(reads, []);
+  assert.equal(JSON.stringify(config).includes(token), false);
+  assert.equal(JSON.stringify(config).includes(MUSIC_ASSISTANT_KEYCHAIN_REF), false);
+  assert.equal(
+    await config.musicAssistant?.resolveToken(new AbortController().signal),
+    token,
+  );
+  assert.deepEqual(reads, [MUSIC_ASSISTANT_KEYCHAIN_REF]);
+});
+
+test("accepts only the reviewed Music Assistant SecretRef forms", () => {
+  for (const reference of [
+    "env:HOB_OTHER_TOKEN",
+    "env:hob_music_assistant_token",
+    "keychain:hob-agent/media:other:access-token",
+    "keychain:hob-agent/bridge:music-assistant:access-token",
+    "music-assistant-private-token",
+  ]) {
+    assert.throws(
+      () => readHomeHubLaunchConfig({
+        ...BASE_ENV,
+        HOB_MUSIC_ASSISTANT_BASE_URL: MUSIC_ASSISTANT_BASE_URL,
+        HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: reference,
+      }),
+      (error: unknown) => error instanceof Error
+        && /HOB_MUSIC_ASSISTANT_CREDENTIAL_REF/.test(error.message)
+        && !error.message.includes(reference),
+    );
+  }
 });
 
 test("reads the HomeWorld validation slice without a model or provider credential", async () => {
@@ -355,9 +435,11 @@ test("reads only the explicit launch allowlist before lazy bridge credential res
   const config = readHomeHubLaunchConfig(environment);
 
   assert.equal(reads.includes("UNRELATED_SECRET"), false);
-    assert.deepEqual(reads.filter((name) => name !== "toJSON"), [
+  assert.deepEqual(reads.filter((name) => name !== "toJSON"), [
     "HOB_DATA_DIR",
     "HOB_BRIDGES",
+    "HOB_MUSIC_ASSISTANT_BASE_URL",
+    "HOB_MUSIC_ASSISTANT_CREDENTIAL_REF",
     "HOB_MODEL",
     "HOB_MODEL_BASE_URL",
     "OPENAI_API_KEY",

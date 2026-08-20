@@ -236,6 +236,25 @@ discovery and onboarding, but HA service payloads and Music Assistant URIs do
 not become the neutral contract. No Music Assistant network client is enabled
 during Phase 0 merely because the pure adapter exists.
 
+The first transport remains opt-in and read-only. A trusted launch setting
+supplies the Music Assistant base URL and a scoped `SecretRef`; the token stays
+in the configured vault and is resolved only while establishing an
+authenticated request. HA media labels, unknown attributes, entity metadata,
+and discovered player names never imply that Music Assistant exists and never
+authorize endpoint discovery. Without both explicit settings, the runtime does
+not open a Music Assistant socket, read its credential, or register catalog
+search.
+
+The reviewed transport follows Music Assistant's regular WebSocket API rather
+than HA Ingress impersonation. It first reads the bounded server-info greeting
+without sending credentials, rejects unfinished onboarding and an incompatible
+minimum schema, then authenticates with a long-lived token before issuing only
+`music/search`. Search uses a short connection lifetime, one in-flight command,
+a hard timeout, cancellation, frame and response budgets, and generic redacted
+errors. Disposal aborts every in-flight request. The initial transport has no
+player, queue, browse, recommendation, config, token-management, or arbitrary
+command method; adding any of those requires a separate reviewed contract.
+
 ## Voice surface state machine
 
 The visual surface exposes the actual system state through captions and one
