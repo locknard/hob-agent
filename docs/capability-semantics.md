@@ -93,6 +93,18 @@ decision input and must not return native IDs, routes, credentials, or approval
 state. Missing, stale, or invalid-source state produces `unavailable`; it must
 not be represented as an assumed no-op or an invented `before` value.
 
+The M3c world-cut producer, not the compiler contract consumer, invokes this
+resolver while it still has a Hub-private verified snapshot. It projects the
+read result and one neutral action-compatibility result for each referenced
+device action, bound to that action's consecutive one-based artifact order.
+The projection contains only status, closed reason, and neutral
+`before`/`after` scalars. It never carries `attrs`, MIoT format/unit fields,
+HA service vocabulary, writable metadata, bindings, or native routes. The
+compiler therefore cannot re-infer compatibility from `semanticKind`, schema
+names, or scalar shape, and it does not need provider data to consume the
+already reviewed result. Changing any projected compatibility result changes
+the world-cut identity.
+
 ### Initial reviewed matrix
 
 | Exact schema/version | Read value and conditions/postconditions | Action compatibility | Neutral before/after |

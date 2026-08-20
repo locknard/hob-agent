@@ -532,8 +532,12 @@ type ArtifactCompileInput = {
 ```
 
 `NeutralDeviceSummary` 只能是 Hub 中立 projection（hw IDs、schema/semantic hint、受限当前
-值摘要和 validity）；它不得把 `HomeWorldSnapshot` 中的 native binding、raw attrs 或
-adapter payload 穿过 Agent-facing/compiler contract。`foreignRuleChecks` 缺失、未准备好或
+值摘要和 validity）。对 artifact 中每个设备 action，它还携带由 Hub-private exact-schema
+resolver 产生、按连续一基 action order 绑定的 compatibility 结果；结果只含 closed status/
+reason 和 neutral `before`/`after`，不能含原生格式或 writable metadata。Compiler 不得从
+`semanticKind`、schema 名或 scalar shape 再推断动作能力。它不得把 `HomeWorldSnapshot` 中的
+native binding、raw attrs 或 adapter payload 穿过 Agent-facing/compiler contract。
+`foreignRuleChecks` 缺失、未准备好或
 epoch 与 committed watermark 不一致时，输入保持 `unavailable`，不能伪造零 conflict。
 `evidence`、`risk` 和 `authority` 的 `artifact` 必须等于 `artifact` 的 `ArtifactRef`；
 compiler 只能消费 Hub 已生成的 assessment，不能接受 Agent 提供的 watermarks、risk 或
