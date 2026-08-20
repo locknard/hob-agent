@@ -199,29 +199,17 @@ and audit records, and separately versioned evidence, risk, and authority
 assessments. New automation proposals include the same closed neutral ECA
 content as a review-only candidate; the Hub validates its selected devices and
 capability evidence, and the Inbox renders the exact trigger, conditions,
-actions, rollback, and postconditions. Production mounts only bounded Artifact
-read queries and metadata-only diagnostics. Unmounted Hub-only producer cores
-can already convert the exact approved Proposal into one idempotent revision-one
-draft, produce evidence from the approved source plus the HomeWorld query/snapshot
-port, and produce authority assessments from a Hub-private fresh-world opaque
-binding input plus the candidate registry. Notify-only artifacts explicitly
-produce an empty authority scope. The private authority candidate registry core
-and `ActionAuthorityConfiguration` (`configIdentity` + `configRevision`) are
-tested in isolation; none of these mutation seams is wired to the production
-composition. An unmounted `HomeWorldAuthorityBindingSource` creates fresh,
-gap-free, binding-scoped opaque inputs without exposing native routes, and an
-unmounted `ArtifactRiskProducer` applies the fixed Hub risk policy only after
-exact evidence, authority, and conflict checks. An unmounted source-bound
-conflict reader maps the approved Proposal's checked foreign-rule evidence and
-bounded existing Artifact overlap into that closed conflict input. Its opaque
-source identity changes when the checked rule input or any scanned Artifact row
-changes, even when the resulting findings remain empty. An unmounted
-Hub-private coordinator now exposes only exact approved-Proposal production and
-exact Artifact assessment refresh commands; it returns a metadata-only receipt
-only after evidence, authority, and risk rows agree. Fresh current-catalog
-conflict refresh and any production invocation remain unavailable. Compilation,
-simulation, approval tickets, and execution also remain unavailable; an
-approved proposal is not an installed automation.
+actions, rollback, and postconditions. A qualifying approval atomically queues
+a durable Hub-private preparation job. The production root wakes that job only
+for an approval committed while the process is running, then executes the fixed
+Artifact → evidence → authority → risk → compile → dry-run chain. Writable
+registries, the runner, and bridge authority inputs remain private to the root;
+Cordis, the Agent, Inbox, plugins, and bridges can discover only bounded review
+projections. Notify-only artifacts explicitly produce an empty authority scope.
+Startup never scans or replays queued/running jobs, and preparation has no
+device-write, credential, executor, or remote-rule installation port. Approval
+tickets and execution remain unavailable; an approved or compiled proposal is
+not an installed automation.
 
 Long-running sessions use the official DSH compaction engine with its one
 supported summarizer hook replaced by a household checkpoint template; the

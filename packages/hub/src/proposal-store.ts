@@ -871,6 +871,29 @@ export class SqliteProposalStore {
     return row === undefined ? undefined : fromPreparationJobRow(row);
   }
 
+  getPreparationJobForProposal(
+    proposalId: string,
+    proposalRevision: number,
+  ): ArtifactPreparationJob | undefined {
+    if (typeof proposalId !== "string"
+      || proposalId.length === 0
+      || proposalId.trim() !== proposalId
+      || Buffer.byteLength(proposalId, "utf8") > 200) {
+      throw new TypeError("preparation job proposal id is invalid");
+    }
+    if (!Number.isSafeInteger(proposalRevision) || proposalRevision < 1) {
+      throw new TypeError("preparation job proposal revision is invalid");
+    }
+    const row = this.db.prepare(`SELECT job_id, proposal_id, proposal_revision,
+        idempotency_key, status, attempt, version, stage, error_code, created_at, updated_at
+      FROM approved_proposal_preparation_jobs
+      WHERE proposal_id = ? AND proposal_revision = ?`).get(
+      proposalId,
+      proposalRevision,
+    ) as ArtifactPreparationJobRow | undefined;
+    return row === undefined ? undefined : fromPreparationJobRow(row);
+  }
+
   claimPreparationJob(input: ArtifactPreparationJobTransition): ArtifactPreparationJob {
     return this.transitionPreparationJob(input, "queued", "running");
   }

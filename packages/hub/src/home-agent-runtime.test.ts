@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   createLaunchEnvironmentSnapshot,
@@ -8,6 +11,7 @@ import {
 
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { createHomeAgentRuntime } from "./home-agent-runtime.js";
+import { SqliteProposalStore } from "./proposal-store.js";
 
 function launchEnvironment() {
   return createLaunchEnvironmentSnapshot([{
@@ -180,4 +184,92 @@ test("provides the immutable DSH launch environment before any runtime plugin mo
   });
 
   assert.equal(runtime.context.get(DSH_LAUNCH_ENVIRONMENT_KEY), snapshot);
+});
+
+test("wakes the private durable runner after an approved automation job commits", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-runtime-preparation-"));
+  const proposalPath = join(directory, "proposals.sqlite");
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    homeProposals: { path: proposalPath },
+    homeArtifacts: { path: join(directory, "artifacts.sqlite") },
+    homeAuthorityCandidates: { path: join(directory, "authority-candidates.sqlite") },
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "preparation-runtime-test",
+    },
+  });
+
+  await runtime.start();
+  try {
+    const pending = runtime.context.homeProposals.create({
+      kind: "automation-draft",
+      title: "Review a local household note",
+      summary: "Prepare one local notification without a device write.",
+      idempotencyKey: "runtime-preparation-notify:v1",
+      provenance: { producer: "runtime-test" },
+      evidence: {
+        references: [],
+        watermarks: [{
+          bridgeId: "unavailable-fixture",
+          epochId: "unavailable-epoch",
+          lastSeq: 1,
+          freshness: "unknown",
+          gapCount: 0,
+        }],
+      },
+      conflictCheck: { status: "checked", existingAutomationCount: 0, matches: [] },
+      dryRun: { status: "not_run", summary: "No artifact has been prepared." },
+      risk: { level: "low", reasons: [], requiresHumanApproval: true },
+      intent: {
+        type: "notify_local",
+        description: "Prepare a local review note.",
+        rollback: "No remote change exists.",
+      },
+      artifactCandidate: {
+        schemaVersion: "1",
+        content: {
+          trigger: { kind: "schedule", timezone: "Etc/UTC", daysOfWeek: [1], at: "08:00" },
+          conditions: [],
+          actions: [{ kind: "notify_local", message: "Review the household note." }],
+          rollback: { kind: "no_remote_change" },
+          postconditions: [],
+        },
+      },
+    });
+    const approved = runtime.context.homeProposals.review({
+      proposalId: pending.id,
+      expectedRevision: pending.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+
+    const observer = new SqliteProposalStore({ path: proposalPath });
+    let job = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    for (let attempts = 0; job !== undefined && !["succeeded", "failed"].includes(job.status) && attempts < 50; attempts += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      job = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    }
+    assert.equal(job?.status, "failed");
+    assert.equal(job?.error?.code, "unavailable");
+    const review = runtime.context.homeArtifacts.reviewForProposal(approved.id, approved.revision);
+    assert.equal(review?.compile.status, "not_run");
+    assert.equal(review?.dryRun.status, "not_run");
+    assert.equal(review?.writesPerformed, false);
+    observer.close();
+    for (const privateSurface of [
+      "artifactRegistry",
+      "authorityCandidates",
+      "homePreparationJobs",
+      "homePreparationPipeline",
+    ]) {
+      assert.equal(privateSurface in runtime.context, false, privateSurface);
+    }
+  } finally {
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

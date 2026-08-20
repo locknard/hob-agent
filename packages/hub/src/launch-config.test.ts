@@ -39,6 +39,7 @@ test("reads neutral bridge entries and selected model credential without putting
   }]);
   assert.equal(config.catalog.hasAdapter("home-assistant"), true);
   assert.equal(config.proposalPath, "/tmp/hob-agent-launch-test/proposals.sqlite");
+  assert.equal(config.authorityCandidatePath, "/tmp/hob-agent-launch-test/authority-candidates.sqlite");
   assert.equal(config.observationAuditPath, "/tmp/hob-agent-launch-test/observation-audit.sqlite");
   assert.equal(config.advicePath, "/tmp/hob-agent-launch-test/home-advice.sqlite");
   assert.equal(config.sessionPath, "/tmp/hob-agent-launch-test/dsh-sessions.sqlite");

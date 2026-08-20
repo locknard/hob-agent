@@ -1,22 +1,19 @@
 # M3b 中立自动化 Artifact Contract
 
-> 状态：M3b 基础已部分实现。严格 Artifact revision/schema/hash、三类动态 assessment、
+> 状态：M3b/M3c 非执行链已接入生产 root。严格 Artifact revision/schema/hash、三类动态 assessment、
 > 不可变 SQLite Registry、生产进程中的只读服务边界和精确 approved Proposal revision
 > source gate 已经落地。新的 automation Proposal 还必须携带一个经 Hub 重新校验、可在
 > Inbox 精确审阅的闭集中立 ECA candidate；旧 Proposal 仍可读取但不能成为 Artifact source。
-> Hub-only Artifact producer core 已能从精确 source gate 幂等生成 revision 1，但尚未挂入
-> 生产组合；EvidenceProducer、AuthorityProducer 的 unmounted core 已能分别从 approved
+> Hub-only Artifact producer 从精确 source gate 幂等生成 revision 1；EvidenceProducer、AuthorityProducer 分别从 approved
 > Proposal + HomeWorld query/snapshot port、以及 Hub-private fresh-world opaque binding input
 > + candidate registry 生成 immutable assessment；notify-only authority scope 明确为空。
 > 三类 assessment 的动态输入 identity、Artifact Registry 持久化（含 risk 对
 > evidence+authority 的 exact cross-check）和私有 authority candidate registry core 已实现并
-> 测试。Artifact Registry 的只读查询已由 HomeArtifactService 接入生产；unmounted
-> HomeWorldAuthorityBindingSource、ArtifactRiskConflictSource 与 RiskProducer core 已实现，
-> unmounted private coordinator 已能顺序生成并交叉校验完整 receipt；fresh current-catalog
-> conflict capture、稳定 world cut、纯 neutral compiler 与无写入 dry-run core 已实现并保持
-> unmounted。`ActionAuthorityConfiguration` 的 Hub-private projection 现在要求
-> `configIdentity` + `configRevision`；compile/dry-run 的 durable result registry、显式 Hub
-> coordinator 和只读 Inbox projection 尚未接入，approval ticket 与执行器仍未实现。
+> 测试。生产 root 独占 Proposal store、Artifact Registry、AuthorityCandidateRegistry、
+> preparation runner 与完整 pipeline；Context 只挂载 HomeArtifactService 只读投影。
+> fresh current-catalog capture、稳定 world cut、纯 neutral compiler 与无写入 dry-run 已由
+> 审批后的 durable job 调用并持久化。startup 不扫描或重放旧 job；显式 retry UI、
+> approval ticket 与执行器仍未实现。
 >
 > 本文定义 M3b 之后第一版（下文称 Artifact Phase 1）的最小、可持久化、不可执行 artifact
 > 形状。它复用已有 proposal v1、HomeWorld、证据和 Bridge v6.3 语义；不修改当前

@@ -1,22 +1,22 @@
 # Hub authority candidate registry
 
-Status: the Hub-private registry core, an unmounted authority-assessment
-producer, and an unmounted HomeWorld binding source are implemented and tested
-in isolation as M3b/M3c prerequisites. Production startup now loads the strict,
+Status: the Hub-private registry, authority-assessment producer, and HomeWorld
+binding source are mounted behind the root-private non-applying preparation
+pipeline. Production startup loads the strict,
 private, read-only authority selection described in
 [`action-authority-configuration.md`](./action-authority-configuration.md) into
-`HomeWorldService`; candidate production and the compile pipeline remain
-unmounted.
+`HomeWorldService`; no candidate, writable registry, route, or pipeline handle
+is exposed through Cordis, the Agent, Inbox, bridge, or plugin context.
 
 The isolated core persists opaque candidate identities, lifecycle transitions,
 idempotent operations, and metadata-only audit in private SQLite. It is not an
 action route, and its existence does not make an authority assessment or an
 execution path available. `AuthorityCoordinator` now validates explicit
 `ActionAuthorityConfiguration` with Hub-owned `configIdentity` and positive
-`configRevision`. `ArtifactAuthorityProducer` can consume this candidate
-registry together with a Hub-private fresh-world opaque binding input and write
-an immutable authority assessment, but that producer remains unmounted. It
-does not make a HomeWorld binding adapter or an execution path available.
+`configRevision`. `ArtifactAuthorityProducer` consumes this candidate registry
+together with a Hub-private fresh-world opaque binding input and writes an
+immutable authority assessment during explicit preparation. It does not make
+a HomeWorld binding adapter or an execution path available.
 
 ## Decision
 

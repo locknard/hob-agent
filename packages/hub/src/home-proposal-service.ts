@@ -2,6 +2,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 
 import {
   SqliteProposalStore,
+  type ArtifactPreparationJob,
   type CreateProposalInput,
   type HubVerifiedProposalSource,
   type ProposalEnvelope,
@@ -18,6 +19,15 @@ import {
   type ArtifactContent,
 } from "./neutral-artifact.js";
 
+export interface BorrowedHomeProposalServiceOptions {
+  readonly store: SqliteProposalStore;
+  readonly onPreparationQueued?: (job: ArtifactPreparationJob) => void;
+}
+
+export type HomeProposalServiceOptions =
+  | SqliteProposalStoreOptions
+  | BorrowedHomeProposalServiceOptions;
+
 declare module "@deepseek-ai/cordis" {
   interface Context {
     homeProposals: HomeProposalService;
@@ -27,14 +37,26 @@ declare module "@deepseek-ai/cordis" {
 /** Hub-owned review state. It deliberately exposes no application method. */
 export class HomeProposalService extends Service {
   private readonly store: SqliteProposalStore;
+  private readonly ownedStore: SqliteProposalStore | undefined;
+  private readonly onPreparationQueued: BorrowedHomeProposalServiceOptions["onPreparationQueued"];
 
-  constructor(ctx: Context, options: SqliteProposalStoreOptions) {
+  constructor(ctx: Context, options: HomeProposalServiceOptions) {
     super(ctx, "homeProposals");
-    this.store = new SqliteProposalStore(options);
+    if ("store" in options) {
+      this.store = options.store;
+      this.ownedStore = undefined;
+      this.onPreparationQueued = options.onPreparationQueued;
+    } else {
+      this.store = new SqliteProposalStore(options);
+      this.ownedStore = this.store;
+      this.onPreparationQueued = undefined;
+    }
   }
 
   protected async [Service.init](): Promise<void> {
-    this.ctx.effect(() => () => this.store.close(), "home-proposals.close");
+    if (this.ownedStore !== undefined) {
+      this.ctx.effect(() => () => this.ownedStore?.close(), "home-proposals.close");
+    }
   }
 
   create(input: CreateProposalInput): ProposalEnvelope {
@@ -244,7 +266,21 @@ export class HomeProposalService extends Service {
   }
 
   review(input: ReviewProposalInput): ProposalEnvelope {
-    return this.store.review(input);
+    const reviewed = this.store.review(input);
+    if (reviewed.status === "approved"
+      && reviewed.kind === "automation-draft"
+      && reviewed.artifactCandidate !== undefined
+      && this.onPreparationQueued !== undefined) {
+      const job = this.store.getPreparationJobForProposal(reviewed.id, reviewed.revision);
+      if (job !== undefined) {
+        try {
+          this.onPreparationQueued(job);
+        } catch {
+          // The durable approval and job are already committed; wake is best-effort.
+        }
+      }
+    }
+    return reviewed;
   }
 
   withApprovedProposalAtRevision<T>(

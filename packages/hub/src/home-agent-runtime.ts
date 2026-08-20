@@ -9,10 +9,16 @@ import {
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
 import { HomeProposalService } from "./home-proposal-service.js";
+import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact-registry.js";
 import {
-  HomeArtifactService,
-  type HomeArtifactServiceOptions,
-} from "./home-artifact-service.js";
+  AuthorityCandidateRegistry,
+  type AuthorityCandidateRegistryOptions,
+} from "./authority-candidate-registry.js";
+import { ArtifactPreparationJobRunner } from "./artifact-preparation-job-runner.js";
+import {
+  createArtifactPipelineComposition,
+  type ArtifactPipelineComposition,
+} from "./artifact-pipeline-composition.js";
 import { HomeRetentionService } from "./home-retention-service.js";
 import {
   HomeObservationAuditService,
@@ -22,7 +28,7 @@ import {
   HomeObservationSchedulerService,
   type HomeObservationSchedulerOptions,
 } from "./home-observation-scheduler.js";
-import type { SqliteProposalStoreOptions } from "./proposal-store.js";
+import { SqliteProposalStore, type SqliteProposalStoreOptions } from "./proposal-store.js";
 import {
   HomeAdviceService,
   type HomeAdviceServiceOptions,
@@ -40,7 +46,8 @@ import {
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
   readonly homeProposals?: SqliteProposalStoreOptions;
-  readonly homeArtifacts?: HomeArtifactServiceOptions;
+  readonly homeArtifacts?: ArtifactRegistryOptions;
+  readonly homeAuthorityCandidates?: AuthorityCandidateRegistryOptions;
   readonly homeObservationAudit?: HomeObservationAuditServiceOptions;
   readonly homeAdvice?: HomeAdviceServiceOptions;
   readonly inboxHttp?: ProposalInboxHttpOptions;
@@ -61,6 +68,11 @@ export class HomeAgentRuntime {
   readonly context: Context;
   private statusValue: HomeAgentRuntimeStatus = "created";
   private stopTask: Promise<void> | undefined;
+  private proposalStore: SqliteProposalStore | undefined;
+  private artifactRegistry: ArtifactRegistry | undefined;
+  private authorityCandidates: AuthorityCandidateRegistry | undefined;
+  private artifactPipeline: ArtifactPipelineComposition | undefined;
+  private preparationRunner: ArtifactPreparationJobRunner | undefined;
 
   constructor(private readonly options: HomeAgentRuntimeOptions) {
     this.context = new Context();
@@ -77,13 +89,35 @@ export class HomeAgentRuntime {
     }
     this.statusValue = "starting";
     try {
+      this.proposalStore = new SqliteProposalStore(this.options.homeProposals ?? { path: ":memory:" });
+      this.artifactRegistry = new ArtifactRegistry(this.options.homeArtifacts ?? { path: ":memory:" });
+      this.authorityCandidates = new AuthorityCandidateRegistry(
+        this.options.homeAuthorityCandidates ?? { path: ":memory:" },
+      );
       await this.context.plugin(HomeWorldService, this.options.homeWorld);
       await this.context.plugin(
         HomeObservationAuditService,
         this.options.homeObservationAudit ?? { path: ":memory:" },
       );
-      await this.context.plugin(HomeProposalService, this.options.homeProposals ?? { path: ":memory:" });
-      await this.context.plugin(HomeArtifactService, this.options.homeArtifacts ?? { path: ":memory:" });
+      await this.context.plugin(HomeProposalService, {
+        store: this.proposalStore,
+        onPreparationQueued: (job) => {
+          const runner = this.preparationRunner;
+          if (runner !== undefined) void runner.run(job.jobId, job.version).catch(() => undefined);
+        },
+      });
+      this.artifactPipeline = await createArtifactPipelineComposition({
+        context: this.context,
+        proposals: this.proposalStore,
+        homeWorld: this.context.homeWorld,
+        artifacts: this.artifactRegistry,
+        authorityCandidates: this.authorityCandidates,
+      });
+      this.preparationRunner = new ArtifactPreparationJobRunner({
+        jobs: this.proposalStore,
+        preparation: this.artifactPipeline,
+      });
+      await this.preparationRunner.start();
       await this.context.plugin(HomeRetentionService);
       await mountDshHomeAgent(this.context, this.options.agent);
       await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
@@ -104,16 +138,38 @@ export class HomeAgentRuntime {
     if (this.stopTask) return this.stopTask;
 
     this.statusValue = "stopping";
-    this.stopTask = this.context.fiber.dispose().then(
-      () => {
-        this.statusValue = "stopped";
-      },
-      (error: unknown) => {
-        this.statusValue = "stopped";
-        throw error;
-      },
-    );
+    this.stopTask = this.disposeRuntime();
     return this.stopTask;
+  }
+
+  private async disposeRuntime(): Promise<void> {
+    let failure: unknown;
+    try {
+      await this.preparationRunner?.stop();
+      await this.artifactPipeline?.stop();
+      await this.context.fiber.dispose();
+    } catch (error) {
+      failure = error;
+    } finally {
+      for (const resource of [
+        this.authorityCandidates,
+        this.artifactRegistry,
+        this.proposalStore,
+      ]) {
+        try {
+          resource?.close();
+        } catch (error) {
+          failure ??= error;
+        }
+      }
+      this.preparationRunner = undefined;
+      this.artifactPipeline = undefined;
+      this.authorityCandidates = undefined;
+      this.artifactRegistry = undefined;
+      this.proposalStore = undefined;
+      this.statusValue = "stopped";
+    }
+    if (failure !== undefined) throw failure;
   }
 }
 

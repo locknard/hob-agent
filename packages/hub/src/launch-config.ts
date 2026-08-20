@@ -47,6 +47,7 @@ export interface HomeHubLaunchConfig {
   readonly worldModelPath: string;
   readonly proposalPath: string;
   readonly artifactPath: string;
+  readonly authorityCandidatePath: string;
   readonly observationAuditPath: string;
   readonly advicePath: string;
   readonly sessionPath: string;
@@ -186,6 +187,7 @@ export function readHomeHubLaunchConfig(
     ...world,
     proposalPath: join(world.dataDirectory, "proposals.sqlite"),
     artifactPath: join(world.dataDirectory, "artifacts.sqlite"),
+    authorityCandidatePath: join(world.dataDirectory, "authority-candidates.sqlite"),
     observationAuditPath: join(world.dataDirectory, "observation-audit.sqlite"),
     advicePath: join(world.dataDirectory, "home-advice.sqlite"),
     sessionPath: join(world.dataDirectory, "dsh-sessions.sqlite"),

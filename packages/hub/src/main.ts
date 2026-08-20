@@ -66,6 +66,7 @@ export function createHomeHubProcessOptions(
       },
       homeProposals: { path: config.proposalPath },
       homeArtifacts: { path: config.artifactPath },
+      homeAuthorityCandidates: { path: config.authorityCandidatePath },
       homeObservationAudit: { path: config.observationAuditPath },
       homeAdvice: { path: config.advicePath },
       agent: {

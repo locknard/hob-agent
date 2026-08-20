@@ -1,8 +1,9 @@
 # Approved-proposal preparation pipeline
 
-Status: accepted architecture decision for the next non-applying Hub slice.
-Implementation is still gated by the existing Artifact, assessment, compiler,
-and read-only Inbox contracts.
+Status: accepted and implemented for the non-applying Hub runtime slice.
+The production composition now owns the durable stores and wakes preparation
+only for a qualifying approval committed during that running process. Inbox
+job projection and explicit retry controls remain follow-up review work.
 
 ## Decision
 
@@ -199,6 +200,14 @@ stage, or invoke a producer. A job enqueued during an already running process
 may wake that process's explicitly mounted worker; that event is not startup
 replay. Jobs left `queued` or `running` by shutdown remain so until an
 explicit, operator-authorized command handles them.
+
+The production `HomeAgentRuntime` is the unique owner of the Proposal store,
+Artifact Registry, and Authority Candidate Registry. It mounts borrowed
+read-only/review services, constructs one root-private pipeline and durable job
+runner, and drains them before disposing Cordis and closing the three stores.
+The authority-candidate database has its own
+`authority-candidates.sqlite` path under `HOB_DATA_DIR`; it is not co-located
+with Artifact records and is never forwarded to the Agent or a bridge.
 
 ## Cordis, Agent, bridge, and Inbox boundaries
 

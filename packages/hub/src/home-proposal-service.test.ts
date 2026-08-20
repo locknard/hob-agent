@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HomeProposalService } from "./home-proposal-service.js";
-import type { CreateProposalInput } from "./proposal-store.js";
+import {
+  SqliteProposalStore,
+  type ArtifactPreparationJob,
+  type CreateProposalInput,
+} from "./proposal-store.js";
 
 const rationale = {
   householdValue: "Reduce a recurring household inconvenience.",
@@ -601,4 +608,195 @@ test("rejects temporal capability selections outside the selected devices", asyn
 
   await fiber.dispose();
   await ctx.fiber.dispose();
+});
+
+test("uses an injected proposal store for existing reads and review without closing the borrowed store", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-home-proposal-borrowed-"));
+  const store = new SqliteProposalStore({ path: join(directory, "proposals.sqlite") });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    const created = store.create(candidate);
+    fiber = await ctx.plugin(HomeProposalService, { store } as never);
+
+    for (const forbidden of ["listPreparationJobs", "claimPreparationJob", "retryPreparationJob"]) {
+      assert.equal(forbidden in ctx.homeProposals, false, forbidden);
+    }
+    assert.equal(ctx.homeProposals.get(created.id)?.id, created.id);
+    assert.deepEqual(ctx.homeProposals.list(), [created]);
+    assert.equal(ctx.homeProposals.review({
+      proposalId: created.id,
+      expectedRevision: created.revision,
+      decision: "rejected",
+      reviewer: "household-owner",
+      feedbackCode: "already_covered",
+    }).status, "rejected");
+
+    await fiber.dispose();
+    fiber = undefined;
+    assert.equal(store.get(created.id)?.status, "rejected");
+    assert.equal(store.list()[0]?.id, created.id);
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("wakes exactly once with the committed queued job after approving a qualifying automation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-home-proposal-wake-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => "2026-08-19T01:00:00.000Z" });
+  const observer = new SqliteProposalStore({ path, now: () => "2026-08-19T01:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  const callbackJobs: ArtifactPreparationJob[] = [];
+  const callbackVisibleJobs: (ArtifactPreparationJob | undefined)[] = [];
+  try {
+    const proposal = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "service-wake:approved:v1",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      onPreparationQueued: (job: ArtifactPreparationJob) => {
+        callbackJobs.push(job);
+        callbackVisibleJobs.push(observer.getPreparationJob(job.jobId));
+      },
+    } as never);
+
+    const approved = ctx.homeProposals.review({
+      proposalId: proposal.id,
+      expectedRevision: proposal.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+    const queued = observer.listPreparationJobs()[0];
+
+    assert.equal(approved.status, "approved");
+    assert.equal(callbackJobs.length, 1);
+    assert.equal(queued?.proposalId, approved.id);
+    assert.equal(queued?.proposalRevision, approved.revision);
+    assert.deepEqual(callbackJobs, [queued]);
+    assert.deepEqual(callbackVisibleJobs, [queued]);
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    observer.close();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("does not wake for rejected, expired, or non-automation reviews", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-home-proposal-no-wake-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => "2026-08-19T01:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  const callbackJobs: ArtifactPreparationJob[] = [];
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      onPreparationQueued: (job: ArtifactPreparationJob) => callbackJobs.push(job),
+    } as never);
+    const rejected = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "service-wake:rejected:v1",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    const expired = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "service-wake:expired:v1",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    const insight = store.create({
+      ...candidate,
+      idempotencyKey: "service-wake:insight:v1",
+    });
+
+    ctx.homeProposals.review({
+      proposalId: rejected.id,
+      expectedRevision: rejected.revision,
+      decision: "rejected",
+      reviewer: "household-owner",
+      feedbackCode: "not_useful",
+    });
+    ctx.homeProposals.review({
+      proposalId: expired.id,
+      expectedRevision: expired.revision,
+      decision: "expired",
+      reviewer: "household-owner",
+    });
+    ctx.homeProposals.review({
+      proposalId: insight.id,
+      expectedRevision: insight.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+
+    assert.deepEqual(callbackJobs, []);
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("does not report a wake-hook failure after the approval and queued job commit", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-home-proposal-wake-error-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => "2026-08-19T01:00:00.000Z" });
+  const observer = new SqliteProposalStore({ path, now: () => "2026-08-19T01:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  let calls = 0;
+  try {
+    const proposal = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "service-wake:error:v1",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      onPreparationQueued: () => {
+        calls += 1;
+        throw new Error("worker wake failed");
+      },
+    } as never);
+
+    let approved;
+    assert.doesNotThrow(() => {
+      approved = ctx.homeProposals.review({
+        proposalId: proposal.id,
+        expectedRevision: proposal.revision,
+        decision: "approved",
+        reviewer: "household-owner",
+        feedbackCode: "useful_as_is",
+      });
+    });
+    assert.equal(approved?.status, "approved");
+    assert.equal(calls, 1);
+    assert.equal(observer.get(proposal.id)?.status, "approved");
+    assert.equal(observer.listPreparationJobs().length, 1);
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    observer.close();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

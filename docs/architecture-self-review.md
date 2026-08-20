@@ -355,6 +355,25 @@ binding digest, so a version-only mapping change cannot silently reuse an old
 candidate. Candidate production and compiler coordination remain unmounted,
 and no executor or action route exists.
 
+### Implemented foundation — approved Proposal preparation
+
+The earlier unmounted Artifact producers and compiler path are now composed by
+`HomeAgentRuntime` behind a durable, non-applying job boundary. A qualifying
+automation approval and its job commit in the same Proposal-store transaction;
+only that post-commit event wakes the root-private runner. The runner claims the
+exact Proposal revision and sequences Artifact, evidence, authority, risk,
+fresh conflict/world-cut capture, compile, and dry-run. It persists only closed
+stage/error metadata and never stores arbitrary exception text.
+
+The runtime root uniquely owns the Proposal store, Artifact Registry, and
+Authority Candidate Registry. Cordis receives borrowed Proposal review and
+Artifact read projections, but no queue, writable registry, candidate resolver,
+or preparation handle. Shutdown drains preparation before disposing Context and
+closing stores. Startup deliberately does not scan or resume old queued/running
+jobs; retry remains an explicit future review control. There is still no action
+ticket, executor, bridge write, remote automation installation, or rollback
+path.
+
 ### Implemented foundation — canonical ingest-journal retention
 
 The neutral ingest journal has a deterministic logical hard quota and fails
