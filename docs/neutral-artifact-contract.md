@@ -706,6 +706,9 @@ seq、freshness、gap），并与 world cut/evidence 一致。`foreignCatalogIde
 per-bridge checks 的 aggregate identity。相关 bridge 缺行、重复行、watermark/epoch 不一致或
 capture unavailable 均 fail closed。Compile constructor 自行取 world-cut watermarks；dry-run
 constructor 自行取 compile watermarks，调用者不能另传一个看似新鲜的 vector。
+Current-catalog capture 接受 exact ArtifactRef 和刚生成的 exact evidence attestation；它从
+evidence watermark vector 决定相关 bridges，并重新验证 artifact capability scope。不能仅按
+device action target 猜 bridge，否则 notify-only artifact 会丢失其全家庭 evidence cut。
 
 非 `compiled` compile attestation 必须有 canonical、unique blocking reasons；`compiled` 不得
 有 blocking reason。Dry-run status 必须与 compile status、diff 和 conflict 一致：compile
