@@ -6,6 +6,7 @@ import {
   EnvelopeSchema,
   type Envelope,
 } from "../../../contracts/bridge-contract.js";
+import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
 import {
   createXiaomiHomeAdapterRegistration,
   deriveXiaomiRemoteInstanceId,
@@ -290,6 +291,27 @@ test("keeps Xiaomi transport pluggable and fails closed at the registration boun
   assert.equal(registration.adapterType, "xiaomi-home");
   assert.equal(registration.capabilitySchemas[0]?.schema, "miot.property");
   assert.deepEqual(registration.credentialRequirements, []);
+});
+
+test("consumes the Xiaomi registration through the neutral conformance harness", async () => {
+  const registration = createXiaomiHomeAdapterRegistration(fixturePlugin());
+  const report = await runBridgeAdapterConformance({
+    registration,
+    adapterType: registration.adapterType,
+    bridgeId: "xiaomi-conformance",
+    config: { region: "cn", transport: "cloud" },
+    credentials: { resolve: async () => undefined, describe: async () => ({ configured: false }) },
+    replay: {
+      epochId: /^xiaomi-conformance:miot-[a-f0-9]{64}$/,
+      snapshotId: /^miot-[a-f0-9]{64}$/,
+      remoteInstanceId: deriveXiaomiRemoteInstanceId("cn", snapshot.installationId),
+      deviceEnvelopeCount: 1,
+      stateEnvelopeCount: 2,
+    },
+    extensionHandles: [],
+  });
+
+  assert.equal(report.passed, true);
 });
 
 test("rejects a transport semantic kind outside the reviewed neutral vocabulary", async () => {

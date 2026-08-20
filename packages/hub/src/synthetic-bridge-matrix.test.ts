@@ -11,6 +11,7 @@ import {
   type Envelope,
   type StateEvent,
 } from "./bridge-ingest.js";
+import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
 import {
   BridgeCatalog,
   type AdapterRegistration,
@@ -96,6 +97,46 @@ function loadSynthetic(bridge: SyntheticBridge, configuredBridgeId = bridge.info
     config: {},
   });
 }
+
+test("consumes the synthetic reference registration through the neutral conformance harness", async () => {
+  const conformanceBridgeId = "synthetic-conformance";
+  const registration = syntheticRegistration(() => {
+    const bridge = new SyntheticBridge({ bridgeId: conformanceBridgeId });
+    bridge.enqueue(frame("conformance-epoch", 1, {
+      kind: "sync-start",
+      snapshotId: "conformance-snapshot",
+      remoteInstanceId: "synthetic-remote",
+      reason: "initial",
+    }));
+    bridge.enqueue(frame("conformance-epoch", 2, {
+      kind: "device-upserted",
+      device: descriptor("conformance-device"),
+    }));
+    bridge.enqueue(frame("conformance-epoch", 3, {
+      kind: "state",
+      state: state("conformance-device", "ready"),
+    }));
+    bridge.enqueue(complete("conformance-epoch", 4, "conformance-snapshot", 1, 1));
+    return bridge;
+  });
+  const report = await runBridgeAdapterConformance({
+    registration,
+    adapterType: registration.adapterType,
+    bridgeId: conformanceBridgeId,
+    config: {},
+    credentials: { resolve: async () => undefined, describe: async () => ({ configured: false }) },
+    replay: {
+      epochId: "conformance-epoch",
+      snapshotId: "conformance-snapshot",
+      remoteInstanceId: "synthetic-remote",
+      deviceEnvelopeCount: 1,
+      stateEnvelopeCount: 1,
+    },
+    extensionHandles: [],
+  });
+
+  assert.equal(report.passed, true);
+});
 
 test("synthetic reference bridge frozen protocol matrix", async (t) => {
   await t.test("composes declarations and degrades an unavailable extension", () => {

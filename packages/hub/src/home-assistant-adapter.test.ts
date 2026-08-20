@@ -6,6 +6,7 @@ import {
   type BridgeEvent,
   type Envelope,
 } from "../../../contracts/bridge-contract.js";
+import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
 import type { ForeignRulesHandle } from "../../../contracts/bridge-foreign-rules.js";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
@@ -377,6 +378,65 @@ test("events resolve the scoped token and emit a neutral snapshot in the frozen 
     deviceEnvelopeCount: 1,
     stateEnvelopeCount: 1,
   });
+});
+
+test("consumes the Home Assistant registration through the neutral conformance harness", async () => {
+  const conformanceBridgeId = "bridge-ha-conformance";
+  const conformanceConfig = { ...config, authenticationPrincipal: "conformance" };
+  // Preserve the production registration metadata; only its test-only
+  // transport dependency seam is wrapped so the harness stays local.
+  const conformanceRegistration = {
+    ...HOME_ASSISTANT_ADAPTER_REGISTRATION,
+    factory: (context: Parameters<typeof createHomeAssistantBridgeAdapter>[0]) => {
+      const socket = new FakeSocket();
+      const adapter = createHomeAssistantBridgeAdapter(context, {
+        socketFactory: () => socket,
+        snapshotIdFactory: () => "conformance-snapshot",
+      });
+      let bootstrapScheduled = false;
+      return {
+        info: adapter.info,
+        control: adapter.control,
+        extension: (name: Parameters<typeof adapter.extension>[0]) => adapter.extension(name),
+        events: (signal: AbortSignal) => {
+          const stream = adapter.events(signal);
+          if (!bootstrapScheduled) {
+            bootstrapScheduled = true;
+            setImmediate(() => respondToBootstrap(socket));
+          }
+          return stream;
+        },
+      };
+    },
+  };
+  const scoped = credentials();
+  const report = await runBridgeAdapterConformance({
+    registration: conformanceRegistration,
+    adapterType: conformanceRegistration.adapterType,
+    bridgeId: conformanceBridgeId,
+    config: conformanceConfig,
+    credentials: {
+      resolve: scoped.provider.resolve,
+      describe: async (alias: string) => ({ configured: alias === HOME_ASSISTANT_ACCESS_TOKEN_ALIAS }),
+    },
+    replay: {
+      epochId: /^bridge-ha-conformance:conformance-snapshot:\d+$/,
+      snapshotId: "conformance-snapshot",
+      remoteInstanceId: deriveHomeAssistantRemoteInstanceId(
+        conformanceConfig.baseUrl,
+        conformanceConfig.authenticationPrincipal,
+      ),
+      deviceEnvelopeCount: 1,
+      stateEnvelopeCount: 1,
+    },
+    extensionHandles: [
+      { key: "foreignRules@1", available: true },
+      { key: "orgHints@1", available: false },
+    ],
+  });
+
+  assert.equal(report.passed, true);
+  assert.equal(scoped.calls.includes(HOME_ASSISTANT_ACCESS_TOKEN_ALIAS), true);
 });
 
 test("maps bounded Home Assistant device connections and identifiers into platform identity claims", async () => {

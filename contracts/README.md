@@ -16,6 +16,8 @@ projected into these shapes before they reach hub or agent-layer code.
 - `bridge-contract-v6.ts` is the sole explicit frozen-version entry point and
   `index.ts` is the package entry point; both re-export the canonical
   implementation. There is no legacy v0 contract entry point.
+- `bridge-adapter-conformance.ts` is an opt-in test helper exported from the
+  package entry point. It is not a second runtime or ingest implementation.
 
 The package depends on `zod` at the workspace root. Consumers should import
 both the schema they need (for example `envelopeSchema`) and its inferred type
@@ -63,6 +65,59 @@ frozen core surfaces:
 Schemas are strict for core objects and reject unknown fields. Extension
 payloads remain `unknown` by design: the core only validates their envelope and
 canonical extension key; an enabled extension owns its payload schema.
+
+## Adapter conformance helper
+
+Third-party adapter tests can call `runBridgeAdapterConformance()` with one
+deterministic registration fixture. The report covers:
+
+- registration schema, adapter type and hub-assigned bridge identity;
+- synchronous factory construction and the observable purity boundary that
+  forbids credential reads during construction;
+- Zod config validation and bridge-scoped credential alias/kind checks,
+  including aliases actually read by the adapter, without retaining material in
+  the report. The wrapper fail-closes undeclared aliases and kind mismatches by
+  returning no material to the adapter;
+- the first replay through `sync-start` and `sync-complete`, including epoch,
+  sequence, remote instance identity, and manifest counts. Exact identity
+  strings are preferred; a deterministic regular-expression expectation is
+  available for adapters whose IDs include a monotonic process-local suffix;
+- declared extension canonical keys and expected handle availability;
+- an adapter-supplied stream-error probe normalized to the closed taxonomy;
+- `requestResync()` result validation and terminal `dispose()` execution for
+  every adapter instance constructed by the probes; any disposal failure fails
+  the report.
+
+The adapter public seam is checked with a local strict projection of
+`{info, events, control, extension}`, so class-backed adapters with private
+runtime fields remain testable without changing the frozen contract schema.
+
+The helper deliberately stops at the first `sync-complete`. It does not journal,
+deduplicate, fold state, run reducers, schedule retries, or implement any
+action surface. Those behaviors remain hub-owned and must retain their own
+integration tests. Factory purity is necessarily an observable boundary: the
+helper detects asynchronous factories and credential-provider calls, but cannot
+prove arbitrary synchronous I/O performed by trusted in-process code.
+
+```ts
+const report = await runBridgeAdapterConformance({
+  registration,
+  adapterType: "example",
+  bridgeId: "bridge-example",
+  config,
+  credentials,
+  replay: {
+    epochId: "epoch-1",
+    snapshotId: "snapshot-1",
+    remoteInstanceId: "remote-1",
+    deviceEnvelopeCount: 0,
+    stateEnvelopeCount: 0,
+  },
+  extensionHandles: [],
+});
+
+if (!report.passed) throw new Error("adapter conformance failed");
+```
 
 ## Module augmentation
 
