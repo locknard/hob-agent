@@ -12,11 +12,14 @@ import {
   type BridgeEvent,
   type BridgeInfo,
   type Envelope,
+  type WorldCapability,
 } from "../../../contracts/bridge-contract.js";
 import { BridgeCatalog, type AdapterRegistration } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore, type BridgeConfigEntry } from "./bridge-registry.js";
+import { AuthorityCoordinator } from "./authority-coordinator.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 import { SyntheticBridge } from "./synthetic-bridge.js";
+import { WorldIdentityManager } from "./world-identity.js";
 import {
   HomeWorldService,
   type HomeWorldDeviceSnapshot,
@@ -96,6 +99,50 @@ function syntheticBridge(bridgeId: string, remoteInstanceId: string, events: rea
   const bridge = new SyntheticBridge({ bridgeId, remoteInstanceId });
   for (const event of events) bridge.enqueue(event);
   return bridge;
+}
+
+function deterministicIdentityManager(): WorldIdentityManager {
+  return new WorldIdentityManager({
+    idFactory: (kind) => ({
+      hw: "hw-device",
+      hwCapability: "hwc-light",
+      hwSpace: "hws-living",
+      proposal: "proposal-test",
+      audit: "audit-test",
+    })[kind],
+  });
+}
+
+function authorityCapability(bindings: WorldCapability["bindings"]): WorldCapability {
+  return {
+    hwCapabilityId: "hwc-light",
+    hwId: "hw-device",
+    schema: "synthetic.light",
+    bindings,
+  };
+}
+
+function idleAuthorityAdapter(bridgeId: string, counters: { requestResync: number }): BridgeAdapter {
+  return {
+    info: {
+      bridgeId,
+      coreVersion: "6.3.0",
+      ecosystem: "synthetic",
+      heartbeatIntervalMs: 60_000,
+      extensions: [],
+    },
+    async *events() {
+      // The authority seam must not need a live stream or control call.
+    },
+    control: {
+      requestResync: async () => {
+        counters.requestResync += 1;
+        return { status: "completed" };
+      },
+      dispose: async () => undefined,
+    },
+    extension: () => undefined,
+  };
 }
 
 function testRuntimeOptions(
@@ -179,6 +226,212 @@ test("mounts as homeWorld, consumes every configured bridge once, and aggregates
   );
 
   await fiber.dispose();
+});
+
+test("projects a private authority candidate input with revision-bound opaque identities", async () => {
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge("bridge-authority", "remote-authority", snapshotFor("bridge-authority", "remote-authority"));
+  catalog.register(registration(() => bridge));
+  const registryStore = new MemoryBridgeRegistryStore([{
+    bridgeId: "bridge-authority",
+    adapterType: "synthetic",
+    createdAt: "2026-08-20T00:00:00.000Z",
+    generation: 7,
+    remoteInstanceId: "remote-authority",
+  }]);
+  const registry = new BridgeRegistry({ catalog, store: registryStore });
+  const actionConfig = {
+    bridgeId: "bridge-authority",
+    approved: true,
+    configIdentity: `sha256:${"a".repeat(64)}`,
+    configRevision: 4,
+  };
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-authority")],
+    new Map([["bridge-authority", bridge]]),
+    {
+      identityManager: deterministicIdentityManager(),
+      actionAuthorityConfig: { "hwc-light": actionConfig },
+      monitorIntervalMs: 0,
+    },
+  ));
+  try {
+    await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-authority"]?.diagnostics.connectionState === "ready");
+
+    const input = ctx.homeWorld.resolveAuthorityCandidateInput("hwc-light");
+    assert.equal(input?.hwCapabilityId, "hwc-light");
+    assert.equal(input?.knownCapability, true);
+    assert.equal(input?.configured, true);
+    assert.equal(input?.approved, true);
+    assert.equal(input?.available, true);
+    assert.equal(input?.registrationGeneration, 7);
+    assert.match(input?.bindingIdentity ?? "", /^sha256:[0-9a-f]{64}$/);
+    assert.match(input?.configurationIdentity ?? "", /^sha256:[0-9a-f]{64}$/);
+    assert.doesNotMatch(JSON.stringify(input), /bridge-authority|remote-authority|synthetic|native/);
+
+    const firstBindingIdentity = input?.bindingIdentity;
+    registryStore.save({
+      bridgeId: "bridge-authority",
+      adapterType: "synthetic",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      generation: 7,
+      remoteInstanceId: "remote-authority-rotated",
+    });
+    const changedRemote = ctx.homeWorld.resolveAuthorityCandidateInput("hwc-light");
+    assert.notEqual(changedRemote?.bindingIdentity, firstBindingIdentity);
+    assert.doesNotMatch(JSON.stringify(changedRemote), /remote-authority-rotated/);
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("returns an explicit unavailable placeholder without configuration and fails closed for unknown or invalid capability inputs", async () => {
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge("bridge-authority-placeholder", "remote-placeholder", snapshotFor("bridge-authority-placeholder", "remote-placeholder"));
+  catalog.register(registration(() => bridge));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-authority-placeholder")],
+    new Map([["bridge-authority-placeholder", bridge]]),
+    {
+      identityManager: deterministicIdentityManager(),
+      actionAuthorityConfig: {
+        "hwc-light": {
+          bridgeId: "bridge-authority-placeholder",
+          approved: true,
+          configIdentity: "not-a-sha256-digest",
+          configRevision: 1,
+        },
+      },
+      monitorIntervalMs: 0,
+    },
+  ));
+  try {
+    await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-authority-placeholder"]?.diagnostics.connectionState === "ready");
+
+    const unknown = ctx.homeWorld.resolveAuthorityCandidateInput("hwc-unknown");
+    assert.equal(unknown, undefined);
+
+    const invalid = ctx.homeWorld.resolveAuthorityCandidateInput("hwc-light");
+    assert.equal(invalid, undefined);
+  } finally {
+    await fiber.dispose();
+  }
+
+  const placeholderCatalog = new BridgeCatalog();
+  const placeholderBridge = syntheticBridge("bridge-authority-unconfigured", "remote-unconfigured", snapshotFor("bridge-authority-unconfigured", "remote-unconfigured"));
+  placeholderCatalog.register(registration(() => placeholderBridge));
+  const placeholderRegistry = new BridgeRegistry({ catalog: placeholderCatalog });
+  const placeholderContext = new Context();
+  const placeholderFiber = await placeholderContext.plugin(HomeWorldService, testRuntimeOptions(
+    placeholderCatalog,
+    placeholderRegistry,
+    [entry("bridge-authority-unconfigured")],
+    new Map([["bridge-authority-unconfigured", placeholderBridge]]),
+    { identityManager: deterministicIdentityManager(), monitorIntervalMs: 0 },
+  ));
+  try {
+    await waitFor(() => placeholderContext.homeWorld.snapshot().bridges["bridge-authority-unconfigured"]?.diagnostics.connectionState === "ready");
+    assert.deepEqual(placeholderContext.homeWorld.resolveAuthorityCandidateInput("hwc-light"), {
+      hwCapabilityId: "hwc-light",
+      knownCapability: true,
+      configured: false,
+      approved: false,
+      available: false,
+    });
+  } finally {
+    await placeholderFiber.dispose();
+  }
+});
+
+test("fails closed for an unbound remote without invoking bridge control", async () => {
+  const counters = { requestResync: 0 };
+  const catalog = new BridgeCatalog();
+  const adapter = idleAuthorityAdapter("bridge-unbound", counters);
+  catalog.register(registration(() => adapter));
+  const registry = new BridgeRegistry({ catalog });
+  const authority = new AuthorityCoordinator({
+    capabilities: [authorityCapability([{
+      bridgeId: "bridge-unbound",
+      nativeId: "native-unbound",
+      nativeInstanceId: "native-unbound:main",
+    }])],
+    actionAuthorityConfig: {
+      "hwc-light": {
+        bridgeId: "bridge-unbound",
+        approved: true,
+        configIdentity: `sha256:${"e".repeat(64)}`,
+        configRevision: 1,
+      },
+    },
+  });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-unbound")],
+    new Map(),
+    { authorityCoordinator: authority, monitorIntervalMs: 0 },
+  ));
+  try {
+    await waitFor(() => ctx.homeWorld.runtime("bridge-unbound") !== undefined);
+    assert.equal(ctx.homeWorld.resolveAuthorityCandidateInput("hwc-light"), undefined);
+    assert.equal(counters.requestResync, 0);
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("fails closed when one authority target has ambiguous capability bindings", async () => {
+  const counters = { requestResync: 0 };
+  const catalog = new BridgeCatalog();
+  const adapter = idleAuthorityAdapter("bridge-ambiguous", counters);
+  catalog.register(registration(() => adapter));
+  const registry = new BridgeRegistry({
+    catalog,
+    store: new MemoryBridgeRegistryStore([{
+      bridgeId: "bridge-ambiguous",
+      adapterType: "synthetic",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      generation: 2,
+      remoteInstanceId: "remote-ambiguous",
+    }]),
+  });
+  const authority = new AuthorityCoordinator({
+    capabilities: [authorityCapability([
+      { bridgeId: "bridge-ambiguous", nativeId: "native-one", nativeInstanceId: "native-one:main" },
+      { bridgeId: "bridge-ambiguous", nativeId: "native-two", nativeInstanceId: "native-two:main" },
+    ])],
+    actionAuthorityConfig: {
+      "hwc-light": {
+        bridgeId: "bridge-ambiguous",
+        approved: true,
+        configIdentity: `sha256:${"f".repeat(64)}`,
+        configRevision: 1,
+      },
+    },
+  });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-ambiguous")],
+    new Map(),
+    { authorityCoordinator: authority, monitorIntervalMs: 0 },
+  ));
+  try {
+    await waitFor(() => ctx.homeWorld.runtime("bridge-ambiguous") !== undefined);
+    assert.equal(ctx.homeWorld.resolveAuthorityCandidateInput("hwc-light"), undefined);
+    assert.equal(counters.requestResync, 0);
+  } finally {
+    await fiber.dispose();
+  }
 });
 
 test("returns only selected post-baseline live changes as bounded neutral evidence", async () => {

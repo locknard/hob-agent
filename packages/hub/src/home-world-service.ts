@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -63,6 +64,7 @@ import {
   type AuthorityResyncPort,
   type StateAuthorityResolution,
 } from "./authority-coordinator.js";
+import type { AuthorityCandidateResolveInput } from "./authority-candidate-registry.js";
 import {
   WorldIdentityManager,
   type IdentityObservation,
@@ -867,6 +869,70 @@ export class HomeWorldService extends Service {
     return this.authority.resolveActionAuthority(hwCapabilityId, this.authorityAvailability(hwCapabilityId));
   }
 
+  /**
+   * Hub-private input seam for authority assessment. The projection contains
+   * only Hub capability facts and opaque digests; unresolved route, identity,
+   * and registration state fail closed instead of becoming a placeholder.
+   */
+  resolveAuthorityCandidateInput(hwCapabilityId: string): AuthorityCandidateResolveInput | undefined {
+    this.refreshIdentity();
+    const capability = this.authority.capability(hwCapabilityId);
+    if (capability === undefined) return undefined;
+
+    const configuration = this.authority.resolveActionAuthorityConfiguration(hwCapabilityId);
+    if (configuration.status === "not_configured") {
+      return Object.freeze({
+        hwCapabilityId,
+        knownCapability: true,
+        configured: false,
+        approved: false,
+        available: false,
+      });
+    }
+    if (configuration.status !== "configured"
+      || configuration.configIdentity === undefined
+      || configuration.configRevision === undefined) return undefined;
+
+    const selectedBindings = capability.bindings.filter((binding) => (
+      this.authority.isActionAuthorityConfiguredForBridge(hwCapabilityId, binding.bridgeId)
+    ));
+    if (selectedBindings.length !== 1 || this.registry === undefined) return undefined;
+    const [selectedBinding] = selectedBindings;
+    if (selectedBinding === undefined) return undefined;
+    const registration = this.registry.binding(selectedBinding.bridgeId);
+    if (registration === undefined
+      || registration.remoteInstanceId === undefined
+      || !Number.isSafeInteger(registration.generation)
+      || registration.generation < 1) return undefined;
+
+    const availability = this.authorityAvailability(hwCapabilityId)
+      .find((candidate) => candidate.bridgeId === selectedBinding.bridgeId);
+    return Object.freeze({
+      hwCapabilityId,
+      knownCapability: true,
+      configured: true,
+      approved: configuration.approved,
+      available: configuration.approved
+        && availability?.available === true
+        && availability.validity === "valid",
+      bindingIdentity: authorityDigest("authority-binding-v1", {
+        adapterType: registration.adapterType,
+        bridgeId: selectedBinding.bridgeId,
+        nativeId: selectedBinding.nativeId,
+        nativeInstanceId: selectedBinding.nativeInstanceId,
+        hwSpaceId: selectedBinding.hwSpaceId ?? null,
+        remoteBound: registration.remoteInstanceId !== undefined,
+        remoteInstanceId: registration.remoteInstanceId,
+        registrationGeneration: registration.generation,
+      }),
+      configurationIdentity: authorityDigest("authority-configuration-v1", {
+        configIdentity: configuration.configIdentity,
+        configRevision: configuration.configRevision,
+      }),
+      registrationGeneration: registration.generation,
+    });
+  }
+
   /** Runs both liveness clocks synchronously for deterministic callers/tests. */
   tick(now = this.nowMs()): void {
     for (const runtime of this.runtimesById.values()) {
@@ -1503,6 +1569,17 @@ function metricsFor(diagnostics: HubBridgeDiagnostics): HomeWorldBridgeMetrics {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function authorityDigest(
+  domain: string,
+  value: Readonly<Record<string, string | number | boolean | null>>,
+): `sha256:${string}` {
+  const canonical = JSON.stringify([
+    domain,
+    ...Object.entries(value).sort(([left], [right]) => compareStrings(left, right)),
+  ]);
+  return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
 }
 
 function validateEvidenceQuery(input: HomeWorldEvidenceQuery): number {

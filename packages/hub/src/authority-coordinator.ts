@@ -361,6 +361,17 @@ export class AuthorityCoordinator {
     });
   }
 
+  /**
+   * Hub-internal binding selector for HomeWorld's candidate projection. It
+   * only answers a caller-supplied bridge predicate and never returns a route
+   * or configuration record.
+   */
+  isActionAuthorityConfiguredForBridge(hwCapabilityId: string, bridgeId: string): boolean {
+    if (!this.capabilities.has(hwCapabilityId) || typeof bridgeId !== "string") return false;
+    const configured = parseActionAuthorityConfiguration(this.actionAuthorityConfig.get(hwCapabilityId));
+    return configured?.bridgeId === bridgeId;
+  }
+
   proposeActionAuthority(hwCapabilityId: string, bridgeId: string): GovernanceProposal {
     const capability = this.capabilities.get(hwCapabilityId);
     if (capability === undefined) throw new Error(`Unknown hwCapabilityId "${hwCapabilityId}"`);
@@ -450,7 +461,33 @@ function readStringMap(value: ReadonlyMap<string, string> | Readonly<Record<stri
 function readActionMap(
   value: ReadonlyMap<string, ActionAuthorityConfiguration> | Readonly<Record<string, ActionAuthorityConfiguration>> | undefined,
 ): ReadonlyMap<string, unknown> {
-  return value instanceof Map ? new Map(value) : new Map(Object.entries(value ?? {}));
+  const entries = value instanceof Map ? [...value.entries()] : Object.entries(value ?? {});
+  return new Map(entries.map(([key, configuration]) => [
+    key,
+    snapshotActionAuthorityConfig(configuration),
+  ] as const));
+}
+
+function snapshotActionAuthorityConfig(value: unknown): unknown {
+  const seen = new WeakSet<object>();
+  const clone = (candidate: unknown): unknown => {
+    if (candidate === null || typeof candidate !== "object") return candidate;
+    if (seen.has(candidate)) return undefined;
+    seen.add(candidate);
+    try {
+      if (Array.isArray(candidate)) return Object.freeze(candidate.map(clone));
+      const copy: Record<string, unknown> = {};
+      for (const [key, nested] of Object.entries(candidate)) copy[key] = clone(nested);
+      return Object.freeze(copy);
+    } finally {
+      seen.delete(candidate);
+    }
+  };
+  try {
+    return clone(value);
+  } catch {
+    return undefined;
+  }
 }
 
 const ACTION_AUTHORITY_CONFIG_IDENTITY = /^sha256:[0-9a-f]{64}$/;

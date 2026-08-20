@@ -354,3 +354,25 @@ test("fails closed for missing, malformed, or non-positive versioned action conf
     { bridgeId: "bridge-a", available: true, validity: "valid" },
   ]), { status: "unavailable", reason: "not_configured" });
 });
+
+test("snapshots action authority configuration and requires a new coordinator for a new revision", () => {
+  const actionConfig = {
+    bridgeId: "bridge-a",
+    approved: true,
+    configIdentity: `sha256:${"d".repeat(64)}`,
+    configRevision: 3,
+  };
+  const first = new AuthorityCoordinator({
+    capabilities: [capability("hc-1")],
+    actionAuthorityConfig: { "hc-1": actionConfig },
+  });
+
+  actionConfig.configRevision = 4;
+  assert.equal(first.resolveActionAuthorityConfiguration("hc-1").configRevision, 3);
+
+  const second = new AuthorityCoordinator({
+    capabilities: [capability("hc-1")],
+    actionAuthorityConfig: { "hc-1": actionConfig },
+  });
+  assert.equal(second.resolveActionAuthorityConfiguration("hc-1").configRevision, 4);
+});
