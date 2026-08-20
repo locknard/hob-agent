@@ -162,6 +162,13 @@ See [`docs/standalone-inbox.md`](docs/standalone-inbox.md) and
 The recommended sequence for a real-home trial is documented in
 [`docs/household-pilot.md`](docs/household-pilot.md).
 
+The accepted post-pilot product direction also includes an accessible,
+voice-first household surface and governed media playback. Voice remains an
+input/output mode for the single DSH runtime; media search is read-only, and
+playback cannot bypass Hub policy, confirmation, action tickets, verification,
+or audit. See
+[`docs/voice-and-media-interaction.md`](docs/voice-and-media-interaction.md).
+
 For behavioral evidence, keep the full runtime connected and use **Observe
 now** in its authenticated Inbox. This starts one paid turn through the same
 readiness, pending-proposal, Agent-idle, and audit gates as periodic
