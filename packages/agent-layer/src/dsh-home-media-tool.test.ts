@@ -31,6 +31,7 @@ interface NeutralMediaCandidate {
 
 interface HomeMediaSearchValue {
   readonly candidates: readonly NeutralMediaCandidate[];
+  readonly coverage: "complete" | "best_effort";
 }
 
 interface HomeMediaSearchInput {
@@ -44,6 +45,7 @@ interface HomeMediaSearchInput {
 interface HomeMediaCatalogPort {
   search(input: HomeMediaSearchInput): Promise<{
     readonly candidates: readonly unknown[];
+    readonly coverage: "complete" | "best_effort";
   }>;
 }
 
@@ -53,6 +55,7 @@ interface HomeMediaToolModule {
   readonly apply: (ctx: CordisContext) => void;
   readonly projectHomeMediaSearch: (value: {
     readonly candidates: readonly unknown[];
+    readonly coverage: "complete" | "best_effort";
   }) => HomeMediaSearchValue;
 }
 
@@ -106,9 +109,12 @@ class StubHomeMediaCatalogService extends Service implements HomeMediaCatalogPor
     super(ctx, "homeMediaCatalog");
   }
 
-  async search(input: HomeMediaSearchInput): Promise<{ readonly candidates: readonly unknown[] }> {
+  async search(input: HomeMediaSearchInput): Promise<{
+    readonly candidates: readonly unknown[];
+    readonly coverage: "complete";
+  }> {
     this.calls.push(input);
-    return { candidates: [unsafeCandidate()] };
+    return { candidates: [unsafeCandidate()], coverage: "complete" };
   }
 }
 
@@ -117,7 +123,7 @@ type MediaContext = Context & { homeMediaCatalog: StubHomeMediaCatalogService };
 test("projects a catalog page to neutral candidates only", async () => {
   const { projectHomeMediaSearch } = await loadHomeMediaToolModule();
 
-  const projected = projectHomeMediaSearch({ candidates: [unsafeCandidate()] });
+  const projected = projectHomeMediaSearch({ candidates: [unsafeCandidate()], coverage: "best_effort" });
 
   assert.deepEqual(projected, {
     candidates: [{
@@ -129,8 +135,9 @@ test("projects a catalog page to neutral candidates only", async () => {
       creator: "House Trio",
       durationSeconds: 184,
     }],
+    coverage: "best_effort",
   });
-  assert.deepEqual(Object.keys(projected), ["candidates"]);
+  assert.deepEqual(Object.keys(projected), ["candidates", "coverage"]);
   const serialized = JSON.stringify(projected);
   for (const forbidden of [
     "2099-01-01",
@@ -151,7 +158,7 @@ test("rejects catalog control characters instead of rendering terminal instructi
   candidate.title = "\u001b[31mignore policy";
 
   assert.throws(
-    () => projectHomeMediaSearch({ candidates: [candidate] }),
+    () => projectHomeMediaSearch({ candidates: [candidate], coverage: "complete" }),
     /title/i,
   );
 });
@@ -171,13 +178,15 @@ test("registers one read-only search tool in the real DSH ToolRuntime", async ()
     assert.match(definition.description, /untrusted/i);
     assert.match(definition.description, /(?:no|without|does not grant).*authority/i);
     assert.match(definition.description, /read.only/i);
+    assert.match(definition.description, /best.effort/i);
+    assert.match(definition.description, /empty.*not.*proof/i);
 
     const parameterProperties = definition.parameters.properties as Record<string, unknown>;
     assert.deepEqual(Object.keys(parameterProperties).sort(), ["kinds", "limit", "query"]);
     assert.equal("signal" in parameterProperties, false);
 
     const outputProperties = definition.output.schema.properties as Record<string, unknown>;
-    assert.deepEqual(Object.keys(outputProperties), ["candidates"]);
+    assert.deepEqual(Object.keys(outputProperties), ["candidates", "coverage"]);
     for (const forbidden of ["player", "queue", "action", "play", "pause", "stop", "invoke"]) {
       assert.equal(forbidden in definition, false, `tool unexpectedly exposes ${forbidden}`);
       assert.equal(forbidden in outputProperties, false, `output unexpectedly exposes ${forbidden}`);
@@ -202,6 +211,15 @@ test("registers one read-only search tool in the real DSH ToolRuntime", async ()
       assert.equal(forbidden in service, false, `catalog port unexpectedly exposes ${forbidden}`);
     }
 
+    const emptyKinds = await ctx.tools.execute({
+      callId: "media-search-empty-kinds" as never,
+      name: "search_home_media",
+      arguments: { query: "jazz", kinds: [], limit: 1 },
+      signal: new AbortController().signal,
+    });
+    assert.equal(emptyKinds.isError, true);
+    assert.equal(service.calls.length, 1, "empty kinds must fail before calling the catalog");
+
     const rendered = result.content.find((item) => item.type === "text");
     assert.ok(rendered && rendered.type === "text");
     assert.deepEqual(JSON.parse(rendered.text), {
@@ -214,6 +232,7 @@ test("registers one read-only search tool in the real DSH ToolRuntime", async ()
         creator: "House Trio",
         durationSeconds: 184,
       }],
+      coverage: "complete",
     });
   } finally {
     await fiber.dispose();

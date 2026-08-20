@@ -185,6 +185,15 @@ reported volume is evidence only, same-label endpoints remain distinct, and no
 playback or volume operation is introduced. A deterministic synthetic catalog
 can be mounted explicitly in component/runtime tests but is never enabled by
 the production launch parser.
+The Hub also contains a transport-injected, read-only Music Assistant search
+provider. It maps the reviewed grouped `music/search` subset into neutral
+catalog rows, enforces one total result budget, propagates cancellation, and
+keeps MA URIs and provider metadata behind `mediaCatalog@1`. It creates no
+network connection and is not a production default. Catalog search is
+best-effort; an empty result is not proof that no matching media exists.
+The `search_home_media` result carries machine-readable `complete` or
+`best_effort` coverage so the model does not have to infer completeness from
+empty candidates.
 
 For behavioral evidence, keep the full runtime connected and use **Observe
 now** in its authenticated Inbox. This starts one paid turn through the same

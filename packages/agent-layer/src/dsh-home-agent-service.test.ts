@@ -309,6 +309,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.match(adapter.requests[0]?.system ?? "", /cannot control devices/i);
   assert.match(adapter.requests[0]?.system ?? "", /same.*media.*label.*not.*same.*endpoint/is);
   assert.match(adapter.requests[0]?.system ?? "", /mediaRef.*does not grant.*authority/is);
+  assert.match(adapter.requests[0]?.system ?? "", /empty.*media.*search.*not.*prove.*no.*match/is);
   assert.match(adapter.requests[0]?.system ?? "", /window_before_baseline.*not observed/is);
   assert.match(adapter.requests[0]?.system ?? "", /prefer one exact hub device.*semantic kinds/is);
   assert.match(adapter.requests[0]?.system ?? "", /calm, reversible household suggestions/i);

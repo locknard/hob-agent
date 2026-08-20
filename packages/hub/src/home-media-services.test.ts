@@ -35,6 +35,7 @@ class StubWorld extends Service {
   snapshot() {
     const binding = { bridgeId: "bridge-a", nativeId: "native-a", nativeInstanceId: "instance-a", hwSpaceId: "hws-a" };
     return {
+      bridges: { "bridge-a": { metrics: { connection: "up" } } },
       spaces: [{ hwSpaceId: "hws-a", name: "多媒体室" }],
       devices: [{
         hwId: "hw-a",
@@ -95,7 +96,10 @@ test("mounts an explicit synthetic catalog behind a search-only service", async 
   });
   try {
     const service = ctx.get("homeMediaCatalog") as unknown as {
-      search(input: Record<string, unknown>): Promise<{ candidates: readonly Record<string, unknown>[] }>;
+      search(input: Record<string, unknown>): Promise<{
+        candidates: readonly Record<string, unknown>[];
+        coverage: "complete" | "best_effort";
+      }>;
     };
     const result = await service.search({
       query: "爵士",
@@ -104,6 +108,7 @@ test("mounts an explicit synthetic catalog behind a search-only service", async 
       signal: new AbortController().signal,
     });
     assert.equal(result.candidates.length, 1);
+    assert.equal(result.coverage, "complete");
     assert.deepEqual(
       Object.keys(result.candidates[0]!).sort(),
       ["creator", "expiresAt", "kind", "mediaRef", "playable", "sourceLabel", "title"],

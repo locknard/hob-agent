@@ -74,7 +74,7 @@ export function projectMediaPlayerInventory(
           && device.health !== "unknown"
           && matchingStates.length === 1
           && selectedBinding !== undefined
-          && bridgeConnectionUp(snapshot, selectedBinding.bridgeId) !== false
+          && bridgeConnectionUp(snapshot, selectedBinding.bridgeId) === true
           ? projectState(matchingStates[0])
           : emptyState();
       players.push(Object.freeze({

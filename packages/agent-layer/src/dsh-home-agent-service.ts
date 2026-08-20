@@ -68,6 +68,7 @@ const DEFAULT_SYSTEM_PROMPT = [
   "When a proposal relies on recent behavior, include the selected hub capability IDs and bounded lookback so the Hub can bind trusted event provenance.",
   "Before proposing an automation, inspect existing household rules and treat unavailable catalogs as incomplete conflict coverage.",
   "When neutral media tools are available, preserve distinct Hub capability IDs: the same media label does not mean the same endpoint.",
+  "An empty media search does not prove that no match exists because provider search is best-effort.",
   "A mediaRef or playable catalog hint does not grant playback, queue, or volume-control authority.",
   "You cannot control devices, install automations, or change configuration.",
   "You cannot approve proposals; only a household reviewer can do so.",

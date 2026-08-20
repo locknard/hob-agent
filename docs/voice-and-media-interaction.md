@@ -83,6 +83,9 @@ Reported volume does not assert that volume control is supported or authorized.
 Equal labels remain separate candidates because room names and display names
 are not identities. Stale or non-valid HomeWorld devices remain discoverable
 but their availability, playback state, and volume are projected as unknown.
+Missing or non-up bridge connection evidence also suppresses cached playback
+state and volume instead of treating absence of diagnostics as permission to
+reuse them.
 
 The initial neutral media kinds are `artist`, `album`, `track`, `playlist`,
 `radio`, `audiobook`, `podcast`, `episode`, and `genre`. Search results carry an
@@ -156,7 +159,8 @@ architectural lessons are:
 Music Assistant exposes rich URIs, provider mappings, image URLs, raw player
 ids, queue ids, and provider-specific metadata. Those are valid inside Music
 Assistant but are deliberately not copied into `mediaCatalog@1`. A future
-trusted Music Assistant adapter keeps them behind the Hub-issued `mediaRef` and
+trusted Music Assistant client and the implemented search adapter keep them
+behind the Hub-issued `mediaRef` and
 player binding. Search results remain candidates; compatibility between a
 candidate and the selected player route is revalidated privately before an
 action ticket is issued.
@@ -166,9 +170,12 @@ Assistant model:
 
 - MA `MediaType` values `artist`, `album`, `track`, `playlist`, `radio`,
   `audiobook`, `podcast`, and `genre` map directly. `podcast_episode` maps to
-  neutral `episode`. Provider folders, announcements, flow streams, audio
-  sources, and sound effects are not silently treated as ordinary playable
-  catalog results; each needs a separate product and policy decision.
+  neutral `episode` when an item-oriented adapter supplies it. MA's current
+  grouped global `music/search` response has no episode bucket, so the search
+  adapter does not invent episode results. Provider folders, announcements,
+  flow streams, audio sources, and sound effects are not silently treated as
+  ordinary playable catalog results; each needs a separate product and policy
+  decision.
 - MA `ProviderMapping`, item URI, provider instance, image path, and external
   ids remain adapter-private. A Hub `mediaRef` represents one time-bounded
   reviewed candidate, not a stable copy of an MA URI.
@@ -200,12 +207,25 @@ are useful future read models, but they should not enlarge `search_home_media`
 implicitly. They require separate bounded projections and opaque cursors so a
 model never receives a provider path, raw current-media URI, or queue id.
 
-For the first real integration, a direct, explicitly configured Music
-Assistant client is preferred over converting a search into an arbitrary Home
-Assistant service call. The HA integration may help discovery and onboarding,
-but HA service payloads and Music Assistant URIs do not become the neutral
-contract. No Music Assistant network client is enabled during Phase 0 merely
-because this reference design exists.
+The implemented Phase 0 adapter is transport-injected: it accepts the grouped
+result of MA `music/search`, maps only reviewed fields, interleaves requested
+media groups under one total result cap, and passes cancellation to the
+injected client. It has no socket, credential store, player client, or queue
+client. Cordis disposal is forwarded once to the injected client so a future
+transport cannot outlive the catalog service. Unknown future buckets and all
+provider mappings, images, external ids, and metadata are ignored. The result
+is best-effort because one provider may be unavailable even when the overall
+search returns; an empty page is not evidence that the household has no
+matching media. `mediaCatalog@1` preserves this as machine-readable `complete`
+or `best_effort` coverage, and the DSH tool returns that field alongside
+candidates.
+
+For the first real integration, an explicitly configured Music Assistant
+client should be injected into this adapter instead of converting search into
+an arbitrary Home Assistant service call. The HA integration may help
+discovery and onboarding, but HA service payloads and Music Assistant URIs do
+not become the neutral contract. No Music Assistant network client is enabled
+during Phase 0 merely because the pure adapter exists.
 
 ## Voice surface state machine
 

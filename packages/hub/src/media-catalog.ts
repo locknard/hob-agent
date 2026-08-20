@@ -15,6 +15,7 @@ export const MEDIA_CATALOG_KINDS = Object.freeze([
 ] as const);
 
 export type MediaCatalogKind = typeof MEDIA_CATALOG_KINDS[number];
+export type MediaCatalogSearchCoverage = "complete" | "best_effort";
 
 export interface MediaCatalogProviderSearchInput {
   readonly query: string;
@@ -25,6 +26,8 @@ export interface MediaCatalogProviderSearchInput {
 
 /** Hub-private provider seam. Native item identity never enters a search result. */
 export interface MediaCatalogProvider {
+  /** Defaults to best-effort when the provider cannot prove exhaustive search. */
+  readonly searchCoverage?: MediaCatalogSearchCoverage;
   search(input: MediaCatalogProviderSearchInput): Promise<readonly unknown[]>;
 }
 
@@ -48,6 +51,7 @@ export interface MediaCatalogSearchInput {
 
 export interface MediaCatalogSearchResult {
   readonly candidates: readonly MediaCatalogCandidate[];
+  readonly coverage: MediaCatalogSearchCoverage;
 }
 
 export interface MediaCatalogOptions {
@@ -116,6 +120,7 @@ export class MediaCatalog {
   private readonly now: () => number;
   private readonly mediaRefFactory: () => string;
   private readonly provider: MediaCatalogProvider;
+  private readonly searchCoverage: MediaCatalogSearchCoverage;
   private readonly refs = new Map<string, StoredMediaRef>();
 
   constructor(options: MediaCatalogOptions) {
@@ -140,6 +145,11 @@ export class MediaCatalog {
     if (typeof options.provider?.search !== "function") {
       throw new MediaCatalogError("invalid_configuration", "Media catalog provider is invalid");
     }
+    if (options.provider.searchCoverage !== undefined
+      && options.provider.searchCoverage !== "complete"
+      && options.provider.searchCoverage !== "best_effort") {
+      throw new MediaCatalogError("invalid_configuration", "Media catalog provider coverage is invalid");
+    }
     if (options.now !== undefined && typeof options.now !== "function") {
       throw new MediaCatalogError("invalid_configuration", "Media catalog clock is invalid");
     }
@@ -157,6 +167,7 @@ export class MediaCatalog {
     this.now = options.now ?? Date.now;
     this.mediaRefFactory = options.mediaRefFactory ?? (() => randomUUID().replaceAll("-", ""));
     this.provider = options.provider;
+    this.searchCoverage = options.provider.searchCoverage ?? "best_effort";
   }
 
   async search(input: MediaCatalogSearchInput): Promise<MediaCatalogSearchResult> {
@@ -217,7 +228,10 @@ export class MediaCatalog {
       candidates.push(candidate);
     }
     for (const stored of stagedRefs) this.refs.set(stored.candidate.mediaRef, stored);
-    return Object.freeze({ candidates: Object.freeze(candidates) });
+    return Object.freeze({
+      candidates: Object.freeze(candidates),
+      coverage: this.searchCoverage,
+    });
   }
 
   /** Hub-private freshness check; it exposes no provider or native identity. */

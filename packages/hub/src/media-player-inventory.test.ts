@@ -64,6 +64,9 @@ function acceptedMediaSnapshot(): Record<string, unknown> {
     hwSpaceId: "hws-media-room",
   };
   return {
+    bridges: {
+      "bridge-ha": { metrics: { connection: "up" } },
+    },
     spaces: [{
       hwSpaceId: "hws-media-room",
       name: "多媒体室",
@@ -260,6 +263,18 @@ test("does not reuse a playing state from a disconnected bridge", async () => {
   snapshot.bridges = {
     "bridge-ha": { metrics: { connection: "down" } },
   };
+
+  const projected = projectMediaPlayerInventory(snapshot);
+
+  assert.equal(projected.players[0]?.availability, "unknown");
+  assert.equal(projected.players[0]?.playbackState, "unknown");
+  assert.deepEqual(projected.players[0]?.volume, { reported: false });
+});
+
+test("does not reuse a playing state when bridge connection evidence is missing", async () => {
+  const { projectMediaPlayerInventory } = await loadMediaPlayerInventoryModule();
+  const snapshot = acceptedMediaSnapshot();
+  delete snapshot.bridges;
 
   const projected = projectMediaPlayerInventory(snapshot);
 

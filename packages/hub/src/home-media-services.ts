@@ -86,6 +86,7 @@ export interface SyntheticMediaCatalogRow {
 
 /** Deterministic development/test provider. It is never mounted by default. */
 export class SyntheticMediaCatalogProvider implements MediaCatalogProvider {
+  readonly searchCoverage = "complete" as const;
   private readonly rows: readonly SyntheticMediaCatalogRow[];
 
   constructor(rows: readonly SyntheticMediaCatalogRow[]) {

@@ -32,6 +32,7 @@ interface MediaCatalogSearchInput {
 
 interface MediaCatalogSearchResult {
   readonly candidates: readonly MediaCatalogCandidate[];
+  readonly coverage: "complete" | "best_effort";
 }
 
 interface MediaCatalogProvider {
@@ -236,6 +237,14 @@ test("uses the reviewed Music Assistant-compatible media kinds when no filter is
     "episode",
     "genre",
   ]);
+});
+
+test("marks an unclassified provider search as best-effort in the machine-readable result", async () => {
+  const { catalog } = await fixture();
+
+  const result = await catalog.search({ query: "jazz", limit: 1 });
+
+  assert.equal(result.coverage, "best_effort");
 });
 
 test("does not issue a mediaRef from a provider result that arrives after cancellation", async () => {
