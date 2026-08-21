@@ -134,6 +134,11 @@ outside the Hub intent, Agent and bridge boundaries. The registry freezes provid
 metadata, and each render receives a deep-frozen copy so Host-owned safety and
 governance state stays canonical.
 
+Declarative layout recipes compile untrusted data into a deeply frozen Host slot
+plan. The grammar contains only closed semantic routes, layout modes, widths and
+route-scoped slot identifiers. Reviews and control remain atomic Host workspaces;
+the recipe has no executable content, transport location, query or authority field.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond

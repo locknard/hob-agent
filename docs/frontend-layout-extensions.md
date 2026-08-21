@@ -322,6 +322,25 @@ bundled Control provider declares `rowDensity` (`comfortable` or `compact`). Thi
 F1 contract keeps preference UI declarative; executable provider settings remain
 part of the later isolated View Application phase.
 
+### F2a bounded recipe compilation
+
+The first declarative ecosystem slice accepts data and produces an immutable Host
+slot plan. A V1 recipe contains an exact API version, bounded publisher-scoped id
+and title, 1–7 unique semantic pages, one closed layout mode per page, and 1–12
+unique Host slot references per page. Registration accepts up to 64 slots across
+the recipe. The `builtin.*` namespace belongs to the Host.
+
+V1 semantic routes are `overview`, `conversation`, `reviews`, `activity`, `control`,
+`settings` and `onboarding`. Slots use an exact route-scoped vocabulary. The
+confirmation/proposal surface remains one indivisible `reviews.workspace` slot;
+the recipe cannot split, reorder or recombine its two lifecycles. Control stays one
+`control.workspace` slot so governed forms and feedback remain Host-rendered.
+
+The recipe grammar contains no HTML, CSS, JavaScript, URL, asset, query, secret,
+credential, model prompt, native bridge identity, handler or action field. Compilation
+validates the entire object before returning a deeply frozen plan. Runtime rendering
+and third-party loading remain later F2 work.
+
 ## Failure and recovery
 
 - Provider 加载超时、崩溃、版本不兼容或被撤销：继续显示当前安全视图；不可用 provider
@@ -352,7 +371,7 @@ state table and render identical governed control content for the semantic route
 
 ## Delivery sequence
 
-Current checkpoint (2026-08-22): F0 is complete. F1 now includes the shared
+Current checkpoint (2026-08-22): F0 and F1 are complete. F1 includes the shared
 presentation kernel, `ProductViewRegistry`, `builtin.life`, `builtin.control`,
 browser-profile device defaults, semantic-route continuity and deterministic
 recovery to `builtin.life`. Top-level switching applies to the current browser session. The
@@ -364,8 +383,9 @@ render content for the active semantic route. The connection and control-feedbac
 error-state matrix is complete. The shared accessibility matrix covers one page
 heading, skip navigation, labelled controls, native time fields, semantic progress,
 visible keyboard focus, touch feedback, reduced motion/transparency, increased
-contrast and responsive safe areas. The remaining F1 work is provider-specific
-presentation configuration beyond the device default.
+contrast and responsive safe areas. Provider metadata and every render input are
+immutable at runtime. Provider-specific presentation choices are closed declarations
+validated and persisted by the Host.
 
 1. **F0 — contract and prototype:** 在交互稿中加入生活/控制视图切换、失败回退、per-device
    preference 和语义路由连续性；不装载第三方代码。

@@ -5,10 +5,12 @@
   "type": "module",
   "exports": {
     "./http": "./src/proposal-inbox-http-service.ts",
-    "./service": "./src/proposal-inbox-service.ts"
+    "./service": "./src/proposal-inbox-service.ts",
+    "./view-recipe": "./src/product-view-recipe.ts"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@hob-agent/agent-layer": "workspace:*"
+    "@hob-agent/agent-layer": "workspace:*",
+    "zod": "^4.4.3"
   }
 }
