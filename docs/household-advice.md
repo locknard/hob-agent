@@ -51,13 +51,29 @@ and must not create a hazard.
 
 - Questions are UTF-8 text from 1 to 1,000 characters and are always untrusted
   input. They cannot add tools, authority, instructions, or policy exceptions.
-- Only one advice turn may run at a time, and it shares the Agent's bounded
-  deadline and tool budget with autonomous observation.
+- Only one advice turn may run at a time. It shares the governed Agent tool
+  budget with autonomous observation, but uses an independent five-minute
+  product deadline because the persisted request continues after the HTTP
+  response and may need several bounded evidence reads.
+- Every DSH model step has a 4,096-token output ceiling, including custom
+  OpenAI-compatible deployments whose provider default is otherwise unknown.
+- Detailed snapshot pages have a 7,500-byte model-visible ceiling. Pages shrink
+  deterministically; an individually oversized device fails closed and must be
+  queried again with narrower semantic kinds instead of flooding the next
+  model step.
+- Starting a question persists a `running` record and returns immediately. The
+  Hub owns the background DSH turn, cancellation, terminal persistence, and a
+  bounded in-memory semantic progress log.
 - A request fails closed when HomeWorld is not ready, the Agent is busy, or the
   model does not publish exactly one valid structured report.
 - The Inbox accepts requests only through authenticated, exact-same-origin
   form posts with bounded bodies. Standalone Inbox mode may read prior reports
   but cannot start a new Agent turn.
+- Running report pages consume an authenticated same-origin SSE endpoint with
+  monotonic event IDs, cursor replay, heartbeat, and terminal close. The stream
+  exposes only household-facing lifecycle stages and bounded answer text; raw
+  DSH events, prompts, hidden reasoning, tool arguments, tool results, and
+  provider errors never cross the HTTP boundary.
 - Reports are visibly labelled Agent-authored. Hub evidence returned by tools
   remains the authority for observed state; report prose is never promoted to
   Hub evidence.
@@ -68,6 +84,12 @@ The Inbox presents an “Ask about your home” form and a bounded recent-report
 list. A report page separates: answer, what the Agent found, what remains
 unknown, a proposed trial, sensing gaps, and how to validate. This is a
 request/response document workflow, not a native chat application.
+
+While a report is running, the page uses household language for accepted,
+inventory, routine, evidence, snapshot, and answer-writing activity; only
+stages actually observed from the redacted DSH trace are marked complete. A
+reload or brief connection loss resumes the same request rather than starting
+another one, and the household can stop waiting without applying any change.
 
 The reusable acceptance matrix is documented in
 [`household-advice-evaluation.md`](household-advice-evaluation.md). Real-home

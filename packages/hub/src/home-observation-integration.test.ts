@@ -380,10 +380,13 @@ test("answers a curtain question through governed DSH evidence into the local In
   });
   await ctx.plugin(ProposalInboxService);
 
-  const answer = await ctx.homeInbox.askAdvice("Why does the curtain sometimes open too early and sometimes too late?");
+  const accepted = await ctx.homeInbox.startAdvice("Why does the curtain sometimes open too early and sometimes too late?");
 
-  assert.equal(answer.status, "completed");
-  if (answer.status !== "completed") return;
+  assert.equal(accepted.status, "running");
+  await waitFor(() => ctx.homeAdvice.get(accepted.id)?.status === "completed");
+  const answer = ctx.homeAdvice.get(accepted.id);
+  assert.equal(answer?.status, "completed");
+  if (answer?.status !== "completed") return;
   assert.equal(answer.report.hardwareSuggestions[0]?.capability, "illuminance");
   assert.equal(answer.report.hardwareSuggestions[0]?.necessity, "optional");
   assert.match(ctx.homeInbox.renderAdvice(answer.id) ?? "", /No-purchase alternative/);
@@ -402,3 +405,11 @@ test("answers a curtain question through governed DSH evidence into the local In
 
   await ctx.fiber.dispose();
 });
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail("condition did not become true in time");
+}

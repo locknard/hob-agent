@@ -52,6 +52,7 @@ export class HomeAdviceReportService extends Service {
 
   private activeAgent: Agent | undefined;
   private report: HomeAdviceReport | undefined;
+  private onRecorded: (() => void) | undefined;
 
   constructor(ctx: Context) {
     super(ctx, "homeAdviceReport");
@@ -118,16 +119,18 @@ export class HomeAdviceReportService extends Service {
     }));
   }
 
-  begin(agent: Agent): void {
+  begin(agent: Agent, onRecorded?: () => void): void {
     if (this.activeAgent !== undefined) throw new Error("Home advice report is already active");
     this.activeAgent = agent;
     this.report = undefined;
+    this.onRecorded = onRecorded;
   }
 
   end(): HomeAdviceReport | undefined {
     const report = this.report;
     this.activeAgent = undefined;
     this.report = undefined;
+    this.onRecorded = undefined;
     return report === undefined ? undefined : copyReport(report);
   }
 
@@ -137,6 +140,11 @@ export class HomeAdviceReportService extends Service {
     }
     if (this.report !== undefined) throw new Error("Home advice report is already recorded");
     this.report = copyReport(report);
+    try {
+      this.onRecorded?.();
+    } catch {
+      // A product lifecycle hook must not turn a valid report into a failed tool result.
+    }
   }
 }
 

@@ -406,6 +406,7 @@ const MAX_PAGE_LIMIT = 20;
 const MAX_HW_IDS = 20;
 const MAX_SPACE_IDS = 10;
 const MAX_ID_LENGTH = 256;
+const MODEL_VISIBLE_PAGE_BYTES = 7_500;
 
 /** Applies the bounded model-facing query to an already normalized snapshot. */
 export function pageHomeSnapshot(
@@ -432,25 +433,34 @@ export function pageHomeSnapshot(
     ? 0
     : matchedDevices.findIndex((device) => compareStrings(device.hwId, afterHwId) > 0);
   const pageStart = start < 0 ? matchedDevices.length : start;
-  const pageDevices = matchedDevices.slice(pageStart, pageStart + limit);
-  const hasNextPage = pageStart + pageDevices.length < matchedDevices.length;
-  const referencedSpaceIds = new Set(pageDevices.flatMap((device) =>
-    device.bindings.flatMap((binding) => binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId])));
-
-  return {
-    spaces: snapshot.spaces.filter((space) => referencedSpaceIds.has(space.hwSpaceId))
-      .map(({ hwSpaceId, name }) => ({ hwSpaceId, ...(name === undefined ? {} : { name }) })),
-    devices: pageDevices.map(projectModelDevice),
-    bridgeWatermarks: snapshot.bridgeWatermarks,
-    metrics: snapshot.metrics,
-    topology: snapshot.topology,
-    page: {
-      limit,
-      returnedDevices: pageDevices.length,
-      totalMatchedDevices: matchedDevices.length,
-      ...(hasNextPage && pageDevices.length > 0 ? { nextAfterHwId: pageDevices.at(-1)!.hwId } : {}),
-    },
-  };
+  let returnedDevices = Math.min(limit, matchedDevices.length - pageStart);
+  while (returnedDevices >= 0) {
+    const pageDevices = matchedDevices.slice(pageStart, pageStart + returnedDevices);
+    const hasNextPage = pageStart + pageDevices.length < matchedDevices.length;
+    const referencedSpaceIds = new Set(pageDevices.flatMap((device) =>
+      device.bindings.flatMap((binding) => binding.hwSpaceId === undefined ? [] : [binding.hwSpaceId])));
+    const page: HomeSnapshotPageValue = {
+      spaces: snapshot.spaces.filter((space) => referencedSpaceIds.has(space.hwSpaceId))
+        .map(({ hwSpaceId, name }) => ({ hwSpaceId, ...(name === undefined ? {} : { name }) })),
+      devices: pageDevices.map(projectModelDevice),
+      bridgeWatermarks: snapshot.bridgeWatermarks,
+      metrics: snapshot.metrics,
+      topology: snapshot.topology,
+      page: {
+        limit,
+        returnedDevices: pageDevices.length,
+        totalMatchedDevices: matchedDevices.length,
+        ...(hasNextPage && pageDevices.length > 0 ? { nextAfterHwId: pageDevices.at(-1)!.hwId } : {}),
+      },
+    };
+    if (Buffer.byteLength(JSON.stringify(page), "utf8") <= MODEL_VISIBLE_PAGE_BYTES) return page;
+    if (returnedDevices === 1) {
+      throw new RangeError("one snapshot device exceeds the model-visible page budget; narrow hwIds or semanticKinds");
+    }
+    returnedDevices -= 1;
+  }
+  /* v8 ignore next -- the zero-device page has bounded fixed metadata. */
+  throw new RangeError("snapshot metadata exceeds the model-visible page budget");
 }
 
 function projectModelDevice(

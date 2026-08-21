@@ -171,6 +171,49 @@ test("fails closed for invalid or oversized snapshot query arguments", () => {
   assert.throws(() => pageHomeSnapshot(queryFixture(), { semanticKinds: ["not-a-kind" as "light"] }), /semanticKinds/);
 });
 
+test("shrinks snapshot pages deterministically to the model-visible budget", () => {
+  const snapshot = structuredClone(queryFixture());
+  const template = snapshot.devices[0]!;
+  snapshot.devices = Array.from({ length: 3 }, (_, index) => ({
+    ...structuredClone(template),
+    hwId: `hw-large-${String(index).padStart(2, "0")}`,
+    name: `large-device-${String(index).padStart(2, "0")}-${"x".repeat(2_500)}`,
+  }));
+
+  const page = pageHomeSnapshot(snapshot, { limit: 3 });
+  assert.ok(Buffer.byteLength(JSON.stringify(page), "utf8") <= 7_500);
+  assert.deepEqual(page.devices.map((device) => device.hwId), ["hw-large-00", "hw-large-01"]);
+  assert.deepEqual(page.page, {
+    limit: 3,
+    returnedDevices: 2,
+    totalMatchedDevices: 3,
+    nextAfterHwId: "hw-large-01",
+  });
+
+  const next = pageHomeSnapshot(snapshot, { limit: 3, afterHwId: page.page.nextAfterHwId });
+  assert.ok(Buffer.byteLength(JSON.stringify(next), "utf8") <= 7_500);
+  assert.deepEqual(next.devices.map((device) => device.hwId), ["hw-large-02"]);
+});
+
+test("fails closed with a bounded narrowing guide when one snapshot device cannot fit", () => {
+  const snapshot = structuredClone(queryFixture());
+  snapshot.devices = [{
+    ...snapshot.devices[0]!,
+    name: `too-large-${"x".repeat(8_000)}`,
+  }];
+
+  assert.throws(
+    () => pageHomeSnapshot(snapshot, { limit: 1 }),
+    (error: unknown) => {
+      assert.ok(error instanceof RangeError);
+      assert.match(error.message, /model-visible page budget/);
+      assert.match(error.message, /narrow hwIds or semanticKinds/);
+      assert.equal(error.message.includes("x".repeat(100)), false);
+      return true;
+    },
+  );
+});
+
 test("mounts and unloads through the real DSH tool registry", async () => {
   const ctx = new Context();
   await ctx.plugin(SystemPrompt, {});

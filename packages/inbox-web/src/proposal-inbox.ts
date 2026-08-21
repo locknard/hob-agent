@@ -347,6 +347,23 @@ export type InboxObservationDisposition =
   | "mapping_uncertain"
   | "other_uncertainty";
 
+/**
+ * Household-facing availability for a new advice question.
+ *
+ * The web surface deliberately receives a closed state rather than a boolean:
+ * each expected condition needs a useful explanation and a next action. The
+ * HTTP/service layer may retain richer diagnostics, but they must not cross
+ * this boundary into everyday household copy.
+ */
+export type InboxAdviceAvailability =
+  | { readonly status: "ready" }
+  | { readonly status: "setup_required"; readonly actionHref?: string }
+  | { readonly status: "home_connecting"; readonly actionHref?: string }
+  | { readonly status: "model_unavailable"; readonly actionHref?: string }
+  | { readonly status: "agent_busy"; readonly activeAdviceId?: string }
+  | { readonly status: "active_request"; readonly activeAdviceId: string }
+  | { readonly status: "stopped"; readonly actionHref?: string };
+
 export type InboxHomeAdviceRecord = {
   readonly id: string;
   readonly question: string;
@@ -482,7 +499,7 @@ export function renderProposalList(
   persistedAttempts: readonly InboxObservationAttempt[] = [],
   calibration?: InboxCalibrationSummary,
   advice: readonly InboxHomeAdviceRecord[] = [],
-  canAskAdvice = false,
+  adviceAvailability: InboxAdviceAvailability | boolean = false,
 ): string {
   const items = proposals.map((proposal) => `<li class="proposal-row" data-status="${escapeHtml(proposal.status)}">
     <a href="/proposals/${encodeURIComponent(proposal.id)}"><h2>${escapeHtml(proposal.title)}</h2></a>
@@ -504,18 +521,16 @@ export function renderProposalList(
     ).join("")}</ol>`;
   const calibrationSection = calibration === undefined ? "" : `<details class="quiet-section">${renderCalibrationSummary(calibration)}</details>`;
   const empty = proposals.length === 0 ? `<div class="empty-state"><h2>No ideas need review</h2><p>When the Agent finds a useful pattern with enough evidence, it will appear here before anything can change.</p></div>` : `<ol class="proposal-list">${items}</ol>`;
-  const adviceItems = advice.slice(0, 5).map((item) => `<li><a href="/advice/${encodeURIComponent(item.id)}"><strong>${escapeHtml(item.question)}</strong></a><span>${item.status === "completed" ? escapeHtml(item.report.summary) : escapeHtml(item.status)}</span></li>`).join("");
-  const adviceControl = canAskAdvice
-    ? `<form class="advice-form" method="post" action="/advice"><label for="home-question">What would you like to understand?</label><textarea id="home-question" name="question" maxlength="1000" required></textarea><p>The Agent will inspect bounded household evidence and return guidance only. It cannot make a change.</p><button type="submit">Ask about your home</button></form>`
-    : `<p>Open the full home runtime to ask a new question. Stored answers remain available here.</p>`;
+  const adviceItems = advice.slice(0, 5).map((item) => `<li><a href="/advice/${encodeURIComponent(item.id)}"><strong>${escapeHtml(item.question)}</strong></a><span>${adviceListStatusLabel(item)}</span></li>`).join("");
+  const adviceControl = renderAdviceControl(normalizeAdviceAvailability(adviceAvailability));
   const adviceHistory = adviceItems.length === 0 ? "<p>No household questions have been answered yet.</p>" : `<ol class="advice-list">${adviceItems}</ol>`;
   return `<main id="main-content" class="proposal-inbox"><header id="overview" class="page-header"><p class="eyebrow">Household review</p><h1>Review ideas for your home</h1><p class="muted">The Agent can suggest persistent behavior, but your household decides what is useful.</p></header><section id="home" class="inbox-overview" aria-label="Home status">${observationStatus}</section><section id="advice" class="quiet-section" aria-labelledby="advice-heading"><div class="section-heading"><div><p class="eyebrow">One question at a time</p><h2 id="advice-heading">Ask about your home</h2></div></div>${adviceControl}<details><summary>Recent answers</summary>${adviceHistory}</details></section><section id="observations" class="observation-panel" aria-label="Home observation">${observationControl}</section><section class="quiet-section" aria-label="Recent observations"><details><summary>Recent observations</summary>${observationHistory || "<p>No observations have been recorded yet.</p>"}</details></section><section id="reviews" class="quiet-section" aria-labelledby="reviews-heading"><div class="section-heading"><div><p class="eyebrow">Decision queue</p><h2 id="reviews-heading">Reviews</h2></div><p>${proposals.length} item${proposals.length === 1 ? "" : "s"}</p></div>${empty}</section>${calibrationSection}<section id="settings" class="quiet-section" aria-labelledby="settings-heading"><h2 id="settings-heading">Connections and access</h2><p>Secrets are kept outside household files and are never shown in proposal evidence or Agent traces.</p></section></main>`;
 }
 
 export function renderHomeAdvice(advice: InboxHomeAdviceRecord): string {
   const header = `<header><a class="back-link" href="/proposals#advice">← Back to household questions</a><p class="eyebrow">Agent-authored guidance</p><h1>${escapeHtml(advice.question)}</h1><p class="muted">This answer cannot control a device, change a rule, or grant authority.</p></header>`;
-  if (advice.status === "running") return `<main id="main-content" class="advice-detail">${header}<section><h2>Answer in progress</h2><p>The Agent is inspecting bounded household evidence.</p></section></main>`;
-  if (advice.status === "failed") return `<main id="main-content" class="advice-detail">${header}<section><h2>No answer was produced</h2><p>The request failed safely without storing provider error details.</p></section></main>`;
+  if (advice.status === "running") return renderRunningAdvice(advice, header);
+  if (advice.status === "failed") return renderFailedAdvice(advice, header);
   const report = advice.report;
   const findings = report.findings.length === 0 ? "<p>No supported findings were reported.</p>" : `<ul>${report.findings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
   const unknowns = report.unknowns.length === 0 ? "<p>No additional unknowns were reported.</p>" : `<ul>${report.unknowns.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
@@ -524,7 +539,73 @@ export function renderHomeAdvice(advice: InboxHomeAdviceRecord): string {
     ? "<p>No additional hardware is currently suggested.</p>"
     : `<ol class="hardware-suggestions">${report.hardwareSuggestions.map((item) => `<li><h3>${escapeHtml(hardwareCapabilityLabel(item.capability))} sensing · ${escapeHtml(item.necessity)}</h3><p>${escapeHtml(item.reason)}</p>${item.placement === undefined ? "" : `<p><strong>Placement:</strong> ${escapeHtml(item.placement)}</p>`}<p><strong>Privacy impact:</strong> ${escapeHtml(item.privacyImpact)}</p><p class="no-purchase-alternative"><strong>No-purchase alternative:</strong> ${escapeHtml(item.alternative)}</p></li>`).join("")}</ol>`;
   const validation = report.validationSteps.length === 0 ? "<p>No validation steps were reported.</p>" : `<ol>${report.validationSteps.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`;
-  return `<main id="main-content" class="advice-detail">${header}<section class="advice-answer"><p class="eyebrow">Confidence: ${escapeHtml(report.confidence)}</p><h2>Answer</h2><p>${escapeHtml(report.summary)}</p></section><section><h2>What the Agent found</h2>${findings}</section><section><h2>What remains unknown</h2>${unknowns}</section><section><h2>Suggested trial</h2>${trial}</section><section><h2>Would more sensing help?</h2>${hardware}</section><section><h2>How to validate</h2>${validation}</section></main>`;
+  return `<main id="main-content" class="advice-detail" data-advice-id="${encodeURIComponent(advice.id)}" data-advice-state="completed">${header}<section class="advice-answer"><p class="eyebrow">Confidence: ${escapeHtml(report.confidence)}</p><h2>Answer</h2><p>${escapeHtml(report.summary)}</p></section><section><h2>What the Agent found</h2>${findings}</section><section><h2>What remains unknown</h2>${unknowns}</section><section><h2>Suggested trial</h2>${trial}</section><section><h2>Would more sensing help?</h2>${hardware}</section><section><h2>How to validate</h2>${validation}</section></main>`;
+}
+
+const ADVICE_STAGES: readonly { readonly id: string; readonly label: string }[] = [
+  { id: "accepted", label: "Question received" },
+  { id: "inspecting_home", label: "Getting to know your home" },
+  { id: "reading_inventory", label: "Checking available information" },
+  { id: "checking_rules", label: "Reviewing current routines" },
+  { id: "evaluating_evidence", label: "Comparing recent patterns" },
+  { id: "composing_answer", label: "Writing your answer" },
+];
+
+function renderRunningAdvice(advice: Extract<InboxHomeAdviceRecord, { readonly status: "running" }>, header: string): string {
+  const adviceId = encodeURIComponent(advice.id);
+  const stages = ADVICE_STAGES.map((stage, index) => `<li class="advice-stage" data-advice-stage="${stage.id}" data-advice-stage-state="${index === 0 ? "current" : "pending"}"${index === 0 ? " aria-current=\"step\"" : ""}><span class="advice-stage-marker" aria-hidden="true">${index + 1}</span><span>${stage.label}</span></li>`).join("");
+  return `<main id="main-content" class="advice-detail advice-running" data-advice-id="${adviceId}" data-advice-state="running" data-advice-events="/advice/${adviceId}/events" data-advice-cancel="/advice/${adviceId}/cancel" data-advice-reconnect="true" data-advice-stream="sse">${header}<section class="advice-progress" aria-labelledby="advice-progress-heading"><div class="advice-progress-heading"><p class="eyebrow">Working on your question</p><h2 id="advice-progress-heading">Answer in progress</h2><p class="advice-live-status" data-advice-status aria-live="polite">Question received. Looking at the information available in your home.</p></div><ol class="advice-stage-list" aria-label="Answer progress">${stages}</ol><p class="advice-stream-answer" data-advice-answer aria-live="off"></p><p class="muted advice-progress-note">You can leave this page and come back. Your question will keep its place.</p><form class="advice-cancel-form" method="post" action="/advice/${adviceId}/cancel"><button type="submit">Stop waiting</button></form></section><script type="module" src="/assets/advice.js" defer></script></main>`;
+}
+
+function renderFailedAdvice(advice: Extract<InboxHomeAdviceRecord, { readonly status: "failed" }>, header: string): string {
+  return `<main id="main-content" class="advice-detail advice-failed" data-advice-id="${encodeURIComponent(advice.id)}" data-advice-state="failed">${header}<section class="advice-status advice-status-failed" role="alert"><p class="eyebrow">The question stopped safely</p><h2>The answer could not be completed</h2><p>No household change was made. You can ask the same question again when you are ready.</p><form method="post" action="/advice"><input type="hidden" name="question" value="${escapeHtml(advice.question)}"><button type="submit">Try the question again</button></form><p><a href="/proposals#advice">Return to household questions</a></p></section></main>`;
+}
+
+function normalizeAdviceAvailability(value: InboxAdviceAvailability | boolean): InboxAdviceAvailability {
+  return typeof value === "boolean" ? (value ? { status: "ready" } : { status: "setup_required" }) : value;
+}
+
+function adviceListStatusLabel(advice: InboxHomeAdviceRecord): string {
+  if (advice.status === "completed") return escapeHtml(advice.report.summary);
+  if (advice.status === "running") return "Answer in progress";
+  return "The answer could not be completed";
+}
+
+function renderAdviceControl(availability: InboxAdviceAvailability): string {
+  switch (availability.status) {
+    case "ready":
+      return `<form class="advice-form" method="post" action="/advice"><label for="home-question">What would you like to understand?</label><textarea id="home-question" name="question" maxlength="1000" required></textarea><p id="home-question-help">The answer uses the information available in your home and cannot make a change.</p><button type="submit" aria-describedby="home-question-help">Ask about your home</button></form>`;
+    case "setup_required":
+      return renderAdviceAvailabilityMessage(availability.status, "Connect your home before asking", "Complete setup once so the Agent can read the household information needed for an answer.", availability.actionHref, "Open home setup");
+    case "home_connecting":
+      return renderAdviceAvailabilityMessage(availability.status, "Still connecting to your home", "Your household information is still loading. This page will be ready when the connection is consistent.", availability.actionHref, "Check home setup");
+    case "model_unavailable":
+      return renderAdviceAvailabilityMessage(availability.status, "Choose a model to continue", "Select a model in home setup, then come back to ask your question.", availability.actionHref, "Open model setup");
+    case "agent_busy":
+      return renderAdviceBusyMessage(availability);
+    case "active_request":
+      return renderAdviceActiveMessage(availability.activeAdviceId);
+    case "stopped":
+      return renderAdviceAvailabilityMessage(availability.status, "Home questions are paused", "Start home questions again to get a grounded answer about your household.", availability.actionHref, "Open home setup");
+  }
+}
+
+function renderAdviceAvailabilityMessage(status: "setup_required" | "home_connecting" | "model_unavailable" | "stopped", heading: string, description: string, actionHref: string | undefined, actionLabel: string): string {
+  const href = safeLocalHref(actionHref, "/control-center");
+  return `<div class="advice-availability" data-advice-availability="${status}" role="status"><h3>${heading}</h3><p>${description}</p><a class="advice-action-link" href="${escapeHtml(href)}">${actionLabel}</a></div>`;
+}
+
+function renderAdviceBusyMessage(availability: Extract<InboxAdviceAvailability, { readonly status: "agent_busy" }>): string {
+  const active = availability.activeAdviceId === undefined ? "" : `<p><a class="advice-action-link" href="/advice/${encodeURIComponent(availability.activeAdviceId)}">View current question</a></p>`;
+  return `<div class="advice-availability" data-advice-availability="agent_busy" role="status"><h3>Another question is already being answered</h3><p>Only one home question is handled at a time. You can follow the current answer and ask yours next.</p>${active}</div>`;
+}
+
+function renderAdviceActiveMessage(adviceId: string): string {
+  return `<div class="advice-availability" data-advice-availability="active_request" role="status"><h3>Continue the current question</h3><p>Your question is already in progress. We will keep its place while the answer is prepared.</p><p><a class="advice-action-link" href="/advice/${encodeURIComponent(adviceId)}">View current question</a></p></div>`;
+}
+
+function safeLocalHref(value: string | undefined, fallback: string): string {
+  return value !== undefined && value.startsWith("/") && !value.startsWith("//") ? value : fallback;
 }
 
 function hardwareCapabilityLabel(value: string): string {

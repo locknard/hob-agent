@@ -550,7 +550,8 @@ test("returns one structured advice report for a bounded untrusted household que
 
   assert.equal(report.confidence, "partial");
   assert.equal(report.hardwareSuggestions[0]?.capability, "illuminance");
-  assert.equal(adapter.requests.length, 3);
+  assert.equal(adapter.requests.length, 2);
+  assert.equal(adapter.requests.every((request) => request.maxTokens === 4_096), true);
   assert.equal(
     adapter.requests[0]?.messages.some((message) => JSON.stringify(message).includes("load the answer-home-question skill")),
     true,
@@ -588,6 +589,26 @@ test("cancels a model request that exceeds the autonomous observation deadline",
   );
   assert.equal(adapter.requests, 1);
   assert.equal(ctx.homeAgent.observationStatus, "idle");
+
+  await ctx.fiber.dispose();
+});
+
+test("validates the independent household advice deadline", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter: new RecordingAdapter(),
+    sessionId: "invalid-advice-deadline",
+    adviceTimeoutMs: 300_001,
+  });
+
+  await assert.rejects(
+    ctx.homeAgent.requestAdvice("Should I adjust the curtain schedule?"),
+    /Home advice timeout must be from 1 to 300000 milliseconds/,
+  );
 
   await ctx.fiber.dispose();
 });

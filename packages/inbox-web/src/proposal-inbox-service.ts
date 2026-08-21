@@ -25,6 +25,7 @@ import {
   type ProposalInboxPort,
   type ProposalTracePort,
   type InboxHomeAdviceRecord,
+  type InboxAdviceAvailability,
 } from "./proposal-inbox.js";
 import {
   projectControlCenter,
@@ -87,7 +88,11 @@ export class ProposalInboxService extends Service {
   };
   private readonly advice?: {
     canAsk(): boolean;
+    availability?(): InboxAdviceAvailability;
     ask(question: string): Promise<InboxHomeAdviceRecord>;
+    events?(id: string, afterSeq?: number): readonly InboxAdviceProgressEvent[];
+    subscribe?(id: string, listener: InboxAdviceProgressListener, afterSeq?: number): () => void;
+    cancel?(id: string): boolean;
     list(query?: { limit?: number }): readonly InboxHomeAdviceRecord[];
     get(id: string): InboxHomeAdviceRecord | undefined;
   };
@@ -171,12 +176,45 @@ export class ProposalInboxService extends Service {
   }
 
   canAskAdvice(): boolean {
-    return this.advice?.canAsk() ?? false;
+    return this.getAdviceAvailability().status === "ready";
+  }
+
+  getAdviceAvailability(): InboxAdviceAvailability {
+    if (this.advice === undefined) return { status: "setup_required" };
+    const availability = this.advice.availability?.();
+    if (availability === undefined) {
+      return this.advice.canAsk() ? { status: "ready" } : { status: "setup_required" };
+    }
+    return normalizeAdviceAvailability(availability);
   }
 
   async askAdvice(question: string): Promise<InboxHomeAdviceRecord> {
-    if (!this.canAskAdvice() || this.advice === undefined) throw new Error("Home advice is unavailable");
+    return this.startAdvice(question);
+  }
+
+  async startAdvice(question: string): Promise<InboxHomeAdviceRecord> {
+    if (this.advice === undefined) throw new Error("Home advice is unavailable");
     return this.advice.ask(question);
+  }
+
+  readAdviceEvents(id: string, after?: string): readonly InboxAdviceProgressEvent[] {
+    if (this.advice?.events === undefined) return [];
+    return this.advice.events(id, adviceCursor(after));
+  }
+
+  subscribeAdvice(id: string, listener: InboxAdviceProgressListener): () => void {
+    if (this.advice?.subscribe === undefined) return () => undefined;
+    // HTTP subscribes before replay to close the read/subscribe race. Suppress
+    // the Hub's synchronous replay here; the HTTP layer performs one cursor-
+    // aware replay and queues only events that arrive after this subscription.
+    return this.advice.subscribe(id, listener, Number.MAX_SAFE_INTEGER);
+  }
+
+  async cancelAdvice(id: string): Promise<InboxAdviceCancelResult> {
+    const record = this.advice?.get(id);
+    if (record === undefined) return { status: "not_found" };
+    if (record.status !== "running" || this.advice?.cancel === undefined) return { status: "terminal_status" };
+    return this.advice.cancel(id) ? { status: "cancelled" } : { status: "terminal_status" };
   }
 
   renderAdvice(id: string): string | undefined {
@@ -194,7 +232,7 @@ export class ProposalInboxService extends Service {
         ...(this.observationAudit === undefined ? {} : { observations: this.observationAudit.summary() }),
       },
       this.advice?.list({ limit: 5 }),
-      this.canAskAdvice(),
+      this.getAdviceAvailability(),
     );
   }
 
@@ -225,6 +263,39 @@ export class ProposalInboxService extends Service {
       this.preparationSource?.preparationForProposal(proposalId, proposalRevision),
       this.preparation !== undefined,
     );
+  }
+}
+
+interface InboxAdviceProgressEvent {
+  readonly id: number;
+  readonly type: string;
+  readonly data: Readonly<Record<string, unknown>>;
+}
+
+type InboxAdviceProgressListener = (event: InboxAdviceProgressEvent) => void;
+
+type InboxAdviceCancelResult =
+  | { readonly status: "cancelled" }
+  | { readonly status: "not_found" }
+  | { readonly status: "terminal_status" };
+
+function adviceCursor(value: string | undefined): number {
+  if (value === undefined || value.length === 0) return 0;
+  const cursor = Number(value);
+  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new TypeError("Invalid advice event cursor");
+  return cursor;
+}
+
+function normalizeAdviceAvailability(value: InboxAdviceAvailability): InboxAdviceAvailability {
+  switch (value.status) {
+    case "ready":
+    case "setup_required":
+    case "home_connecting":
+    case "model_unavailable":
+    case "agent_busy":
+    case "active_request":
+    case "stopped":
+      return value;
   }
 }
 

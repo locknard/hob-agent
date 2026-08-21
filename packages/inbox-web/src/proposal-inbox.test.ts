@@ -7,6 +7,7 @@ import {
   renderProposalList,
   renderHomeAdvice,
   type InboxProposal,
+  type InboxAdviceAvailability,
   type InboxHomeAdviceRecord,
 } from "./proposal-inbox.js";
 
@@ -621,4 +622,90 @@ test("renders a household advice document with uncertainty, trial, and capabilit
   assert.match(list, /Ask about your home/i);
   assert.match(list, /name="question"/i);
   assert.match(list, /Try a daylight-aware schedule/i);
+});
+
+test("renders household-facing next steps for each advice availability state", () => {
+  const cases: readonly { readonly availability: InboxAdviceAvailability; readonly expected: RegExp }[] = [
+    { availability: { status: "ready" }, expected: /Ask about your home/i },
+    { availability: { status: "setup_required", actionHref: "/setup" }, expected: /Connect your home before asking/i },
+    { availability: { status: "home_connecting" }, expected: /Still connecting to your home/i },
+    { availability: { status: "model_unavailable", actionHref: "/settings/model" }, expected: /Choose a model to continue/i },
+    { availability: { status: "agent_busy", activeAdviceId: "advice-current" }, expected: /Another question is already being answered/i },
+    { availability: { status: "active_request", activeAdviceId: "advice-current" }, expected: /Continue the current question/i },
+    { availability: { status: "stopped" }, expected: /Home questions are paused/i },
+  ];
+
+  for (const { availability, expected } of cases) {
+    const html = renderProposalList([], undefined, [], undefined, [], availability);
+    const adviceSection = html.slice(html.indexOf('<section id="advice"'), html.indexOf('<section id="observations"'));
+    assert.match(adviceSection, expected);
+    assert.equal(adviceSection.includes("Household advice unavailable"), false);
+    assert.equal(adviceSection.includes("agent runtime"), false);
+    assert.equal(adviceSection.includes("provider"), false);
+    assert.equal(adviceSection.includes("bridge"), false);
+  }
+
+  const active = renderProposalList([], undefined, [], undefined, [], {
+    status: "active_request",
+    activeAdviceId: "advice-current",
+  });
+  assert.match(active, /href="\/advice\/advice-current"/);
+  assert.match(active, /View current question/i);
+});
+
+test("uses household language for running and failed questions in the recent list", () => {
+  const html = renderProposalList([], undefined, [], undefined, [{
+    id: "advice-running",
+    status: "running",
+    question: "Why does the room feel bright?",
+    createdAt: "2026-08-21T10:00:00.000Z",
+  }, {
+    id: "advice-failed",
+    status: "failed",
+    question: "Why did the curtain move?",
+    createdAt: "2026-08-21T09:00:00.000Z",
+    completedAt: "2026-08-21T09:00:01.000Z",
+  }], { status: "ready" });
+
+  assert.match(html, /Answer in progress/i);
+  assert.match(html, /The answer could not be completed/i);
+  assert.equal(html.includes(">running<"), false);
+  assert.equal(html.includes(">failed<"), false);
+});
+
+test("renders a reconnectable, cancellable advice progress document", () => {
+  const html = renderHomeAdvice({
+    id: "advice-running",
+    status: "running",
+    question: "Why does the curtain open at different times?",
+    createdAt: "2026-08-21T10:00:00.000Z",
+  });
+
+  assert.match(html, /data-advice-id="advice-running"/);
+  assert.match(html, /data-advice-events="\/advice\/advice-running\/events"/);
+  assert.match(html, /data-advice-cancel="\/advice\/advice-running\/cancel"/);
+  assert.match(html, /aria-live="polite"/);
+  assert.match(html, /Answer in progress/i);
+  for (const stage of ["accepted", "inspecting_home", "reading_inventory", "checking_rules", "evaluating_evidence", "composing_answer"]) {
+    assert.match(html, new RegExp(`data-advice-stage="${stage}"`));
+  }
+  assert.match(html, />Stop waiting</i);
+  assert.equal(html.includes("indefinite"), false);
+  assert.equal((html.match(/class="advice-card"/g) ?? []).length, 0);
+});
+
+test("renders failed advice with an actionable recovery path", () => {
+  const html = renderHomeAdvice({
+    id: "advice-failed",
+    status: "failed",
+    question: "Why does the curtain open at different times?",
+    createdAt: "2026-08-21T10:00:00.000Z",
+    completedAt: "2026-08-21T10:00:08.000Z",
+  });
+
+  assert.match(html, /The answer could not be completed/i);
+  assert.match(html, /Try the question again/i);
+  assert.match(html, /href="\/proposals# advice"|href="\/proposals#?advice"/i);
+  assert.equal(html.includes("provider error"), false);
+  assert.equal(html.includes("Home advice unavailable"), false);
 });

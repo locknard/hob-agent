@@ -211,11 +211,28 @@ class StubObservation extends Service {
 
 class StubAdvice extends Service {
   questions: string[] = [];
+  cancelled: string[] = [];
   constructor(ctx: Context) { super(ctx, "homeAdvice"); }
   canAsk() { return true; }
+  availability() { return { status: "ready" as const }; }
   async ask(question: string) {
     this.questions.push(question);
     return this.get("advice-1")!;
+  }
+  events(id: string, afterSeq = 0) {
+    return id === "advice-1"
+      ? [{ id: 2, type: "inspecting_home" as const, data: { adviceId: id, at: "2026-08-20T10:00:01.000Z", stage: "inspecting_home" as const } }]
+        .filter((event) => event.id > afterSeq)
+      : [];
+  }
+  subscribe(id: string, listener: (event: unknown) => void, afterSeq = 0) {
+    for (const event of this.events(id, afterSeq)) listener(event);
+    return () => undefined;
+  }
+  cancel(id: string) {
+    if (id !== "advice-running") return false;
+    this.cancelled.push(id);
+    return true;
   }
   list() { return [this.get("advice-1")!]; }
   get(id: string) {
@@ -303,6 +320,34 @@ test("exposes bounded household advice without turning the Inbox into a chat run
   assert.match(ctx.homeInbox.renderList(), /Ask about your home/i);
   assert.match(ctx.homeInbox.renderAdvice("advice-1") ?? "", /Try a bounded daylight-aware schedule/i);
   assert.equal(ctx.homeInbox.renderAdvice("missing"), undefined);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("projects the asynchronous advice lifecycle through one neutral Inbox seam", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAdvice);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  assert.deepEqual(ctx.homeInbox.getAdviceAvailability(), { status: "ready" });
+  const started = await ctx.homeInbox.startAdvice("Why is the curtain timing uncomfortable?");
+  assert.equal(started.id, "advice-1");
+  assert.deepEqual(ctx.homeInbox.readAdviceEvents("advice-1", "1"), [{
+    id: 2,
+    type: "inspecting_home",
+    data: {
+      adviceId: "advice-1",
+      at: "2026-08-20T10:00:01.000Z",
+      stage: "inspecting_home",
+    },
+  }]);
+  const delivered: unknown[] = [];
+  const unsubscribe = ctx.homeInbox.subscribeAdvice("advice-1", (event) => delivered.push(event));
+  assert.equal(delivered.length, 0);
+  unsubscribe();
+  assert.deepEqual(await ctx.homeInbox.cancelAdvice("missing"), { status: "not_found" });
 
   await fiber.dispose();
   await ctx.fiber.dispose();

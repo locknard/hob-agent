@@ -55,7 +55,9 @@ import { HomeCompactionEngine } from "./dsh-home-compaction.js";
 
 const DEFAULT_SESSION_ID = "home-main";
 const HOME_OBSERVATION_MAX_TOOL_CALLS = 12;
+const HOME_AGENT_MAX_OUTPUT_TOKENS = 4_096;
 const HOME_OBSERVATION_TIMEOUT_MS = 120_000;
+const HOME_ADVICE_TIMEOUT_MS = 300_000;
 const HOME_OBSERVATION_TIMEOUT_CODE = "HOME_OBSERVATION_TIMEOUT";
 const DEFAULT_SYSTEM_PROMPT = [
   "You are a household observer in Phase 0.",
@@ -98,6 +100,8 @@ export interface DshHomeAgentOptions {
   readonly systemPrompt?: string;
   /** Isolated-test override for the product-owned observation deadline. */
   readonly observationTimeoutMs?: number;
+  /** Isolated-test override for the persisted household-advice deadline. */
+  readonly adviceTimeoutMs?: number;
 }
 
 export interface HomeObservationRunMetrics {
@@ -216,7 +220,7 @@ export class DshHomeAgentService extends Service {
     if (!inventoryCoverage || !calibrationCoverage || !rulesCoverage || !turnBudget || !adviceReport) {
       throw new Error("Home advice governance is unavailable");
     }
-    const timeoutMs = this.options.observationTimeoutMs ?? HOME_OBSERVATION_TIMEOUT_MS;
+    const timeoutMs = this.options.adviceTimeoutMs ?? HOME_ADVICE_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
       throw new TypeError("Home advice timeout must be from 1 to 300000 milliseconds");
     }
@@ -224,7 +228,16 @@ export class DshHomeAgentService extends Service {
     const cancel = () => this.agent.cancel({ kind: "parent" }, { keepInbox: true });
     adviceDeadline.signal.addEventListener("abort", cancel, { once: true });
     turnBudget.begin(this.agent, HOME_OBSERVATION_MAX_TOOL_CALLS);
-    adviceReport.begin(this.agent);
+    adviceReport.begin(this.agent, () => {
+      queueMicrotask(() => {
+        if (this.agent.status === "running") {
+          this.agent.cancel(
+            { kind: "hook", reason: "home-advice-report-recorded" },
+            { keepInbox: true },
+          );
+        }
+      });
+    });
     inventoryCoverage.beginObservation();
     calibrationCoverage.beginObservation();
     rulesCoverage.beginObservation();
@@ -394,6 +407,10 @@ export class DshHomeAgentService extends Service {
     const agentOptions = {
       provider: this.options.provider,
       model: this.options.model,
+      // Keep every model step bounded. Custom OpenAI-compatible deployments
+      // otherwise inherit an unknown provider default and can spend the whole
+      // product deadline emitting reasoning before reaching a governed tool.
+      maxTokens: HOME_AGENT_MAX_OUTPUT_TOKENS,
     };
     const persisted = this.options.sessionPersistencePath === undefined
       ? false

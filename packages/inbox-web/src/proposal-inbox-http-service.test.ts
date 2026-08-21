@@ -44,6 +44,52 @@ class StubRetryableInbox extends StubInbox {
   }
 }
 
+class StructuredAdviceInbox extends StubInbox {
+  availability: "ready" | "active_request" | "setup_required" = "ready";
+  readonly started: string[] = [];
+  readonly cancelled: string[] = [];
+  readonly events = [
+    { id: 1, type: "accepted", data: {} },
+    { id: 2, type: "inspecting_home", data: {} },
+    { id: 3, type: "answer_delta", data: { text: "窗帘建议" } },
+    { id: 4, type: "completed", data: {} },
+  ];
+  adviceId = "advice-stream";
+  listener: ((event: unknown) => void) | undefined;
+
+  getAdviceAvailability() {
+    return this.availability === "active_request"
+      ? { status: "active_request" as const, activeAdviceId: "advice-active" }
+      : { status: this.availability };
+  }
+
+  async startAdvice(question: string) {
+    this.started.push(question);
+    return { id: this.adviceId };
+  }
+
+  readAdviceEvents(id: string, after?: string) {
+    assert.equal(id, this.adviceId);
+    const last = after === undefined ? 0 : Number(after);
+    return this.events.filter((event) => event.id > last);
+  }
+
+  subscribeAdvice(id: string, listener: (event: unknown) => void) {
+    assert.equal(id, this.adviceId);
+    this.listener = listener;
+    return () => { this.listener = undefined; };
+  }
+
+  async cancelAdvice(id: string) {
+    this.cancelled.push(id);
+    return { status: "cancelled" as const };
+  }
+
+  renderAdvice(id: string) {
+    return id === this.adviceId || id === "advice-active" ? "<main>Advice detail</main>" : undefined;
+  }
+}
+
 const token = "a-secure-local-inbox-token-1234567890";
 const authorization = `Basic ${Buffer.from(`home:${token}`).toString("base64")}`;
 
@@ -67,6 +113,13 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.equal(response.status, 200);
   assert.match(await response.text(), /Inbox list/);
 
+  const adviceEntry = await fetch(`${ctx.homeInboxHttp.origin}/advice`, {
+    headers: { authorization },
+    redirect: "manual",
+  });
+  assert.equal(adviceEntry.status, 303);
+  assert.equal(adviceEntry.headers.get("location"), "/proposals#advice");
+
   const controlCenter = await fetch(`${ctx.homeInboxHttp.origin}/`, {
     headers: { authorization },
   });
@@ -88,8 +141,17 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   assert.match(response.headers.get("content-security-policy") ?? "", /style-src 'self'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
   assert.equal(response.headers.get("x-frame-options"), "DENY");
   assert.equal(response.headers.get("referrer-policy"), "same-origin");
+
+  const adviceClient = await fetch(`${ctx.homeInboxHttp.origin}/assets/advice.js`, {
+    headers: { authorization },
+  });
+  assert.equal(adviceClient.status, 200);
+  assert.equal(adviceClient.headers.get("content-type"), "text/javascript; charset=utf-8");
+  assert.match(await adviceClient.text(), /new EventSource/);
 
   const stylesheet = await fetch(`${ctx.homeInboxHttp.origin}/assets/inbox.css`, {
     headers: { authorization },
@@ -422,6 +484,131 @@ test("accepts one bounded same-origin household question and serves its answer",
     redirect: "manual",
   });
   assert.equal(oversized.status, 413);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("reports typed advice availability and redirects duplicate requests to the active advice", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+  });
+  const url = `${ctx.homeInboxHttp.origin}/advice`;
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  const inbox = ctx.homeInbox as unknown as StructuredAdviceInbox;
+
+  inbox.availability = "setup_required";
+  const unavailable = await fetch(url, {
+    method: "POST",
+    headers,
+    body: "question=Should+I+add+a+sensor%3F",
+    redirect: "manual",
+  });
+  assert.equal(unavailable.status, 303);
+  assert.equal(unavailable.headers.get("location"), "/proposals#advice");
+
+  inbox.availability = "active_request";
+  const duplicate = await fetch(url, {
+    method: "POST",
+    headers,
+    body: "question=Should+I+add+a+sensor%3F",
+    redirect: "manual",
+  });
+  assert.equal(duplicate.status, 303);
+  assert.equal(duplicate.headers.get("location"), "/advice/advice-active");
+  assert.deepEqual(inbox.started, []);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("accepts an advice start immediately and streams only bounded replayable household events", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+  });
+  const inbox = ctx.homeInbox as unknown as StructuredAdviceInbox;
+  const adviceUrl = `${ctx.homeInboxHttp.origin}/advice`;
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+
+  const accepted = await fetch(adviceUrl, {
+    method: "POST",
+    headers,
+    body: "question=窗帘为什么总是太早打开%3F",
+    redirect: "manual",
+  });
+  assert.equal(accepted.status, 303);
+  assert.equal(accepted.headers.get("location"), "/advice/advice-stream");
+  assert.deepEqual(inbox.started, ["窗帘为什么总是太早打开?"]);
+
+  const events = await fetch(`${ctx.homeInboxHttp.origin}/advice/advice-stream/events`, {
+    headers: { authorization, "last-event-id": "1" },
+  });
+  assert.equal(events.status, 200);
+  assert.equal(events.headers.get("content-type"), "text/event-stream; charset=utf-8");
+  assert.equal(events.headers.get("cache-control"), "no-store");
+  const body = await events.text();
+  assert.match(body, /id: 2\nevent: inspecting_home\ndata: \{\}\n\n/);
+  assert.match(body, /id: 3\nevent: answer_delta\ndata: \{"text":"窗帘建议"\}\n\n/);
+  assert.match(body, /id: 4\nevent: completed\ndata: \{\}\n\n/);
+  assert.equal(body.includes("raw DSH"), false);
+  assert.equal(body.includes("tool_call"), false);
+
+  const unauthorized = await fetch(`${ctx.homeInboxHttp.origin}/advice/advice-stream/events`);
+  assert.equal(unauthorized.status, 401);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("cancels an advice turn only from the exact local origin", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+  });
+  const inbox = ctx.homeInbox as unknown as StructuredAdviceInbox;
+  const url = `${ctx.homeInboxHttp.origin}/advice/advice-stream/cancel`;
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+
+  const crossOrigin = await fetch(url, {
+    method: "POST",
+    headers: { ...headers, origin: "http://attacker.invalid" },
+    body: "",
+    redirect: "manual",
+  });
+  assert.equal(crossOrigin.status, 403);
+
+  const cancelled = await fetch(url, {
+    method: "POST",
+    headers,
+    body: "",
+    redirect: "manual",
+  });
+  assert.equal(cancelled.status, 303);
+  assert.equal(cancelled.headers.get("location"), "/advice/advice-stream");
+  assert.deepEqual(inbox.cancelled, ["advice-stream"]);
 
   await fiber.dispose();
   await inboxFiber.dispose();
