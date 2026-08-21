@@ -151,6 +151,12 @@ Host ownership, canonical fallback and responsive layout. Invalid data produces 
 redacted status-only report. This seam stays independent from package loading,
 signatures, grants and executable plugin lifecycle.
 
+The HTTP composition accepts up to 16 explicit recipe values as a deployment seam.
+It compiles and checks the exact immutable plan before the listener opens, then
+registers a Host-rendered provider. A rejected value returns one stable redacted
+startup classification. Runtime discovery, package import and manifest processing
+remain governed by their later phase gates.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond

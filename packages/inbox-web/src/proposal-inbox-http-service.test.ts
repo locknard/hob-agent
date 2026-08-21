@@ -5,7 +5,6 @@ import { Context, Service } from "@deepseek-ai/cordis";
 
 import {
   ProposalInboxHttpService,
-  createDeclarativeProductViewProvider,
   createInboxBasicAuthenticator,
   type ProductViewProvider,
   type ProposalInboxHttpOptions,
@@ -1553,7 +1552,7 @@ test("keeps the Host Shell fixed while a registered view provider supplies ordin
 });
 
 test("registers a data-only recipe provider while the Host keeps semantic fallback pages", async () => {
-  const recipeProvider = createDeclarativeProductViewProvider({
+  const recipe = {
     apiVersion: "hob.view.recipe/v1",
     id: "community.review-first",
     title: "先看决定",
@@ -1567,14 +1566,14 @@ test("registers a data-only recipe provider while the Host keeps semantic fallba
         { slot: "overview.composer", width: "full" },
       ],
     }],
-  });
+  };
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    viewProviders: [recipeProvider],
+    viewRecipes: [recipe],
   });
   try {
     const home = await fetch(`${ctx.homeInboxHttp.origin}/home?view=community.review-first`, {
@@ -1603,6 +1602,55 @@ test("registers a data-only recipe provider while the Host keeps semantic fallba
     await inboxFiber.dispose();
     await ctx.fiber.dispose();
   }
+});
+
+test("admits only bounded conformant recipe contributions before opening the product listener", async () => {
+  const marker = "private-layout-marker";
+  const invalidContext = new Context();
+  const invalidInbox = await invalidContext.plugin(StructuredAdviceInbox);
+  await assert.rejects(async () => {
+    await invalidContext.plugin(ProposalInboxHttpService, {
+      port: 0,
+      authenticate: createInboxBasicAuthenticator(token),
+      principal: adminPrincipal,
+      viewRecipes: [{
+        apiVersion: "hob.view.recipe/v1",
+        id: "community.invalid",
+        title: marker,
+        pages: [{
+          route: "overview",
+          layout: "stack",
+          slots: [{ slot: "overview.spaces", width: "full" }],
+        }],
+      }],
+    });
+  }, (error) => error instanceof TypeError
+    && error.message === "Product view recipe conformance failed"
+    && !error.message.includes(marker));
+  await invalidInbox.dispose();
+  await invalidContext.fiber.dispose();
+
+  const wideContext = new Context();
+  const wideInbox = await wideContext.plugin(StructuredAdviceInbox);
+  await assert.rejects(async () => {
+    await wideContext.plugin(ProposalInboxHttpService, {
+      port: 0,
+      authenticate: createInboxBasicAuthenticator(token),
+      principal: adminPrincipal,
+      viewRecipes: Array.from({ length: 17 }, (_, index) => ({
+        apiVersion: "hob.view.recipe/v1",
+        id: `community.layout-${index}`,
+        title: `家庭布局 ${index + 1}`,
+        pages: [{
+          route: "overview",
+          layout: "stack",
+          slots: [{ slot: "overview.header", width: "full" }],
+        }],
+      })),
+    });
+  }, /at most 16 recipe contributions/i);
+  await wideInbox.dispose();
+  await wideContext.fiber.dispose();
 });
 
 test("uses the bundled life provider for canonical routes when no preference is stored", async () => {

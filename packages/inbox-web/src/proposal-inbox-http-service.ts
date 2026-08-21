@@ -24,6 +24,7 @@ import {
   type RegisteredProductViewPreference,
   type RegisteredProductViewProvider,
 } from "./product-view-registry.js";
+import { runProductViewRecipeConformance } from "./product-view-recipe-conformance.js";
 import { compileProductViewRecipe, type ProductViewRecipeV1 } from "./product-view-recipe.js";
 import { renderVoiceSurface, VOICE_INTERACTION_JS } from "./voice-surface.js";
 import {
@@ -233,6 +234,10 @@ function renderBundledView(
 /** Creates a Host-rendered provider from a strict data-only layout recipe. */
 export function createDeclarativeProductViewProvider(recipeInput: unknown): ProductViewProvider {
   const recipe = compileProductViewRecipe(recipeInput);
+  return productViewProviderFromRecipe(recipe);
+}
+
+function productViewProviderFromRecipe(recipe: ProductViewRecipeV1): ProductViewProvider {
   return {
     id: recipe.id,
     label: recipe.title,
@@ -240,6 +245,30 @@ export function createDeclarativeProductViewProvider(recipeInput: unknown): Prod
       return renderBundledView(model, context, recipe);
     },
   };
+}
+
+function conformantRecipeProviders(inputs: readonly unknown[] | undefined): readonly ProductViewProvider[] {
+  if (inputs === undefined) return [];
+  let length: number;
+  try {
+    if (!Array.isArray(inputs)) throw new TypeError();
+    length = inputs.length;
+  } catch {
+    throw new TypeError("Product view recipe contributions are invalid");
+  }
+  if (length > 16) throw new TypeError("Product view accepts at most 16 recipe contributions");
+  const providers: ProductViewProvider[] = [];
+  try {
+    for (let index = 0; index < length; index += 1) {
+      const recipe = compileProductViewRecipe(inputs[index]);
+      const report = runProductViewRecipeConformance(recipe);
+      if (!report.passed) throw new TypeError();
+      providers.push(productViewProviderFromRecipe(recipe));
+    }
+  } catch {
+    throw new TypeError("Product view recipe conformance failed");
+  }
+  return Object.freeze(providers);
 }
 
 async function renderRegisteredProductView(
@@ -319,6 +348,8 @@ export interface ProposalInboxHttpOptions {
   readonly onboarding?: OnboardingPort;
   /** Trusted in-process presentation providers registered beside the built-in views. */
   readonly viewProviders?: readonly ProductViewProvider[];
+  /** Explicit data-only layout contributions checked before the listener opens. */
+  readonly viewRecipes?: readonly unknown[];
   /** Initial provider used before this browser saves a device-local preference. */
   readonly defaultViewId?: string;
 }
@@ -467,10 +498,12 @@ export class ProposalInboxHttpService extends Service {
     if (this.principal === undefined) {
       throw new TypeError("Inbox runtime review requires an explicit principal role and device binding");
     }
+    const recipeProviders = conformantRecipeProviders(options.viewRecipes);
     this.views = new ProductViewRegistry([
       BUILTIN_LIFE_VIEW,
       BUILTIN_CONTROL_VIEW,
       ...(options.viewProviders ?? []),
+      ...recipeProviders,
     ], BUILTIN_LIFE_VIEW.id);
     this.defaultViewId = options.defaultViewId ?? BUILTIN_LIFE_VIEW.id;
     if (this.views.resolve(this.defaultViewId).recoveredFrom !== undefined) {

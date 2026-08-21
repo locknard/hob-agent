@@ -376,6 +376,18 @@ manifests, signatures, catalog publication and grants enter through their separa
 reviewed phase gates. A passing layout report establishes presentation conformance;
 the Hub continues to decide identity, data scope, intents, approval and execution.
 
+### F2d explicit local contribution registration
+
+`ProposalInboxHttpOptions.viewRecipes` accepts up to 16 explicitly supplied recipe
+values. Startup compiles each value into one immutable plan, runs the F2c conformance
+set against that exact plan and creates the Host-rendered provider before opening the
+HTTP listener. Any rejected contribution produces one stable redacted startup error.
+
+This path gives deployments and developer fixtures a complete data-only integration
+seam. The existing `viewProviders` option remains the trusted in-process seam for the
+two bundled views and repository-owned tests. Filesystem discovery, package loading,
+network retrieval, watching and manifest interpretation belong to later phase gates.
+
 ## Failure and recovery
 
 - Provider 加载超时、崩溃、版本不兼容或被撤销：继续显示当前安全视图；不可用 provider
@@ -422,10 +434,11 @@ contrast and responsive safe areas. Provider metadata and every render input are
 immutable at runtime. Provider-specific presentation choices are closed declarations
 validated and persisted by the Host.
 
-F2a–F2c now provide the strict V1 recipe compiler, Host-rendered slot layout,
-canonical semantic-route fallback and a digest-bound conformance report. The
-remaining F2 work covers developer authoring, locally reviewed contribution
-registration and the later phase-gated signature, compatibility and grant path.
+F2a–F2d now provide the strict V1 recipe compiler, Host-rendered slot layout,
+canonical semantic-route fallback, a digest-bound conformance report and explicit
+local contribution registration. The remaining F2 work covers developer authoring
+and the later phase-gated package registration, signature, compatibility and grant
+path.
 
 1. **F0 — contract and prototype:** 在交互稿中加入生活/控制视图切换、失败回退、per-device
    preference 和语义路由连续性；不装载第三方代码。
