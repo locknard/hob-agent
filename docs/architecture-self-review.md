@@ -144,6 +144,13 @@ fixed shell continues to own identity, safety, navigation, view recovery and the
 two review lifecycles. Compact screens collapse slots to one column and contain
 the growing view list inside a labelled horizontal switcher.
 
+Recipe conformance runs as a deterministic, side-effect-free publication check.
+Its immutable report binds the compiled ordered plan to a SHA-256 identity and
+records compilation, plan freezing, deterministic rendering, semantic headings,
+Host ownership, canonical fallback and responsive layout. Invalid data produces a
+redacted status-only report. This seam stays independent from package loading,
+signatures, grants and executable plugin lifecycle.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond

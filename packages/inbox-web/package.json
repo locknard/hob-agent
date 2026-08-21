@@ -6,7 +6,8 @@
   "exports": {
     "./http": "./src/proposal-inbox-http-service.ts",
     "./service": "./src/proposal-inbox-service.ts",
-    "./view-recipe": "./src/product-view-recipe.ts"
+    "./view-recipe": "./src/product-view-recipe.ts",
+    "./view-recipe-conformance": "./src/product-view-recipe-conformance.ts"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",

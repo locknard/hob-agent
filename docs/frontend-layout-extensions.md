@@ -357,6 +357,25 @@ as complete product paths. The fixed Host Shell owns safety alerts, navigation,
 identity, view recovery and queue badges. The Host view switcher scrolls within its
 own boundary on compact screens and reveals the active view on page load.
 
+### F2c deterministic recipe conformance
+
+`@hob-agent/inbox-web/view-recipe-conformance` exposes one pure publication check
+for a data-only recipe. A successful report binds the exact compiled plan to a
+`sha256:` digest and records seven closed checks: compilation, immutable plan,
+deterministic render, one semantic heading per page, fixed Host boundary, canonical
+fallback and responsive layout. The report and every check are immutable.
+
+Compilation failure returns one failed check followed by blocked dependent checks.
+The report contains stable check names and statuses, keeping submitted titles,
+household content and invalid fields inside the validator boundary. The digest
+changes when the ordered page or slot plan changes, so a publisher can bind later
+review evidence to one exact recipe generation.
+
+This Phase 0 seam evaluates recipe data directly. Package installation, plugin
+manifests, signatures, catalog publication and grants enter through their separately
+reviewed phase gates. A passing layout report establishes presentation conformance;
+the Hub continues to decide identity, data scope, intents, approval and execution.
+
 ## Failure and recovery
 
 - Provider 加载超时、崩溃、版本不兼容或被撤销：继续显示当前安全视图；不可用 provider
@@ -402,6 +421,11 @@ visible keyboard focus, touch feedback, reduced motion/transparency, increased
 contrast and responsive safe areas. Provider metadata and every render input are
 immutable at runtime. Provider-specific presentation choices are closed declarations
 validated and persisted by the Host.
+
+F2a–F2c now provide the strict V1 recipe compiler, Host-rendered slot layout,
+canonical semantic-route fallback and a digest-bound conformance report. The
+remaining F2 work covers developer authoring, locally reviewed contribution
+registration and the later phase-gated signature, compatibility and grant path.
 
 1. **F0 — contract and prototype:** 在交互稿中加入生活/控制视图切换、失败回退、per-device
    preference 和语义路由连续性；不装载第三方代码。
