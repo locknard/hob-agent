@@ -354,8 +354,7 @@ navigation.
 A semantic route omitted by the recipe uses its canonical Host page while the
 provider remains active. This preserves conversations, reviews, control and setup
 as complete product paths. The fixed Host Shell owns safety alerts, navigation,
-identity, view recovery and queue badges. The Host view switcher scrolls within its
-own boundary on compact screens and reveals the active view on page load.
+identity, view recovery and queue badges.
 
 ### F2c deterministic recipe conformance
 
@@ -387,6 +386,21 @@ This path gives deployments and developer fixtures a complete data-only integrat
 seam. The existing `viewProviders` option remains the trusted in-process seam for the
 two bundled views and repository-owned tests. Filesystem discovery, package loading,
 network retrieval, watching and manifest interpretation belong to later phase gates.
+
+### F2e scalable Host view selection
+
+Two available views remain direct Host shortcuts. Three or more views use one compact
+current-view trigger: an anchored panel on desktop and a bounded bottom panel above
+mobile navigation. The panel lists every registered choice, marks the current view
+and links to the separate settings surface for default-view management.
+
+The native disclosure keeps keyboard semantics. Host behavior closes it on Escape,
+returns focus to the trigger and closes it when the person points elsewhere. Long
+labels truncate inside the trigger and list rows, recovery text receives its own row,
+and the document retains its viewport width. Opening and closing the panel leaves the
+current page, active Agent turn, safety surface and both review badges unchanged.
+Review selection and control result references travel with the semantic route, so a
+view switch keeps the proposal detail, action feedback or batch result in context.
 
 ## Failure and recovery
 
@@ -434,11 +448,11 @@ contrast and responsive safe areas. Provider metadata and every render input are
 immutable at runtime. Provider-specific presentation choices are closed declarations
 validated and persisted by the Host.
 
-F2a–F2d now provide the strict V1 recipe compiler, Host-rendered slot layout,
+F2a–F2e now provide the strict V1 recipe compiler, Host-rendered slot layout,
 canonical semantic-route fallback, a digest-bound conformance report and explicit
-local contribution registration. The remaining F2 work covers developer authoring
-and the later phase-gated package registration, signature, compatibility and grant
-path.
+local contribution registration, plus scalable Host-owned view selection. The
+remaining F2 work covers developer authoring and the later phase-gated package
+registration, signature, compatibility and grant path.
 
 1. **F0 — contract and prototype:** 在交互稿中加入生活/控制视图切换、失败回退、per-device
    preference 和语义路由连续性；不装载第三方代码。

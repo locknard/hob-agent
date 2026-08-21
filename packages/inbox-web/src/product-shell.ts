@@ -655,17 +655,25 @@ function navigationLink(route: ProductShellRoute, current: ProductShellRoute, mo
   return `<a class="${className}"${mobileRouteAttribute} href="${routeHref(route, options)}"${currentAttribute}><span class="${mobile ? "" : "product-nav-label"}">${label}</span>${badges}</a>`;
 }
 
-function renderHostViewSwitcher(view: ProductViewState | undefined): string {
+function renderHostViewSwitcher(view: ProductViewState | undefined, options: ProductShellRenderOptions): string {
   if (view === undefined || view.choices.length < 2) return "";
   const links = view.choices.map((choice) => {
     const current = choice.id === view.activeId ? ' aria-current="true"' : "";
-    const href = `${localHref(view.currentPath, "/home")}?view=${encodeURIComponent(choice.id)}`;
-    return `<a href="${escapeHtml(href)}"${current}>${escapeHtml(choice.label)}</a>`;
+    const currentPath = localHref(view.currentPath, "/home");
+    const separator = currentPath.includes("?") ? "&" : "?";
+    const href = `${currentPath}${separator}view=${encodeURIComponent(choice.id)}`;
+    const state = choice.id === view.activeId ? `<span>当前</span>` : "";
+    return `<a href="${escapeHtml(href)}"${current}><strong>${escapeHtml(choice.label)}</strong>${state}</a>`;
   }).join("");
   const recovery = view.recoveryMessage === undefined
     ? ""
     : `<p class="product-view-recovery" role="status">${escapeHtml(view.recoveryMessage)}</p>`;
-  return `<section class="product-host-view-switcher" data-host-owned="true" aria-label="切换家庭视图"><nav data-host-view-scroll aria-label="可用家庭视图">${links}</nav>${recovery}</section>`;
+  if (view.choices.length === 2) {
+    return `<section class="product-host-view-switcher" data-host-owned="true" aria-label="切换家庭视图"><nav data-host-view-shortcuts aria-label="可用家庭视图">${links}</nav>${recovery}</section>`;
+  }
+  const activeLabel = view.choices.find((choice) => choice.id === view.activeId)?.label ?? "选择视图";
+  const menu = `<details class="product-host-view-menu" data-host-view-menu><summary data-host-view-menu-trigger><span>当前视图</span><strong>${escapeHtml(activeLabel)}</strong></summary><div class="product-host-view-menu-panel"><header><div><strong>选择家庭视图</strong><span>切换会保留当前对话和家庭状态</span></div><a href="${routeHref("settings", options)}">管理视图</a></header><nav aria-label="可用家庭视图">${links}</nav></div></details>`;
+  return `<section class="product-host-view-switcher" data-host-owned="true" aria-label="切换家庭视图">${menu}${recovery}</section>`;
 }
 
 function renderSafetyBanner(alert: ProductSafetyAlert): string {
@@ -698,7 +706,7 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
   const memberRole = model.household.memberRole ?? "身份待确认";
   const safety = model.safetyAlert === undefined ? "" : renderSafetyBanner(model.safetyAlert);
   const completion = renderAdviceCompletionNotification(model.completionNotification);
-  const viewSwitcher = renderHostViewSwitcher(model.view);
+  const viewSwitcher = renderHostViewSwitcher(model.view, options);
   const desktopNav = ROUTES.map((item) => navigationLink(item, route, model, options)).join("");
   const mobileRoutes: readonly ProductShellRoute[] = ["overview", "reviews", "control", "activity", "settings"];
   const mobileCurrentRoute = route === "conversation" ? "overview" : route === "onboarding" ? "settings" : route;

@@ -142,7 +142,7 @@ The Host renders each declared slot through its canonical renderer in a bounded
 six-column grid and supplies canonical pages for routes omitted by a recipe. The
 fixed shell continues to own identity, safety, navigation, view recovery and the
 two review lifecycles. Compact screens collapse slots to one column and contain
-the growing view list inside a labelled horizontal switcher.
+the growing view list inside a Host-owned selection panel above mobile navigation.
 
 Recipe conformance runs as a deterministic, side-effect-free publication check.
 Its immutable report binds the compiled ordered plan to a SHA-256 identity and
@@ -156,6 +156,13 @@ It compiles and checks the exact immutable plan before the listener opens, then
 registers a Host-rendered provider. A rejected value returns one stable redacted
 startup classification. Runtime discovery, package import and manifest processing
 remain governed by their later phase gates.
+
+The Host renders two views as direct shortcuts and three or more through one native
+disclosure. Desktop uses an anchored panel; compact screens use a bounded bottom
+panel. Escape returns focus to the trigger, pointing elsewhere closes the panel and
+long labels stay inside the viewport. View selection continues to preserve the
+semantic route, selected proposal, action feedback, batch result and every Hub-owned
+safety and review surface.
 
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state

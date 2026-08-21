@@ -105,13 +105,18 @@ export type ProductViewProvider = RegisteredProductViewProvider<ProductShellMode
 /** Static assets served alongside the fixed Host Shell and registered providers. */
 export const PRODUCT_CSS = PRODUCT_SHELL_STYLES;
 export const PRODUCT_JS = String.raw`// EventSource reconnects with Last-Event-ID for the active household turn.
-const hostViewScroll = document.querySelector("[data-host-view-scroll]");
-const activeHostView = hostViewScroll?.querySelector('a[aria-current="true"]');
-if (hostViewScroll instanceof HTMLElement && activeHostView instanceof HTMLElement) {
-  const scrollBounds = hostViewScroll.getBoundingClientRect();
-  const activeBounds = activeHostView.getBoundingClientRect();
-  const targetLeft = hostViewScroll.scrollLeft + activeBounds.left - scrollBounds.left - (hostViewScroll.clientWidth - activeBounds.width) / 2;
-  hostViewScroll.scrollLeft = Math.max(0, targetLeft);
+for (const hostViewMenu of document.querySelectorAll("[data-host-view-menu]")) {
+  if (!(hostViewMenu instanceof HTMLDetailsElement)) continue;
+  document.addEventListener("pointerdown", (event) => {
+    if (hostViewMenu.open && event.target instanceof Node && !hostViewMenu.contains(event.target)) hostViewMenu.open = false;
+  });
+  hostViewMenu.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && hostViewMenu.open) {
+      hostViewMenu.open = false;
+      const trigger = hostViewMenu.querySelector("[data-host-view-menu-trigger]");
+      if (trigger instanceof HTMLElement) trigger.focus();
+    }
+  });
 }
 
 const runtimeCountdowns = Array.from(document.querySelectorAll("[data-runtime-countdown][data-expires-at]"));
@@ -1250,12 +1255,13 @@ export class ProposalInboxHttpService extends Service {
       ...(onboarding === undefined ? {} : { onboarding }),
       household: hostProjection.household,
     };
+    const viewCurrentPath = productViewCurrentPath(path, route, proposalId, actionTicketId, batchRequestId);
     try {
       let resolution = this.views.resolve(requestedViewId);
       let presentation = productViewPresentation(resolution.provider.id, resolution.provider.preferences ?? [], presentationCookie);
       let context: ProductRouteRenderContext = {
         ...baseContext,
-        view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, resolution.recoveredFrom),
+        view: productViewState(viewCurrentPath, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, resolution.recoveredFrom),
       };
       let model = productShellModel(route, context);
       let content: string;
@@ -1268,7 +1274,7 @@ export class ProposalInboxHttpService extends Service {
         presentation = productViewPresentation(resolution.provider.id, resolution.provider.preferences ?? [], presentationCookie);
         context = {
           ...baseContext,
-          view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, failedProviderId),
+          view: productViewState(viewCurrentPath, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, failedProviderId),
         };
         model = productShellModel(route, context);
         content = await renderRegisteredProductView(resolution.provider, model, context);
@@ -1767,6 +1773,21 @@ function clearProductViewPresentation(
       `${productViewPresentationCookieName(providerId, declaration.key)}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`,
     ),
   );
+}
+
+function productViewCurrentPath(
+  path: string,
+  route: ProductRoute,
+  proposalId?: string,
+  actionTicketId?: string,
+  batchRequestId?: string,
+): string {
+  const parameters = new URLSearchParams();
+  if (route === "review-center" && proposalId !== undefined) parameters.set("proposal", proposalId);
+  if (route === "control" && actionTicketId !== undefined) parameters.set("action", actionTicketId);
+  if (route === "control" && batchRequestId !== undefined) parameters.set("batch", batchRequestId);
+  const query = parameters.toString();
+  return query.length === 0 ? path : `${path}?${query}`;
 }
 
 function productViewState(

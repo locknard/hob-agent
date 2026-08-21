@@ -435,7 +435,43 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.match(PRODUCT_SHELL_CSS, /\.product-presentation-choice:has\(input:checked\)/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-presentation-choice:has\(input:focus-visible\)/);
   assert.match(PRODUCT_SHELL_CSS, /data-control-row-density="compact"/);
-  assert.match(PRODUCT_SHELL_CSS, /\.product-host-view-switcher nav\s*\{[^}]*overflow-x:\s*auto/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-host-view-menu-panel\s*\{[^}]*position:\s*absolute/);
+  assert.match(PRODUCT_SHELL_CSS, /@media\s*\(max-width:\s*56rem\)[\s\S]*\.product-host-view-menu-panel\s*\{[^}]*position:\s*fixed/);
+});
+
+test("keeps two views as direct shortcuts and presents larger catalogs in a Host menu", () => {
+  const twoViews = renderProductShell(model({
+    view: {
+      activeId: "builtin.life",
+      currentPath: "/home",
+      choices: [
+        { id: "builtin.life", label: "生活视图" },
+        { id: "builtin.control", label: "控制视图" },
+      ],
+    },
+  }));
+  assert.match(twoViews, /data-host-view-shortcuts/);
+  assert.doesNotMatch(twoViews, /data-host-view-menu/);
+
+  const manyViews = renderProductShell(model({
+    view: {
+      activeId: "community.wall-panel",
+      currentPath: "/home",
+      choices: [
+        { id: "builtin.life", label: "生活视图" },
+        { id: "builtin.control", label: "控制视图" },
+        { id: "community.calm-home", label: "安静家庭" },
+        { id: "community.wall-panel", label: "墙面面板" },
+      ],
+    },
+  }));
+  assert.match(manyViews, /<details class="product-host-view-menu" data-host-view-menu>/);
+  assert.match(manyViews, /<summary[^>]*data-host-view-menu-trigger[^>]*><span>当前视图<\/span><strong>墙面面板<\/strong><\/summary>/);
+  assert.match(manyViews, /class="product-host-view-menu-panel"/);
+  assert.match(manyViews, /aria-label="可用家庭视图"/);
+  assert.match(manyViews, /href="\/settings">管理视图<\/a>/);
+  assert.match(manyViews, /href="\/home\?view=community\.wall-panel" aria-current="true"/);
+  assert.doesNotMatch(manyViews, /data-host-view-scroll/);
 });
 
 test("arranges declarative recipes from Host-rendered slots and preserves canonical fallback routes", () => {
@@ -589,7 +625,7 @@ test("renders neutral control forms and explicit action feedback with a ten-seco
   assert.match(html, /data-control-density="dense"/);
   assert.match(html, /data-control-row-density="compact"/);
   assert.match(html, /class="product-host-view-switcher"/);
-  assert.match(html, /data-host-view-scroll/);
+  assert.match(html, /data-host-view-shortcuts/);
   assert.match(html, /aria-label="可用家庭视图"/);
   assert.doesNotMatch(html, /class="product-view-switcher"[^>]*>生活视图<\/a>/);
   assert.match(html, /aria-label="家庭控制概览"/);

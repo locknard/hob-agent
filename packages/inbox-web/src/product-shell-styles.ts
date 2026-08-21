@@ -118,12 +118,29 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-safety-banner { position: relative; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem max(1rem, env(safe-area-inset-right)) .85rem max(1rem, env(safe-area-inset-left)); background: var(--shell-red); color: white; }
 .product-completion-notification { position: relative; z-index: 19; display: flex; align-items: center; justify-content: center; gap: 1rem; min-height: 2.75rem; padding: .65rem max(1rem, env(safe-area-inset-right)) .65rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-blue-soft); color: var(--shell-text); }
 .product-completion-notification a { color: var(--shell-blue); font-weight: 650; }
-.product-host-view-switcher { position: relative; z-index: 18; display: flex; align-items: center; justify-content: flex-end; gap: .8rem; min-width: 0; min-height: 3rem; overflow: hidden; padding: .45rem max(1rem, env(safe-area-inset-right)) .45rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-surface); }
-.product-host-view-switcher nav { display: inline-flex; gap: .2rem; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; padding: .2rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-bg); scrollbar-width: none; }
-.product-host-view-switcher nav::-webkit-scrollbar { display: none; }
-.product-host-view-switcher a { min-height: 2rem; display: inline-flex; flex: 0 0 auto; align-items: center; padding: .35rem .7rem; border-radius: 999px; color: var(--shell-muted); text-decoration: none; font-size: .82rem; font-weight: 700; }
-.product-host-view-switcher a[aria-current="true"] { background: var(--shell-surface); color: var(--shell-blue); box-shadow: var(--shell-shadow-soft); }
-.product-view-recovery { margin: 0; color: var(--shell-muted); font-size: .8rem; }
+.product-host-view-switcher { position: relative; z-index: 18; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .45rem .8rem; min-width: 0; min-height: 3rem; padding: .45rem max(1rem, env(safe-area-inset-right)) .45rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-surface); }
+.product-host-view-switcher nav[data-host-view-shortcuts] { display: inline-flex; gap: .2rem; padding: .2rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-bg); }
+.product-host-view-switcher nav[data-host-view-shortcuts] a { min-height: 2rem; display: inline-flex; align-items: center; gap: .35rem; padding: .35rem .7rem; border-radius: 999px; color: var(--shell-muted); text-decoration: none; font-size: .82rem; }
+.product-host-view-switcher nav[data-host-view-shortcuts] a[aria-current="true"] { background: var(--shell-surface); color: var(--shell-blue); box-shadow: var(--shell-shadow-soft); }
+.product-host-view-switcher nav[data-host-view-shortcuts] a span { font-size: .68rem; }
+.product-host-view-menu { position: relative; }
+.product-host-view-menu summary { min-height: 2.45rem; max-width: 100%; display: inline-flex; align-items: center; gap: .55rem; padding: .42rem .8rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-bg); color: var(--shell-muted); cursor: pointer; list-style: none; }
+.product-host-view-menu summary::-webkit-details-marker { display: none; }
+.product-host-view-menu summary span { font-size: .75rem; }
+.product-host-view-menu summary strong { min-width: 0; overflow: hidden; color: var(--shell-text); font-size: .84rem; text-overflow: ellipsis; white-space: nowrap; }
+.product-host-view-menu[open] summary { border-color: color-mix(in srgb, var(--shell-blue) 45%, var(--shell-rule)); background: var(--shell-blue-soft); }
+.product-host-view-menu-panel { position: absolute; inset-block-start: calc(100% + .5rem); inset-inline-end: 0; z-index: 30; width: min(24rem, calc(100vw - 2rem)); max-height: min(32rem, calc(100vh - 8rem)); overflow: auto; padding: .65rem; border: 1px solid var(--shell-rule); border-radius: 1.15rem; background: var(--shell-surface); box-shadow: var(--shell-shadow); }
+.product-host-view-menu-panel header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; padding: .55rem .55rem .75rem; border-block-end: 1px solid var(--shell-rule); }
+.product-host-view-menu-panel header div { display: grid; gap: .18rem; }
+.product-host-view-menu-panel header span { color: var(--shell-muted); font-size: .75rem; }
+.product-host-view-menu-panel header a { color: var(--shell-blue); font-size: .8rem; font-weight: 700; text-decoration: none; }
+.product-host-view-menu-panel nav { display: grid; gap: .25rem; padding-block-start: .5rem; }
+.product-host-view-menu-panel nav a { min-height: 3rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .65rem .75rem; border-radius: .8rem; color: var(--shell-text); text-decoration: none; }
+.product-host-view-menu-panel nav a:hover { background: var(--shell-bg); }
+.product-host-view-menu-panel nav a[aria-current="true"] { background: var(--shell-blue-soft); color: var(--shell-blue); }
+.product-host-view-menu-panel nav a strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.product-host-view-menu-panel nav a span { color: var(--shell-blue); font-size: .72rem; font-weight: 700; }
+.product-view-recovery { flex: 1 1 100%; margin: 0; color: var(--shell-muted); font-size: .8rem; text-align: end; }
 .product-safety-copy { display: grid; gap: .12rem; min-width: 0; }
 .product-safety-copy strong { font-size: .96rem; }
 .product-safety-copy span { color: rgba(255,255,255,.86); font-size: .83rem; }
@@ -510,6 +527,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 @media (max-width: 56rem) {
   .product-layout { display: block; }
   .product-sidebar { display: none; }
+  .product-host-view-switcher { padding-inline: .75rem; }
+  .product-host-view-menu { max-width: 100%; }
+  .product-host-view-menu-panel { position: fixed; inset-block: auto calc(4.85rem + env(safe-area-inset-bottom)); inset-inline: .75rem; z-index: 30; width: auto; max-height: min(70vh, 32rem); border-radius: 1.35rem; }
   .product-main { padding: 1.3rem 1rem calc(11rem + env(safe-area-inset-bottom)); }
   .product-page-header { align-items: start; }
   .product-page-header h1 { font-size: 1.85rem; }

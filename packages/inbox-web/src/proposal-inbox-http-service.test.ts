@@ -677,6 +677,7 @@ test("routes neutral control requests through the review center and exposes veri
   assert.match(html, /data-control-status="verified"/);
   assert.match(html, /action="\/actions\/action-ticket-1\/undo"/);
   assert.match(html, /10 秒内/);
+  assert.match(html, /href="\/control\?action=action-ticket-1&amp;view=builtin\.control"/);
 
   const undo = await fetch(`${origin}/actions/action-ticket-1/undo`, {
     method: "POST",
@@ -737,6 +738,7 @@ test("accepts a bounded same-origin batch control request and redirects to per-i
   const html = await resultPage.text();
   assert.match(html, /data-batch-result-status="verified"/);
   assert.match(html, /data-ticket-id="ticket-lock"/);
+  assert.match(html, /href="\/control\?batch=batch-request-1&amp;view=builtin\.control"/);
 
   const duplicate = await fetch(`${origin}/control/batch`, {
     method: "POST",
@@ -1521,7 +1523,9 @@ test("keeps the Host Shell fixed while a registered view provider supplies ordin
       headers: { authorization },
     });
     assert.equal(selectedProposal.status, 200);
+    const selectedProposalHtml = await selectedProposal.text();
     assert.equal(rendered.at(-1)?.proposalId, "proposal-1");
+    assert.match(selectedProposalHtml, /href="\/review-center\?proposal=proposal-1&amp;view=test\.layout"/);
 
     const root = await fetch(`${ctx.homeInboxHttp.origin}/`, {
       headers: { authorization },
@@ -1543,7 +1547,7 @@ test("keeps the Host Shell fixed while a registered view provider supplies ordin
     assert.equal(js.status, 200);
     const jsText = await js.text();
     assert.match(jsText, /data-runtime-countdown/);
-    assert.match(jsText, /data-host-view-scroll/);
+    assert.match(jsText, /data-host-view-menu/);
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();
