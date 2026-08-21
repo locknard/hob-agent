@@ -118,9 +118,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-safety-banner { position: relative; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem max(1rem, env(safe-area-inset-right)) .85rem max(1rem, env(safe-area-inset-left)); background: var(--shell-red); color: white; }
 .product-completion-notification { position: relative; z-index: 19; display: flex; align-items: center; justify-content: center; gap: 1rem; min-height: 2.75rem; padding: .65rem max(1rem, env(safe-area-inset-right)) .65rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-blue-soft); color: var(--shell-text); }
 .product-completion-notification a { color: var(--shell-blue); font-weight: 650; }
-.product-host-view-switcher { position: relative; z-index: 18; display: flex; align-items: center; justify-content: flex-end; gap: .8rem; min-height: 3rem; padding: .45rem max(1rem, env(safe-area-inset-right)) .45rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-surface); }
-.product-host-view-switcher nav { display: inline-flex; gap: .2rem; padding: .2rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-bg); }
-.product-host-view-switcher a { min-height: 2rem; display: inline-flex; align-items: center; padding: .35rem .7rem; border-radius: 999px; color: var(--shell-muted); text-decoration: none; font-size: .82rem; font-weight: 700; }
+.product-host-view-switcher { position: relative; z-index: 18; display: flex; align-items: center; justify-content: flex-end; gap: .8rem; min-width: 0; min-height: 3rem; overflow: hidden; padding: .45rem max(1rem, env(safe-area-inset-right)) .45rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-surface); }
+.product-host-view-switcher nav { display: inline-flex; gap: .2rem; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; padding: .2rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-bg); scrollbar-width: none; }
+.product-host-view-switcher nav::-webkit-scrollbar { display: none; }
+.product-host-view-switcher a { min-height: 2rem; display: inline-flex; flex: 0 0 auto; align-items: center; padding: .35rem .7rem; border-radius: 999px; color: var(--shell-muted); text-decoration: none; font-size: .82rem; font-weight: 700; }
 .product-host-view-switcher a[aria-current="true"] { background: var(--shell-surface); color: var(--shell-blue); box-shadow: var(--shell-shadow-soft); }
 .product-view-recovery { margin: 0; color: var(--shell-muted); font-size: .8rem; }
 .product-safety-copy { display: grid; gap: .12rem; min-width: 0; }
@@ -152,6 +153,14 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-status-card[data-status="attention"] { background: var(--shell-amber-soft); }
 
 .product-overview-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(18rem, .85fr); gap: 1.2rem; align-items: start; }
+.product-recipe-layout { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1.2rem; align-items: start; }
+.product-recipe-slot { min-width: 0; }
+.product-recipe-slot[data-recipe-width="full"] { grid-column: span 6; }
+.product-recipe-slot[data-recipe-width="half"] { grid-column: span 3; }
+.product-recipe-slot[data-recipe-width="third"] { grid-column: span 2; }
+.product-recipe-slot[data-recipe-width="half"] .product-space-grid { grid-template-columns: minmax(0, 1fr); }
+.product-recipe-slot[data-recipe-width="third"] .product-space-grid { grid-template-columns: minmax(0, 1fr); }
+.product-recipe-slot > .product-page-header:first-child, .product-recipe-slot > .product-composer:first-child { margin-block-start: 0; }
 .product-space-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.2rem; }
 .product-space-card { min-height: 10.8rem; }
 .product-space-heading { display: flex; align-items: baseline; justify-content: space-between; gap: .65rem; margin-block-end: 1.05rem; }
@@ -507,6 +516,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-safety-banner { align-items: start; flex-direction: column; gap: .65rem; padding-block: .8rem; }
   .product-safety-meta { justify-content: start; }
   .product-overview-grid, .product-space-grid, .product-review-page, .product-conversation, .product-activity, .product-settings-grid, .product-onboarding-content { grid-template-columns: minmax(0, 1fr); }
+  .product-recipe-slot[data-recipe-width] { grid-column: span 6; }
   .product-overview-aside { grid-template-columns: minmax(0, 1fr); }
   .product-control-grid { grid-template-columns: minmax(0, 1fr); }
   .product-control-summary { flex-wrap: wrap; }
@@ -530,6 +540,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-onboarding-item-status { grid-column: 2; justify-self: start; }
   .product-main > .product-composer { position: fixed; z-index: 14; inset-inline: .75rem; inset-block-end: calc(4.75rem + env(safe-area-inset-bottom)); margin: 0; }
   .product-main > .product-helper-copy { display: none; }
+  .product-recipe-slot[data-recipe-slot="overview.composer"] { position: fixed; z-index: 14; inset-inline: .75rem; inset-block-end: calc(4.75rem + env(safe-area-inset-bottom)); }
+  .product-recipe-slot[data-recipe-slot="overview.composer"] .product-composer { margin: 0; }
+  .product-recipe-slot[data-recipe-slot="overview.composer"] .product-helper-copy { display: none; }
   .product-shell[data-route="onboarding"] .product-main { width: min(100%, 42rem); padding-block-end: calc(2rem + env(safe-area-inset-bottom)); }
   .product-shell[data-route="onboarding"] .product-onboarding-content { display: block; }
   .product-shell[data-route="onboarding"] .product-onboarding-list { display: none; }

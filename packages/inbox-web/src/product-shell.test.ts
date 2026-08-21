@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  renderProductContent,
+  renderProductHost,
   renderProductShell,
+  renderProductViewRecipeContent,
   type ProductConnectionState,
   type ProductControlFeedback,
   type ProductShellModel,
@@ -432,6 +435,46 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.match(PRODUCT_SHELL_CSS, /\.product-presentation-choice:has\(input:checked\)/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-presentation-choice:has\(input:focus-visible\)/);
   assert.match(PRODUCT_SHELL_CSS, /data-control-row-density="compact"/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-host-view-switcher nav\s*\{[^}]*overflow-x:\s*auto/);
+});
+
+test("arranges declarative recipes from Host-rendered slots and preserves canonical fallback routes", () => {
+  const recipe = {
+    apiVersion: "hob.view.recipe/v1",
+    id: "community.review-first",
+    title: "先看决定",
+    pages: [{
+      route: "overview",
+      layout: "split",
+      slots: [
+        { slot: "overview.header", width: "full" },
+        { slot: "overview.review-summary", width: "half" },
+        { slot: "overview.spaces", width: "half" },
+        { slot: "overview.composer", width: "full" },
+      ],
+    }],
+  };
+  const source = model();
+  const content = renderProductViewRecipeContent(recipe, source);
+  const html = renderProductHost(source, content);
+
+  assert.match(html, /data-recipe-provider="community\.review-first"/);
+  assert.match(html, /data-recipe-layout="split"/);
+  assert.match(html, /data-recipe-slot="overview\.review-summary" data-recipe-width="half"/);
+  assert.ok(content.indexOf("需要你决定") < content.indexOf("客厅"));
+  assert.match(content, /action="\/conversation"/);
+  assert.match(content, /小海的家/);
+  assert.equal((content.match(/<h1/g) ?? []).length, 1);
+  assert.doesNotMatch(content, /先看决定/);
+
+  const controlSource = model({ route: "control" });
+  assert.equal(
+    renderProductViewRecipeContent(recipe, controlSource),
+    renderProductContent(controlSource),
+  );
+  assert.match(PRODUCT_SHELL_CSS, /\.product-recipe-layout\s*\{[^}]*grid-template-columns:\s*repeat\(6,/);
+  assert.match(PRODUCT_SHELL_CSS, /data-recipe-width="third"/);
+  assert.match(PRODUCT_SHELL_CSS, /data-recipe-width="half"\] \.product-space-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
 });
 
 test("keeps control, settings, and onboarding as reachable server-rendered destinations", () => {
@@ -546,6 +589,8 @@ test("renders neutral control forms and explicit action feedback with a ten-seco
   assert.match(html, /data-control-density="dense"/);
   assert.match(html, /data-control-row-density="compact"/);
   assert.match(html, /class="product-host-view-switcher"/);
+  assert.match(html, /data-host-view-scroll/);
+  assert.match(html, /aria-label="可用家庭视图"/);
   assert.doesNotMatch(html, /class="product-view-switcher"[^>]*>生活视图<\/a>/);
   assert.match(html, /aria-label="家庭控制概览"/);
   assert.match(html, /data-control-space="living-room"/);

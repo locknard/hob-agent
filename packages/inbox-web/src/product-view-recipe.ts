@@ -78,9 +78,16 @@ const productViewRecipeSchema = z.strictObject({
     if (page.route === "overview" && !slots.has("overview.header")) {
       context.addIssue({ code: "custom", path: ["pages", pageIndex, "slots"], message: "Overview heading" });
     }
+    if (page.route === "overview" && page.slots[0]?.slot !== "overview.header") {
+      context.addIssue({ code: "custom", path: ["pages", pageIndex, "slots", 0], message: "Overview heading order" });
+    }
     const overviewHeader = page.slots.find((placement) => placement.slot === "overview.header");
     if (overviewHeader !== undefined && overviewHeader.width !== "full") {
       context.addIssue({ code: "custom", path: ["pages", pageIndex, "slots"], message: "Overview heading width" });
+    }
+    const composerIndex = page.slots.findIndex((placement) => placement.slot === "overview.composer");
+    if (composerIndex >= 0 && composerIndex !== page.slots.length - 1) {
+      context.addIssue({ code: "custom", path: ["pages", pageIndex, "slots", composerIndex], message: "Overview composer order" });
     }
     if (page.layout !== "stack" && page.slots.length < 2) {
       context.addIssue({ code: "custom", path: ["pages", pageIndex, "slots"], message: "Layout requires multiple slots" });

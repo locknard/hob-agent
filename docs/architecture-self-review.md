@@ -138,6 +138,11 @@ Declarative layout recipes compile untrusted data into a deeply frozen Host slot
 plan. The grammar contains only closed semantic routes, layout modes, widths and
 route-scoped slot identifiers. Reviews and control remain atomic Host workspaces;
 the recipe has no executable content, transport location, query or authority field.
+The Host renders each declared slot through its canonical renderer in a bounded
+six-column grid and supplies canonical pages for routes omitted by a recipe. The
+fixed shell continues to own identity, safety, navigation, view recovery and the
+two review lifecycles. Compact screens collapse slots to one column and contain
+the growing view list inside a labelled horizontal switcher.
 
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state

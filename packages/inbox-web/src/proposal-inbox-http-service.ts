@@ -7,6 +7,7 @@ import type { InboxRejectionFeedbackCode, InboxReviewInput } from "./proposal-in
 import {
   renderProductContent,
   renderProductHost,
+  renderProductViewRecipeContent,
   type ProductOnboardingChoices,
   type ProductOnboardingCapabilityChoice,
   type ProductOnboardingBridgeChoice,
@@ -23,6 +24,7 @@ import {
   type RegisteredProductViewPreference,
   type RegisteredProductViewProvider,
 } from "./product-view-registry.js";
+import { compileProductViewRecipe, type ProductViewRecipeV1 } from "./product-view-recipe.js";
 import { renderVoiceSurface, VOICE_INTERACTION_JS } from "./voice-surface.js";
 import {
   UnavailableOnboardingService,
@@ -102,6 +104,15 @@ export type ProductViewProvider = RegisteredProductViewProvider<ProductShellMode
 /** Static assets served alongside the fixed Host Shell and registered providers. */
 export const PRODUCT_CSS = PRODUCT_SHELL_STYLES;
 export const PRODUCT_JS = String.raw`// EventSource reconnects with Last-Event-ID for the active household turn.
+const hostViewScroll = document.querySelector("[data-host-view-scroll]");
+const activeHostView = hostViewScroll?.querySelector('a[aria-current="true"]');
+if (hostViewScroll instanceof HTMLElement && activeHostView instanceof HTMLElement) {
+  const scrollBounds = hostViewScroll.getBoundingClientRect();
+  const activeBounds = activeHostView.getBoundingClientRect();
+  const targetLeft = hostViewScroll.scrollLeft + activeBounds.left - scrollBounds.left - (hostViewScroll.clientWidth - activeBounds.width) / 2;
+  hostViewScroll.scrollLeft = Math.max(0, targetLeft);
+}
+
 const runtimeCountdowns = Array.from(document.querySelectorAll("[data-runtime-countdown][data-expires-at]"));
 const updateRuntimeCountdowns = () => {
   const now = Date.now();
@@ -195,7 +206,11 @@ const PRODUCT_HREFS: Partial<Record<ProductShellRoute, string>> = {
   settings: "/settings",
 };
 
-function renderBundledView(model: ProductShellModel, context: ProductRouteRenderContext): string {
+function renderBundledView(
+  model: ProductShellModel,
+  context: ProductRouteRenderContext,
+  recipe?: ProductViewRecipeV1,
+): string {
   const hrefs: Partial<Record<ProductShellRoute, string>> = {
     ...PRODUCT_HREFS,
     control: "/home?view=builtin.control",
@@ -203,7 +218,9 @@ function renderBundledView(model: ProductShellModel, context: ProductRouteRender
       ? { overview: "/home?view=builtin.life" }
       : {}),
   };
-  const rendered = renderProductContent(model, { includeStyles: false, hrefs });
+  const rendered = recipe === undefined
+    ? renderProductContent(model, { includeStyles: false, hrefs })
+    : renderProductViewRecipeContent(recipe, model, { includeStyles: false, hrefs });
   if (
     context.route !== "conversation"
     || context.adviceId === undefined
@@ -211,6 +228,18 @@ function renderBundledView(model: ProductShellModel, context: ProductRouteRender
     || !streamsAdviceTurn(context.activeTurn)
   ) return rendered;
   return `<section data-advice-stream="sse" data-advice-events="/conversation/${encodeURIComponent(context.adviceId)}/events"><p data-advice-status>${escapeTransportHtml(context.activeTurn.statusMessage ?? "正在处理。")}</p><p data-advice-answer></p>${rendered}</section>`;
+}
+
+/** Creates a Host-rendered provider from a strict data-only layout recipe. */
+export function createDeclarativeProductViewProvider(recipeInput: unknown): ProductViewProvider {
+  const recipe = compileProductViewRecipe(recipeInput);
+  return {
+    id: recipe.id,
+    label: recipe.title,
+    renderContent(model, context) {
+      return renderBundledView(model, context, recipe);
+    },
+  };
 }
 
 async function renderRegisteredProductView(

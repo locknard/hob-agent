@@ -1,3 +1,5 @@
+import { compileProductViewRecipe, type ProductViewRecipeV1 } from "./product-view-recipe.js";
+
 /**
  * The shell consumes a neutral, read-only presentation model. It emits links
  * and forms only; the host remains responsible for authentication, policy,
@@ -663,7 +665,7 @@ function renderHostViewSwitcher(view: ProductViewState | undefined): string {
   const recovery = view.recoveryMessage === undefined
     ? ""
     : `<p class="product-view-recovery" role="status">${escapeHtml(view.recoveryMessage)}</p>`;
-  return `<section class="product-host-view-switcher" data-host-owned="true" aria-label="切换家庭视图"><nav>${links}</nav>${recovery}</section>`;
+  return `<section class="product-host-view-switcher" data-host-owned="true" aria-label="切换家庭视图"><nav data-host-view-scroll aria-label="可用家庭视图">${links}</nav>${recovery}</section>`;
 }
 
 function renderSafetyBanner(alert: ProductSafetyAlert): string {
@@ -705,22 +707,47 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
+  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer()}`;
+}
+
+function renderOverviewHeader(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const householdName = model.household.name ?? "家庭名称待设置";
-  const runtime = model.runtimeConfirmations;
-  const proposals = model.proposals;
-  const spaces = model.spaces;
-  const energy = model.energy;
-  const reviewItems = runtime.map((item) => `<li><span>${escapeHtml(item.title)}</span><span>${escapeHtml(item.expiresIn ?? "有时限")}</span></li>`).join("");
-  const proposalItems = proposals.slice(0, 3).map((item) => `<li><span>${escapeHtml(item.title)}</span><span>${item.status === "snoozed" ? "已暂缓" : escapeHtml(item.expiresAt ?? "不着急")}</span></li>`).join("");
-  const status = overviewConnectionStatus(model.connection);
-  const spaceGrid = spaces.length === 0
-    ? `<section class="product-card product-review-empty"><h2>家庭空间会在连接完成后显示</h2><p class="product-muted">${escapeHtml(status.emptySpaceDetail)}</p></section>`
-    : spaces.map(renderSpaceCard).join("");
-  const agentName = model.household.agentName ?? "家庭助手";
   const standaloneViewShortcut = model.view === undefined
     ? `<a class="product-view-switcher" href="${routeHref("control", options)}">控制视图</a>`
     : "";
-  return `<header class="product-page-header"><div><p class="product-kicker">生活视图</p><h1>${escapeHtml(householdName)}</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header><section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`)}</p></section>${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${spaceGrid}</div><aside class="product-overview-aside"><section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div></section><section class="product-card product-agent-note" aria-label="${escapeHtml(agentName)}的提醒"><span class="product-agent-mark" aria-hidden="true">h</span><p class="product-agent-bubble">${escapeHtml(model.agentNote ?? "需要你决定的事会出现在处理中心。")}</p></section>${energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`}</aside></div><form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="问问家，或说出你想做的事…" /><button type="submit">发送</button></form><p class="product-helper-copy">小范围动作会直接完成；影响较大的动作会先请你确认。</p>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">生活视图</p><h1>${escapeHtml(householdName)}</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>`;
+}
+
+function renderOverviewStatus(model: NormalizedProductShellModel): string {
+  const status = overviewConnectionStatus(model.connection);
+  return `<section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`)}</p></section>`;
+}
+
+function renderOverviewSpaces(model: NormalizedProductShellModel): string {
+  const status = overviewConnectionStatus(model.connection);
+  return model.spaces.length === 0
+    ? `<section class="product-card product-review-empty"><h2>家庭空间会在连接完成后显示</h2><p class="product-muted">${escapeHtml(status.emptySpaceDetail)}</p></section>`
+    : model.spaces.map(renderSpaceCard).join("");
+}
+
+function renderOverviewReviewSummary(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
+  const reviewItems = model.runtimeConfirmations.map((item) => `<li><span>${escapeHtml(item.title)}</span><span>${escapeHtml(item.expiresIn ?? "有时限")}</span></li>`).join("");
+  const proposalItems = model.proposals.slice(0, 3).map((item) => `<li><span>${escapeHtml(item.title)}</span><span>${item.status === "snoozed" ? "已暂缓" : escapeHtml(item.expiresAt ?? "不着急")}</span></li>`).join("");
+  return `<section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div></section>`;
+}
+
+function renderOverviewAgentNote(model: NormalizedProductShellModel): string {
+  const agentName = model.household.agentName ?? "家庭助手";
+  return `<section class="product-card product-agent-note" aria-label="${escapeHtml(agentName)}的提醒"><span class="product-agent-mark" aria-hidden="true">h</span><p class="product-agent-bubble">${escapeHtml(model.agentNote ?? "需要你决定的事会出现在处理中心。")}</p></section>`;
+}
+
+function renderOverviewEnergy(model: NormalizedProductShellModel): string {
+  const energy = model.energy;
+  return energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`;
+}
+
+function renderOverviewComposer(): string {
+  return `<form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="问问家，或说出你想做的事…" /><button type="submit">发送</button></form><p class="product-helper-copy">小范围动作会直接完成；影响较大的动作会先请你确认。</p>`;
 }
 
 function overviewConnectionStatus(connection: ProductShellConnection): {
@@ -1213,6 +1240,49 @@ function renderOnboarding(model: NormalizedProductShellModel, options: ProductSh
       ? "current"
       : "pending";
   return `<header class="product-page-header"><div><p class="product-kicker">首次设置 · 第 ${step} 步，共 8 步</p><h1>${escapeHtml(title)}</h1><p class="product-muted">${escapeHtml(body)}</p></div></header><div class="product-onboarding" data-onboarding-step="${step}" data-onboarding-key="${escapeHtml(current.key)}"><div class="product-onboarding-progress" role="progressbar" aria-valuenow="${step}" aria-valuemin="1" aria-valuemax="8" aria-valuetext="第 ${step} 步，共 8 步" aria-label="首次设置进度">${steps.map((_, index) => `<span class="product-onboarding-step" data-state="${stepState(index)}" aria-hidden="true"></span>`).join("")}</div><div class="product-onboarding-content"><ol class="product-onboarding-list" aria-label="首次设置步骤">${steps.map((item, index) => `<li data-state="${stepState(index)}"><span class="product-onboarding-index">${index + 1}</span><span>${escapeHtml(item.label)}</span></li>`).join("")}</ol><section class="product-card product-card--blue product-onboarding-form-panel" aria-labelledby="onboarding-form-heading"><h2 id="onboarding-form-heading">${escapeHtml(current.label)}</h2>${renderOnboardingItems(items)}<form class="product-onboarding-form" method="post" action="${escapeHtml(action)}"><input type="hidden" name="step" value="${step}">${fields.map(renderOnboardingField).join("")}<button class="product-primary-action product-onboarding-submit" type="submit"${submitDisabled ? " disabled" : ""}>${escapeHtml(submitLabel)}</button></form>${note === undefined ? "" : `<p class="product-onboarding-note">${escapeHtml(note)}</p>`}</section></div></div>`;
+}
+
+type ProductViewRecipeSlot = ProductViewRecipeV1["pages"][number]["slots"][number]["slot"];
+
+/** Arrange only Host-rendered slots from a validated declarative recipe. */
+export function renderProductViewRecipeContent(
+  recipeInput: unknown,
+  source: ProductShellModel = {},
+  options: ProductShellRenderOptions = {},
+): string {
+  const recipe = compileProductViewRecipe(recipeInput);
+  const model = normalizedModel(source);
+  const page = recipe.pages.find((candidate) => candidate.route === model.route);
+  if (page === undefined) return renderProductContent(source, options);
+  const slots = page.slots.map((placement) => {
+    const content = renderProductViewRecipeSlot(placement.slot, model, options);
+    if (content.length === 0) return "";
+    return `<div class="product-recipe-slot" data-recipe-slot="${placement.slot}" data-recipe-width="${placement.width}">${content}</div>`;
+  }).join("");
+  return `<div class="product-recipe-layout" data-recipe-provider="${escapeHtml(recipe.id)}" data-recipe-route="${page.route}" data-recipe-layout="${page.layout}">${slots}</div>`;
+}
+
+function renderProductViewRecipeSlot(
+  slot: ProductViewRecipeSlot,
+  model: NormalizedProductShellModel,
+  options: ProductShellRenderOptions,
+): string {
+  switch (slot) {
+    case "overview.header": return renderOverviewHeader(model, options);
+    case "overview.status": return renderOverviewStatus(model);
+    case "overview.active-turn": return renderActiveTurnSummary(model.activeTurn);
+    case "overview.spaces": return `<div class="product-space-grid">${renderOverviewSpaces(model)}</div>`;
+    case "overview.review-summary": return renderOverviewReviewSummary(model, options);
+    case "overview.agent-note": return renderOverviewAgentNote(model);
+    case "overview.energy": return renderOverviewEnergy(model);
+    case "overview.composer": return renderOverviewComposer();
+    case "conversation.workspace": return renderConversation(model, options);
+    case "reviews.workspace": return renderReviews(model, options);
+    case "activity.workspace": return renderActivity(model);
+    case "control.workspace": return renderControl(model, options);
+    case "settings.workspace": return renderSettings(model, options);
+    case "onboarding.workspace": return renderOnboarding(model, options);
+  }
 }
 
 /** Render the layout-owned page content inside the fixed Host Shell. */

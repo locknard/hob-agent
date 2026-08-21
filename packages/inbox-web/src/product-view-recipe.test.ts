@@ -119,6 +119,31 @@ test("enforces route-scoped slots, atomic governed workspaces, and page headings
       ],
     }],
   }), /Product view recipe is invalid/);
+
+  assert.throws(() => compileProductViewRecipe({
+    ...validRecipe(),
+    pages: [{
+      route: "overview",
+      layout: "split",
+      slots: [
+        { slot: "overview.spaces", width: "half" },
+        { slot: "overview.header", width: "full" },
+      ],
+    }],
+  }), /Product view recipe is invalid/);
+
+  assert.throws(() => compileProductViewRecipe({
+    ...validRecipe(),
+    pages: [{
+      route: "overview",
+      layout: "split",
+      slots: [
+        { slot: "overview.header", width: "full" },
+        { slot: "overview.composer", width: "full" },
+        { slot: "overview.spaces", width: "half" },
+      ],
+    }],
+  }), /Product view recipe is invalid/);
 });
 
 test("rejects duplicate pages, invalid layout widths, and every resource overflow", () => {

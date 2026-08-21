@@ -338,8 +338,24 @@ the recipe cannot split, reorder or recombine its two lifecycles. Control stays 
 
 The recipe grammar contains no HTML, CSS, JavaScript, URL, asset, query, secret,
 credential, model prompt, native bridge identity, handler or action field. Compilation
-validates the entire object before returning a deeply frozen plan. Runtime rendering
-and third-party loading remain later F2 work.
+validates the entire object before returning a deeply frozen plan. F2b adds Host slot
+rendering; a later F2 milestone adds isolated third-party loading.
+
+### F2b Host slot rendering
+
+A declarative provider is created only from a compiled V1 recipe. For a declared
+page, the Host maps each slot identifier to its existing renderer and arranges the
+result in a bounded six-column layout. `full`, `half` and `third` span six, three and
+two columns; compact viewports place every slot on one column. Every slot receives
+markup from its Host renderer. The overview heading is first and full-width; the
+optional composer is last in DOM order and remains immediately above mobile
+navigation.
+
+A semantic route omitted by the recipe uses its canonical Host page while the
+provider remains active. This preserves conversations, reviews, control and setup
+as complete product paths. The fixed Host Shell owns safety alerts, navigation,
+identity, view recovery and queue badges. The Host view switcher scrolls within its
+own boundary on compact screens and reveals the active view on page load.
 
 ## Failure and recovery
 

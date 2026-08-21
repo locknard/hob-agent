@@ -5,6 +5,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 
 import {
   ProposalInboxHttpService,
+  createDeclarativeProductViewProvider,
   createInboxBasicAuthenticator,
   type ProductViewProvider,
   type ProposalInboxHttpOptions,
@@ -1541,7 +1542,62 @@ test("keeps the Host Shell fixed while a registered view provider supplies ordin
     assert.match(await css.text(), /\.product-safety-banner/);
     const js = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, { headers: { authorization } });
     assert.equal(js.status, 200);
-    assert.match(await js.text(), /data-runtime-countdown/);
+    const jsText = await js.text();
+    assert.match(jsText, /data-runtime-countdown/);
+    assert.match(jsText, /data-host-view-scroll/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("registers a data-only recipe provider while the Host keeps semantic fallback pages", async () => {
+  const recipeProvider = createDeclarativeProductViewProvider({
+    apiVersion: "hob.view.recipe/v1",
+    id: "community.review-first",
+    title: "先看决定",
+    pages: [{
+      route: "overview",
+      layout: "split",
+      slots: [
+        { slot: "overview.header", width: "full" },
+        { slot: "overview.review-summary", width: "half" },
+        { slot: "overview.spaces", width: "half" },
+        { slot: "overview.composer", width: "full" },
+      ],
+    }],
+  });
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    viewProviders: [recipeProvider],
+  });
+  try {
+    const home = await fetch(`${ctx.homeInboxHttp.origin}/home?view=community.review-first`, {
+      headers: { authorization },
+    });
+    assert.equal(home.status, 200);
+    const homeHtml = await home.text();
+    assert.match(homeHtml, /data-view-provider="community\.review-first"/);
+    assert.match(homeHtml, /data-recipe-provider="community\.review-first"/);
+    assert.match(homeHtml, /先看决定/);
+    assert.match(homeHtml, /data-badge="runtime" data-count="2">2<\/span>/);
+    assert.match(homeHtml, /data-badge="proposal" data-count="3\/5">3<\/span>/);
+
+    const reviews = await fetch(`${ctx.homeInboxHttp.origin}/review-center?view=community.review-first`, {
+      headers: { authorization },
+    });
+    assert.equal(reviews.status, 200);
+    const reviewHtml = await reviews.text();
+    assert.match(reviewHtml, /data-view-provider="community\.review-first"/);
+    assert.doesNotMatch(reviewHtml, /data-recipe-layout=/);
+    assert.match(reviewHtml, /需要你决定的事/);
+    assert.match(reviewHtml, /等待你放行/);
+    assert.match(reviewHtml, /给家的建议/);
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();
