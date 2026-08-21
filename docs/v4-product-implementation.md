@@ -24,10 +24,11 @@ stable semantic destinations:
 | Control | Use the same home state in a denser layout | neutral capabilities and the same governed intent seam |
 | Settings | Complete setup and manage connections, permissions and preferences | non-secret setup checkpoints and explicit capability availability |
 
-The built-in Life and Control layouts share these projections. The HTTP surface
-names this ordinary-content seam `ProductLayout`; layout plugins may rearrange
-only the canonical projection, while the Host Shell owns authentication, safety
-alerts, review counts, settings/recovery, and write-command dispatch.
+The built-in Life and Control providers share these projections and register in
+the `ProductViewRegistry`. The browser stores a device-local provider preference;
+semantic routes remain stable during a switch. Providers arrange the canonical
+projection, while the Host Shell owns authentication, safety alerts, review
+counts, provider recovery, and write-command dispatch.
 
 ## 2. Three action gates
 

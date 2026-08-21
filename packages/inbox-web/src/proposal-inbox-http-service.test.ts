@@ -6,7 +6,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import {
   ProposalInboxHttpService,
   createInboxBasicAuthenticator,
-  type ProductLayout,
+  type ProductViewProvider,
   type ProposalInboxHttpOptions,
 } from "./proposal-inbox-http-service.js";
 
@@ -1416,11 +1416,13 @@ test("restarts a persisted failed advice turn through the same-origin product ro
   }
 });
 
-test("keeps the Host Shell fixed while ProductLayout supplies ordinary route content", async () => {
+test("keeps the Host Shell fixed while a registered view provider supplies ordinary route content", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
   const rendered: Array<{ route: string; reviewCounts?: unknown; proposalId?: string }> = [];
-  const layout: ProductLayout = {
+  const layout: ProductViewProvider = {
+    id: "test.layout",
+    label: "测试视图",
     renderContent(model, input) {
       const legacyKeys = ["reviews", "confirmations", "home", "turn"].filter((key) => key in model);
       assert.deepEqual(legacyKeys, []);
@@ -1432,7 +1434,8 @@ test("keeps the Host Shell fixed while ProductLayout supplies ordinary route con
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    layout,
+    viewProviders: [layout],
+    defaultViewId: layout.id,
   };
   const fiber = await ctx.plugin(ProposalInboxHttpService, options);
 
@@ -1444,21 +1447,25 @@ test("keeps the Host Shell fixed while ProductLayout supplies ordinary route con
       assert.match(html, new RegExp(`data-product-route="${route.slice(1)}"`));
       assert.match(html, /class="product-shell"/);
       assert.match(html, /aria-label="家庭导航"/);
+      assert.match(html, /data-badge="runtime" data-count="2">2<\/span>/, route);
+      assert.match(html, /data-badge="proposal" data-count="3\/5">3<\/span>/, route);
       assert.ok((html.match(/<header/g) ?? []).length <= 1);
       assert.equal(html.includes('class="skip-link"'), false);
     }
     assert.deepEqual(rendered.map((entry) => entry.route), [
       "home", "conversation", "review-center", "activity", "control", "settings", "onboarding",
     ]);
-    assert.deepEqual(rendered[2]?.reviewCounts, {
+    for (const entry of rendered) assert.deepEqual(entry.reviewCounts, {
       runtimeConfirmations: 2,
       persistentProposals: 3,
-    });
-    assert.deepEqual(rendered[0]?.reviewCounts, {
-      runtimeConfirmations: 2,
-      persistentProposals: 3,
-    });
+    }, entry.route);
     assert.equal(JSON.stringify(rendered[2]?.reviewCounts ?? {}).includes("total"), false);
+
+    const voice = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview`, { headers: { authorization } });
+    assert.equal(voice.status, 200);
+    const voiceHtml = await voice.text();
+    assert.match(voiceHtml, /data-badge="runtime" data-count="2">2<\/span>/);
+    assert.match(voiceHtml, /data-badge="proposal" data-count="3\/5">3<\/span>/);
 
     const selectedProposal = await fetch(`${ctx.homeInboxHttp.origin}/review-center?proposal=proposal-1`, {
       headers: { authorization },
@@ -1492,7 +1499,7 @@ test("keeps the Host Shell fixed while ProductLayout supplies ordinary route con
   }
 });
 
-test("uses the bundled ProductLayout for canonical routes when no layout is injected", async () => {
+test("uses the bundled life provider for canonical routes when no preference is stored", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -1548,6 +1555,121 @@ test("uses the bundled ProductLayout for canonical routes when no layout is inje
     assert.match(productJsText, /answer_delta/);
     assert.match(productJsText, /inspecting_home/);
     assert.match(productJsText, /cancelled/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("switches built-in view providers without changing the semantic route and recovers to the safe view", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+
+  try {
+    const life = await fetch(`${ctx.homeInboxHttp.origin}/home`, { headers: { authorization } });
+    assert.equal(life.status, 200);
+    const lifeHtml = await life.text();
+    assert.match(lifeHtml, /data-view-provider="builtin\.life"/);
+    assert.match(lifeHtml, /aria-label="切换家庭视图"/);
+    assert.match(lifeHtml, /生活视图/);
+
+    const control = await fetch(`${ctx.homeInboxHttp.origin}/home?view=builtin.control`, {
+      headers: { authorization },
+    });
+    assert.equal(control.status, 200);
+    const preference = control.headers.get("set-cookie") ?? "";
+    assert.match(preference, /hob_view=builtin\.control/);
+    assert.match(preference, /HttpOnly/);
+    const controlHtml = await control.text();
+    assert.match(controlHtml, /data-route="overview"[^>]*data-view-provider="builtin\.control"/);
+    assert.match(controlHtml, /<p class="product-kicker">控制<\/p>/);
+    assert.match(controlHtml, /class="product-control-grid"/);
+
+    const conversation = await fetch(`${ctx.homeInboxHttp.origin}/conversation`, {
+      headers: { authorization, cookie: "hob_view=builtin.control" },
+    });
+    assert.equal(conversation.status, 200);
+    const conversationHtml = await conversation.text();
+    assert.match(conversationHtml, /data-route="conversation"[^>]*data-view-provider="builtin\.control"/);
+    assert.match(conversationHtml, /和家庭助手对话/);
+
+    const recovered = await fetch(`${ctx.homeInboxHttp.origin}/home?view=missing.provider`, {
+      headers: { authorization },
+    });
+    assert.equal(recovered.status, 200);
+    const recoveredHtml = await recovered.text();
+    assert.match(recoveredHtml, /data-view-provider="builtin\.life"/);
+    assert.match(recoveredHtml, /这个视图当前不可用，已恢复生活视图/);
+
+    const repairedPreference = await fetch(`${ctx.homeInboxHttp.origin}/home`, {
+      headers: { authorization, cookie: "hob_view=plugin.unavailable" },
+    });
+    assert.match(repairedPreference.headers.get("set-cookie") ?? "", /hob_view=builtin\.life/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("recovers from a provider render failure inside the Host boundary", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    defaultViewId: "plugin.crash",
+    viewProviders: [{
+      id: "plugin.crash",
+      label: "故障视图",
+      renderContent() { throw new Error("provider_failed"); },
+    }],
+  });
+
+  try {
+    const response = await fetch(`${ctx.homeInboxHttp.origin}/home`, { headers: { authorization } });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("set-cookie") ?? "", /hob_view=builtin\.life/);
+    const html = await response.text();
+    assert.match(html, /data-view-provider="builtin\.life"/);
+    assert.match(html, /这个视图当前不可用，已恢复生活视图/);
+    assert.match(html, /<p class="product-kicker">生活视图<\/p>/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps governed review intents identical across both built-in providers", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(RuntimeDecisionInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+
+  try {
+    const actions = [] as string[][];
+    for (const view of ["builtin.life", "builtin.control"] as const) {
+      const response = await fetch(`${ctx.homeInboxHttp.origin}/review-center?view=${view}`, {
+        headers: { authorization },
+      });
+      assert.equal(response.status, 200);
+      const html = await response.text();
+      actions.push([...html.matchAll(/<form[^>]+action="([^"]+)"/g)].map((match) => match[1]!).sort());
+    }
+    assert.deepEqual(actions[0], actions[1]);
+    assert.ok(actions[0]?.includes("/runtime-confirmations/runtime-1/approve"));
+    assert.ok(actions[0]?.includes("/runtime-confirmations/runtime-1/reject"));
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();
@@ -1787,7 +1909,7 @@ test("projects onboarding identity and real choices across every canonical produ
     onboarding,
   } as unknown) as never);
   try {
-    for (const path of ["/home", "/conversation", "/review-center", "/activity", "/control", "/settings", "/onboarding"] as const) {
+    for (const path of ["/home", "/conversation", "/review-center", "/activity", "/control", "/settings", "/onboarding", "/voice-preview"] as const) {
       const response = await fetch(`${ctx.homeInboxHttp.origin}${path}`, { headers: { authorization } });
       assert.equal(response.status, 200, path);
       const html = await response.text();

@@ -17,6 +17,10 @@ import {
   type ProductControlFeedback,
 } from "./product-shell.js";
 import { PRODUCT_SHELL_STYLES } from "./product-shell-styles.js";
+import {
+  ProductViewRegistry,
+  type RegisteredProductViewProvider,
+} from "./product-view-registry.js";
 import { renderVoiceSurface, VOICE_INTERACTION_JS } from "./voice-surface.js";
 import {
   UnavailableOnboardingService,
@@ -84,21 +88,16 @@ export interface ProductRouteRenderContext {
   readonly controlFeedback?: ProductControlFeedback;
   readonly onboarding?: ProductOnboardingState;
   readonly household?: ProductShellModel["household"];
+  readonly view?: ProductShellModel["view"];
 }
 
 /**
- * Product layout seam. The HTTP service owns transport and policy checks; the
- * layout owns ordinary product markup and receives only the canonical shell
- * projection, never raw Hub or adapter payloads.
+ * Product view provider seam. The HTTP service owns transport and policy
+ * checks; providers render ordinary markup from the canonical shell projection.
  */
-export interface ProductLayout {
-  renderContent(
-    model: ProductShellModel,
-    context: ProductRouteRenderContext,
-  ): string | Promise<string>;
-}
+export type ProductViewProvider = RegisteredProductViewProvider<ProductShellModel, ProductRouteRenderContext>;
 
-/** Static assets served alongside the fixed Host Shell and ProductLayout. */
+/** Static assets served alongside the fixed Host Shell and registered providers. */
 export const PRODUCT_CSS = PRODUCT_SHELL_STYLES;
 export const PRODUCT_JS = String.raw`// EventSource reconnects with Last-Event-ID for the active household turn.
 const runtimeCountdowns = Array.from(document.querySelectorAll("[data-runtime-countdown][data-expires-at]"));
@@ -182,9 +181,8 @@ if (batchControl instanceof HTMLElement) {
 ` + `\n${VOICE_INTERACTION_JS}`;
 
 /**
- * The bundled product layout is the safe default for the real local runtime.
- * An embedding may replace it through the ProductLayout seam; the HTTP
- * contract stays unchanged either way.
+ * The bundled providers share one presentation kernel and the fixed HTTP
+ * contract. The registry supplies deterministic selection and recovery.
  */
 const PRODUCT_HREFS: Partial<Record<ProductShellRoute, string>> = {
   overview: "/home",
@@ -195,16 +193,37 @@ const PRODUCT_HREFS: Partial<Record<ProductShellRoute, string>> = {
   settings: "/settings",
 };
 
-const DEFAULT_PRODUCT_LAYOUT: ProductLayout = {
+function renderBundledView(model: ProductShellModel, context: ProductRouteRenderContext): string {
+  const hrefs: Partial<Record<ProductShellRoute, string>> = {
+    ...PRODUCT_HREFS,
+    control: "/home?view=builtin.control",
+    ...((context.route === "home" && context.view?.activeId === "builtin.control") || context.route === "control"
+      ? { overview: "/home?view=builtin.life" }
+      : {}),
+  };
+  const rendered = renderProductContent(model, { includeStyles: false, hrefs });
+  if (
+    context.route !== "conversation"
+    || context.adviceId === undefined
+    || context.activeTurn === undefined
+    || !streamsAdviceTurn(context.activeTurn)
+  ) return rendered;
+  return `<section data-advice-stream="sse" data-advice-events="/conversation/${encodeURIComponent(context.adviceId)}/events"><p data-advice-status>${escapeTransportHtml(context.activeTurn.statusMessage ?? "正在处理。")}</p><p data-advice-answer></p>${rendered}</section>`;
+}
+
+const BUILTIN_LIFE_VIEW: ProductViewProvider = {
+  id: "builtin.life",
+  label: "生活视图",
   renderContent(model, context) {
-    const rendered = renderProductContent(model, { includeStyles: false, hrefs: PRODUCT_HREFS });
-    if (
-      context.route !== "conversation"
-      || context.adviceId === undefined
-      || context.activeTurn === undefined
-      || !streamsAdviceTurn(context.activeTurn)
-    ) return rendered;
-    return `<section data-advice-stream="sse" data-advice-events="/conversation/${encodeURIComponent(context.adviceId)}/events"><p data-advice-status>${escapeTransportHtml(context.activeTurn.statusMessage ?? "正在处理。")}</p><p data-advice-answer></p>${rendered}</section>`;
+    return renderBundledView(model, context);
+  },
+};
+
+const BUILTIN_CONTROL_VIEW: ProductViewProvider = {
+  id: "builtin.control",
+  label: "控制视图",
+  renderContent(model, context) {
+    return renderBundledView(context.route === "home" ? { ...model, route: "control" } : model, context);
   },
 };
 
@@ -217,8 +236,10 @@ export interface ProposalInboxHttpOptions {
   readonly reviewer?: string;
   /** Hub-owned typed onboarding coordinator. */
   readonly onboarding?: OnboardingPort;
-  /** Layout-owned ordinary content rendered inside the fixed Host Shell. */
-  readonly layout?: ProductLayout;
+  /** Trusted in-process presentation providers registered beside the built-in views. */
+  readonly viewProviders?: readonly ProductViewProvider[];
+  /** Initial provider used before this browser saves a device-local preference. */
+  readonly defaultViewId?: string;
 }
 
 /**
@@ -348,7 +369,8 @@ export class ProposalInboxHttpService extends Service {
   private readonly inbox: InboxHttpPort;
   private readonly reviewer: string;
   private readonly principal: InboxReviewActor | undefined;
-  private readonly layout: ProductLayout;
+  private readonly views: ProductViewRegistry<ProductShellModel, ProductRouteRenderContext>;
+  private readonly defaultViewId: string;
   private readonly onboarding: OnboardingPort;
 
   constructor(ctx: Context, private readonly options: ProposalInboxHttpOptions) {
@@ -364,7 +386,15 @@ export class ProposalInboxHttpService extends Service {
     if (this.principal === undefined) {
       throw new TypeError("Inbox runtime review requires an explicit principal role and device binding");
     }
-    this.layout = options.layout ?? DEFAULT_PRODUCT_LAYOUT;
+    this.views = new ProductViewRegistry([
+      BUILTIN_LIFE_VIEW,
+      BUILTIN_CONTROL_VIEW,
+      ...(options.viewProviders ?? []),
+    ], BUILTIN_LIFE_VIEW.id);
+    this.defaultViewId = options.defaultViewId ?? BUILTIN_LIFE_VIEW.id;
+    if (this.views.resolve(this.defaultViewId).recoveredFrom !== undefined) {
+      throw new TypeError("Default product view provider is not registered");
+    }
     this.onboarding = options.onboarding ?? new UnavailableOnboardingService();
     this.server = createServer((request, response) => { void this.handle(request, response); });
   }
@@ -396,6 +426,12 @@ export class ProposalInboxHttpService extends Service {
       }
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", this.origin);
+      const requestedViewId = productViewPreference(
+        url.searchParams.get("view"),
+        request.headers.cookie,
+        this.defaultViewId,
+      );
+      const persistViewPreference = url.searchParams.has("view");
       if (isMutationMethod(method) && request.headers.origin !== this.origin) {
         return send(response, 403, "This action requires the local household origin");
       }
@@ -419,7 +455,7 @@ export class ProposalInboxHttpService extends Service {
         const batchRequestId = productRoute === "control"
           ? selectedBatchRequestId(url.searchParams.get("batch"))
           : undefined;
-        return this.sendProductRoute(response, productRoute, url.pathname, method === "HEAD", undefined, proposalId, actionTicketId, batchRequestId);
+        return this.sendProductRoute(response, productRoute, url.pathname, method === "HEAD", undefined, proposalId, actionTicketId, batchRequestId, requestedViewId, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -475,7 +511,7 @@ export class ProposalInboxHttpService extends Service {
         if (url.search.length > 0) return redirect(response, "/voice-preview");
         const content = renderVoiceSurface("idle");
         if (content === undefined) return send(response, 500, "Voice surface unavailable");
-        return this.sendVoiceRoute(response, content, method === "HEAD");
+        return this.sendVoiceRoute(response, content, method === "HEAD", requestedViewId);
       }
       const adviceEvents = /^\/conversation\/([^/]+)\/events$/.exec(url.pathname);
       if (method === "GET" && adviceEvents) {
@@ -623,7 +659,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && adviceDetail) {
         const adviceId = safeDecode(adviceDetail[1]!);
         if (adviceId === undefined) return send(response, 404, "Household advice not found");
-        return this.sendProductRoute(response, "conversation", url.pathname, method === "HEAD", adviceId);
+        return this.sendProductRoute(response, "conversation", url.pathname, method === "HEAD", adviceId, undefined, undefined, undefined, requestedViewId, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/conversation") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -883,7 +919,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && detail) {
         const proposalId = safeDecode(detail[1]!);
         if (proposalId === undefined) return send(response, 404, "Proposal not found");
-        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId);
+        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
@@ -1007,6 +1043,8 @@ export class ProposalInboxHttpService extends Service {
     proposalId?: string,
     actionTicketId?: string,
     batchRequestId?: string,
+    requestedViewId?: string,
+    persistViewPreference = false,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
     const reviewProjection = showsReviewSummary ? await this.productReviewProjection(proposalId) : undefined;
@@ -1018,38 +1056,52 @@ export class ProposalInboxHttpService extends Service {
     const activeTurn = (route === "home" || route === "conversation") && effectiveAdviceId !== undefined
       ? await this.productAdviceTurn(effectiveAdviceId)
       : undefined;
-    const onboardingState = await this.productOnboardingState();
-    const onboarding = route === "onboarding" ? onboardingState : undefined;
-    const household = productHouseholdFromIdentity(onboardingState?.household, this.principal);
+    const hostProjection = await this.productHostProjection(reviewProjection);
+    const onboarding = route === "onboarding" ? hostProjection.onboardingState : undefined;
     const controlFeedback = route === "control" && actionTicketId !== undefined
       ? await this.productControlFeedback(actionTicketId)
       : undefined;
     const shellProjection = await this.productShellProjection(batchRequestId);
-    const context: ProductRouteRenderContext = {
+    const baseContext: ProductRouteRenderContext = {
       route,
       path,
       ...(route !== "conversation" || effectiveAdviceId === undefined ? {} : { adviceId: effectiveAdviceId }),
       ...(proposalId === undefined ? {} : { proposalId }),
-      ...(showsReviewSummary
-        ? {
-            reviewCounts: reviewProjection === undefined
-              ? await this.productReviewCounts()
-              : productReviewCountsFromProjection(reviewProjection),
-            ...(reviewProjection === undefined ? {} : { reviewProjection }),
-          }
-        : {}),
+      reviewCounts: hostProjection.reviewCounts,
+      ...(reviewProjection === undefined ? {} : { reviewProjection }),
       ...(route === "conversation" && availability !== undefined ? { availability } : {}),
       ...(activeTurn === undefined ? {} : { activeTurn }),
       ...(shellProjection === undefined ? {} : { shellProjection }),
       ...(controlFeedback === undefined ? {} : { controlFeedback }),
       ...(onboarding === undefined ? {} : { onboarding }),
-      household,
+      household: hostProjection.household,
     };
     try {
-      const model = productShellModel(route, context);
-      const content = await this.layout.renderContent(model, context);
+      let resolution = this.views.resolve(requestedViewId);
+      let context: ProductRouteRenderContext = {
+        ...baseContext,
+        view: productViewState(path, resolution.provider.id, this.views.choices(), resolution.recoveredFrom),
+      };
+      let model = productShellModel(route, context);
+      let content: string;
+      try {
+        content = await resolution.provider.renderContent(model, context);
+      } catch (error) {
+        if (resolution.provider.id === this.views.fallbackId) throw error;
+        const failedProviderId = resolution.provider.id;
+        resolution = this.views.resolve();
+        context = {
+          ...baseContext,
+          view: productViewState(path, resolution.provider.id, this.views.choices(), failedProviderId),
+        };
+        model = productShellModel(route, context);
+        content = await resolution.provider.renderContent(model, context);
+      }
       const host = renderProductHost(model, content, { includeStyles: false, hrefs: PRODUCT_HREFS });
       const html = productDocument(host, route);
+      if (persistViewPreference || context.view?.recoveryMessage !== undefined) {
+        setProductViewPreference(response, resolution.provider.id);
+      }
       if (head) {
         applySecurityHeaders(response);
         response.statusCode = 200;
@@ -1065,16 +1117,24 @@ export class ProposalInboxHttpService extends Service {
     }
   }
 
-  private async sendVoiceRoute(response: ServerResponse, content: string, head: boolean): Promise<void> {
-    const shellProjection = await this.productShellProjection();
+  private async sendVoiceRoute(response: ServerResponse, content: string, head: boolean, requestedViewId?: string): Promise<void> {
+    const [shellProjection, hostProjection] = await Promise.all([
+      this.productShellProjection(),
+      this.productHostProjection(),
+    ]);
+    const resolution = this.views.resolve(requestedViewId);
     const context: ProductRouteRenderContext = {
       route: "conversation",
       path: "/voice-preview",
+      reviewCounts: hostProjection.reviewCounts,
+      household: hostProjection.household,
+      view: productViewState("/voice-preview", resolution.provider.id, this.views.choices(), resolution.recoveredFrom),
       ...(shellProjection === undefined ? {} : { shellProjection }),
     };
     const model = productShellModel("conversation", context);
     const host = renderProductHost(model, content, { includeStyles: false, hrefs: PRODUCT_HREFS });
     const html = productDocument(host, "conversation");
+    if (resolution.recoveredFrom !== undefined) setProductViewPreference(response, resolution.provider.id);
     if (head) {
       applySecurityHeaders(response);
       response.statusCode = 200;
@@ -1083,6 +1143,24 @@ export class ProposalInboxHttpService extends Service {
       return;
     }
     sendHtml(response, 200, html, false);
+  }
+
+  private async productHostProjection(reviewProjection?: InboxProductReviewProjection): Promise<{
+    readonly reviewCounts: ProductReviewCounts;
+    readonly onboardingState?: ProductOnboardingState;
+    readonly household: ProductShellModel["household"];
+  }> {
+    const [reviewCounts, onboardingState] = await Promise.all([
+      reviewProjection === undefined
+        ? this.productReviewCounts()
+        : Promise.resolve(productReviewCountsFromProjection(reviewProjection)),
+      this.productOnboardingState(),
+    ]);
+    return {
+      reviewCounts,
+      ...(onboardingState === undefined ? {} : { onboardingState }),
+      household: productHouseholdFromIdentity(onboardingState?.household, this.principal),
+    };
   }
 
   private async productAdviceTurn(id: string): Promise<ProductTurn | undefined> {
@@ -1366,6 +1444,43 @@ function batchControlErrorText(error: unknown): string {
   return "Household batch control failed";
 }
 
+function productViewPreference(query: string | null, cookie: string | undefined, fallbackId: string): string {
+  const queryId = boundedProductViewId(query);
+  if (queryId !== undefined) return queryId;
+  for (const part of cookie?.split(";") ?? []) {
+    const [name, value] = part.trim().split("=", 2);
+    if (name !== "hob_view") continue;
+    const cookieId = boundedProductViewId(value ?? null);
+    if (cookieId !== undefined) return cookieId;
+  }
+  return fallbackId;
+}
+
+function boundedProductViewId(value: string | null): string | undefined {
+  if (value === null || value.length === 0 || value.length > 120) return undefined;
+  return /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(value) ? value : undefined;
+}
+
+function setProductViewPreference(response: ServerResponse, viewId: string): void {
+  response.setHeader("set-cookie", `hob_view=${viewId}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict`);
+}
+
+function productViewState(
+  currentPath: string,
+  activeId: string,
+  choices: readonly { readonly id: string; readonly label: string }[],
+  recoveredFrom?: string,
+): NonNullable<ProductShellModel["view"]> {
+  return {
+    activeId,
+    currentPath,
+    choices,
+    ...(recoveredFrom === undefined
+      ? {}
+      : { recoveryMessage: "这个视图当前不可用，已恢复生活视图。" }),
+  };
+}
+
 function productHouseholdFromIdentity(
   identity: ProductOnboardingState["household"] | undefined,
   principal: InboxReviewActor | undefined,
@@ -1391,8 +1506,12 @@ function productShellModel(route: ProductRoute, context: ProductRouteRenderConte
   return {
     ...(context.shellProjection ?? {}),
     household: context.household ?? {},
+    ...(context.view === undefined ? {} : { view: context.view }),
     route: defaultProductShellRoute(route),
     runtimeConfirmations: context.reviewProjection?.runtimeConfirmations ?? [],
+    runtimeConfirmationCount: context.reviewCounts?.runtimeConfirmations
+      ?? context.reviewProjection?.runtimeConfirmations.length
+      ?? 0,
     proposals: context.reviewProjection?.proposals ?? [],
     proposalCapacityUsed: context.reviewProjection?.proposalCapacityUsed
       ?? context.reviewCounts?.persistentProposals

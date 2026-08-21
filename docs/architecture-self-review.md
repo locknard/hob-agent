@@ -110,9 +110,10 @@ explicitly blocked.
 
 The Product Shell serves `/home`, `/conversation`, `/review-center`, `/activity`,
 `/control`, `/settings`, `/onboarding` and `/voice-preview`. Life and Control
-views consume the same projection and submit the same intents. The `ProductLayout`
-seam can replace ordinary content while authentication, safety, review badges
-and command dispatch remain fixed.
+views consume the same projection and submit the same intents. The
+`ProductViewRegistry` selects registered providers, keeps a device-local
+preference and recovers to `builtin.life`. Authentication, safety, review badges
+and command dispatch remain fixed in the Host.
 
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state

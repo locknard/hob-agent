@@ -407,6 +407,7 @@ test("keeps the selected proposal visible through trial and renders the second e
 
 test("ships responsive and preference-aware presentation tokens without decorative assets", () => {
   const html = renderProductShell(model());
+  assert.match(PRODUCT_SHELL_CSS, /\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
   assert.match(PRODUCT_SHELL_CSS, /prefers-reduced-motion/);
   assert.match(PRODUCT_SHELL_CSS, /prefers-reduced-transparency/);
   assert.match(PRODUCT_SHELL_CSS, /prefers-contrast/);

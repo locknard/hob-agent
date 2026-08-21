@@ -30,6 +30,7 @@ export const PRODUCT_SHELL_CSS = String.raw`
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { min-width: 320px; background: var(--shell-bg); }
 body { min-width: 320px; margin: 0; background: var(--shell-bg); color: var(--shell-ink); }
 button, input, select, textarea { font: inherit; }
@@ -116,6 +117,11 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-safety-banner { position: relative; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem max(1rem, env(safe-area-inset-right)) .85rem max(1rem, env(safe-area-inset-left)); background: var(--shell-red); color: white; }
 .product-completion-notification { position: relative; z-index: 19; display: flex; align-items: center; justify-content: center; gap: 1rem; min-height: 2.75rem; padding: .65rem max(1rem, env(safe-area-inset-right)) .65rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-blue-soft); color: var(--shell-text); }
 .product-completion-notification a { color: var(--shell-blue); font-weight: 650; }
+.product-host-view-switcher { position: relative; z-index: 18; display: flex; align-items: center; justify-content: flex-end; gap: .8rem; min-height: 3rem; padding: .45rem max(1rem, env(safe-area-inset-right)) .45rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-surface); }
+.product-host-view-switcher nav { display: inline-flex; gap: .2rem; padding: .2rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-bg); }
+.product-host-view-switcher a { min-height: 2rem; display: inline-flex; align-items: center; padding: .35rem .7rem; border-radius: 999px; color: var(--shell-muted); text-decoration: none; font-size: .82rem; font-weight: 700; }
+.product-host-view-switcher a[aria-current="true"] { background: var(--shell-surface); color: var(--shell-blue); box-shadow: var(--shell-shadow-soft); }
+.product-view-recovery { margin: 0; color: var(--shell-muted); font-size: .8rem; }
 .product-safety-copy { display: grid; gap: .12rem; min-width: 0; }
 .product-safety-copy strong { font-size: .96rem; }
 .product-safety-copy span { color: rgba(255,255,255,.86); font-size: .83rem; }

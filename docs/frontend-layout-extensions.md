@@ -315,6 +315,12 @@ intent 禁用；保存失败保留草稿。重置只删除当前 provider 的 pr
 
 ## Delivery sequence
 
+Current checkpoint (2026-08-22): F0 is complete. F1 now includes the shared
+presentation kernel, `ProductViewRegistry`, `builtin.life`, `builtin.control`,
+device-local selection, semantic-route continuity and deterministic recovery to
+`builtin.life`. The remaining F1 work is the complete cross-provider conformance
+matrix and provider-specific presentation configuration.
+
 1. **F0 — contract and prototype:** 在交互稿中加入生活/控制视图切换、失败回退、per-device
    preference 和语义路由连续性；不装载第三方代码。
 2. **F1 — shared presentation kernel:** 在 `packages/inbox-web` 内建立 presentation/intents

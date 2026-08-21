@@ -21,6 +21,13 @@ export interface ProductShellHousehold {
   readonly memberRole?: string;
 }
 
+export interface ProductViewState {
+  readonly activeId: string;
+  readonly currentPath: string;
+  readonly choices: readonly { readonly id: string; readonly label: string }[];
+  readonly recoveryMessage?: string;
+}
+
 export interface ProductShellConnection {
   readonly state: ProductConnectionState;
   readonly lastContact?: string;
@@ -316,9 +323,11 @@ export interface ProductOnboardingState {
 export interface ProductShellModel {
   readonly route?: ProductShellRoute;
   readonly household?: ProductShellHousehold;
+  readonly view?: ProductViewState;
   readonly connection?: ProductShellConnection;
   readonly safetyAlerts?: readonly ProductSafetyAlert[];
   readonly runtimeConfirmations?: readonly ProductRuntimeConfirmation[];
+  readonly runtimeConfirmationCount?: number;
   readonly proposals?: readonly ProductProposal[];
   readonly selectedProposal?: ProductProposal;
   readonly proposalCapacityUsed?: number;
@@ -561,6 +570,7 @@ function list(items: readonly string[] | undefined, className = "product-list"):
 
 function normalizedModel(source: ProductShellModel): NormalizedProductShellModel {
   const runtimeConfirmations = source.runtimeConfirmations ?? [];
+  const runtimeConfirmationCount = source.runtimeConfirmationCount ?? runtimeConfirmations.length;
   const proposals = source.proposals ?? [];
   const spaces = source.spaces ?? [];
   const household = source.household ?? {};
@@ -576,6 +586,7 @@ function normalizedModel(source: ProductShellModel): NormalizedProductShellModel
     household,
     connection,
     runtimeConfirmations,
+    runtimeConfirmationCount,
     proposals,
     spaces,
     activeTurn,
@@ -592,6 +603,7 @@ interface NormalizedProductShellModel extends ProductShellModel {
   readonly household: ProductShellHousehold;
   readonly connection: ProductShellConnection;
   readonly runtimeConfirmations: readonly ProductRuntimeConfirmation[];
+  readonly runtimeConfirmationCount: number;
   readonly proposals: readonly ProductProposal[];
   readonly spaces: readonly ProductSpace[];
   readonly activeTurn?: ProductTurn;
@@ -622,9 +634,22 @@ function navigationLink(route: ProductShellRoute, current: ProductShellRoute, mo
   const label = mobile ? MOBILE_ROUTE_LABELS[route] : ROUTE_LABELS[route];
   const mobileRouteAttribute = mobile ? ` data-mobile-route="${escapeHtml(route)}"` : "";
   const badges = route === "reviews"
-    ? `<span class="${mobile ? "product-mobile-nav-badges" : "product-nav-badges"}" aria-label="${model.runtimeConfirmations.length} 项等待你放行，${model.proposalCapacityUsed}/${model.proposalCapacity} 条建议"><span class="product-badge product-badge--runtime" data-badge="runtime" data-count="${model.runtimeConfirmations.length}">${model.runtimeConfirmations.length}</span><span class="product-badge product-badge--proposal" data-badge="proposal" data-count="${model.proposalCapacityUsed}/${model.proposalCapacity}">${model.proposalCapacityUsed}</span></span>`
+    ? `<span class="${mobile ? "product-mobile-nav-badges" : "product-nav-badges"}" aria-label="${model.runtimeConfirmationCount} 项等待你放行，${model.proposalCapacityUsed}/${model.proposalCapacity} 条建议"><span class="product-badge product-badge--runtime" data-badge="runtime" data-count="${model.runtimeConfirmationCount}">${model.runtimeConfirmationCount}</span><span class="product-badge product-badge--proposal" data-badge="proposal" data-count="${model.proposalCapacityUsed}/${model.proposalCapacity}">${model.proposalCapacityUsed}</span></span>`
     : "";
   return `<a class="${className}"${mobileRouteAttribute} href="${routeHref(route, options)}"${currentAttribute}><span class="${mobile ? "" : "product-nav-label"}">${label}</span>${badges}</a>`;
+}
+
+function renderHostViewSwitcher(view: ProductViewState | undefined): string {
+  if (view === undefined || view.choices.length < 2) return "";
+  const links = view.choices.map((choice) => {
+    const current = choice.id === view.activeId ? ' aria-current="true"' : "";
+    const href = `${localHref(view.currentPath, "/home")}?view=${encodeURIComponent(choice.id)}`;
+    return `<a href="${escapeHtml(href)}"${current}>${escapeHtml(choice.label)}</a>`;
+  }).join("");
+  const recovery = view.recoveryMessage === undefined
+    ? ""
+    : `<p class="product-view-recovery" role="status">${escapeHtml(view.recoveryMessage)}</p>`;
+  return `<section class="product-host-view-switcher" data-host-owned="true" aria-label="切换家庭视图"><nav>${links}</nav>${recovery}</section>`;
 }
 
 function renderSafetyBanner(alert: ProductSafetyAlert): string {
@@ -657,11 +682,12 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
   const memberRole = model.household.memberRole ?? "身份待确认";
   const safety = model.safetyAlert === undefined ? "" : renderSafetyBanner(model.safetyAlert);
   const completion = renderAdviceCompletionNotification(model.completionNotification);
+  const viewSwitcher = renderHostViewSwitcher(model.view);
   const desktopNav = ROUTES.map((item) => navigationLink(item, route, model, options)).join("");
   const mobileRoutes: readonly ProductShellRoute[] = ["overview", "reviews", "control", "activity", "settings"];
   const mobileCurrentRoute = route === "conversation" ? "overview" : route === "onboarding" ? "settings" : route;
   const mobileNav = mobileRoutes.map((item) => navigationLink(item, mobileCurrentRoute, model, options, true)).join("");
-  return `<div class="product-shell" data-route="${escapeHtml(route)}" data-connection-state="${escapeHtml(model.connection.state)}">${safety}${completion}<a class="product-skip-link" href="#product-main">跳到主要内容</a><div class="product-layout"><aside class="product-sidebar" aria-label="家庭导航"><a class="product-brand" href="${routeHref("overview", options)}"><span class="product-brand-mark" aria-hidden="true">h</span><span class="product-brand-copy"><strong>${escapeHtml(agentName)}</strong>${householdName === undefined ? "" : `<small>${escapeHtml(householdName)}</small>`}<small>HobAgent</small></span></a><nav aria-label="家庭导航">${desktopNav}</nav><div class="product-profile"><span class="product-profile-mark" aria-hidden="true">${escapeHtml(memberName.slice(0, 1))}</span><span class="product-profile-copy"><strong>${escapeHtml(memberName)}</strong><small>${escapeHtml(memberRole)}</small></span></div></aside><div class="product-content"><main class="product-main" id="product-main">${page}</main><nav class="product-mobile-nav" aria-label="移动家庭导航">${mobileNav}</nav></div></div></div>`;
+  return `<div class="product-shell" data-route="${escapeHtml(route)}" data-connection-state="${escapeHtml(model.connection.state)}"${model.view === undefined ? "" : ` data-view-provider="${escapeHtml(model.view.activeId)}"`}>${safety}${completion}${viewSwitcher}<a class="product-skip-link" href="#product-main">跳到主要内容</a><div class="product-layout"><aside class="product-sidebar" aria-label="家庭导航"><a class="product-brand" href="${routeHref("overview", options)}"><span class="product-brand-mark" aria-hidden="true">h</span><span class="product-brand-copy"><strong>${escapeHtml(agentName)}</strong>${householdName === undefined ? "" : `<small>${escapeHtml(householdName)}</small>`}<small>HobAgent</small></span></a><nav aria-label="家庭导航">${desktopNav}</nav><div class="product-profile"><span class="product-profile-mark" aria-hidden="true">${escapeHtml(memberName.slice(0, 1))}</span><span class="product-profile-copy"><strong>${escapeHtml(memberName)}</strong><small>${escapeHtml(memberRole)}</small></span></div></aside><div class="product-content"><main class="product-main" id="product-main">${page}</main><nav class="product-mobile-nav" aria-label="移动家庭导航">${mobileNav}</nav></div></div></div>`;
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
