@@ -36,6 +36,12 @@ private device, while an administrator manages a shared device. The Control
 provider presents spaces, current values, policy labels and governed actions in
 one continuous dense surface; it uses the same Hub intent handlers as Life.
 
+The shared presentation layer also owns accessibility conformance. It exposes one
+page heading and a skip target, labels every form control, uses native time inputs,
+announces onboarding progress, preserves visible keyboard focus and supplies
+reduced-motion, reduced-transparency, increased-contrast and mobile safe-area
+variants. Providers inherit these semantics through the shared presentation layer.
+
 ## 2. Three action gates
 
 1. **Direct** — reversible, within granted device scope, and initiated by a

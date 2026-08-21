@@ -34,7 +34,8 @@ export const PRODUCT_SHELL_CSS = String.raw`
 html { min-width: 320px; background: var(--shell-bg); }
 body { min-width: 320px; margin: 0; background: var(--shell-bg); color: var(--shell-ink); }
 button, input, select, textarea { font: inherit; }
-button, a { -webkit-tap-highlight-color: transparent; }
+button, a, input, select, textarea, summary { touch-action: manipulation; }
+button, a { -webkit-tap-highlight-color: color-mix(in srgb, var(--shell-blue) 16%, transparent); }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .52; }
 a { color: inherit; }
@@ -218,7 +219,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-proposal-detail { display: grid; gap: 1.2rem; }
 .product-detail-header { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: .8rem; }
 .product-detail-header h2 { margin: 0; font-size: clamp(1.5rem, 2.5vw, 2.1rem); }
-.product-stepper { display: grid; grid-template-columns: repeat(3, 1fr); overflow: hidden; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); }
+.product-stepper { display: grid; grid-template-columns: repeat(3, 1fr); overflow: hidden; margin: 0; padding: 0; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); list-style: none; }
 .product-step { display: flex; align-items: center; gap: .45rem; min-height: 3.3rem; padding: .55rem .7rem; border-inline-end: 1px solid var(--shell-rule); background: var(--shell-surface); color: var(--shell-muted); font-size: .82rem; }
 .product-step:last-child { border-inline-end: 0; }
 .product-step[data-state="current"] { border-color: var(--shell-blue); background: var(--shell-blue-soft); color: var(--shell-blue); font-weight: 760; }

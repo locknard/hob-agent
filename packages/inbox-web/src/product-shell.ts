@@ -235,7 +235,7 @@ export interface ProductControlFeedback {
   readonly undo?: ProductUndo;
 }
 
-export type ProductOnboardingFieldType = "text" | "url" | "textarea" | "select" | "radio" | "checkbox";
+export type ProductOnboardingFieldType = "text" | "time" | "url" | "textarea" | "select" | "radio" | "checkbox";
 
 export interface ProductOnboardingFieldOption {
   readonly value: string;
@@ -525,8 +525,8 @@ const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
           { value: "10080", label: "每周" },
         ],
       },
-      { name: "quietHoursStart", type: "text", label: "安静时段开始", placeholder: "22:00", help: "使用 HH:MM" },
-      { name: "quietHoursEnd", type: "text", label: "安静时段结束", placeholder: "08:00", help: "使用 HH:MM" },
+      { name: "quietHoursStart", type: "time", label: "安静时段开始", placeholder: "22:00", help: "使用 HH:MM" },
+      { name: "quietHoursEnd", type: "time", label: "安静时段结束", placeholder: "08:00", help: "使用 HH:MM" },
     ],
     submitLabel: "保存观察节奏",
     note: "保存后，观察会按你的许可和时间安排运行。",
@@ -708,7 +708,7 @@ function renderOverview(model: NormalizedProductShellModel, options: ProductShel
   const standaloneViewShortcut = model.view === undefined
     ? `<a class="product-view-switcher" href="${routeHref("control", options)}">控制视图</a>`
     : "";
-  return `<header class="product-page-header"><div><p class="product-kicker">生活视图</p><h1>${escapeHtml(householdName)}</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header><section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`)}</p></section>${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${spaceGrid}</div><aside class="product-overview-aside"><section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div></section><section class="product-card product-agent-note" aria-label="${escapeHtml(agentName)}的提醒"><span class="product-agent-mark" aria-hidden="true">h</span><p class="product-agent-bubble">${escapeHtml(model.agentNote ?? "需要你决定的事会出现在处理中心。")}</p></section>${energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`}</aside></div><form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="问问家，或说出你想做的事" /><button type="submit">发送</button></form><p class="product-helper-copy">小范围动作会直接完成；影响较大的动作会先请你确认。</p>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">生活视图</p><h1>${escapeHtml(householdName)}</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header><section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`)}</p></section>${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${spaceGrid}</div><aside class="product-overview-aside"><section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div></section><section class="product-card product-agent-note" aria-label="${escapeHtml(agentName)}的提醒"><span class="product-agent-mark" aria-hidden="true">h</span><p class="product-agent-bubble">${escapeHtml(model.agentNote ?? "需要你决定的事会出现在处理中心。")}</p></section>${energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`}</aside></div><form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="问问家，或说出你想做的事…" /><button type="submit">发送</button></form><p class="product-helper-copy">小范围动作会直接完成；影响较大的动作会先请你确认。</p>`;
 }
 
 function overviewConnectionStatus(connection: ProductShellConnection): {
@@ -749,7 +749,7 @@ function renderConversation(model: NormalizedProductShellModel, options: Product
   const thread = turn === undefined
     ? `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><p>我在这里，告诉我家里的情况或想做的事。</p></div></div>`
     : `<div class="product-message product-message--user"><div class="product-message-bubble"><p>${escapeHtml(turn.question)}</p></div></div>${renderTurn(turn, agentName)}`;
-  return `<header class="product-page-header product-conversation-header"><div><p class="product-kicker">对话</p><h1>和${escapeHtml(agentName)}对话</h1><p class="product-muted">问我家里的状态、刚刚发生的变化，或下一步怎么做。</p></div><a class="product-view-switcher" href="${routeHref("overview", options)}">回到总览</a></header><div class="product-conversation"><section class="product-card product-conversation-main" aria-label="对话内容"><div class="product-conversation-thread" aria-live="polite">${thread}</div><form class="product-conversation-composer" method="post" action="/conversation"><label class="product-sr-only" for="conversation-question">继续对话</label><input id="conversation-question" name="question" autocomplete="off" placeholder="继续吩咐，或问它为什么这样选" /><button type="submit">发送</button></form><p class="product-helper-copy">处理进度和结果会显示在这里。</p>${renderUndo(model.undo)}</section><aside class="product-conversation-side"><section class="product-card" aria-labelledby="conversation-scope-heading"><h2 id="conversation-scope-heading">本次问题</h2><ul class="product-side-list"><li><span>家庭</span><strong>${escapeHtml(model.household.name ?? "家庭名称待设置")}</strong></li><li><span>来源</span><strong>家庭状态</strong></li></ul></section><section class="product-card product-card--flat"><h2>动作说明</h2><p class="product-muted">需要确认的动作会先等你同意；每次动作的验证和撤销入口会显示在结果里。</p></section></aside></div>`;
+  return `<header class="product-page-header product-conversation-header"><div><p class="product-kicker">对话</p><h1>和${escapeHtml(agentName)}对话</h1><p class="product-muted">问我家里的状态、刚刚发生的变化，或下一步怎么做。</p></div><a class="product-view-switcher" href="${routeHref("overview", options)}">回到总览</a></header><div class="product-conversation"><section class="product-card product-conversation-main" aria-label="对话内容"><div class="product-conversation-thread" aria-live="polite">${thread}</div><form class="product-conversation-composer" method="post" action="/conversation"><label class="product-sr-only" for="conversation-question">继续对话</label><input id="conversation-question" name="question" autocomplete="off" placeholder="继续吩咐，或问它为什么这样选…" /><button type="submit">发送</button></form><p class="product-helper-copy">处理进度和结果会显示在这里。</p>${renderUndo(model.undo)}</section><aside class="product-conversation-side"><section class="product-card" aria-labelledby="conversation-scope-heading"><h2 id="conversation-scope-heading">本次问题</h2><ul class="product-side-list"><li><span>家庭</span><strong>${escapeHtml(model.household.name ?? "家庭名称待设置")}</strong></li><li><span>来源</span><strong>家庭状态</strong></li></ul></section><section class="product-card product-card--flat"><h2>动作说明</h2><p class="product-muted">需要确认的动作会先等你同意；每次动作的验证和撤销入口会显示在结果里。</p></section></aside></div>`;
 }
 
 function renderTurn(turn: ProductTurn, agentName: string): string {
@@ -773,7 +773,7 @@ function renderTurn(turn: ProductTurn, agentName: string): string {
 
 function renderCorrectionForm(adviceId: string): string {
   const action = `/conversation/${encodedPathSegment(adviceId)}/correction`;
-  return `<form class="product-correction-form" method="post" action="${escapeHtml(action)}"><fieldset><legend>这次回答需要调整吗？</legend><label><input type="radio" name="correctionType" value="household_fact" required>家庭事实</label><label><input type="radio" name="correctionType" value="household_preference">家庭偏好</label><label><input type="radio" name="correctionType" value="future_behavior">未来行为</label></fieldset><label class="product-sr-only" for="correction-${escapeHtml(adviceId)}">告诉我需要记住什么</label><textarea id="correction-${escapeHtml(adviceId)}" name="correction" rows="2" maxlength="2000" required placeholder="告诉我需要记住什么"></textarea><input type="hidden" name="idempotencyKey" value="${escapeHtml(`${adviceId}:correction`)}"><button class="product-secondary-action" type="submit">提交纠正</button><p class="product-muted">事实和偏好会写入家庭知识；未来行为会进入给家的建议。</p></form>`;
+  return `<form class="product-correction-form" method="post" action="${escapeHtml(action)}"><fieldset><legend>这次回答需要调整吗？</legend><label><input type="radio" name="correctionType" value="household_fact" required>家庭事实</label><label><input type="radio" name="correctionType" value="household_preference">家庭偏好</label><label><input type="radio" name="correctionType" value="future_behavior">未来行为</label></fieldset><label class="product-sr-only" for="correction-${escapeHtml(adviceId)}">告诉我需要记住什么</label><textarea id="correction-${escapeHtml(adviceId)}" name="correction" autocomplete="off" rows="2" maxlength="2000" required placeholder="告诉我需要记住什么…"></textarea><input type="hidden" name="idempotencyKey" value="${escapeHtml(`${adviceId}:correction`)}"><button class="product-secondary-action" type="submit">提交纠正</button><p class="product-muted">事实和偏好会写入家庭知识；未来行为会进入给家的建议。</p></form>`;
 }
 
 function renderUndo(undo: ProductUndo | undefined): string {
@@ -828,7 +828,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
         : `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/enable"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">确认长期使用</button></form>`;
   const why = proposal.why?.length ? proposal.why : proposal.evidence?.length ? proposal.evidence : ["暂无已记录证据"];
   const willDo = proposal.willDo?.length ? proposal.willDo : ["待补充"];
-  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">需要两次确认</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div><div class="product-stepper" aria-label="建议进度"><div class="product-step" data-state="${stageState("direction")}"><span class="product-step-index">1</span><span>确认方向</span></div><div class="product-step" data-state="${stageState("trial")}"><span class="product-step-index">2</span><span>试运行阶段（每次先告诉你）</span></div><div class="product-step" data-state="${stageState("enable")}"><span class="product-step-index">3</span><span>你决定是否长期使用</span></div></div><div class="product-detail-columns"><section><h3>为什么提这个</h3>${list(why, "product-cause-chain")}</section><section><h3>会做什么</h3>${list(willDo, "product-cause-chain")}</section></div>${proposal.dependency === undefined ? "" : `<p class="product-dependency">需要：${escapeHtml(proposal.dependency)}。确认方向后，试运行会按当前权限进行；要长期使用时，你可以在设置里打开对应权限。</p>`}${proposal.unknowns?.length ? `<section><h3>仍待确认</h3>${list(proposal.unknowns)}</section>` : ""}<div class="product-review-boundary"><div class="product-card-actions">${action}<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options"><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="tomorrow">明天晚上</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="weekend">周末</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="next_week">下周</button></form></div></details><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">这次跳过</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject-latch"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-danger-action" type="submit">不再建议这件事</button></form></div><p>试运行结束后，你会看到结果，再决定是否长期使用。</p></div></article>`;
+  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">需要两次确认</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div><ol class="product-stepper" aria-label="建议进度"><li class="product-step" data-state="${stageState("direction")}"><span class="product-step-index">1</span><span>确认方向</span></li><li class="product-step" data-state="${stageState("trial")}"><span class="product-step-index">2</span><span>试运行阶段（每次先告诉你）</span></li><li class="product-step" data-state="${stageState("enable")}"><span class="product-step-index">3</span><span>你决定是否长期使用</span></li></ol><div class="product-detail-columns"><section><h3>为什么提这个</h3>${list(why, "product-cause-chain")}</section><section><h3>会做什么</h3>${list(willDo, "product-cause-chain")}</section></div>${proposal.dependency === undefined ? "" : `<p class="product-dependency">需要：${escapeHtml(proposal.dependency)}。确认方向后，试运行会按当前权限进行；要长期使用时，你可以在设置里打开对应权限。</p>`}${proposal.unknowns?.length ? `<section><h3>仍待确认</h3>${list(proposal.unknowns)}</section>` : ""}<div class="product-review-boundary"><div class="product-card-actions">${action}<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options"><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="tomorrow">明天晚上</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="weekend">周末</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="next_week">下周</button></form></div></details><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">这次跳过</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject-latch"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-danger-action" type="submit">不再建议这件事</button></form></div><p>试运行结束后，你会看到结果，再决定是否长期使用。</p></div></article>`;
 }
 
 function renderActivity(model: NormalizedProductShellModel): string {
@@ -888,20 +888,62 @@ function controlPolicyLabel(policyClass: ProductControlItem["policyClass"]): str
   return "直接完成";
 }
 
+const CONTROL_CONNECTION_PRESENTATION = {
+  connected: {
+    availability: "available",
+    countLabel: "项可用动作",
+    summary: "每项动作都会按成员权限处理，需要确认的会先等你同意。",
+  },
+  quiet: {
+    availability: "available",
+    countLabel: "项可用动作",
+    summary: "每项动作都会按成员权限处理，需要确认的会先等你同意。",
+  },
+  connecting: {
+    availability: "waiting",
+    countLabel: "项待连接动作",
+    summary: "正在连接家庭设备，状态准备好后即可操作。",
+  },
+  disconnected: {
+    availability: "waiting",
+    countLabel: "项待连接动作",
+    summary: "家庭连接正在恢复，状态保留为上次已知值。",
+  },
+  unknown: {
+    availability: "waiting",
+    countLabel: "项待连接动作",
+    summary: "正在确认家庭连接，状态准备好后即可操作。",
+  },
+} as const satisfies Readonly<Record<ProductConnectionState, {
+  readonly availability: "available" | "waiting";
+  readonly countLabel: string;
+  readonly summary: string;
+}>>;
+
 function renderDenseControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const spaces = model.controlSpaces ?? [];
   const controlCount = spaces.reduce((total, space) => total + (space.controls?.length ?? 0), 0);
+  const connectionPresentation = CONTROL_CONNECTION_PRESENTATION[model.connection.state];
+  const controlsAvailable = connectionPresentation.availability === "available";
   const feedback = model.controlFeedback === undefined ? "" : renderControlFeedback(model.controlFeedback);
   const batch = model.batchControl === undefined ? "" : renderBatchControl(model.batchControl);
   const standaloneViewShortcut = model.view === undefined
     ? `<a class="product-view-switcher" href="${routeHref("overview", options)}">生活视图</a>`
     : "";
   const rows = spaces.map((space) => {
-    const controls = (space.controls ?? []).map((control) => `<form class="product-control-row" method="post" action="/control/${encodedPathSegment(control.id)}" data-control-capability="${escapeHtml(control.id)}"><span class="product-control-identity"><strong>${escapeHtml(control.label)}</strong><small>${escapeHtml(controlPolicyLabel(control.policyClass))}</small></span><span class="product-control-current-value">${escapeHtml(control.value ?? "状态待确认")}</span><button class="product-control-action${control.result === "unknown" ? " product-result--unknown" : control.result === "failed" ? " product-result--failed" : ""}" type="submit">${escapeHtml(control.actionLabel ?? control.label)}</button></form>`).join("");
+    const controls = (space.controls ?? []).map((control) => {
+      const policyLabel = controlPolicyLabel(control.policyClass);
+      const stateLabel = controlsAvailable ? policyLabel : `${policyLabel} · 连接恢复后可用`;
+      const currentValue = controlsAvailable || control.value === undefined
+        ? control.value ?? "状态待确认"
+        : `上次：${control.value}`;
+      const disabled = controlsAvailable ? "" : " disabled aria-disabled=\"true\"";
+      return `<form class="product-control-row" method="post" action="/control/${encodedPathSegment(control.id)}" data-control-capability="${escapeHtml(control.id)}"><span class="product-control-identity"><strong>${escapeHtml(control.label)}</strong><small>${escapeHtml(stateLabel)}</small></span><span class="product-control-current-value">${escapeHtml(currentValue)}</span><button class="product-control-action${control.result === "unknown" ? " product-result--unknown" : control.result === "failed" ? " product-result--failed" : ""}" type="submit"${disabled}>${escapeHtml(control.actionLabel ?? control.label)}</button></form>`;
+    }).join("");
     const metrics = space.metrics?.map((metric) => `<span class="product-control-metric"><small>${escapeHtml(metric.label)}</small><strong>${escapeHtml(metric.value)}</strong></span>`).join("") ?? "";
     return `<section class="product-control-space" data-control-space="${escapeHtml(space.id)}" aria-labelledby="control-${escapeHtml(space.id)}"><header><div><h2 id="control-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-control-state">${escapeHtml(space.state ?? `${space.deviceCount ?? 0} 个设备`)}</span></div>${metrics === "" ? "" : `<div class="product-control-metrics">${metrics}</div>`}</header><div class="product-control-rows">${controls || `<p class="product-control-empty">这个空间的动作仍在准备，当前状态会继续更新。</p>`}</div></section>`;
   }).join("");
-  return `<header class="product-page-header"><div><p class="product-kicker">控制视图</p><h1>家里的状态</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<section class="product-control-workspace" data-control-density="dense" aria-label="家庭控制概览"><div class="product-control-summary"><span><strong>${spaces.length}</strong><small>个空间</small></span><span><strong>${controlCount}</strong><small>项可用动作</small></span><p>每项动作都会按成员权限处理，需要确认的会先等你同意。</p></div><div class="product-control-spaces">${rows || `<section class="product-control-space"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>`}</div></section>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">控制视图</p><h1>家里的状态</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<section class="product-control-workspace" data-control-density="dense" data-control-availability="${connectionPresentation.availability}" aria-label="家庭控制概览"><div class="product-control-summary"><span><strong>${spaces.length}</strong><small>个空间</small></span><span><strong>${controlCount}</strong><small>${connectionPresentation.countLabel}</small></span><p>${connectionPresentation.summary}</p></div><div class="product-control-spaces">${rows || `<section class="product-control-space"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>`}</div></section>`;
 }
 
 function renderControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -918,19 +960,24 @@ function renderControl(model: NormalizedProductShellModel, options: ProductShell
   return `<header class="product-page-header"><div><p class="product-kicker">控制</p><h1>家里的状态</h1><p class="product-muted">查看房间状态，需要时请求一项动作。</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<div class="product-control-grid">${spaces.length === 0 ? `<section class="product-card"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>` : spaces.map((space) => `<section class="product-card product-control-card" aria-labelledby="control-${escapeHtml(space.id)}"><header><h2 id="control-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-control-state">${escapeHtml(space.state ?? `${space.deviceCount ?? 0} 个设备`)}</span></header>${space.metrics?.length ? `<div class="product-metric-row">${space.metrics.map((metric) => `<span class="product-metric"><span class="product-metric-label">${escapeHtml(metric.label)}</span><strong class="product-metric-value">${escapeHtml(metric.value)}</strong></span>`).join("")}</div>` : ""}<div class="product-control-actions">${(space.controls ?? []).map((control) => `<form class="product-action-form" method="post" action="/control/${encodedPathSegment(control.id)}"><button class="product-control-action${control.result === "unknown" ? " product-result--unknown" : control.result === "failed" ? " product-result--failed" : ""}" type="submit">${escapeHtml(control.actionLabel ?? control.label)}</button></form>`).join("") || `<span class="product-muted">正在更新这个空间的状态</span>`}</div></section>`).join("")}</div>`;
 }
 
+const CONTROL_FEEDBACK_PRESENTATION = {
+  verified: { label: "已完成", showsExpiry: false, showsUndo: true },
+  pending_confirmation: { label: "等待你放行", showsExpiry: true, showsUndo: false },
+  failed: { label: "动作未完成", showsExpiry: false, showsUndo: false },
+  unknown: { label: "正在确认结果", showsExpiry: false, showsUndo: false },
+} as const satisfies Readonly<Record<ProductControlFeedback["status"], {
+  readonly label: string;
+  readonly showsExpiry: boolean;
+  readonly showsUndo: boolean;
+}>>;
+
 function renderControlFeedback(feedback: ProductControlFeedback): string {
-  const statusLabel = feedback.status === "verified"
-    ? "已完成"
-    : feedback.status === "pending_confirmation"
-      ? "等待你放行"
-      : feedback.status === "failed"
-        ? "动作未完成"
-        : "正在确认结果";
-  const expires = feedback.expiresAt === undefined
+  const presentation = CONTROL_FEEDBACK_PRESENTATION[feedback.status];
+  const expires = !presentation.showsExpiry || feedback.expiresAt === undefined
     ? ""
     : `<span class="product-control-feedback-expiry" data-control-expires-at="${escapeHtml(feedback.expiresAt)}">${escapeHtml(feedback.expiresIn ?? "有时限")}</span>`;
-  const undo = feedback.undo === undefined ? "" : renderUndo(feedback.undo);
-  return `<section class="product-card product-control-feedback product-control-feedback--${escapeHtml(feedback.status)}" data-control-status="${escapeHtml(feedback.status)}" role="status" aria-live="polite"><div class="product-control-feedback-copy"><p class="product-kicker">${statusLabel}</p><h2>${escapeHtml(feedback.label)}</h2><p>${escapeHtml(feedback.detail)}</p>${expires}</div>${undo}</section>`;
+  const undo = presentation.showsUndo && feedback.undo !== undefined ? renderUndo(feedback.undo) : "";
+  return `<section class="product-card product-control-feedback product-control-feedback--${escapeHtml(feedback.status)}" data-control-status="${escapeHtml(feedback.status)}" role="status" aria-live="polite"><div class="product-control-feedback-copy"><p class="product-kicker">${presentation.label}</p><h2>${escapeHtml(feedback.label)}</h2><p>${escapeHtml(feedback.detail)}</p>${expires}</div>${undo}</section>`;
 }
 
 function renderDeviceViewPreference(view: ProductViewState): string {
@@ -1090,7 +1137,7 @@ function renderOnboardingField(field: ProductOnboardingField): string {
     return `<label class="product-onboarding-field" for="${escapeHtml(id)}"><span class="product-onboarding-field-label">${escapeHtml(field.label)}</span><select id="${escapeHtml(id)}" name="${escapeHtml(field.name)}"${required}${disabled}>${options}</select>${help}</label>`;
   }
   if (field.type === "textarea") {
-    return `<label class="product-onboarding-field" for="${escapeHtml(id)}"><span class="product-onboarding-field-label">${escapeHtml(field.label)}</span><textarea id="${escapeHtml(id)}" name="${escapeHtml(field.name)}" placeholder="${escapeHtml(field.placeholder)}"${required}${disabled}>${escapeHtml(field.value)}</textarea>${help}</label>`;
+    return `<label class="product-onboarding-field" for="${escapeHtml(id)}"><span class="product-onboarding-field-label">${escapeHtml(field.label)}</span><textarea id="${escapeHtml(id)}" name="${escapeHtml(field.name)}" autocomplete="off" placeholder="${escapeHtml(field.placeholder)}"${required}${disabled}>${escapeHtml(field.value)}</textarea>${help}</label>`;
   }
   if (field.type === "radio" || field.type === "checkbox") {
     const inputType = field.type === "radio" ? "radio" : "checkbox";
@@ -1103,7 +1150,7 @@ function renderOnboardingField(field: ProductOnboardingField): string {
     }).join("");
     return `<fieldset class="product-onboarding-field product-onboarding-fieldset"><legend class="product-onboarding-field-label">${escapeHtml(field.label)}</legend><div class="product-onboarding-choices">${options}</div>${help}</fieldset>`;
   }
-  return `<label class="product-onboarding-field" for="${escapeHtml(id)}"><span class="product-onboarding-field-label">${escapeHtml(field.label)}</span><input id="${escapeHtml(id)}" type="${escapeHtml(field.type)}" name="${escapeHtml(field.name)}" value="${escapeHtml(field.value)}" placeholder="${escapeHtml(field.placeholder)}"${required}${disabled}>${help}</label>`;
+  return `<label class="product-onboarding-field" for="${escapeHtml(id)}"><span class="product-onboarding-field-label">${escapeHtml(field.label)}</span><input id="${escapeHtml(id)}" type="${escapeHtml(field.type)}" name="${escapeHtml(field.name)}" value="${escapeHtml(field.value)}" placeholder="${escapeHtml(field.placeholder)}" autocomplete="off"${required}${disabled}>${help}</label>`;
 }
 
 function renderOnboardingItems(items: readonly ProductOnboardingItem[] | undefined): string {
@@ -1130,7 +1177,7 @@ function renderOnboarding(model: NormalizedProductShellModel, options: ProductSh
     : index + 1 === step
       ? "current"
       : "pending";
-  return `<header class="product-page-header"><div><p class="product-kicker">首次设置 · 第 ${step} 步，共 8 步</p><h1>${escapeHtml(title)}</h1><p class="product-muted">${escapeHtml(body)}</p></div></header><div class="product-onboarding" data-onboarding-step="${step}" data-onboarding-key="${escapeHtml(current.key)}"><div class="product-onboarding-progress" aria-label="首次设置进度">${steps.map((_, index) => `<span class="product-onboarding-step" data-state="${stepState(index)}" aria-hidden="true"></span>`).join("")}</div><div class="product-onboarding-content"><ol class="product-onboarding-list" aria-label="首次设置步骤">${steps.map((item, index) => `<li data-state="${stepState(index)}"><span class="product-onboarding-index">${index + 1}</span><span>${escapeHtml(item.label)}</span></li>`).join("")}</ol><section class="product-card product-card--blue product-onboarding-form-panel" aria-labelledby="onboarding-form-heading"><h2 id="onboarding-form-heading">${escapeHtml(current.label)}</h2>${renderOnboardingItems(items)}<form class="product-onboarding-form" method="post" action="${escapeHtml(action)}"><input type="hidden" name="step" value="${step}">${fields.map(renderOnboardingField).join("")}<button class="product-primary-action product-onboarding-submit" type="submit"${submitDisabled ? " disabled" : ""}>${escapeHtml(submitLabel)}</button></form>${note === undefined ? "" : `<p class="product-onboarding-note">${escapeHtml(note)}</p>`}</section></div></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">首次设置 · 第 ${step} 步，共 8 步</p><h1>${escapeHtml(title)}</h1><p class="product-muted">${escapeHtml(body)}</p></div></header><div class="product-onboarding" data-onboarding-step="${step}" data-onboarding-key="${escapeHtml(current.key)}"><div class="product-onboarding-progress" role="progressbar" aria-valuenow="${step}" aria-valuemin="1" aria-valuemax="8" aria-valuetext="第 ${step} 步，共 8 步" aria-label="首次设置进度">${steps.map((_, index) => `<span class="product-onboarding-step" data-state="${stepState(index)}" aria-hidden="true"></span>`).join("")}</div><div class="product-onboarding-content"><ol class="product-onboarding-list" aria-label="首次设置步骤">${steps.map((item, index) => `<li data-state="${stepState(index)}"><span class="product-onboarding-index">${index + 1}</span><span>${escapeHtml(item.label)}</span></li>`).join("")}</ol><section class="product-card product-card--blue product-onboarding-form-panel" aria-labelledby="onboarding-form-heading"><h2 id="onboarding-form-heading">${escapeHtml(current.label)}</h2>${renderOnboardingItems(items)}<form class="product-onboarding-form" method="post" action="${escapeHtml(action)}"><input type="hidden" name="step" value="${step}">${fields.map(renderOnboardingField).join("")}<button class="product-primary-action product-onboarding-submit" type="submit"${submitDisabled ? " disabled" : ""}>${escapeHtml(submitLabel)}</button></form>${note === undefined ? "" : `<p class="product-onboarding-note">${escapeHtml(note)}</p>`}</section></div></div>`;
 }
 
 /** Render the layout-owned page content inside the fixed Host Shell. */

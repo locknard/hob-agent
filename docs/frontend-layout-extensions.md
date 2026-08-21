@@ -313,6 +313,21 @@ intent 禁用；保存失败保留草稿。重置只删除当前 provider 的 pr
 - 自定义布局不满足 keyboard、contrast、reduced-motion 或屏幕尺寸 conformance：不得发布
   到公共 catalog；本地开发模式也保留“恢复默认布局”。
 
+Control availability is an exhaustive projection of the neutral connection state:
+
+| Connection state | Presented value | Action state | Recovery path |
+| --- | --- | --- | --- |
+| `connected` | current value | available | normal control feedback |
+| `quiet` | current value, connection healthy | available | normal control feedback |
+| `connecting` | last known value | waiting | connection completion |
+| `disconnected` | last known value | waiting | connection recovery |
+| `unknown` | last known value | waiting | connection classification |
+
+Control feedback has four valid shapes: `verified` may offer the bounded undo,
+`pending_confirmation` may show its approval expiry, and `failed` or `unknown`
+render stable, informational feedback. Both built-in providers pass the same
+state table and render identical governed control content for the semantic route.
+
 ## Delivery sequence
 
 Current checkpoint (2026-08-22): F0 is complete. F1 now includes the shared
@@ -323,9 +338,12 @@ Host-owned settings command persists or resets a device default; a bound private
 device is managed by its member and a shared device is managed by an administrator.
 The Control provider renders a continuous dense space-and-action surface from the
 same governed intents. The Host is the single owner of the view switcher; providers
-render content for the active semantic route. The remaining F1 work is provider-specific presentation
-configuration beyond the device default and the full accessibility/error-state
-conformance matrix.
+render content for the active semantic route. The connection and control-feedback
+error-state matrix is complete. The shared accessibility matrix covers one page
+heading, skip navigation, labelled controls, native time fields, semantic progress,
+visible keyboard focus, touch feedback, reduced motion/transparency, increased
+contrast and responsive safe areas. The remaining F1 work is provider-specific
+presentation configuration beyond the device default.
 
 1. **F0 — contract and prototype:** 在交互稿中加入生活/控制视图切换、失败回退、per-device
    preference 和语义路由连续性；不装载第三方代码。

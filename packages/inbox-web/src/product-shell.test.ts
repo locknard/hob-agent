@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   renderProductShell,
+  type ProductConnectionState,
+  type ProductControlFeedback,
   type ProductShellModel,
 } from "./product-shell.js";
 import { PRODUCT_SHELL_CSS } from "./product-shell-styles.js";
@@ -77,6 +79,7 @@ test("renders a responsive shell with independent runtime and proposal badges", 
   assert.equal(html.includes("data-count=\"2\""), false);
   assert.match(html, /<main[^>]+id="product-main"/);
   assert.match(html, /小海的家/);
+  assert.match(html, /placeholder="问问家，或说出你想做的事…"/);
 });
 
 test("keeps a host-owned safety banner above navigation and distinguishes quiet from disconnected", () => {
@@ -302,7 +305,8 @@ test("offers explicit correction choices only on a completed conversation turn",
   assert.match(completed, /name="correctionType" value="household_preference"/);
   assert.match(completed, /name="correctionType" value="future_behavior"/);
   assert.match(completed, /name="idempotencyKey" value="advice-1:correction"/);
-  assert.match(completed, /name="correction"/);
+  assert.match(completed, /name="correction"[^>]*autocomplete="off"/);
+  assert.match(completed, /placeholder="告诉我需要记住什么…"/);
   assert.doesNotMatch(completed, /action="\/conversation\/advice-1\/correction"[^>]*>[^]*name="correctionType" value="other"/);
 
   const failed = renderProductShell(model({
@@ -361,6 +365,8 @@ test("separates proposal snooze from the two-consent detail and explains activit
   assert.match(review, /name="feedbackCode" value="useful_as_is"/);
   assert.doesNotMatch(review, /action="\/review-center\/proposals\/media-power\/advance"/);
   assert.match(review, /确认方向，开始准备/);
+  assert.match(review, /<ol class="product-stepper" aria-label="建议进度">/);
+  assert.equal((review.match(/<li class="product-step"/g) ?? []).length, 3);
   assert.match(review, /试运行阶段/);
   assert.match(review, /你决定是否长期使用/);
   assert.match(review, /action="\/review-center\/proposals\/media-power\/reject"[^>]*>/);
@@ -413,6 +419,8 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.match(PRODUCT_SHELL_CSS, /prefers-contrast/);
   assert.match(PRODUCT_SHELL_CSS, /max-width: 56rem/);
   assert.match(PRODUCT_SHELL_CSS, /-apple-system/);
+  assert.match(PRODUCT_SHELL_CSS, /touch-action:\s*manipulation/);
+  assert.doesNotMatch(PRODUCT_SHELL_CSS, /-webkit-tap-highlight-color:\s*transparent/);
   assert.equal(PRODUCT_SHELL_CSS.includes("gradient"), false);
   assert.equal(PRODUCT_SHELL_CSS.includes("<svg"), false);
   assert.doesNotMatch(html, /[⌄✓●→↗⚙⌂◷≋▱□]/);
@@ -549,6 +557,80 @@ test("renders neutral control forms and explicit action feedback with a ten-seco
   assert.match(failed, /家里保持原状/);
 });
 
+test("models control availability across every household connection state", () => {
+  const expectations: Readonly<Record<ProductConnectionState, {
+    readonly availability: "available" | "waiting";
+    readonly summary: string;
+    readonly disabled: boolean;
+    readonly value: string;
+  }>> = {
+    connected: { availability: "available", summary: "每项动作都会按成员权限处理", disabled: false, value: "开" },
+    quiet: { availability: "available", summary: "每项动作都会按成员权限处理", disabled: false, value: "开" },
+    connecting: { availability: "waiting", summary: "正在连接家庭设备", disabled: true, value: "上次：开" },
+    disconnected: { availability: "waiting", summary: "家庭连接正在恢复", disabled: true, value: "上次：开" },
+    unknown: { availability: "waiting", summary: "正在确认家庭连接", disabled: true, value: "上次：开" },
+  };
+
+  for (const [state, expected] of Object.entries(expectations) as Array<[ProductConnectionState, typeof expectations[ProductConnectionState]]>) {
+    const html = renderProductShell(model({
+      route: "control",
+      connection: { state },
+      controlSpaces: [{
+        id: "living-room",
+        name: "客厅",
+        controls: [{ id: "cap-light", label: "顶灯", value: "开", actionLabel: "关闭", policyClass: "direct" }],
+      }],
+    }));
+
+    assert.match(html, new RegExp(`data-control-availability="${expected.availability}"`), state);
+    assert.match(html, new RegExp(expected.summary), state);
+    assert.match(html, new RegExp(`class="product-control-current-value">${expected.value}<\\/span>`), state);
+    assert.equal(/<button[^>]+disabled/.test(html), expected.disabled, state);
+    if (expected.disabled) assert.match(html, /连接恢复后可用/, state);
+  }
+});
+
+test("keeps every control feedback state in a valid interaction shape", () => {
+  const expectations: Readonly<Record<ProductControlFeedback["status"], {
+    readonly label: string;
+    readonly undo: boolean;
+    readonly expiry: boolean;
+  }>> = {
+    verified: { label: "已完成", undo: true, expiry: false },
+    pending_confirmation: { label: "等待你放行", undo: false, expiry: true },
+    failed: { label: "动作未完成", undo: false, expiry: false },
+    unknown: { label: "正在确认结果", undo: false, expiry: false },
+  };
+
+  for (const [status, expected] of Object.entries(expectations) as Array<[ProductControlFeedback["status"], typeof expectations[ProductControlFeedback["status"]]]>) {
+    const html = renderProductShell(model({
+      route: "control",
+      controlSpaces: [],
+      controlFeedback: {
+        capabilityId: "cap-light",
+        ticketId: "ticket-1",
+        status,
+        label: "关闭顶灯",
+        detail: "动作状态已经更新。",
+        expiresAt: "2026-08-22T08:10:00.000Z",
+        expiresIn: "2 分钟",
+        undo: {
+          id: "ticket-1",
+          label: "关闭顶灯已完成",
+          inverseLabel: "恢复打开",
+          remainingSeconds: 8,
+          status: "available",
+        },
+      },
+    }));
+
+    assert.match(html, new RegExp(`data-control-status="${status}"`), status);
+    assert.match(html, new RegExp(expected.label), status);
+    assert.equal(html.includes('/actions/ticket-1/undo'), expected.undo, status);
+    assert.equal(html.includes('data-control-expires-at='), expected.expiry, status);
+  }
+});
+
 test("renders bounded batch selection, policy preview, and per-item outcomes", () => {
   const html = renderProductShell(model({
     route: "control",
@@ -644,6 +726,8 @@ test("renders all eight onboarding steps with clear server-postable fields", () 
       onboarding: { step },
     }));
     assert.match(html, new RegExp(`data-onboarding-step="${step}"`));
+    assert.match(html, new RegExp(`role="progressbar"[^>]*aria-valuenow="${step}"[^>]*aria-valuemin="1"[^>]*aria-valuemax="8"`));
+    assert.match(html, new RegExp(`aria-valuetext="第 ${step} 步，共 8 步"`));
     assert.match(html, content);
     assert.match(html, field);
     assert.match(html, new RegExp(`name="step" value="${step}"`));
@@ -653,6 +737,14 @@ test("renders all eight onboarding steps with clear server-postable fields", () 
 
   const safety = renderProductShell(model({ route: "onboarding", onboarding: { step: 6 } }));
   assert.match(safety, /name="safetyAcknowledged"[^>]+required/);
+
+  const identity = renderProductShell(model({ route: "onboarding", onboarding: { step: 1 } }));
+  assert.match(identity, /type="text" name="agentName"[^>]*autocomplete="off"/);
+  assert.match(identity, /type="text" name="householdName"[^>]*autocomplete="off"/);
+
+  const observation = renderProductShell(model({ route: "onboarding", onboarding: { step: 7 } }));
+  assert.match(observation, /type="time" name="quietHoursStart"[^>]*autocomplete="off"/);
+  assert.match(observation, /type="time" name="quietHoursEnd"[^>]*autocomplete="off"/);
 });
 
 test("renders only projected bridge and capability ids, with a blocked read-only state when choices are absent", () => {

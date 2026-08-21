@@ -9,6 +9,7 @@ import {
   type ProductViewProvider,
   type ProposalInboxHttpOptions,
 } from "./proposal-inbox-http-service.js";
+import type { ProductConnectionState } from "./product-shell.js";
 
 class StubInbox extends Service {
   readonly reviews: unknown[] = [];
@@ -37,11 +38,12 @@ class StubInbox extends Service {
 class ControlInbox extends StubInbox {
   readonly controls: unknown[] = [];
   readonly undos: unknown[] = [];
+  connectionState: ProductConnectionState = "quiet";
   status: "verified" | "pending_confirmation" | "failed" | "unknown" = "verified";
 
   getProductShellProjection() {
     return {
-      connection: { state: "quiet" as const, lastContact: "刚刚" },
+      connection: { state: this.connectionState, lastContact: "刚刚" },
       spaces: [{ id: "living-room", name: "客厅", deviceCount: 1, devices: ["顶灯 · 开"] }],
       controlSpaces: [{
         id: "living-room",
@@ -1761,6 +1763,53 @@ test("keeps governed review intents identical across both built-in providers", a
     assert.deepEqual(actions[0], actions[1]);
     assert.ok(actions[0]?.includes("/runtime-confirmations/runtime-1/approve"));
     assert.ok(actions[0]?.includes("/runtime-confirmations/runtime-1/reject"));
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps the complete control connection state machine identical across built-in providers", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(ControlInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const inbox = ctx.homeInbox as unknown as ControlInbox;
+  const expectations: Readonly<Record<ProductConnectionState, "available" | "waiting">> = {
+    connected: "available",
+    quiet: "available",
+    connecting: "waiting",
+    disconnected: "waiting",
+    unknown: "waiting",
+  };
+
+  try {
+    for (const [state, availability] of Object.entries(expectations) as Array<[ProductConnectionState, "available" | "waiting"]>) {
+      inbox.connectionState = state;
+      const mainByView: string[] = [];
+      for (const view of ["builtin.life", "builtin.control"] as const) {
+        const response = await fetch(`${ctx.homeInboxHttp.origin}/control?view=${view}`, {
+          headers: { authorization },
+        });
+        assert.equal(response.status, 200, `${state}:${view}`);
+        const html = await response.text();
+        assert.match(html, new RegExp(`data-connection-state="${state}"`), `${state}:${view}`);
+        assert.match(html, new RegExp(`data-view-provider="${view}"`), `${state}:${view}`);
+        assert.match(html, new RegExp(`data-control-availability="${availability}"`), `${state}:${view}`);
+        assert.equal((html.match(/class="product-host-view-switcher"/g) ?? []).length, 1, `${state}:${view}`);
+        assert.equal((html.match(/data-badge="runtime"/g) ?? []).length, 2, `${state}:${view}`);
+        assert.equal((html.match(/data-badge="proposal"/g) ?? []).length, 2, `${state}:${view}`);
+        assert.equal(/<button[^>]+disabled/.test(html), availability === "waiting", `${state}:${view}`);
+        const main = /<main class="product-main" id="product-main">([\s\S]+)<\/main>/.exec(html)?.[1];
+        assert.ok(main, `${state}:${view}`);
+        mainByView.push(main);
+      }
+      assert.equal(mainByView[0], mainByView[1], state);
+    }
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();

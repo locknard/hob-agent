@@ -121,6 +121,12 @@ before writing the preference cookie. Both built-in providers continue to submit
 the same governed review and control intents. The Host renders the only view
 switcher, so a provider cannot create a competing navigation path.
 
+The Control projection exhaustively maps every neutral connection state. Connected
+and quiet homes expose governed actions; connecting, disconnected and unknown homes
+show the last known value while actions wait for a classified live connection.
+Control feedback also enforces valid combinations: verified may expose undo,
+pending confirmation may expose an expiry, and failed or unknown remain informative.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond
