@@ -410,6 +410,33 @@ class StructuredAdviceInbox extends StubInbox {
 
 }
 
+class PresentationPreferenceInbox extends StubInbox {
+  getProductShellProjection() {
+    return {
+      connection: { state: "quiet" as const, lastContact: "刚刚" },
+      spaces: Array.from({ length: 5 }, (_, index) => ({
+        id: `space-${index + 1}`,
+        name: `空间 ${index + 1}`,
+        deviceCount: index + 1,
+      })),
+      controlSpaces: [],
+      activity: [],
+    };
+  }
+
+  getProductReviewProjection() {
+    return {
+      runtimeConfirmations: [],
+      proposals: [
+        { id: "proposal-1", revision: 1, title: "建议一", status: "pending" as const },
+        { id: "proposal-2", revision: 1, title: "建议二", status: "pending" as const },
+      ],
+      proposalCapacityUsed: 2,
+      proposalCapacity: 5,
+    };
+  }
+}
+
 class GenericAdviceInbox extends StructuredAdviceInbox {
   readonly events = [
     { id: 1, type: "accepted", data: {} },
@@ -942,6 +969,7 @@ test("keeps administrator confirmations and proposal decisions on a bound privat
       redirect: "manual",
     });
     assert.equal(denied.status, 403);
+
     assert.match(await denied.text(), /authorized device/i);
 
     const unavailableSnooze = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-1/snooze`, {
@@ -1429,12 +1457,24 @@ test("keeps the Host Shell fixed while a registered view provider supplies ordin
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
   const rendered: Array<{ route: string; reviewCounts?: unknown; proposalId?: string }> = [];
+  const immutableInputs: boolean[] = [];
   const layout: ProductViewProvider = {
     id: "test.layout",
     label: "测试视图",
     renderContent(model, input) {
       const legacyKeys = ["reviews", "confirmations", "home", "turn"].filter((key) => key in model);
       assert.deepEqual(legacyKeys, []);
+      immutableInputs.push(Object.isFrozen(model), Object.isFrozen(input), Object.isFrozen(input.reviewCounts));
+      try {
+        (model as { runtimeConfirmationCount: number }).runtimeConfirmationCount = 99;
+      } catch {
+        // The Host snapshot is immutable at runtime.
+      }
+      try {
+        (input.reviewCounts as { runtimeConfirmations: number }).runtimeConfirmations = 99;
+      } catch {
+        // Nested provider context is immutable at runtime.
+      }
       rendered.push({ route: input.route, reviewCounts: input.reviewCounts, proposalId: input.proposalId });
       return `<section data-product-route="${input.route}"><h1>${input.route}</h1></section>`;
     },
@@ -1468,6 +1508,7 @@ test("keeps the Host Shell fixed while a registered view provider supplies ordin
       runtimeConfirmations: 2,
       persistentProposals: 3,
     }, entry.route);
+    assert.equal(immutableInputs.every(Boolean), true);
     assert.equal(JSON.stringify(rendered[2]?.reviewCounts ?? {}).includes("total"), false);
 
     const voice = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview`, { headers: { authorization } });
@@ -1704,10 +1745,133 @@ test("persists and resets a device default view through the Host-owned settings 
       redirect: "manual",
     });
     assert.equal(denied.status, 403);
+
+    const presentationDenied = await fetch(`${sharedCtx.homeInboxHttp.origin}/settings/view-presentation`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: sharedCtx.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "mode=set&providerId=builtin.control&key=rowDensity&value=compact",
+      redirect: "manual",
+    });
+    assert.equal(presentationDenied.status, 403);
   } finally {
     await sharedFiber.dispose();
     await sharedInboxFiber.dispose();
     await sharedCtx.fiber.dispose();
+  }
+});
+
+test("persists only declared provider presentation choices through the Host settings boundary", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+
+  try {
+    const initial = await fetch(`${ctx.homeInboxHttp.origin}/settings?view=builtin.control`, {
+      headers: { authorization },
+    });
+    const initialHtml = await initial.text();
+    assert.match(initialHtml, /action="\/settings\/view-presentation"/);
+    assert.match(initialHtml, /name="key" value="rowDensity"/);
+    assert.match(initialHtml, /name="value" value="comfortable" checked/);
+
+    const saved = await fetch(`${ctx.homeInboxHttp.origin}/settings/view-presentation`, {
+      method: "POST",
+      headers,
+      body: "mode=set&providerId=builtin.control&key=rowDensity&value=compact",
+      redirect: "manual",
+    });
+    assert.equal(saved.status, 303);
+    assert.equal(saved.headers.get("location"), "/settings?view=builtin.control");
+    const preferenceCookie = saved.headers.get("set-cookie") ?? "";
+    assert.match(preferenceCookie, /hob_view_pref_builtin\.control_rowDensity=compact/);
+    assert.match(preferenceCookie, /HttpOnly/);
+
+    const control = await fetch(`${ctx.homeInboxHttp.origin}/control?view=builtin.control`, {
+      headers: { authorization, cookie: "hob_view_pref_builtin.control_rowDensity=compact" },
+    });
+    assert.match(await control.text(), /data-control-row-density="compact"/);
+
+    const tampered = await fetch(`${ctx.homeInboxHttp.origin}/settings?view=builtin.control`, {
+      headers: { authorization, cookie: "hob_view_pref_builtin.control_rowDensity=unknown" },
+    });
+    assert.match(await tampered.text(), /name="value" value="comfortable" checked/);
+
+    for (const body of [
+      "mode=set&providerId=builtin.control&key=rowDensity&value=unknown",
+      "mode=set&providerId=builtin.control&key=unknown&value=compact",
+      "mode=set&providerId=plugin.missing&key=rowDensity&value=compact",
+      "mode=set&providerId=builtin.control&key=rowDensity&key=rowDensity&value=compact",
+      "mode=reset&providerId=builtin.control&key=rowDensity",
+    ]) {
+      const invalid = await fetch(`${ctx.homeInboxHttp.origin}/settings/view-presentation`, {
+        method: "POST",
+        headers,
+        body,
+        redirect: "manual",
+      });
+      assert.equal(invalid.status, 400, body);
+    }
+
+    const reset = await fetch(`${ctx.homeInboxHttp.origin}/settings/view-presentation`, {
+      method: "POST",
+      headers,
+      body: "mode=reset&providerId=builtin.control",
+      redirect: "manual",
+    });
+    assert.equal(reset.status, 303);
+    assert.match(reset.headers.get("set-cookie") ?? "", /hob_view_pref_builtin\.control_rowDensity=;/);
+    assert.match(reset.headers.get("set-cookie") ?? "", /Max-Age=0/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("applies the declared life-view information focus without changing household truth", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(PresentationPreferenceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  try {
+    const focused = await fetch(`${ctx.homeInboxHttp.origin}/home?view=builtin.life`, {
+      headers: { authorization },
+    });
+    const focusedHtml = await focused.text();
+    assert.match(focusedHtml, /空间 4/);
+    assert.doesNotMatch(focusedHtml, /空间 5/);
+    assert.match(focusedHtml, /建议一/);
+    assert.doesNotMatch(focusedHtml, /建议二/);
+
+    const expanded = await fetch(`${ctx.homeInboxHttp.origin}/home?view=builtin.life`, {
+      headers: {
+        authorization,
+        cookie: "hob_view_pref_builtin.life_overviewFocus=expanded",
+      },
+    });
+    const expandedHtml = await expanded.text();
+    assert.match(expandedHtml, /空间 5/);
+    assert.match(expandedHtml, /建议二/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
   }
 });
 

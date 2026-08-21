@@ -300,6 +300,28 @@ stable(current)
 intent 禁用；保存失败保留草稿。重置只删除当前 provider 的 presentation preferences，
 不删除家庭数据、设备绑定、Agent 历史或其他布局配置。
 
+### F1 declarative presentation preferences
+
+A trusted provider may declare up to 8 bounded select preferences. Each declaration
+contains a stable key, household-facing label and description, 2–8 closed choices,
+and one default choice. The Host validates declarations during registration and
+validates every saved provider/key/value tuple again at the HTTP boundary.
+
+The Host owns the settings form, the private browser-profile cookie and the same
+member/device permission used for the device default. Reset clears the active
+provider's declared preferences. The provider receives an immutable presentation
+snapshot. The values stay confined to layout and remain outside Hub intents, Agent
+prompts, bridge contracts, review decisions and semantic route selection.
+
+Registry registration snapshots and freezes provider metadata. Every render receives
+a deep-frozen copy of the model and route context; the Host renders safety, identity,
+navigation and review counts from its original canonical model.
+
+The bundled Life provider declares `overviewFocus` (`focused` or `expanded`). The
+bundled Control provider declares `rowDensity` (`comfortable` or `compact`). This
+F1 contract keeps preference UI declarative; executable provider settings remain
+part of the later isolated View Application phase.
+
 ## Failure and recovery
 
 - Provider 加载超时、崩溃、版本不兼容或被撤销：继续显示当前安全视图；不可用 provider

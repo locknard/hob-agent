@@ -15,10 +15,12 @@ import {
   type ProductShellRoute,
   type ProductTurn,
   type ProductControlFeedback,
+  type ProductViewPreferenceState,
 } from "./product-shell.js";
 import { PRODUCT_SHELL_STYLES } from "./product-shell-styles.js";
 import {
   ProductViewRegistry,
+  type RegisteredProductViewPreference,
   type RegisteredProductViewProvider,
 } from "./product-view-registry.js";
 import { renderVoiceSurface, VOICE_INTERACTION_JS } from "./voice-surface.js";
@@ -211,17 +213,67 @@ function renderBundledView(model: ProductShellModel, context: ProductRouteRender
   return `<section data-advice-stream="sse" data-advice-events="/conversation/${encodeURIComponent(context.adviceId)}/events"><p data-advice-status>${escapeTransportHtml(context.activeTurn.statusMessage ?? "正在处理。")}</p><p data-advice-answer></p>${rendered}</section>`;
 }
 
+async function renderRegisteredProductView(
+  provider: ProductViewProvider,
+  model: ProductShellModel,
+  context: ProductRouteRenderContext,
+): Promise<string> {
+  const input = immutableProviderInput({ model, context });
+  return provider.renderContent(input.model, input.context);
+}
+
+function immutableProviderInput<T>(value: T): T {
+  return deepFreeze(structuredClone(value));
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) return value;
+  const object = value as object;
+  if (seen.has(object)) return value;
+  seen.add(object);
+  for (const child of Object.values(object)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
+
 const BUILTIN_LIFE_VIEW: ProductViewProvider = {
   id: "builtin.life",
   label: "生活视图",
+  preferences: [{
+    key: "overviewFocus",
+    label: "首页信息",
+    description: "选择首页展示的信息量。",
+    defaultValue: "focused",
+    choices: [
+      { value: "focused", label: "只看重点" },
+      { value: "expanded", label: "展示更多" },
+    ],
+  }],
   renderContent(model, context) {
-    return renderBundledView(model, context);
+    const focus = model.view?.preferences?.find((preference) => preference.key === "overviewFocus")?.value;
+    const presented = context.route === "home" && focus !== "expanded"
+      ? {
+          ...model,
+          ...(model.spaces === undefined ? {} : { spaces: model.spaces.slice(0, 4) }),
+          ...(model.proposals === undefined ? {} : { proposals: model.proposals.slice(0, 1) }),
+        }
+      : model;
+    return renderBundledView(presented, context);
   },
 };
 
 const BUILTIN_CONTROL_VIEW: ProductViewProvider = {
   id: "builtin.control",
   label: "控制视图",
+  preferences: [{
+    key: "rowDensity",
+    label: "设备行距",
+    description: "选择控制列表的行距。",
+    defaultValue: "comfortable",
+    choices: [
+      { value: "comfortable", label: "舒展" },
+      { value: "compact", label: "紧凑" },
+    ],
+  }],
   renderContent(model, context) {
     return renderBundledView(context.route === "home" ? { ...model, route: "control" } : model, context);
   },
@@ -460,7 +512,7 @@ export class ProposalInboxHttpService extends Service {
         const batchRequestId = productRoute === "control"
           ? selectedBatchRequestId(url.searchParams.get("batch"))
           : undefined;
-        return this.sendProductRoute(response, productRoute, url.pathname, method === "HEAD", undefined, proposalId, actionTicketId, batchRequestId, requestedViewId, storedDefaultViewId, persistViewPreference);
+        return this.sendProductRoute(response, productRoute, url.pathname, method === "HEAD", undefined, proposalId, actionTicketId, batchRequestId, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -508,6 +560,36 @@ export class ProposalInboxHttpService extends Service {
         }
         return redirect(response, "/settings");
       }
+      if (method === "POST" && url.pathname === "/settings/view-presentation") {
+        if (!canManageProductViewDefault(this.principal)) {
+          return send(response, 403, "View presentation preference requires an eligible household member");
+        }
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported view presentation content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid view presentation preference");
+        }
+        const command = productViewPresentationCommand(body);
+        if (command === undefined) return send(response, 400, "Invalid view presentation preference");
+        const resolution = this.views.resolve(command.providerId);
+        if (resolution.recoveredFrom !== undefined) return send(response, 400, "Unknown product view provider");
+        const preferences = resolution.provider.preferences ?? [];
+        if (command.mode === "reset") {
+          if (preferences.length === 0) return send(response, 400, "Product view provider has no presentation preferences");
+          clearProductViewPresentation(response, resolution.provider.id, preferences);
+        } else {
+          const preference = preferences.find((candidate) => candidate.key === command.key);
+          if (preference === undefined || !preference.choices.some((choice) => choice.value === command.value)) {
+            return send(response, 400, "Unknown product view presentation choice");
+          }
+          setProductViewPresentation(response, resolution.provider.id, preference.key, command.value);
+        }
+        return redirect(response, `/settings?view=${encodeURIComponent(resolution.provider.id)}`);
+      }
       const safetyAcknowledge = /^\/safety\/([^/]+)\/acknowledge$/.exec(url.pathname);
       if (method === "POST" && safetyAcknowledge) {
         const alertId = safeDecode(safetyAcknowledge[1]!);
@@ -539,7 +621,7 @@ export class ProposalInboxHttpService extends Service {
         if (url.search.length > 0) return redirect(response, "/voice-preview");
         const content = renderVoiceSurface("idle");
         if (content === undefined) return send(response, 500, "Voice surface unavailable");
-        return this.sendVoiceRoute(response, content, method === "HEAD", requestedViewId, storedDefaultViewId);
+        return this.sendVoiceRoute(response, content, method === "HEAD", requestedViewId, storedDefaultViewId, request.headers.cookie);
       }
       const adviceEvents = /^\/conversation\/([^/]+)\/events$/.exec(url.pathname);
       if (method === "GET" && adviceEvents) {
@@ -687,7 +769,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && adviceDetail) {
         const adviceId = safeDecode(adviceDetail[1]!);
         if (adviceId === undefined) return send(response, 404, "Household advice not found");
-        return this.sendProductRoute(response, "conversation", url.pathname, method === "HEAD", adviceId, undefined, undefined, undefined, requestedViewId, storedDefaultViewId, persistViewPreference);
+        return this.sendProductRoute(response, "conversation", url.pathname, method === "HEAD", adviceId, undefined, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/conversation") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -947,7 +1029,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && detail) {
         const proposalId = safeDecode(detail[1]!);
         if (proposalId === undefined) return send(response, 404, "Proposal not found");
-        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, persistViewPreference);
+        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
@@ -1073,6 +1155,7 @@ export class ProposalInboxHttpService extends Service {
     batchRequestId?: string,
     requestedViewId?: string,
     storedDefaultViewId?: string,
+    presentationCookie?: string,
     persistViewPreference = false,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
@@ -1107,24 +1190,26 @@ export class ProposalInboxHttpService extends Service {
     };
     try {
       let resolution = this.views.resolve(requestedViewId);
+      let presentation = productViewPresentation(resolution.provider.id, resolution.provider.preferences ?? [], presentationCookie);
       let context: ProductRouteRenderContext = {
         ...baseContext,
-        view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), resolution.recoveredFrom),
+        view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, resolution.recoveredFrom),
       };
       let model = productShellModel(route, context);
       let content: string;
       try {
-        content = await resolution.provider.renderContent(model, context);
+        content = await renderRegisteredProductView(resolution.provider, model, context);
       } catch (error) {
         if (resolution.provider.id === this.views.fallbackId) throw error;
         const failedProviderId = resolution.provider.id;
         resolution = this.views.resolve();
+        presentation = productViewPresentation(resolution.provider.id, resolution.provider.preferences ?? [], presentationCookie);
         context = {
           ...baseContext,
-          view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), failedProviderId),
+          view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, failedProviderId),
         };
         model = productShellModel(route, context);
-        content = await resolution.provider.renderContent(model, context);
+        content = await renderRegisteredProductView(resolution.provider, model, context);
       }
       const host = renderProductHost(model, content, { includeStyles: false, hrefs: PRODUCT_HREFS });
       const html = productDocument(host, route);
@@ -1152,18 +1237,20 @@ export class ProposalInboxHttpService extends Service {
     head: boolean,
     requestedViewId?: string,
     storedDefaultViewId?: string,
+    presentationCookie?: string,
   ): Promise<void> {
     const [shellProjection, hostProjection] = await Promise.all([
       this.productShellProjection(),
       this.productHostProjection(),
     ]);
     const resolution = this.views.resolve(requestedViewId);
+    const presentation = productViewPresentation(resolution.provider.id, resolution.provider.preferences ?? [], presentationCookie);
     const context: ProductRouteRenderContext = {
       route: "conversation",
       path: "/voice-preview",
       reviewCounts: hostProjection.reviewCounts,
       household: hostProjection.household,
-      view: productViewState("/voice-preview", resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), resolution.recoveredFrom),
+      view: productViewState("/voice-preview", resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, resolution.recoveredFrom),
       ...(shellProjection === undefined ? {} : { shellProjection }),
     };
     const model = productShellModel("conversation", context);
@@ -1517,6 +1604,28 @@ function productViewDefaultCommand(body: string):
   return viewId === undefined ? undefined : { mode, viewId };
 }
 
+function productViewPresentationCommand(body: string):
+  | { readonly mode: "set"; readonly providerId: string; readonly key: string; readonly value: string }
+  | { readonly mode: "reset"; readonly providerId: string }
+  | undefined {
+  const form = new URLSearchParams(body);
+  const mode = form.get("mode");
+  const providerId = boundedProductViewId(form.get("providerId"));
+  if (providerId === undefined || form.getAll("mode").length !== 1 || form.getAll("providerId").length !== 1) {
+    return undefined;
+  }
+  if (mode === "reset") {
+    return [...form.keys()].length === 2 ? { mode, providerId } : undefined;
+  }
+  if (mode !== "set" || [...form.keys()].length !== 4) return undefined;
+  if (form.getAll("key").length !== 1 || form.getAll("value").length !== 1) return undefined;
+  const key = form.get("key");
+  const value = form.get("value");
+  if (key === null || !/^[a-z][A-Za-z0-9]{0,39}$/.test(key)) return undefined;
+  if (value === null || !/^[a-z][a-z0-9_-]{0,39}$/.test(value)) return undefined;
+  return { mode, providerId, key, value };
+}
+
 function canManageProductViewDefault(principal: InboxReviewActor | undefined): boolean {
   if (principal === undefined || !principal.present) return false;
   if (principal.device.kind === "private") {
@@ -1543,12 +1652,68 @@ function clearProductViewDefault(response: ServerResponse): void {
   ]);
 }
 
+function productViewPresentation(
+  providerId: string,
+  declarations: readonly RegisteredProductViewPreference[],
+  cookie: string | undefined,
+): readonly ProductViewPreferenceState[] {
+  const cookieValues = new Map<string, string>();
+  for (const part of cookie?.split(";") ?? []) {
+    const separator = part.indexOf("=");
+    if (separator < 1) continue;
+    cookieValues.set(part.slice(0, separator).trim(), part.slice(separator + 1).trim());
+  }
+  return declarations.map((declaration) => {
+    const stored = cookieValues.get(productViewPresentationCookieName(providerId, declaration.key));
+    const value = declaration.choices.some((choice) => choice.value === stored)
+      ? stored!
+      : declaration.defaultValue;
+    return {
+      key: declaration.key,
+      label: declaration.label,
+      description: declaration.description,
+      value,
+      choices: declaration.choices,
+    };
+  });
+}
+
+function productViewPresentationCookieName(providerId: string, key: string): string {
+  return `hob_view_pref_${providerId}_${key}`;
+}
+
+function setProductViewPresentation(
+  response: ServerResponse,
+  providerId: string,
+  key: string,
+  value: string,
+): void {
+  response.setHeader(
+    "set-cookie",
+    `${productViewPresentationCookieName(providerId, key)}=${value}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict`,
+  );
+}
+
+function clearProductViewPresentation(
+  response: ServerResponse,
+  providerId: string,
+  declarations: readonly RegisteredProductViewPreference[],
+): void {
+  response.setHeader(
+    "set-cookie",
+    declarations.map((declaration) =>
+      `${productViewPresentationCookieName(providerId, declaration.key)}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`,
+    ),
+  );
+}
+
 function productViewState(
   currentPath: string,
   activeId: string,
   choices: readonly { readonly id: string; readonly label: string }[],
   defaultId: string | undefined,
   canSetDeviceDefault: boolean,
+  preferences: readonly ProductViewPreferenceState[],
   recoveredFrom?: string,
 ): NonNullable<ProductShellModel["view"]> {
   return {
@@ -1557,6 +1722,7 @@ function productViewState(
     currentPath,
     choices,
     canSetDeviceDefault,
+    ...(preferences.length === 0 ? {} : { preferences }),
     ...(recoveredFrom === undefined
       ? {}
       : { recoveryMessage: "这个视图当前不可用，已恢复生活视图。" }),

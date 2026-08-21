@@ -27,7 +27,19 @@ export interface ProductViewState {
   readonly currentPath: string;
   readonly choices: readonly { readonly id: string; readonly label: string }[];
   readonly canSetDeviceDefault?: boolean;
+  readonly preferences?: readonly ProductViewPreferenceState[];
   readonly recoveryMessage?: string;
+}
+
+export interface ProductViewPreferenceState {
+  readonly key: string;
+  readonly label: string;
+  readonly description: string;
+  readonly value: string;
+  readonly choices: readonly {
+    readonly value: string;
+    readonly label: string;
+  }[];
 }
 
 export interface ProductShellConnection {
@@ -925,6 +937,9 @@ function renderDenseControl(model: NormalizedProductShellModel, options: Product
   const controlCount = spaces.reduce((total, space) => total + (space.controls?.length ?? 0), 0);
   const connectionPresentation = CONTROL_CONNECTION_PRESENTATION[model.connection.state];
   const controlsAvailable = connectionPresentation.availability === "available";
+  const rowDensity = model.view?.preferences?.find((preference) => preference.key === "rowDensity")?.value === "compact"
+    ? "compact"
+    : "comfortable";
   const feedback = model.controlFeedback === undefined ? "" : renderControlFeedback(model.controlFeedback);
   const batch = model.batchControl === undefined ? "" : renderBatchControl(model.batchControl);
   const standaloneViewShortcut = model.view === undefined
@@ -943,7 +958,7 @@ function renderDenseControl(model: NormalizedProductShellModel, options: Product
     const metrics = space.metrics?.map((metric) => `<span class="product-control-metric"><small>${escapeHtml(metric.label)}</small><strong>${escapeHtml(metric.value)}</strong></span>`).join("") ?? "";
     return `<section class="product-control-space" data-control-space="${escapeHtml(space.id)}" aria-labelledby="control-${escapeHtml(space.id)}"><header><div><h2 id="control-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-control-state">${escapeHtml(space.state ?? `${space.deviceCount ?? 0} 个设备`)}</span></div>${metrics === "" ? "" : `<div class="product-control-metrics">${metrics}</div>`}</header><div class="product-control-rows">${controls || `<p class="product-control-empty">这个空间的动作仍在准备，当前状态会继续更新。</p>`}</div></section>`;
   }).join("");
-  return `<header class="product-page-header"><div><p class="product-kicker">控制视图</p><h1>家里的状态</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<section class="product-control-workspace" data-control-density="dense" data-control-availability="${connectionPresentation.availability}" aria-label="家庭控制概览"><div class="product-control-summary"><span><strong>${spaces.length}</strong><small>个空间</small></span><span><strong>${controlCount}</strong><small>${connectionPresentation.countLabel}</small></span><p>${connectionPresentation.summary}</p></div><div class="product-control-spaces">${rows || `<section class="product-control-space"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>`}</div></section>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">控制视图</p><h1>家里的状态</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<section class="product-control-workspace" data-control-density="dense" data-control-row-density="${rowDensity}" data-control-availability="${connectionPresentation.availability}" aria-label="家庭控制概览"><div class="product-control-summary"><span><strong>${spaces.length}</strong><small>个空间</small></span><span><strong>${controlCount}</strong><small>${connectionPresentation.countLabel}</small></span><p>${connectionPresentation.summary}</p></div><div class="product-control-spaces">${rows || `<section class="product-control-space"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>`}</div></section>`;
 }
 
 function renderControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -1000,11 +1015,31 @@ function renderDeviceViewPreference(view: ProductViewState): string {
   return `<section class="product-settings-section" aria-labelledby="device-view-heading"><div><h2 id="device-view-heading">这台设备的默认视图</h2><p class="product-muted">顶部切换只影响当前浏览会话；这里保存下一次打开时使用的视图。</p></div><ul class="product-view-default-list">${choices}</ul>${management}</section>`;
 }
 
+function renderViewPresentationPreferences(view: ProductViewState): string {
+  if (view.preferences === undefined || view.preferences.length === 0) return "";
+  const providerLabel = view.choices.find((choice) => choice.id === view.activeId)?.label ?? "当前视图";
+  const fields = view.preferences.map((preference) => {
+    const selected = preference.choices.find((choice) => choice.value === preference.value)?.label ?? preference.value;
+    if (view.canSetDeviceDefault !== true) {
+      return `<div class="product-presentation-preference"><div><h3>${escapeHtml(preference.label)}</h3><p class="product-muted">${escapeHtml(preference.description)}</p></div><strong>${escapeHtml(selected)}</strong></div>`;
+    }
+    const choices = preference.choices.map((choice, index) => {
+      const id = `view-preference-${preference.key}-${index + 1}`;
+      return `<label class="product-presentation-choice" for="${escapeHtml(id)}"><input id="${escapeHtml(id)}" type="radio" name="value" value="${escapeHtml(choice.value)}"${choice.value === preference.value ? " checked" : ""}><span>${escapeHtml(choice.label)}</span></label>`;
+    }).join("");
+    return `<form class="product-presentation-preference" method="post" action="/settings/view-presentation"><input type="hidden" name="mode" value="set"><input type="hidden" name="providerId" value="${escapeHtml(view.activeId)}"><input type="hidden" name="key" value="${escapeHtml(preference.key)}"><fieldset><legend>${escapeHtml(preference.label)}</legend><p class="product-muted">${escapeHtml(preference.description)}</p><div class="product-presentation-choices">${choices}</div></fieldset><button class="product-secondary-action" type="submit">保存显示方式</button></form>`;
+  }).join("");
+  const reset = view.canSetDeviceDefault === true
+    ? `<form class="product-presentation-reset" method="post" action="/settings/view-presentation"><input type="hidden" name="providerId" value="${escapeHtml(view.activeId)}"><button class="product-secondary-action" type="submit" name="mode" value="reset">恢复${escapeHtml(providerLabel)}默认</button></form>`
+    : `<p class="product-muted">管理员可以设置这台共享设备的显示方式。</p>`;
+  return `<section class="product-settings-section" aria-labelledby="view-presentation-heading"><div><h2 id="view-presentation-heading">${escapeHtml(providerLabel)}的显示方式</h2><p class="product-muted">这些选择只调整这台设备上的排版。</p></div><div class="product-presentation-preferences">${fields}${reset}</div></section>`;
+}
+
 function renderManagedSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const memberName = model.household.memberName ?? "待设置";
   const memberRole = model.household.memberRole ?? "待确认";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接和权限细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li><li><span>连接详情</span><strong>查看连接</strong></li></ul></section><section class="product-settings-section"><div><h2>成员与权限</h2><p class="product-muted">高影响动作继续按成员和设备身份确认。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>身份</span><strong>${escapeHtml(memberRole)}</strong></li><li><span>高影响动作</span><strong>${model.household.memberRole === undefined ? "完成身份设置后显示" : "按动作权限确认"}</strong></li></ul></section><section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接和权限细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li><li><span>连接详情</span><strong>查看连接</strong></li></ul></section><section class="product-settings-section"><div><h2>成员与权限</h2><p class="product-muted">高影响动作继续按成员和设备身份确认。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>身份</span><strong>${escapeHtml(memberRole)}</strong></li><li><span>高影响动作</span><strong>${model.household.memberRole === undefined ? "完成身份设置后显示" : "按动作权限确认"}</strong></li></ul></section><section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
 }
 
 function renderSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {

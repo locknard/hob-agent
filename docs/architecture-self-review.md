@@ -127,6 +127,13 @@ show the last known value while actions wait for a classified live connection.
 Control feedback also enforces valid combinations: verified may expose undo,
 pending confirmation may expose an expiry, and failed or unknown remain informative.
 
+Provider presentation preferences are closed declarations registered beside the
+provider. The Host validates and persists a bounded choice map, renders the settings
+surface and applies device permission. The values affect layout only and remain
+outside the Hub intent, Agent and bridge boundaries. The registry freezes provider
+metadata, and each render receives a deep-frozen copy so Host-owned safety and
+governance state stays canonical.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond

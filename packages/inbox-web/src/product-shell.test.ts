@@ -429,6 +429,9 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.match(PRODUCT_SHELL_CSS, /\.product-composer \{ grid-template-columns: minmax\(0, 1fr\) auto;/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-shell\[data-route="onboarding"\] \.product-mobile-nav \{ display: none;/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-shell\[data-route="onboarding"\] \.product-onboarding-list \{ display: none;/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-presentation-choice:has\(input:checked\)/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-presentation-choice:has\(input:focus-visible\)/);
+  assert.match(PRODUCT_SHELL_CSS, /data-control-row-density="compact"/);
 });
 
 test("keeps control, settings, and onboarding as reachable server-rendered destinations", () => {
@@ -456,6 +459,16 @@ test("renders Host-owned device view defaults with an explicit permission bounda
     ],
     defaultId: "builtin.life",
     canSetDeviceDefault: true,
+    preferences: [{
+      key: "rowDensity",
+      label: "设备行距",
+      description: "选择控制列表的行距。",
+      value: "comfortable",
+      choices: [
+        { value: "comfortable", label: "舒展" },
+        { value: "compact", label: "紧凑" },
+      ],
+    }],
   } as NonNullable<ProductShellModel["view"]>;
   const settings = renderProductShell(model({ route: "settings", view: manageableView }));
 
@@ -468,12 +481,20 @@ test("renders Host-owned device view defaults with an explicit permission bounda
   assert.match(settings, /控制视图<\/strong><small>当前会话正在使用<\/small>/);
   assert.match(settings, /class="product-view-default-status">设备默认<\/span>/);
   assert.match(settings, /name="mode" value="reset"/);
+  assert.match(settings, /<h2[^>]*>控制视图的显示方式<\/h2>/);
+  assert.match(settings, /method="post" action="\/settings\/view-presentation"/);
+  assert.match(settings, /name="providerId" value="builtin\.control"/);
+  assert.match(settings, /name="key" value="rowDensity"/);
+  assert.match(settings, /name="value" value="comfortable" checked/);
+  assert.match(settings, /舒展/);
+  assert.match(settings, /紧凑/);
 
   const readOnlyView = renderProductShell(model({
     route: "settings",
     view: { ...manageableView, canSetDeviceDefault: false } as NonNullable<ProductShellModel["view"]>,
   }));
   assert.doesNotMatch(readOnlyView, /action="\/settings\/view-default"/);
+  assert.doesNotMatch(readOnlyView, /action="\/settings\/view-presentation"/);
   assert.match(readOnlyView, /管理员可以设置这台共享设备的默认视图/);
 });
 
@@ -487,6 +508,16 @@ test("renders neutral control forms and explicit action feedback with a ten-seco
         { id: "builtin.life", label: "生活视图" },
         { id: "builtin.control", label: "控制视图" },
       ],
+      preferences: [{
+        key: "rowDensity",
+        label: "设备行距",
+        description: "选择控制列表的行距。",
+        value: "compact",
+        choices: [
+          { value: "comfortable", label: "舒展" },
+          { value: "compact", label: "紧凑" },
+        ],
+      }],
     },
     controlSpaces: [{
       id: "living-room",
@@ -513,6 +544,7 @@ test("renders neutral control forms and explicit action feedback with a ten-seco
 
   assert.match(html, /action="\/control\/cap-light"/);
   assert.match(html, /data-control-density="dense"/);
+  assert.match(html, /data-control-row-density="compact"/);
   assert.match(html, /class="product-host-view-switcher"/);
   assert.doesNotMatch(html, /class="product-view-switcher"[^>]*>生活视图<\/a>/);
   assert.match(html, /aria-label="家庭控制概览"/);
