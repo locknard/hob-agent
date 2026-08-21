@@ -23,8 +23,10 @@ export interface ProductShellHousehold {
 
 export interface ProductViewState {
   readonly activeId: string;
+  readonly defaultId?: string;
   readonly currentPath: string;
   readonly choices: readonly { readonly id: string; readonly label: string }[];
+  readonly canSetDeviceDefault?: boolean;
   readonly recoveryMessage?: string;
 }
 
@@ -703,7 +705,10 @@ function renderOverview(model: NormalizedProductShellModel, options: ProductShel
     ? `<section class="product-card product-review-empty"><h2>家庭空间会在连接完成后显示</h2><p class="product-muted">${escapeHtml(status.emptySpaceDetail)}</p></section>`
     : spaces.map(renderSpaceCard).join("");
   const agentName = model.household.agentName ?? "家庭助手";
-  return `<header class="product-page-header"><div><p class="product-kicker">生活视图</p><h1>${escapeHtml(householdName)}</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div><a class="product-view-switcher" href="${routeHref("control", options)}">控制视图</a></header><section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`)}</p></section>${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${spaceGrid}</div><aside class="product-overview-aside"><section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div></section><section class="product-card product-agent-note" aria-label="${escapeHtml(agentName)}的提醒"><span class="product-agent-mark" aria-hidden="true">h</span><p class="product-agent-bubble">${escapeHtml(model.agentNote ?? "需要你决定的事会出现在处理中心。")}</p></section>${energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`}</aside></div><form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="问问家，或说出你想做的事" /><button type="submit">发送</button></form><p class="product-helper-copy">小范围动作会直接完成；影响较大的动作会先请你确认。</p>`;
+  const standaloneViewShortcut = model.view === undefined
+    ? `<a class="product-view-switcher" href="${routeHref("control", options)}">控制视图</a>`
+    : "";
+  return `<header class="product-page-header"><div><p class="product-kicker">生活视图</p><h1>${escapeHtml(householdName)}</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header><section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`)}</p></section>${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${spaceGrid}</div><aside class="product-overview-aside"><section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div></section><section class="product-card product-agent-note" aria-label="${escapeHtml(agentName)}的提醒"><span class="product-agent-mark" aria-hidden="true">h</span><p class="product-agent-bubble">${escapeHtml(model.agentNote ?? "需要你决定的事会出现在处理中心。")}</p></section>${energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`}</aside></div><form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="问问家，或说出你想做的事" /><button type="submit">发送</button></form><p class="product-helper-copy">小范围动作会直接完成；影响较大的动作会先请你确认。</p>`;
 }
 
 function overviewConnectionStatus(connection: ProductShellConnection): {
@@ -877,14 +882,40 @@ function renderBatchControl(batch: ProductBatchControl): string {
   return `<section class="product-card product-batch-control" data-batch-control aria-labelledby="batch-control-heading"><div class="product-batch-header"><div><p class="product-kicker">批量控制</p><h2 id="batch-control-heading">一次选择多项动作</h2><p class="product-muted">先查看每项动作的处理方式，再提交选择。每项动作分别处理。</p></div></div>${counts}<form class="product-batch-form" method="post" action="/control/batch"><fieldset><legend class="product-sr-only">选择要处理的动作</legend><div class="product-batch-items">${items}</div></fieldset><button class="product-primary-action" type="submit" data-batch-submit disabled>执行选中的动作</button></form>${result}</section>`;
 }
 
+function controlPolicyLabel(policyClass: ProductControlItem["policyClass"]): string {
+  if (policyClass === "administrator") return "管理员确认";
+  if (policyClass === "confirmation") return "需要确认";
+  return "直接完成";
+}
+
+function renderDenseControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
+  const spaces = model.controlSpaces ?? [];
+  const controlCount = spaces.reduce((total, space) => total + (space.controls?.length ?? 0), 0);
+  const feedback = model.controlFeedback === undefined ? "" : renderControlFeedback(model.controlFeedback);
+  const batch = model.batchControl === undefined ? "" : renderBatchControl(model.batchControl);
+  const standaloneViewShortcut = model.view === undefined
+    ? `<a class="product-view-switcher" href="${routeHref("overview", options)}">生活视图</a>`
+    : "";
+  const rows = spaces.map((space) => {
+    const controls = (space.controls ?? []).map((control) => `<form class="product-control-row" method="post" action="/control/${encodedPathSegment(control.id)}" data-control-capability="${escapeHtml(control.id)}"><span class="product-control-identity"><strong>${escapeHtml(control.label)}</strong><small>${escapeHtml(controlPolicyLabel(control.policyClass))}</small></span><span class="product-control-current-value">${escapeHtml(control.value ?? "状态待确认")}</span><button class="product-control-action${control.result === "unknown" ? " product-result--unknown" : control.result === "failed" ? " product-result--failed" : ""}" type="submit">${escapeHtml(control.actionLabel ?? control.label)}</button></form>`).join("");
+    const metrics = space.metrics?.map((metric) => `<span class="product-control-metric"><small>${escapeHtml(metric.label)}</small><strong>${escapeHtml(metric.value)}</strong></span>`).join("") ?? "";
+    return `<section class="product-control-space" data-control-space="${escapeHtml(space.id)}" aria-labelledby="control-${escapeHtml(space.id)}"><header><div><h2 id="control-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-control-state">${escapeHtml(space.state ?? `${space.deviceCount ?? 0} 个设备`)}</span></div>${metrics === "" ? "" : `<div class="product-control-metrics">${metrics}</div>`}</header><div class="product-control-rows">${controls || `<p class="product-control-empty">这个空间的动作仍在准备，当前状态会继续更新。</p>`}</div></section>`;
+  }).join("");
+  return `<header class="product-page-header"><div><p class="product-kicker">控制视图</p><h1>家里的状态</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<section class="product-control-workspace" data-control-density="dense" aria-label="家庭控制概览"><div class="product-control-summary"><span><strong>${spaces.length}</strong><small>个空间</small></span><span><strong>${controlCount}</strong><small>项可用动作</small></span><p>每项动作都会按成员权限处理，需要确认的会先等你同意。</p></div><div class="product-control-spaces">${rows || `<section class="product-control-space"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>`}</div></section>`;
+}
+
 function renderControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
+  if (model.controlSpaces !== undefined) return renderDenseControl(model, options);
   const spaces: readonly ProductControlSpace[] = model.controlSpaces ?? model.spaces.map((space): ProductControlSpace => ({
     ...space,
     controls: [],
   }));
   const feedback = model.controlFeedback === undefined ? "" : renderControlFeedback(model.controlFeedback);
   const batch = model.batchControl === undefined ? "" : renderBatchControl(model.batchControl);
-  return `<header class="product-page-header"><div><p class="product-kicker">控制</p><h1>家里的状态</h1><p class="product-muted">查看房间状态，需要时请求一项动作。</p></div><a class="product-view-switcher" href="${routeHref("overview", options)}">生活视图</a></header>${feedback}${batch}<div class="product-control-grid">${spaces.length === 0 ? `<section class="product-card"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>` : spaces.map((space) => `<section class="product-card product-control-card" aria-labelledby="control-${escapeHtml(space.id)}"><header><h2 id="control-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-control-state">${escapeHtml(space.state ?? `${space.deviceCount ?? 0} 个设备`)}</span></header>${space.metrics?.length ? `<div class="product-metric-row">${space.metrics.map((metric) => `<span class="product-metric"><span class="product-metric-label">${escapeHtml(metric.label)}</span><strong class="product-metric-value">${escapeHtml(metric.value)}</strong></span>`).join("")}</div>` : ""}<div class="product-control-actions">${(space.controls ?? []).map((control) => `<form class="product-action-form" method="post" action="/control/${encodedPathSegment(control.id)}"><button class="product-control-action${control.result === "unknown" ? " product-result--unknown" : control.result === "failed" ? " product-result--failed" : ""}" type="submit">${escapeHtml(control.actionLabel ?? control.label)}</button></form>`).join("") || `<span class="product-muted">正在更新这个空间的状态</span>`}</div></section>`).join("")}</div>`;
+  const standaloneViewShortcut = model.view === undefined
+    ? `<a class="product-view-switcher" href="${routeHref("overview", options)}">生活视图</a>`
+    : "";
+  return `<header class="product-page-header"><div><p class="product-kicker">控制</p><h1>家里的状态</h1><p class="product-muted">查看房间状态，需要时请求一项动作。</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<div class="product-control-grid">${spaces.length === 0 ? `<section class="product-card"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>` : spaces.map((space) => `<section class="product-card product-control-card" aria-labelledby="control-${escapeHtml(space.id)}"><header><h2 id="control-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-control-state">${escapeHtml(space.state ?? `${space.deviceCount ?? 0} 个设备`)}</span></header>${space.metrics?.length ? `<div class="product-metric-row">${space.metrics.map((metric) => `<span class="product-metric"><span class="product-metric-label">${escapeHtml(metric.label)}</span><strong class="product-metric-value">${escapeHtml(metric.value)}</strong></span>`).join("")}</div>` : ""}<div class="product-control-actions">${(space.controls ?? []).map((control) => `<form class="product-action-form" method="post" action="/control/${encodedPathSegment(control.id)}"><button class="product-control-action${control.result === "unknown" ? " product-result--unknown" : control.result === "failed" ? " product-result--failed" : ""}" type="submit">${escapeHtml(control.actionLabel ?? control.label)}</button></form>`).join("") || `<span class="product-muted">正在更新这个空间的状态</span>`}</div></section>`).join("")}</div>`;
 }
 
 function renderControlFeedback(feedback: ProductControlFeedback): string {
@@ -902,7 +933,35 @@ function renderControlFeedback(feedback: ProductControlFeedback): string {
   return `<section class="product-card product-control-feedback product-control-feedback--${escapeHtml(feedback.status)}" data-control-status="${escapeHtml(feedback.status)}" role="status" aria-live="polite"><div class="product-control-feedback-copy"><p class="product-kicker">${statusLabel}</p><h2>${escapeHtml(feedback.label)}</h2><p>${escapeHtml(feedback.detail)}</p>${expires}</div>${undo}</section>`;
 }
 
+function renderDeviceViewPreference(view: ProductViewState): string {
+  const choices = view.choices.map((choice) => {
+    const state = choice.id === view.activeId ? "active" : "available";
+    const defaultState = choice.id === view.defaultId ? "default" : "available";
+    const action = defaultState === "default"
+      ? `<span class="product-view-default-status">设备默认</span>`
+      : view.canSetDeviceDefault === true
+        ? `<form method="post" action="/settings/view-default"><input type="hidden" name="mode" value="set"><button class="product-secondary-action" type="submit" name="viewId" value="${escapeHtml(choice.id)}">设为默认</button></form>`
+        : "";
+    const detail = state === "active"
+      ? "当前会话正在使用"
+      : defaultState === "default" ? "下次打开时使用" : "随时可以切换";
+    return `<li data-view-choice="${escapeHtml(choice.id)}" data-state="${state}" data-default-state="${defaultState}"><span><strong>${escapeHtml(choice.label)}</strong><small>${detail}</small></span>${action}</li>`;
+  }).join("");
+  const management = view.canSetDeviceDefault === true
+    ? `<form class="product-view-default-reset" method="post" action="/settings/view-default"><button class="product-secondary-action" type="submit" name="mode" value="reset">恢复产品默认</button></form>`
+    : `<p class="product-muted">管理员可以设置这台共享设备的默认视图。</p>`;
+  return `<section class="product-settings-section" aria-labelledby="device-view-heading"><div><h2 id="device-view-heading">这台设备的默认视图</h2><p class="product-muted">顶部切换只影响当前浏览会话；这里保存下一次打开时使用的视图。</p></div><ul class="product-view-default-list">${choices}</ul>${management}</section>`;
+}
+
+function renderManagedSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
+  const memberName = model.household.memberName ?? "待设置";
+  const memberRole = model.household.memberRole ?? "待确认";
+  const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接和权限细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li><li><span>连接详情</span><strong>查看连接</strong></li></ul></section><section class="product-settings-section"><div><h2>成员与权限</h2><p class="product-muted">高影响动作继续按成员和设备身份确认。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>身份</span><strong>${escapeHtml(memberRole)}</strong></li><li><span>高影响动作</span><strong>${model.household.memberRole === undefined ? "完成身份设置后显示" : "按动作权限确认"}</strong></li></ul></section><section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
+}
+
 function renderSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
+  if (model.view !== undefined) return renderManagedSettings(model, options);
   const memberName = model.household.memberName ?? "待设置";
   const memberRole = model.household.memberRole ?? "待确认";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");

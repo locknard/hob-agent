@@ -201,6 +201,13 @@ const adultAdminPrincipal = {
   device: { kind: "private" as const, boundPrincipalId: "adult-2" },
 };
 
+const childSharedPrincipal = {
+  principalId: "child-1",
+  role: "child" as const,
+  present: true,
+  device: { kind: "shared" as const },
+};
+
 class RuntimeDecisionInbox extends StubInbox {
   readonly runtimeCalls: unknown[] = [];
   runtimeResult: { status: "approved" | "rejected" | "denied"; reason?: string } = { status: "approved" };
@@ -1584,20 +1591,28 @@ test("switches built-in view providers without changing the semantic route and r
     });
     assert.equal(control.status, 200);
     const preference = control.headers.get("set-cookie") ?? "";
-    assert.match(preference, /hob_view=builtin\.control/);
+    assert.match(preference, /hob_view_session=builtin\.control/);
     assert.match(preference, /HttpOnly/);
+    assert.doesNotMatch(preference, /Max-Age/);
     const controlHtml = await control.text();
     assert.match(controlHtml, /data-route="overview"[^>]*data-view-provider="builtin\.control"/);
-    assert.match(controlHtml, /<p class="product-kicker">控制<\/p>/);
-    assert.match(controlHtml, /class="product-control-grid"/);
+    assert.match(controlHtml, /<p class="product-kicker">控制视图<\/p>/);
+    assert.match(controlHtml, /data-control-density="dense"/);
 
     const conversation = await fetch(`${ctx.homeInboxHttp.origin}/conversation`, {
-      headers: { authorization, cookie: "hob_view=builtin.control" },
+      headers: { authorization, cookie: "hob_view_session=builtin.control; hob_view_default=builtin.life" },
     });
     assert.equal(conversation.status, 200);
     const conversationHtml = await conversation.text();
     assert.match(conversationHtml, /data-route="conversation"[^>]*data-view-provider="builtin\.control"/);
     assert.match(conversationHtml, /和家庭助手对话/);
+
+    const settings = await fetch(`${ctx.homeInboxHttp.origin}/settings`, {
+      headers: { authorization, cookie: "hob_view_session=builtin.control; hob_view_default=builtin.life" },
+    });
+    const settingsHtml = await settings.text();
+    assert.match(settingsHtml, /data-view-choice="builtin\.control" data-state="active"/);
+    assert.match(settingsHtml, /data-view-choice="builtin\.life"[^>]*data-default-state="default"/);
 
     const recovered = await fetch(`${ctx.homeInboxHttp.origin}/home?view=missing.provider`, {
       headers: { authorization },
@@ -1608,13 +1623,89 @@ test("switches built-in view providers without changing the semantic route and r
     assert.match(recoveredHtml, /这个视图当前不可用，已恢复生活视图/);
 
     const repairedPreference = await fetch(`${ctx.homeInboxHttp.origin}/home`, {
-      headers: { authorization, cookie: "hob_view=plugin.unavailable" },
+      headers: { authorization, cookie: "hob_view_session=plugin.unavailable" },
     });
-    assert.match(repairedPreference.headers.get("set-cookie") ?? "", /hob_view=builtin\.life/);
+    assert.match(repairedPreference.headers.get("set-cookie") ?? "", /hob_view_session=builtin\.life/);
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();
     await ctx.fiber.dispose();
+  }
+});
+
+test("persists and resets a device default view through the Host-owned settings command", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+
+  try {
+    const saved = await fetch(`${ctx.homeInboxHttp.origin}/settings/view-default`, {
+      method: "POST",
+      headers,
+      body: "mode=set&viewId=builtin.control",
+      redirect: "manual",
+    });
+    assert.equal(saved.status, 303);
+    assert.equal(saved.headers.get("location"), "/settings");
+    assert.match(saved.headers.get("set-cookie") ?? "", /hob_view_default=builtin\.control/);
+    assert.match(saved.headers.get("set-cookie") ?? "", /hob_view_session=;/);
+    assert.match(saved.headers.get("set-cookie") ?? "", /Max-Age=31536000/);
+
+    const reset = await fetch(`${ctx.homeInboxHttp.origin}/settings/view-default`, {
+      method: "POST",
+      headers,
+      body: "mode=reset",
+      redirect: "manual",
+    });
+    assert.equal(reset.status, 303);
+    assert.match(reset.headers.get("set-cookie") ?? "", /hob_view_default=;/);
+    assert.match(reset.headers.get("set-cookie") ?? "", /hob_view_session=;/);
+
+    const invalid = await fetch(`${ctx.homeInboxHttp.origin}/settings/view-default`, {
+      method: "POST",
+      headers,
+      body: "mode=set&viewId=plugin.missing",
+      redirect: "manual",
+    });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+
+  const sharedCtx = new Context();
+  const sharedInboxFiber = await sharedCtx.plugin(StructuredAdviceInbox);
+  const sharedFiber = await sharedCtx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: childSharedPrincipal,
+  });
+  try {
+    const denied = await fetch(`${sharedCtx.homeInboxHttp.origin}/settings/view-default`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: sharedCtx.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "mode=set&viewId=builtin.control",
+      redirect: "manual",
+    });
+    assert.equal(denied.status, 403);
+  } finally {
+    await sharedFiber.dispose();
+    await sharedInboxFiber.dispose();
+    await sharedCtx.fiber.dispose();
   }
 });
 
@@ -1636,7 +1727,7 @@ test("recovers from a provider render failure inside the Host boundary", async (
   try {
     const response = await fetch(`${ctx.homeInboxHttp.origin}/home`, { headers: { authorization } });
     assert.equal(response.status, 200);
-    assert.match(response.headers.get("set-cookie") ?? "", /hob_view=builtin\.life/);
+    assert.match(response.headers.get("set-cookie") ?? "", /hob_view_session=builtin\.life/);
     const html = await response.text();
     assert.match(html, /data-view-provider="builtin\.life"/);
     assert.match(html, /这个视图当前不可用，已恢复生活视图/);

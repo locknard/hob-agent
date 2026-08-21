@@ -30,6 +30,12 @@ semantic routes remain stable during a switch. Providers arrange the canonical
 projection, while the Host Shell owns authentication, safety alerts, review
 counts, provider recovery, and write-command dispatch.
 
+The top Host switcher changes the current browser session. Settings owns the
+persistent device default and its permission check: a member manages a bound
+private device, while an administrator manages a shared device. The Control
+provider presents spaces, current values, policy labels and governed actions in
+one continuous dense surface; it uses the same Hub intent handlers as Life.
+
 ## 2. Three action gates
 
 1. **Direct** — reversible, within granted device scope, and initiated by a

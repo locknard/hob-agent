@@ -115,6 +115,12 @@ views consume the same projection and submit the same intents. The
 preference and recovers to `builtin.life`. Authentication, safety, review badges
 and command dispatch remain fixed in the Host.
 
+The Host distinguishes session switching from a persistent device default. The
+settings command validates the registered provider and member/device permission
+before writing the preference cookie. Both built-in providers continue to submit
+the same governed review and control intents. The Host renders the only view
+switcher, so a provider cannot create a competing navigation path.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond

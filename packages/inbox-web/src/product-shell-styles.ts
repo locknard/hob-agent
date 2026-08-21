@@ -324,6 +324,31 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-control-card header h2 { margin: 0; }
 .product-control-state { color: var(--shell-muted); font-size: .85rem; }
 .product-control-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.product-control-workspace { overflow: hidden; border-block: 1px solid var(--shell-rule); background: var(--shell-surface); }
+.product-control-summary { display: flex; align-items: center; gap: 1.4rem; padding: .9rem 1.1rem; border-block-end: 1px solid var(--shell-rule); background: var(--shell-sidebar); }
+.product-control-summary > span { min-width: 5.5rem; display: grid; gap: .08rem; }
+.product-control-summary strong { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.product-control-summary small, .product-control-summary p { color: var(--shell-muted); font-size: .78rem; }
+.product-control-summary p { margin: 0 0 0 auto; max-width: 38rem; }
+.product-control-spaces { display: grid; }
+.product-control-space { padding: 1.1rem; border-block-end: 1px solid var(--shell-rule); }
+.product-control-space:last-child { border-block-end: 0; }
+.product-control-space > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-block-end: .8rem; }
+.product-control-space h2 { margin: 0; font-size: 1.08rem; letter-spacing: -.018em; }
+.product-control-state { color: var(--shell-muted); font-size: .78rem; }
+.product-control-metrics { display: flex; align-items: center; gap: 1rem; }
+.product-control-metric { display: grid; justify-items: end; gap: .05rem; }
+.product-control-metric small { color: var(--shell-muted); font-size: .72rem; }
+.product-control-metric strong { font-variant-numeric: tabular-nums; }
+.product-control-rows { border-block-start: 1px solid var(--shell-rule); }
+.product-control-row { min-height: 3.5rem; display: grid; grid-template-columns: minmax(10rem, 1fr) minmax(5rem, auto) minmax(7rem, auto); align-items: center; gap: 1rem; margin: 0; padding-block: .45rem; border-block-end: 1px solid var(--shell-rule); }
+.product-control-row:last-child { border-block-end: 0; }
+.product-control-identity { min-width: 0; display: grid; gap: .08rem; }
+.product-control-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.product-control-identity small { color: var(--shell-muted); font-size: .72rem; }
+.product-control-current-value { justify-self: end; color: var(--shell-ink); font-size: .86rem; font-variant-numeric: tabular-nums; }
+.product-control-row .product-control-action { min-width: 7rem; min-height: 2.75rem; }
+.product-control-empty { margin: 0; padding-block: .8rem .2rem; color: var(--shell-muted); }
 .product-control-action { min-height: 2.5rem; padding: .48rem .7rem; border: 1px solid var(--shell-rule); border-radius: .75rem; background: var(--shell-surface); color: var(--shell-blue); font-weight: 700; }
 .product-control-action:hover { border-color: var(--shell-blue); }
 .product-result--unknown { border-style: dashed; border-color: var(--shell-amber); background: var(--shell-amber-soft); }
@@ -370,6 +395,19 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-settings-list li { display: flex; justify-content: space-between; gap: .8rem; padding-block: .65rem; border-block-end: 1px dashed var(--shell-rule); }
 .product-settings-list li:last-child { border-block-end: 0; }
 .product-settings-list span { color: var(--shell-muted); }
+.product-settings-sheet { max-width: 64rem; border-block: 1px solid var(--shell-rule); background: var(--shell-surface); }
+.product-settings-section { display: grid; grid-template-columns: minmax(13rem, 18rem) minmax(0, 1fr); gap: 2rem; padding: 1.3rem 1.1rem; border-block-end: 1px solid var(--shell-rule); }
+.product-settings-section:last-child { border-block-end: 0; }
+.product-settings-section h2, .product-settings-section p { margin-block-start: 0; }
+.product-view-default-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.product-view-default-list li { min-height: 3.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-block: .45rem; border-block-end: 1px solid var(--shell-rule); }
+.product-view-default-list li:last-child { border-block-end: 0; }
+.product-view-default-list li[data-state="active"] { color: var(--shell-blue); }
+.product-view-default-list li > span { display: grid; gap: .08rem; }
+.product-view-default-list small { color: var(--shell-muted); font-size: .74rem; }
+.product-view-default-list form, .product-view-default-reset { margin: 0; }
+.product-view-default-status { color: var(--shell-muted); font-size: .78rem; font-weight: 650; letter-spacing: .01em; }
+.product-view-default-reset { grid-column: 2; }
 .product-onboarding { max-width: 66rem; }
 .product-onboarding-progress { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: .35rem; margin-block: 1rem 1.4rem; }
 .product-onboarding-step { min-height: .38rem; border-radius: 999px; background: var(--shell-rule); }
@@ -455,6 +493,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-overview-grid, .product-space-grid, .product-review-page, .product-conversation, .product-activity, .product-settings-grid, .product-onboarding-content { grid-template-columns: minmax(0, 1fr); }
   .product-overview-aside { grid-template-columns: minmax(0, 1fr); }
   .product-control-grid { grid-template-columns: minmax(0, 1fr); }
+  .product-control-summary { flex-wrap: wrap; }
+  .product-control-summary p { flex-basis: 100%; margin-inline-start: 0; }
+  .product-settings-section { grid-template-columns: minmax(0, 1fr); gap: .8rem; }
+  .product-view-default-reset { grid-column: 1; }
   .product-batch-items { grid-template-columns: minmax(0, 1fr); }
   .product-conversation-main { min-height: auto; }
   .product-conversation-side { order: 2; }
@@ -492,6 +534,11 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-undo button { width: 100%; }
   .product-activity-item { grid-template-columns: minmax(0, 1fr); }
   .product-activity-item .product-attribution { grid-column: auto; }
+  .product-control-space > header { align-items: start; flex-direction: column; }
+  .product-control-metrics { width: 100%; justify-content: space-between; }
+  .product-control-row { grid-template-columns: minmax(0, 1fr) auto; gap: .6rem; }
+  .product-control-row .product-control-action { grid-column: 1 / -1; width: 100%; }
+  .product-view-default-list li { align-items: start; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -426,11 +426,16 @@ export class ProposalInboxHttpService extends Service {
       }
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", this.origin);
-      const requestedViewId = productViewPreference(
+      const viewPreference = productViewPreference(
         url.searchParams.get("view"),
         request.headers.cookie,
         this.defaultViewId,
       );
+      const requestedViewId = viewPreference.activeId;
+      const storedDefaultViewId = viewPreference.defaultId !== undefined
+        && this.views.resolve(viewPreference.defaultId).recoveredFrom === undefined
+        ? viewPreference.defaultId
+        : undefined;
       const persistViewPreference = url.searchParams.has("view");
       if (isMutationMethod(method) && request.headers.origin !== this.origin) {
         return send(response, 403, "This action requires the local household origin");
@@ -455,7 +460,7 @@ export class ProposalInboxHttpService extends Service {
         const batchRequestId = productRoute === "control"
           ? selectedBatchRequestId(url.searchParams.get("batch"))
           : undefined;
-        return this.sendProductRoute(response, productRoute, url.pathname, method === "HEAD", undefined, proposalId, actionTicketId, batchRequestId, requestedViewId, persistViewPreference);
+        return this.sendProductRoute(response, productRoute, url.pathname, method === "HEAD", undefined, proposalId, actionTicketId, batchRequestId, requestedViewId, storedDefaultViewId, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -479,6 +484,29 @@ export class ProposalInboxHttpService extends Service {
         } catch (error) {
           return send(response, onboardingErrorStatus(error), onboardingErrorText(error));
         }
+      }
+      if (method === "POST" && url.pathname === "/settings/view-default") {
+        if (!canManageProductViewDefault(this.principal)) {
+          return send(response, 403, "Device view preference requires an eligible household member");
+        }
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported view preference content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid view preference");
+        }
+        const command = productViewDefaultCommand(body);
+        if (command === undefined) return send(response, 400, "Invalid view preference");
+        if (command.mode === "reset") clearProductViewDefault(response);
+        else {
+          const resolution = this.views.resolve(command.viewId);
+          if (resolution.recoveredFrom !== undefined) return send(response, 400, "Unknown product view provider");
+          setProductViewDefault(response, resolution.provider.id);
+        }
+        return redirect(response, "/settings");
       }
       const safetyAcknowledge = /^\/safety\/([^/]+)\/acknowledge$/.exec(url.pathname);
       if (method === "POST" && safetyAcknowledge) {
@@ -511,7 +539,7 @@ export class ProposalInboxHttpService extends Service {
         if (url.search.length > 0) return redirect(response, "/voice-preview");
         const content = renderVoiceSurface("idle");
         if (content === undefined) return send(response, 500, "Voice surface unavailable");
-        return this.sendVoiceRoute(response, content, method === "HEAD", requestedViewId);
+        return this.sendVoiceRoute(response, content, method === "HEAD", requestedViewId, storedDefaultViewId);
       }
       const adviceEvents = /^\/conversation\/([^/]+)\/events$/.exec(url.pathname);
       if (method === "GET" && adviceEvents) {
@@ -659,7 +687,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && adviceDetail) {
         const adviceId = safeDecode(adviceDetail[1]!);
         if (adviceId === undefined) return send(response, 404, "Household advice not found");
-        return this.sendProductRoute(response, "conversation", url.pathname, method === "HEAD", adviceId, undefined, undefined, undefined, requestedViewId, persistViewPreference);
+        return this.sendProductRoute(response, "conversation", url.pathname, method === "HEAD", adviceId, undefined, undefined, undefined, requestedViewId, storedDefaultViewId, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/conversation") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -919,7 +947,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && detail) {
         const proposalId = safeDecode(detail[1]!);
         if (proposalId === undefined) return send(response, 404, "Proposal not found");
-        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, persistViewPreference);
+        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, persistViewPreference);
       }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
@@ -1044,6 +1072,7 @@ export class ProposalInboxHttpService extends Service {
     actionTicketId?: string,
     batchRequestId?: string,
     requestedViewId?: string,
+    storedDefaultViewId?: string,
     persistViewPreference = false,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
@@ -1080,7 +1109,7 @@ export class ProposalInboxHttpService extends Service {
       let resolution = this.views.resolve(requestedViewId);
       let context: ProductRouteRenderContext = {
         ...baseContext,
-        view: productViewState(path, resolution.provider.id, this.views.choices(), resolution.recoveredFrom),
+        view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), resolution.recoveredFrom),
       };
       let model = productShellModel(route, context);
       let content: string;
@@ -1092,7 +1121,7 @@ export class ProposalInboxHttpService extends Service {
         resolution = this.views.resolve();
         context = {
           ...baseContext,
-          view: productViewState(path, resolution.provider.id, this.views.choices(), failedProviderId),
+          view: productViewState(path, resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), failedProviderId),
         };
         model = productShellModel(route, context);
         content = await resolution.provider.renderContent(model, context);
@@ -1100,7 +1129,7 @@ export class ProposalInboxHttpService extends Service {
       const host = renderProductHost(model, content, { includeStyles: false, hrefs: PRODUCT_HREFS });
       const html = productDocument(host, route);
       if (persistViewPreference || context.view?.recoveryMessage !== undefined) {
-        setProductViewPreference(response, resolution.provider.id);
+        setProductViewSession(response, resolution.provider.id);
       }
       if (head) {
         applySecurityHeaders(response);
@@ -1117,7 +1146,13 @@ export class ProposalInboxHttpService extends Service {
     }
   }
 
-  private async sendVoiceRoute(response: ServerResponse, content: string, head: boolean, requestedViewId?: string): Promise<void> {
+  private async sendVoiceRoute(
+    response: ServerResponse,
+    content: string,
+    head: boolean,
+    requestedViewId?: string,
+    storedDefaultViewId?: string,
+  ): Promise<void> {
     const [shellProjection, hostProjection] = await Promise.all([
       this.productShellProjection(),
       this.productHostProjection(),
@@ -1128,13 +1163,13 @@ export class ProposalInboxHttpService extends Service {
       path: "/voice-preview",
       reviewCounts: hostProjection.reviewCounts,
       household: hostProjection.household,
-      view: productViewState("/voice-preview", resolution.provider.id, this.views.choices(), resolution.recoveredFrom),
+      view: productViewState("/voice-preview", resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), resolution.recoveredFrom),
       ...(shellProjection === undefined ? {} : { shellProjection }),
     };
     const model = productShellModel("conversation", context);
     const host = renderProductHost(model, content, { includeStyles: false, hrefs: PRODUCT_HREFS });
     const html = productDocument(host, "conversation");
-    if (resolution.recoveredFrom !== undefined) setProductViewPreference(response, resolution.provider.id);
+    if (resolution.recoveredFrom !== undefined) setProductViewSession(response, resolution.provider.id);
     if (head) {
       applySecurityHeaders(response);
       response.statusCode = 200;
@@ -1444,16 +1479,24 @@ function batchControlErrorText(error: unknown): string {
   return "Household batch control failed";
 }
 
-function productViewPreference(query: string | null, cookie: string | undefined, fallbackId: string): string {
+function productViewPreference(query: string | null, cookie: string | undefined, fallbackId: string): {
+  readonly activeId: string;
+  readonly defaultId?: string;
+} {
   const queryId = boundedProductViewId(query);
-  if (queryId !== undefined) return queryId;
+  let sessionId: string | undefined;
+  let defaultId: string | undefined;
   for (const part of cookie?.split(";") ?? []) {
     const [name, value] = part.trim().split("=", 2);
-    if (name !== "hob_view") continue;
     const cookieId = boundedProductViewId(value ?? null);
-    if (cookieId !== undefined) return cookieId;
+    if (cookieId === undefined) continue;
+    if (name === "hob_view_session") sessionId = cookieId;
+    if (name === "hob_view_default") defaultId = cookieId;
   }
-  return fallbackId;
+  return {
+    activeId: queryId ?? sessionId ?? defaultId ?? fallbackId,
+    ...(defaultId === undefined ? {} : { defaultId }),
+  };
 }
 
 function boundedProductViewId(value: string | null): string | undefined {
@@ -1461,20 +1504,59 @@ function boundedProductViewId(value: string | null): string | undefined {
   return /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(value) ? value : undefined;
 }
 
-function setProductViewPreference(response: ServerResponse, viewId: string): void {
-  response.setHeader("set-cookie", `hob_view=${viewId}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict`);
+function productViewDefaultCommand(body: string):
+  | { readonly mode: "set"; readonly viewId: string }
+  | { readonly mode: "reset" }
+  | undefined {
+  const form = new URLSearchParams(body);
+  const keys = [...form.keys()];
+  const mode = form.get("mode");
+  if (mode === "reset" && keys.length === 1) return { mode };
+  if (mode !== "set" || keys.length !== 2 || !keys.includes("viewId")) return undefined;
+  const viewId = boundedProductViewId(form.get("viewId"));
+  return viewId === undefined ? undefined : { mode, viewId };
+}
+
+function canManageProductViewDefault(principal: InboxReviewActor | undefined): boolean {
+  if (principal === undefined || !principal.present) return false;
+  if (principal.device.kind === "private") {
+    return principal.device.boundPrincipalId === principal.principalId;
+  }
+  return principal.role === "admin";
+}
+
+function setProductViewSession(response: ServerResponse, viewId: string): void {
+  response.setHeader("set-cookie", `hob_view_session=${viewId}; Path=/; HttpOnly; SameSite=Strict`);
+}
+
+function setProductViewDefault(response: ServerResponse, viewId: string): void {
+  response.setHeader("set-cookie", [
+    `hob_view_default=${viewId}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict`,
+    "hob_view_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+  ]);
+}
+
+function clearProductViewDefault(response: ServerResponse): void {
+  response.setHeader("set-cookie", [
+    "hob_view_default=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+    "hob_view_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+  ]);
 }
 
 function productViewState(
   currentPath: string,
   activeId: string,
   choices: readonly { readonly id: string; readonly label: string }[],
+  defaultId: string | undefined,
+  canSetDeviceDefault: boolean,
   recoveredFrom?: string,
 ): NonNullable<ProductShellModel["view"]> {
   return {
     activeId,
+    ...(defaultId === undefined ? {} : { defaultId }),
     currentPath,
     choices,
+    canSetDeviceDefault,
     ...(recoveredFrom === undefined
       ? {}
       : { recoveryMessage: "这个视图当前不可用，已恢复生活视图。" }),

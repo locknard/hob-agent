@@ -438,9 +438,48 @@ test("keeps control, settings, and onboarding as reachable server-rendered desti
   assert.match(onboarding, /action="\/onboarding\/continue"/);
 });
 
+test("renders Host-owned device view defaults with an explicit permission boundary", () => {
+  const manageableView = {
+    activeId: "builtin.control",
+    currentPath: "/settings",
+    choices: [
+      { id: "builtin.life", label: "生活视图" },
+      { id: "builtin.control", label: "控制视图" },
+    ],
+    defaultId: "builtin.life",
+    canSetDeviceDefault: true,
+  } as NonNullable<ProductShellModel["view"]>;
+  const settings = renderProductShell(model({ route: "settings", view: manageableView }));
+
+  assert.match(settings, /<h2[^>]*>这台设备的默认视图<\/h2>/);
+  assert.match(settings, /method="post" action="\/settings\/view-default"/);
+  assert.match(settings, /name="viewId" value="builtin\.control"/);
+  assert.match(settings, /data-view-choice="builtin\.control" data-state="active"/);
+  assert.match(settings, /data-view-choice="builtin\.life"[^>]*data-default-state="default"/);
+  assert.match(settings, /生活视图<\/strong><small>下次打开时使用<\/small>/);
+  assert.match(settings, /控制视图<\/strong><small>当前会话正在使用<\/small>/);
+  assert.match(settings, /class="product-view-default-status">设备默认<\/span>/);
+  assert.match(settings, /name="mode" value="reset"/);
+
+  const readOnlyView = renderProductShell(model({
+    route: "settings",
+    view: { ...manageableView, canSetDeviceDefault: false } as NonNullable<ProductShellModel["view"]>,
+  }));
+  assert.doesNotMatch(readOnlyView, /action="\/settings\/view-default"/);
+  assert.match(readOnlyView, /管理员可以设置这台共享设备的默认视图/);
+});
+
 test("renders neutral control forms and explicit action feedback with a ten-second undo", () => {
   const html = renderProductShell(model({
     route: "control",
+    view: {
+      activeId: "builtin.control",
+      currentPath: "/control",
+      choices: [
+        { id: "builtin.life", label: "生活视图" },
+        { id: "builtin.control", label: "控制视图" },
+      ],
+    },
     controlSpaces: [{
       id: "living-room",
       name: "客厅",
@@ -465,6 +504,16 @@ test("renders neutral control forms and explicit action feedback with a ten-seco
   }));
 
   assert.match(html, /action="\/control\/cap-light"/);
+  assert.match(html, /data-control-density="dense"/);
+  assert.match(html, /class="product-host-view-switcher"/);
+  assert.doesNotMatch(html, /class="product-view-switcher"[^>]*>生活视图<\/a>/);
+  assert.match(html, /aria-label="家庭控制概览"/);
+  assert.match(html, /data-control-space="living-room"/);
+  assert.match(html, /data-control-capability="cap-light"/);
+  assert.match(html, /class="product-control-current-value">开<\/span>/);
+  assert.match(html, /每项动作都会按成员权限处理，需要确认的会先等你同意/);
+  assert.doesNotMatch(html, />[^<]*Hub[^<]*</);
+  assert.doesNotMatch(html, /product-card product-control-card/);
   assert.match(html, /data-control-status="verified"/);
   assert.match(html, /关闭顶灯已完成/);
   assert.match(html, /action="\/actions\/action-ticket-1\/undo"/);

@@ -317,9 +317,15 @@ intent 禁用；保存失败保留草稿。重置只删除当前 provider 的 pr
 
 Current checkpoint (2026-08-22): F0 is complete. F1 now includes the shared
 presentation kernel, `ProductViewRegistry`, `builtin.life`, `builtin.control`,
-device-local selection, semantic-route continuity and deterministic recovery to
-`builtin.life`. The remaining F1 work is the complete cross-provider conformance
-matrix and provider-specific presentation configuration.
+browser-profile device defaults, semantic-route continuity and deterministic
+recovery to `builtin.life`. Top-level switching applies to the current browser session. The
+Host-owned settings command persists or resets a device default; a bound private
+device is managed by its member and a shared device is managed by an administrator.
+The Control provider renders a continuous dense space-and-action surface from the
+same governed intents. The Host is the single owner of the view switcher; providers
+render content for the active semantic route. The remaining F1 work is provider-specific presentation
+configuration beyond the device default and the full accessibility/error-state
+conformance matrix.
 
 1. **F0 — contract and prototype:** 在交互稿中加入生活/控制视图切换、失败回退、per-device
    preference 和语义路由连续性；不装载第三方代码。
