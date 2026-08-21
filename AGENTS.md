@@ -35,6 +35,34 @@ Postgres/Redis, a native chat application, or a new skill format during Phase 0.
 - Keep household data local by default. Never commit tokens, `.env` files,
   database files, event data, or personally identifying home data.
 
+## Product experience and Apple design
+
+- For every user-facing interface build, redesign, or review, use the installed
+  `apple-design` skill together with the relevant frontend design and browser
+  verification skills. Treat interaction behavior and visual design as one
+  product decision, not as separate finishing passes.
+- The approved source is `emilkowalski/skills@apple-design`. Review upstream
+  changes before replacing the installed version; do not substitute an
+  unrelated Apple-look theme with weaker interaction guidance.
+- Follow Apple's human-centered design logic: purpose, agency, responsibility,
+  familiarity, flexibility, simplicity, craft, and earned delight. This is a
+  behavioral reference, not permission to copy Apple trade dress or platform
+  chrome.
+- Make the common household intent obvious, keep advanced configuration one
+  level deeper, use direct household language, and show immediate, continuous
+  status for work that is still happening. Preserve spatial relationships and
+  make reversible interactions interruptible.
+- Prefer system typography, deliberate optical hierarchy, calm materials, and
+  depth only where it explains structure. Do not add decorative glass, blur,
+  animation, gradients, or bounce without a functional reason.
+- Default physical motion to a critically damped, non-overshooting response of
+  roughly 0.3–0.4 seconds. Reserve momentum or bounce for a gesture that
+  actually carries momentum; never lock input while an animation runs.
+- Ship equivalent feedback for `prefers-reduced-motion`,
+  `prefers-reduced-transparency`, and increased-contrast users. Validate the
+  real responsive interface in a browser, including loading, empty, failure,
+  reconnecting, completion, and cancellation states.
+
 ## Engineering discipline
 
 - Write a focused failing test before production behavior, then implement the
