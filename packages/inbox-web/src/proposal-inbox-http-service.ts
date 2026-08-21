@@ -14,7 +14,7 @@ const MAX_ADVICE_FORM_BYTES = 12 * 1024;
 const SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store",
   "content-security-policy": "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-  "referrer-policy": "no-referrer",
+  "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 });

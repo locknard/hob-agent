@@ -89,7 +89,7 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   assert.match(response.headers.get("content-security-policy") ?? "", /style-src 'self'/);
   assert.equal(response.headers.get("x-frame-options"), "DENY");
-  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(response.headers.get("referrer-policy"), "same-origin");
 
   const stylesheet = await fetch(`${ctx.homeInboxHttp.origin}/assets/inbox.css`, {
     headers: { authorization },
