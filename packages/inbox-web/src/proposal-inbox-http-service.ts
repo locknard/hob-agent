@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { Context, Service } from "@deepseek-ai/cordis";
@@ -51,12 +51,13 @@ const MAX_BATCH_CONTROL_FORM_BYTES = 8 * 1024;
 // application/x-www-form-urlencoded expands a 1,000-character CJK question to roughly 9 KiB.
 const MAX_ADVICE_FORM_BYTES = 12 * 1024;
 const MAX_CORRECTION_FORM_BYTES = 24 * 1024;
+const MAX_LAYOUT_DRAFT_FORM_BYTES = 196 * 1024;
 const MAX_ADVICE_EVENT_TEXT = 4 * 1024;
 const MAX_ADVICE_EVENT_ID = 64;
 const ADVICE_SSE_HEARTBEAT_MS = 15_000;
 const SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store",
-  "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+  "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
@@ -355,8 +356,45 @@ export interface ProposalInboxHttpOptions {
   readonly viewProviders?: readonly ProductViewProvider[];
   /** Explicit data-only layout contributions checked before the listener opens. */
   readonly viewRecipes?: readonly unknown[];
+  /** Hub-owned durable source drafts for private-device administrator authoring. */
+  readonly viewRecipeDrafts?: ProductViewRecipeDraftPort;
   /** Initial provider used before this browser saves a device-local preference. */
   readonly defaultViewId?: string;
+}
+
+export interface ProductViewRecipeDraftSummary {
+  readonly draftId: string;
+  readonly revision: number;
+  readonly label: string;
+  readonly updatedAt: string;
+}
+
+export interface ProductViewRecipeDraft extends ProductViewRecipeDraftSummary {
+  readonly ownerPrincipalId: string;
+  readonly source: string;
+}
+
+export interface ProductViewRecipeDraftPort {
+  create(input: {
+    readonly ownerPrincipalId: string;
+    readonly label: string;
+    readonly source: string;
+    readonly idempotencyKey: string;
+  }): ProductViewRecipeDraft;
+  update(input: {
+    readonly draftId: string;
+    readonly ownerPrincipalId: string;
+    readonly expectedRevision: number;
+    readonly label: string;
+    readonly source: string;
+  }): ProductViewRecipeDraft;
+  remove(input: {
+    readonly draftId: string;
+    readonly ownerPrincipalId: string;
+    readonly expectedRevision: number;
+  }): void;
+  read(draftId: string, ownerPrincipalId: string): ProductViewRecipeDraft | undefined;
+  list(ownerPrincipalId: string): readonly ProductViewRecipeDraftSummary[];
 }
 
 /**
@@ -489,6 +527,7 @@ export class ProposalInboxHttpService extends Service {
   private readonly views: ProductViewRegistry<ProductShellModel, ProductRouteRenderContext>;
   private readonly defaultViewId: string;
   private readonly onboarding: OnboardingPort;
+  private readonly viewRecipeDrafts: ProductViewRecipeDraftPort | undefined;
 
   constructor(ctx: Context, private readonly options: ProposalInboxHttpOptions) {
     super(ctx, "homeInboxHttp");
@@ -515,6 +554,7 @@ export class ProposalInboxHttpService extends Service {
       throw new TypeError("Default product view provider is not registered");
     }
     this.onboarding = options.onboarding ?? new UnavailableOnboardingService();
+    this.viewRecipeDrafts = options.viewRecipeDrafts;
     this.server = createServer((request, response) => { void this.handle(request, response); });
   }
 
@@ -579,7 +619,23 @@ export class ProposalInboxHttpService extends Service {
         const batchRequestId = productRoute === "control"
           ? selectedBatchRequestId(url.searchParams.get("batch"))
           : undefined;
-        return this.sendProductRoute(response, productRoute, url.pathname, method === "HEAD", undefined, proposalId, actionTicketId, batchRequestId, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference);
+        return this.sendProductRoute(
+          response,
+          productRoute,
+          url.pathname,
+          method === "HEAD",
+          undefined,
+          proposalId,
+          actionTicketId,
+          batchRequestId,
+          requestedViewId,
+          storedDefaultViewId,
+          request.headers.cookie,
+          persistViewPreference,
+          productRoute === "settings" ? boundedLayoutDraftId(url.searchParams.get("layout")) : undefined,
+          productRoute === "settings" && url.searchParams.get("preview") === "1",
+          productRoute === "settings" ? boundedLayoutDraftNotice(url.searchParams.get("layoutNotice")) : undefined,
+        );
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -656,6 +712,82 @@ export class ProposalInboxHttpService extends Service {
           setProductViewPresentation(response, resolution.provider.id, preference.key, command.value);
         }
         return redirect(response, `/settings?view=${encodeURIComponent(resolution.provider.id)}`);
+      }
+      if (method === "POST" && url.pathname === "/settings/layout-drafts") {
+        if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
+          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+        }
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported layout draft content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request, MAX_LAYOUT_DRAFT_FORM_BYTES);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid layout draft");
+        }
+        const input = layoutDraftCreateInput(body);
+        if (input === undefined) return send(response, 400, "Invalid layout draft");
+        try {
+          const draft = this.viewRecipeDrafts.create({ ...input, ownerPrincipalId: this.principal.principalId });
+          return redirect(response, `/settings?layout=${encodeURIComponent(draft.draftId)}`);
+        } catch (error) {
+          return redirect(response, `/settings?layoutNotice=${layoutDraftNoticeForError(error)}`);
+        }
+      }
+      const layoutDraftUpdate = /^\/settings\/layout-drafts\/([^/]+)$/.exec(url.pathname);
+      if (method === "POST" && layoutDraftUpdate) {
+        if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
+          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+        }
+        const draftId = safeDecode(layoutDraftUpdate[1]!);
+        if (draftId === undefined) return send(response, 400, "Invalid layout draft");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported layout draft content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request, MAX_LAYOUT_DRAFT_FORM_BYTES);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid layout draft");
+        }
+        const input = layoutDraftUpdateInput(body);
+        if (input === undefined) return send(response, 400, "Invalid layout draft");
+        try {
+          const draft = this.viewRecipeDrafts.update({
+            ...input,
+            draftId,
+            ownerPrincipalId: this.principal.principalId,
+          });
+          return redirect(response, `/settings?layout=${encodeURIComponent(draft.draftId)}`);
+        } catch (error) {
+          return redirect(response, `/settings?layout=${encodeURIComponent(draftId)}&layoutNotice=${layoutDraftNoticeForError(error)}`);
+        }
+      }
+      const layoutDraftDelete = /^\/settings\/layout-drafts\/([^/]+)\/delete$/.exec(url.pathname);
+      if (method === "POST" && layoutDraftDelete) {
+        if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
+          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+        }
+        const draftId = safeDecode(layoutDraftDelete[1]!);
+        if (draftId === undefined) return send(response, 400, "Invalid layout draft deletion");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported layout draft deletion content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid layout draft deletion");
+        }
+        const expectedRevision = layoutDraftDeleteInput(body);
+        if (expectedRevision === undefined) return send(response, 400, "Invalid layout draft deletion");
+        try {
+          this.viewRecipeDrafts.remove({ draftId, ownerPrincipalId: this.principal.principalId, expectedRevision });
+          return redirect(response, "/settings");
+        } catch (error) {
+          return redirect(response, `/settings?layout=${encodeURIComponent(draftId)}&layoutNotice=${layoutDraftNoticeForError(error)}`);
+        }
       }
       const safetyAcknowledge = /^\/safety\/([^/]+)\/acknowledge$/.exec(url.pathname);
       if (method === "POST" && safetyAcknowledge) {
@@ -1224,6 +1356,9 @@ export class ProposalInboxHttpService extends Service {
     storedDefaultViewId?: string,
     presentationCookie?: string,
     persistViewPreference = false,
+    selectedLayoutDraftId?: string,
+    previewLayoutDraft = false,
+    layoutDraftNotice?: LayoutDraftNotice,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
     const reviewProjection = showsReviewSummary ? await this.productReviewProjection(proposalId) : undefined;
@@ -1279,7 +1414,10 @@ export class ProposalInboxHttpService extends Service {
         model = productShellModel(route, context);
         content = await renderRegisteredProductView(resolution.provider, model, context);
       }
-      const host = renderProductHost(model, content, { includeStyles: false, hrefs: PRODUCT_HREFS });
+      const layoutAuthoring = route === "settings"
+        ? this.renderLayoutAuthoring(model, selectedLayoutDraftId, previewLayoutDraft, layoutDraftNotice)
+        : "";
+      const host = renderProductHost(model, `${content}${layoutAuthoring}`, { includeStyles: false, hrefs: PRODUCT_HREFS });
       const html = productDocument(host, route);
       if (persistViewPreference || context.view?.recoveryMessage !== undefined) {
         setProductViewSession(response, resolution.provider.id);
@@ -1333,6 +1471,37 @@ export class ProposalInboxHttpService extends Service {
       return;
     }
     sendHtml(response, 200, html, false);
+  }
+
+  private renderLayoutAuthoring(
+    model: ProductShellModel,
+    selectedDraftId?: string,
+    preview = false,
+    notice?: LayoutDraftNotice,
+  ): string {
+    if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) return "";
+    try {
+      const ownerPrincipalId = this.principal.principalId;
+      const summaries = this.viewRecipeDrafts.list(ownerPrincipalId);
+      const selected = selectedDraftId === undefined
+        ? undefined
+        : this.viewRecipeDrafts.read(selectedDraftId, ownerPrincipalId);
+      const list = summaries.length === 0
+        ? `<p class="product-muted">还没有布局草稿。先为常用场景准备一个名称和布局描述。</p>`
+        : `<ul class="product-layout-draft-list">${summaries.map((draft) => `<li><a href="/settings?layout=${encodeURIComponent(draft.draftId)}"><span><strong>${escapeTransportHtml(draft.label)}</strong><small>草稿版本 ${draft.revision} · ${escapeTransportHtml(layoutDraftUpdatedLabel(draft.updatedAt))}</small></span><span aria-hidden="true">›</span></a></li>`).join("")}</ul>`;
+      const editor = selected === undefined
+        ? `<form class="product-layout-editor" method="post" action="/settings/layout-drafts"><input type="hidden" name="idempotencyKey" value="create-${randomUUID()}"><label><span>草稿名称</span><input name="label" maxlength="80" required placeholder="比如：老人房夜间视图"></label><label><span>布局描述（JSON）</span><textarea name="source" maxlength="65536" spellcheck="false" required placeholder='{"apiVersion":"hob.view.recipe/v1", …}'></textarea></label><button class="product-primary-action" type="submit">建立草稿</button></form>`
+        : `<div class="product-layout-editor-shell"><form class="product-layout-editor" method="post" action="/settings/layout-drafts/${encodeURIComponent(selected.draftId)}"><input type="hidden" name="expectedRevision" value="${selected.revision}"><label><span>草稿名称</span><input name="label" maxlength="80" required value="${escapeTransportHtml(selected.label)}"></label><label><span>布局描述（JSON）</span><textarea name="source" maxlength="65536" spellcheck="false" required>${escapeTransportHtml(selected.source)}</textarea></label><div class="product-layout-editor-actions"><button class="product-primary-action" type="submit">保存草稿</button><a class="product-secondary-action" href="/settings?layout=${encodeURIComponent(selected.draftId)}&amp;preview=1">预览版本 ${selected.revision}</a></div></form><details class="product-layout-delete"><summary>删除这个草稿</summary><div><p>删除会释放一个草稿位置，当前家庭视图保持原样。</p><form method="post" action="/settings/layout-drafts/${encodeURIComponent(selected.draftId)}/delete"><input type="hidden" name="expectedRevision" value="${selected.revision}"><button class="product-danger-action" type="submit">确认删除草稿</button></form></div></details></div>`;
+      const previewHtml = selected !== undefined && preview
+        ? renderLayoutDraftPreview(selected, model)
+        : "";
+      const noticeHtml = notice === undefined
+        ? ""
+        : `<div class="product-layout-notice" data-layout-notice="${notice}" role="status"><strong>${escapeTransportHtml(layoutDraftNoticeTitle(notice))}</strong><p>${escapeTransportHtml(layoutDraftNoticeMessage(notice))}</p></div>`;
+      return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><header><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿保存在本机。预览只展示当前保存的版本，启用布局会走独立的发布流程。</p></div><span class="product-layout-capacity">${summaries.length}/32</span></header>${noticeHtml}<div class="product-layout-workspace-grid"><div><h3>我的草稿</h3>${list}</div><div><h3>${selected === undefined ? "建立布局草稿" : `编辑 · ${escapeTransportHtml(selected.label)}`}</h3>${editor}</div></div>${previewHtml}</section>`;
+    } catch {
+      return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿存储正在恢复。连接恢复后可继续编辑。</p></div></section>`;
+    }
   }
 
   private async productHostProjection(reviewProjection?: InboxProductReviewProjection): Promise<{
@@ -1700,6 +1869,141 @@ function canManageProductViewDefault(principal: InboxReviewActor | undefined): b
     return principal.device.boundPrincipalId === principal.principalId;
   }
   return principal.role === "admin";
+}
+
+function canAuthorProductViewRecipe(principal: InboxReviewActor | undefined): principal is InboxReviewActor {
+  return principal?.present === true
+    && principal.role === "admin"
+    && principal.device.kind === "private"
+    && principal.device.boundPrincipalId === principal.principalId;
+}
+
+function boundedLayoutDraftId(value: string | null): string | undefined {
+  return value !== null && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(value) ? value : undefined;
+}
+
+function layoutDraftCreateInput(body: string): {
+  readonly label: string;
+  readonly source: string;
+  readonly idempotencyKey: string;
+} | undefined {
+  const form = new URLSearchParams(body);
+  if ([...form.keys()].some((key) => !["label", "source", "idempotencyKey"].includes(key))) return undefined;
+  if (form.getAll("label").length !== 1 || form.getAll("source").length !== 1 || form.getAll("idempotencyKey").length !== 1) return undefined;
+  const label = boundedLayoutDraftLabel(form.get("label"));
+  const source = boundedLayoutDraftSource(form.get("source"));
+  const idempotencyKey = boundedLayoutDraftId(form.get("idempotencyKey"));
+  return label === undefined || source === undefined || idempotencyKey === undefined
+    ? undefined
+    : { label, source, idempotencyKey };
+}
+
+function layoutDraftUpdateInput(body: string): {
+  readonly expectedRevision: number;
+  readonly label: string;
+  readonly source: string;
+} | undefined {
+  const form = new URLSearchParams(body);
+  if ([...form.keys()].some((key) => !["expectedRevision", "label", "source"].includes(key))) return undefined;
+  if (form.getAll("expectedRevision").length !== 1 || form.getAll("label").length !== 1 || form.getAll("source").length !== 1) return undefined;
+  const expectedRevision = positiveInteger(form.get("expectedRevision"));
+  const label = boundedLayoutDraftLabel(form.get("label"));
+  const source = boundedLayoutDraftSource(form.get("source"));
+  return expectedRevision === undefined || label === undefined || source === undefined
+    ? undefined
+    : { expectedRevision, label, source };
+}
+
+function layoutDraftDeleteInput(body: string): number | undefined {
+  const form = new URLSearchParams(body);
+  if ([...form.keys()].some((key) => key !== "expectedRevision") || form.getAll("expectedRevision").length !== 1) return undefined;
+  return positiveInteger(form.get("expectedRevision"));
+}
+
+function boundedLayoutDraftLabel(value: string | null): string | undefined {
+  return value !== null
+    && value.length >= 1
+    && value.length <= 80
+    && value.trim() === value
+    && !/[\p{Cc}\u202a-\u202e\u2066-\u2069]/u.test(value)
+    ? value
+    : undefined;
+}
+
+function boundedLayoutDraftSource(value: string | null): string | undefined {
+  return value !== null && Buffer.byteLength(value, "utf8") <= 65_536 && !value.includes("\u0000")
+    ? value
+    : undefined;
+}
+
+type LayoutDraftNotice = "input" | "capacity" | "creation" | "revision" | "missing" | "storage";
+
+function layoutDraftNoticeForError(error: unknown): LayoutDraftNotice {
+  const code = errorCode(error);
+  if (code === "invalid_input") return "input";
+  if (code === "not_found") return "missing";
+  if (code === "revision_conflict") return "revision";
+  if (code === "capacity_full") return "capacity";
+  if (code === "idempotency_conflict") return "creation";
+  return "storage";
+}
+
+function boundedLayoutDraftNotice(value: string | null): LayoutDraftNotice | undefined {
+  return value === "input" || value === "capacity" || value === "creation" || value === "revision" || value === "missing" || value === "storage"
+    ? value
+    : undefined;
+}
+
+function layoutDraftNoticeTitle(notice: LayoutDraftNotice): string {
+  switch (notice) {
+    case "input": return "请调整草稿内容";
+    case "capacity": return "草稿位置已全部使用";
+    case "creation": return "这次建立请求已经处理";
+    case "revision": return "已载入草稿的新版本";
+    case "missing": return "这份草稿已离开当前列表";
+    case "storage": return "草稿存储正在恢复";
+  }
+}
+
+function layoutDraftNoticeMessage(notice: LayoutDraftNotice): string {
+  switch (notice) {
+    case "input": return "调整草稿名称或布局描述后即可继续保存。";
+    case "capacity": return "删除一个旧草稿后即可建立新的布局草稿。";
+    case "creation": return "请从左侧草稿列表选择当前版本继续。";
+    case "revision": return "页面展示当前版本，请确认内容后继续编辑。";
+    case "missing": return "请从当前草稿列表选择下一份内容。";
+    case "storage": return "连接恢复后即可继续编辑，家庭视图保持原样。";
+  }
+}
+
+function layoutDraftUpdatedLabel(value: string): string {
+  return `${value.slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function renderLayoutDraftPreview(draft: ProductViewRecipeDraft, model: ProductShellModel): string {
+  let input: unknown;
+  try {
+    input = JSON.parse(draft.source);
+  } catch {
+    return layoutDraftPreviewFailure(draft.revision, "syntax_error", "JSON 结构还未完整，草稿内容保持原样。");
+  }
+  let recipe: ProductViewRecipeV1;
+  try {
+    recipe = compileProductViewRecipe(input);
+  } catch {
+    return layoutDraftPreviewFailure(draft.revision, "recipe_invalid", "布局字段需要调整，草稿内容保持原样。");
+  }
+  const conformance = runProductViewRecipeConformance(input);
+  if (!conformance.passed || conformance.recipeDigest === undefined) {
+    return layoutDraftPreviewFailure(draft.revision, "conformance_failed", "布局一致性检查需要调整，草稿内容保持原样。");
+  }
+  const rendered = renderProductViewRecipeContent(recipe, { ...model, route: "overview" }, { includeStyles: false, hrefs: PRODUCT_HREFS });
+  const previewDocument = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/product.css"></head><body>${rendered}</body></html>`;
+  return `<section class="product-layout-preview" data-layout-preview-revision="${draft.revision}" data-layout-preview-status="ready" aria-labelledby="layout-preview-heading"><header><div><p class="product-kicker">只读预览 · 草稿版本 ${draft.revision}</p><h3 id="layout-preview-heading">${escapeTransportHtml(recipe.title)}</h3></div><code>${conformance.recipeDigest}</code></header><iframe class="product-layout-preview-canvas" inert data-layout-preview-canvas sandbox tabindex="-1" title="${escapeTransportHtml(recipe.title)}的只读预览" srcdoc="${escapeTransportHtml(previewDocument)}"></iframe></section>`;
+}
+
+function layoutDraftPreviewFailure(revision: number, status: "syntax_error" | "recipe_invalid" | "conformance_failed", message: string): string {
+  return `<section class="product-layout-preview product-layout-preview--issue" data-layout-preview-revision="${revision}" data-layout-preview-status="${status}" role="status"><p class="product-kicker">预览检查 · 草稿版本 ${revision}</p><h3>这份草稿可以继续编辑</h3><p>${escapeTransportHtml(message)}</p></section>`;
 }
 
 function setProductViewSession(response: ServerResponse, viewId: string): void {

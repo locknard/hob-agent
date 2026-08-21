@@ -383,6 +383,7 @@ test("stops the already-mounted HomeWorld when DSH startup fails", async () => {
 });
 
 test("mounts authenticated Inbox HTTP only when explicitly configured", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-layout-runtime-"));
   const runtime = createHomeAgentRuntime({
     homeWorld: homeWorldOptions(),
     launchEnvironment: launchEnvironment(),
@@ -391,18 +392,26 @@ test("mounts authenticated Inbox HTTP only when explicitly configured", async ()
       model: "deepseek-v4-flash",
       sessionId: "inbox-http-test",
     },
-    inboxHttp: { port: 0, authenticate: () => true, principal: fixtureReviewPrincipal },
+    inboxHttp: {
+      port: 0,
+      authenticate: () => true,
+      principal: { ...fixtureReviewPrincipal, role: "admin" },
+    },
+    homeViewRecipeDrafts: { path: join(directory, "layout-drafts.sqlite") },
   });
 
-  await runtime.start();
   try {
+    await runtime.start();
     assert.match(runtime.context.homeInboxHttp.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
     assert.equal(runtime.context.homeObservationScheduler.snapshot().enabled, false);
     const home = await fetch(`${runtime.context.homeInboxHttp.origin}/home`);
     assert.equal(home.status, 200);
     assert.match(await home.text(), /data-route="overview"/);
+    const settings = await fetch(`${runtime.context.homeInboxHttp.origin}/settings`);
+    assert.match(await settings.text(), /布局工作室/);
   } finally {
     await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
   }
   assert.equal(runtime.context.homeInboxHttp, undefined);
 });

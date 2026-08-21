@@ -116,6 +116,7 @@ export function createHomeHubProcessOptions(
       },
       ...(config.inboxHttp === undefined ? {} : {
         inboxHttp: { ...config.inboxHttp },
+        homeViewRecipeDrafts: { path: join(config.dataDirectory, "layout-drafts.sqlite") },
       }),
       ...(config.observation === undefined ? {} : { observation: config.observation }),
       ...(mediaCatalog === undefined ? {} : { mediaCatalog }),

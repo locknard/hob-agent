@@ -528,6 +528,12 @@ test("keeps control, settings, and onboarding as reachable server-rendered desti
   assert.match(onboarding, /action="\/onboarding\/continue"/);
 });
 
+test("bounds the layout preview track independently of its digest and iframe", () => {
+  assert.match(PRODUCT_SHELL_CSS, /\.product-layout-preview\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-layout-preview > header\s*\{[^}]*min-width:\s*0/s);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-layout-preview code\s*\{[^}]*min-width:\s*0[^}]*max-width:\s*100%/s);
+});
+
 test("renders Host-owned device view defaults with an explicit permission boundary", () => {
   const manageableView = {
     activeId: "builtin.control",

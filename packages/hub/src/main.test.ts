@@ -192,6 +192,7 @@ test("forwards only the Inbox verifier and port into the process composition", (
       boundPrincipalId: "household-member",
     },
   });
+  assert.equal(options.runtime.homeViewRecipeDrafts?.path, "/tmp/hob-agent-main-test/layout-drafts.sqlite");
   assert.equal(JSON.stringify(options).includes(inboxToken), false);
 });
 

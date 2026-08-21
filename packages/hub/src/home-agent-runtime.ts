@@ -78,6 +78,10 @@ import {
   HomeBatchActionService,
   type HomeBatchActionServiceOptions,
 } from "./home-batch-action-service.js";
+import {
+  SqliteProductViewRecipeDraftStore,
+  type SqliteProductViewRecipeDraftStoreOptions,
+} from "./product-view-recipe-draft-store.js";
 
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
@@ -102,6 +106,8 @@ export interface HomeAgentRuntimeOptions {
   /** Governed media request orchestration. The runtime mounts it with the catalog and review owner. */
   readonly mediaConversation?: HomeMediaConversationServiceOptions;
   readonly inboxHttp?: ProposalInboxHttpOptions;
+  /** Private Hub-owned persistence for layout authoring source drafts. */
+  readonly homeViewRecipeDrafts?: SqliteProductViewRecipeDraftStoreOptions;
   readonly observation?: HomeObservationSchedulerOptions;
   readonly agent: DshHomeAgentCompositionOptions;
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
@@ -124,6 +130,7 @@ export class HomeAgentRuntime {
   private authorityCandidates: AuthorityCandidateRegistry | undefined;
   private artifactPipeline: ArtifactPipelineComposition | undefined;
   private preparationRunner: ArtifactPreparationJobRunner | undefined;
+  private viewRecipeDraftStore: SqliteProductViewRecipeDraftStore | undefined;
 
   constructor(private readonly options: HomeAgentRuntimeOptions) {
     this.context = new Context();
@@ -145,6 +152,9 @@ export class HomeAgentRuntime {
       this.authorityCandidates = new AuthorityCandidateRegistry(
         this.options.homeAuthorityCandidates ?? { path: ":memory:" },
       );
+      if (this.options.homeViewRecipeDrafts !== undefined) {
+        this.viewRecipeDraftStore = new SqliteProductViewRecipeDraftStore(this.options.homeViewRecipeDrafts);
+      }
       await this.context.plugin(HomeWorldService, this.options.homeWorld);
       await this.context.plugin(HomeMediaPlayerService);
       await this.context.plugin(
@@ -249,7 +259,10 @@ export class HomeAgentRuntime {
         },
       });
       if (this.options.inboxHttp !== undefined) {
-        await this.context.plugin(ProposalInboxHttpService, this.options.inboxHttp);
+        await this.context.plugin(ProposalInboxHttpService, {
+          ...this.options.inboxHttp,
+          ...(this.viewRecipeDraftStore === undefined ? {} : { viewRecipeDrafts: this.viewRecipeDraftStore }),
+        });
       }
       this.statusValue = "running";
     } catch (error) {
@@ -278,6 +291,7 @@ export class HomeAgentRuntime {
     } finally {
       for (const resource of [
         this.authorityCandidates,
+        this.viewRecipeDraftStore,
         this.artifactRegistry,
         this.proposalStore,
       ]) {
@@ -290,6 +304,7 @@ export class HomeAgentRuntime {
       this.preparationRunner = undefined;
       this.artifactPipeline = undefined;
       this.authorityCandidates = undefined;
+      this.viewRecipeDraftStore = undefined;
       this.artifactRegistry = undefined;
       this.proposalStore = undefined;
       this.statusValue = "stopped";

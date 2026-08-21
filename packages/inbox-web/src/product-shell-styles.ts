@@ -428,6 +428,35 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-settings-section { display: grid; grid-template-columns: minmax(13rem, 18rem) minmax(0, 1fr); gap: 2rem; padding: 1.3rem 1.1rem; border-block-end: 1px solid var(--shell-rule); }
 .product-settings-section:last-child { border-block-end: 0; }
 .product-settings-section h2, .product-settings-section p { margin-block-start: 0; }
+.product-layout-workspace { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+.product-layout-workspace > header, .product-layout-preview > header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.product-layout-workspace h3, .product-layout-preview h3 { margin-block: 0 .65rem; }
+.product-layout-capacity { min-width: 3.5rem; padding: .35rem .65rem; border-radius: 999px; background: var(--shell-blue-soft); color: var(--shell-blue); font-size: .82rem; font-weight: 760; text-align: center; font-variant-numeric: tabular-nums; }
+.product-layout-notice { display: grid; gap: .15rem; padding: .8rem .9rem; border: 1px solid color-mix(in srgb, var(--shell-blue) 24%, var(--shell-rule)); border-radius: .8rem; background: var(--shell-blue-soft); color: var(--shell-ink); }
+.product-layout-notice p { margin: 0; color: var(--shell-muted); font-size: .86rem; }
+.product-layout-workspace-grid { display: grid; grid-template-columns: minmax(14rem, .72fr) minmax(0, 1.28fr); gap: 1rem; }
+.product-layout-workspace-grid > div { min-width: 0; padding: 1rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); background: var(--shell-surface); }
+.product-layout-draft-list { display: grid; gap: .35rem; margin: 0; padding: 0; list-style: none; }
+.product-layout-draft-list a { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-height: 3.5rem; padding: .65rem .75rem; border-radius: .75rem; color: var(--shell-ink); text-decoration: none; transition: background var(--shell-motion), transform var(--shell-motion); }
+.product-layout-draft-list a:hover { background: var(--shell-blue-soft); }
+.product-layout-draft-list a:active { transform: scale(.99); }
+.product-layout-draft-list a > span:first-child { display: grid; gap: .1rem; min-width: 0; }
+.product-layout-draft-list strong, .product-layout-draft-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.product-layout-draft-list small { color: var(--shell-muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+.product-layout-editor, .product-layout-editor-shell { display: grid; gap: .8rem; }
+.product-layout-editor label { display: grid; gap: .35rem; color: var(--shell-ink); font-size: .88rem; font-weight: 720; }
+.product-layout-editor input, .product-layout-editor textarea { width: 100%; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--shell-rule); border-radius: .75rem; background: var(--shell-bg); color: var(--shell-ink); }
+.product-layout-editor textarea { min-height: 15rem; resize: vertical; font: .82rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; tab-size: 2; }
+.product-layout-editor-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
+.product-layout-delete { justify-self: end; max-width: 24rem; color: var(--shell-muted); font-size: .86rem; }
+.product-layout-delete summary { min-height: 2.5rem; display: flex; align-items: center; justify-content: end; cursor: pointer; font-weight: 700; }
+.product-layout-delete > div { display: grid; gap: .65rem; justify-items: end; padding: .75rem; border: 1px solid color-mix(in srgb, var(--shell-red) 30%, var(--shell-rule)); border-radius: .75rem; background: var(--shell-red-soft); }
+.product-layout-delete p { margin: 0; }
+.product-layout-preview { display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; min-width: 0; max-width: 100%; padding: 1rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); background: var(--shell-bg); }
+.product-layout-preview > header { min-width: 0; }
+.product-layout-preview code { flex: 0 1 28rem; min-width: 0; max-width: 100%; overflow: hidden; color: var(--shell-muted); font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
+.product-layout-preview-canvas { width: 100%; min-height: 32rem; border: 1px solid var(--shell-rule); border-radius: .9rem; background: var(--shell-bg); pointer-events: none; }
+.product-layout-preview--issue { border-color: color-mix(in srgb, var(--shell-amber) 48%, var(--shell-rule)); background: var(--shell-amber-soft); }
 .product-view-default-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .product-view-default-list li { min-height: 3.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-block: .45rem; border-block-end: 1px solid var(--shell-rule); }
 .product-view-default-list li:last-child { border-block-end: 0; }
@@ -542,6 +571,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-control-summary { flex-wrap: wrap; }
   .product-control-summary p { flex-basis: 100%; margin-inline-start: 0; }
   .product-settings-section { grid-template-columns: minmax(0, 1fr); gap: .8rem; }
+  .product-layout-workspace-grid { grid-template-columns: minmax(0, 1fr); }
+  .product-layout-preview > header { flex-direction: column; }
+  .product-layout-preview-canvas { min-height: 28rem; }
   .product-view-default-reset { grid-column: 1; }
   .product-presentation-preference { grid-template-columns: minmax(0, 1fr); }
   .product-batch-items { grid-template-columns: minmax(0, 1fr); }
@@ -589,6 +621,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-control-row { grid-template-columns: minmax(0, 1fr) auto; gap: .6rem; }
   .product-control-row .product-control-action { grid-column: 1 / -1; width: 100%; }
   .product-view-default-list li { align-items: start; flex-direction: column; }
+  .product-layout-workspace > header { flex-direction: column; }
+  .product-layout-editor-actions > * { width: 100%; }
+  .product-layout-preview-canvas { min-height: 24rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

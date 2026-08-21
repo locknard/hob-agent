@@ -2484,6 +2484,180 @@ test("rejects short authentication secrets before opening a listener", () => {
   assert.throws(() => createInboxBasicAuthenticator("too-short"), /at least 32/);
 });
 
+test("keeps durable layout authoring private while previewing one exact inert revision", async () => {
+  const records = new Map<string, {
+    draftId: string;
+    ownerPrincipalId: string;
+    revision: number;
+    label: string;
+    source: string;
+    updatedAt: string;
+  }>();
+  const drafts = {
+    create(input: { ownerPrincipalId: string; label: string; source: string }) {
+      const value = Object.freeze({
+        draftId: "draft-1",
+        ownerPrincipalId: input.ownerPrincipalId,
+        revision: 1,
+        label: input.label,
+        source: input.source,
+        updatedAt: "2026-08-22T01:00:00.000Z",
+      });
+      records.set(value.draftId, value);
+      return value;
+    },
+    update(input: { draftId: string; ownerPrincipalId: string; expectedRevision: number; label: string; source: string }) {
+      const current = records.get(input.draftId);
+      if (current === undefined) throw Object.assign(new Error("hidden"), { code: "not_found" });
+      if (current.revision !== input.expectedRevision) throw Object.assign(new Error("hidden"), { code: "revision_conflict" });
+      const value = Object.freeze({ ...current, revision: current.revision + 1, label: input.label, source: input.source });
+      records.set(value.draftId, value);
+      return value;
+    },
+    remove(input: { draftId: string; expectedRevision: number }) {
+      const current = records.get(input.draftId);
+      if (current === undefined) throw Object.assign(new Error("hidden"), { code: "not_found" });
+      if (current.revision !== input.expectedRevision) throw Object.assign(new Error("hidden"), { code: "revision_conflict" });
+      records.delete(input.draftId);
+    },
+    read(draftId: string, ownerPrincipalId: string) {
+      const value = records.get(draftId);
+      return value?.ownerPrincipalId === ownerPrincipalId ? value : undefined;
+    },
+    list(ownerPrincipalId: string) {
+      return [...records.values()].filter((value) => value.ownerPrincipalId === ownerPrincipalId).map(({ source: _source, ownerPrincipalId: _owner, ...summary }) => summary);
+    },
+  };
+  const source = JSON.stringify({
+    apiVersion: "hob.view.recipe/v1",
+    id: "community.calm",
+    title: "安静视图",
+    pages: [{
+      route: "overview",
+      layout: "stack",
+      slots: [{ slot: "overview.header", width: "full" }],
+    }],
+  });
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    viewRecipeDrafts: drafts,
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  try {
+    const created = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ label: "我的安静视图", source, idempotencyKey: "create-draft-1" }),
+      redirect: "manual",
+    });
+    assert.equal(created.status, 303);
+    assert.equal(created.headers.get("location"), "/settings?layout=draft-1");
+
+    const listing = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    const listingHtml = await listing.text();
+    assert.match(listingHtml, /布局工作室/);
+    assert.match(listingHtml, /我的安静视图/);
+    assert.doesNotMatch(listingHtml, /community\.calm/);
+
+    const editor = await fetch(`${ctx.homeInboxHttp.origin}/settings?layout=draft-1`, { headers: { authorization } });
+    const editorHtml = await editor.text();
+    assert.match(editorHtml, /name="source"/);
+    assert.match(editorHtml, /community\.calm/);
+    assert.match(editorHtml, /草稿版本 1/);
+
+    const preview = await fetch(`${ctx.homeInboxHttp.origin}/settings?layout=draft-1&preview=1`, { headers: { authorization } });
+    const previewHtml = await preview.text();
+    assert.match(previewHtml, /data-layout-preview-revision="1"/);
+    assert.match(previewHtml, /data-layout-preview-status="ready"/);
+    assert.match(previewHtml, /<iframe[^>]+inert[^>]+data-layout-preview-canvas[^>]+sandbox/);
+    assert.match(previewHtml, /sha256:[a-f0-9]{64}/);
+
+    const updated = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedRevision: "1", label: "继续编辑", source: '{"apiVersion":' }),
+      redirect: "manual",
+    });
+    assert.equal(updated.status, 303);
+    const incompletePreview = await fetch(`${ctx.homeInboxHttp.origin}/settings?layout=draft-1&preview=1`, { headers: { authorization } });
+    const incompleteHtml = await incompletePreview.text();
+    assert.match(incompleteHtml, /data-layout-preview-revision="2"/);
+    assert.match(incompleteHtml, /data-layout-preview-status="syntax_error"/);
+    assert.match(incompleteHtml, /JSON 结构还未完整，草稿内容保持原样/);
+
+    const stale = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedRevision: "1", label: "旧版本", source }),
+      redirect: "manual",
+    });
+    assert.equal(stale.status, 303);
+    assert.equal(stale.headers.get("location"), "/settings?layout=draft-1&layoutNotice=revision");
+    const conflictPage = await fetch(`${ctx.homeInboxHttp.origin}${stale.headers.get("location")}`, { headers: { authorization } });
+    const conflictHtml = await conflictPage.text();
+    assert.match(conflictHtml, /data-layout-notice="revision"/);
+    assert.match(conflictHtml, /已载入草稿的新版本/);
+    assert.match(conflictHtml, /name="expectedRevision" value="2"/);
+
+    const restored = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedRevision: "2", label: "可预览版本", source }),
+      redirect: "manual",
+    });
+    assert.equal(restored.status, 303);
+
+    const deleted = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1/delete`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedRevision: "3" }),
+      redirect: "manual",
+    });
+    assert.equal(deleted.status, 303);
+    assert.equal(records.size, 0);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+
+  const shared = new Context();
+  const sharedInbox = await shared.plugin(StubInbox);
+  const sharedFiber = await shared.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: childSharedPrincipal,
+    viewRecipeDrafts: drafts,
+  });
+  try {
+    const page = await fetch(`${shared.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    assert.doesNotMatch(await page.text(), /布局工作室/);
+    const denied = await fetch(`${shared.homeInboxHttp.origin}/settings/layout-drafts`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: shared.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ label: "共享设备", source, idempotencyKey: "shared-create" }),
+      redirect: "manual",
+    });
+    assert.equal(denied.status, 403);
+  } finally {
+    await sharedFiber.dispose();
+    await sharedInbox.dispose();
+    await shared.fiber.dispose();
+  }
+});
+
 test("requires an explicit principal role and device binding for Basic-authenticated HTTP", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StubInbox);
