@@ -402,6 +402,28 @@ current page, active Agent turn, safety surface and both review badges unchanged
 Review selection and control result references travel with the semantic route, so a
 view switch keeps the proposal detail, action feedback or batch result in context.
 
+### F2f durable authoring drafts
+
+Layout authoring uses `draft → preview → save`; activation remains a separate future
+command. A draft record contains an opaque id, owner principal, positive revision,
+household-facing label, at most 64 KiB of inert UTF-8 source and an update timestamp.
+The Hub stores at most 32 drafts in a private SQLite file and applies optimistic
+revision checks to every update and explicit deletion. Deletion releases one draft
+slot while leaving active providers and household data unchanged.
+
+The draft store treats source as inert content. It returns source only to its owner
+through the authenticated advanced settings path. Logs, Agent prompts, household
+projection and provider registration receive metadata only. Preview parses JSON,
+compiles V1 recipe data and runs conformance for the exact draft revision. A stable
+redacted result describes syntax, recipe or conformance failure while preserving the
+draft source for another edit.
+
+Preview uses the current member's allowed presentation projection and a Host-owned
+interaction-disabled render mode. Save records the draft; preview establishes no
+grant, provider registration, default change, approval or device action. Activation
+later binds an exact draft revision and digest through its own permission and audit
+path. Private-device administrator access is the Phase 0 authoring boundary.
+
 ## Failure and recovery
 
 - Provider 加载超时、崩溃、版本不兼容或被撤销：继续显示当前安全视图；不可用 provider

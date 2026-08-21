@@ -164,6 +164,14 @@ long labels stay inside the viewport. View selection continues to preserve the
 semantic route, selected proposal, action feedback, batch result and every Hub-owned
 safety and review surface.
 
+Layout authoring drafts belong to Hub persistence. The private SQLite record carries
+an opaque id, owner principal, optimistic revision, bounded label, at most 64 KiB of
+inert source and an update timestamp, with a 32-draft household ceiling. Source stays
+inside the authenticated owner editing path. Updates and explicit deletion use the
+expected revision; deletion releases capacity. Preview parses and compiles one exact
+revision, runs recipe conformance and uses a Host-owned interaction-disabled render;
+save and preview create no provider, grant, default change or device authority.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond
