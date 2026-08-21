@@ -133,6 +133,40 @@ operation and policy check; a catalog result never supplies it. The first
 playback slice uses the current verified volume or refuses a policy-exceeding
 volume. It does not hide a non-atomic volume change inside `play_media`.
 
+### Phase 0 media intent preparation
+
+Before an approval ticket or executor exists, the Hub may prepare—but never
+apply—one exact media intent. This is a distinct read-only boundary rather than
+an extension of catalog search:
+
+```text
+prepare_media_playback {
+  intent: {
+    kind: play_media,
+    playerHwCapabilityId: Hub capability id,
+    mediaRef: Hub-issued opaque reference,
+    queueMode: replace_and_play | play_next | add_to_queue
+  }
+}
+```
+
+The Hub reparses the strict object, resolves the reference for the configured
+tenant and current time, verifies the selected candidate is playable, and
+requires one exact currently available player from the latest neutral
+inventory. A successful preparation returns `requires_confirmation` with a
+bounded neutral projection of the player, selection, queue behavior, and
+reported current volume. It does not create or claim an approval ticket, call
+a bridge, change a queue, set volume, or claim that playback occurred.
+
+Preparation fails closed with a closed reason when the reference is expired or
+unknown, the result is not playable, the player is absent or unavailable, or
+the player's current availability cannot be proven. Native ids, routes,
+services, URLs, provider ids, queue ids, credentials, and volume requests are
+rejected by the strict intent schema. Same-label candidates are never merged;
+the Agent must first select one exact Hub capability or ask the household to
+clarify. This preparation result is not durable authority and must be rebuilt
+against fresh state before a later ticket can be issued.
+
 Home Assistant, Xiaomi, AirPlay, a local music server, and future ecosystem
 adapters must pass the same conformance surface. HA entity ids, service calls,
 MIoT identifiers, Spotify URIs, Apple Music ids, and authentication material do

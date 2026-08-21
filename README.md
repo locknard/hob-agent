@@ -120,8 +120,9 @@ metadata. It never discovers or serializes `HOB_MUSIC_ASSISTANT_TOKEN`; an
 explicit development `env:HOB_MUSIC_ASSISTANT_TOKEN` reference is the only
 environment-backed alternative. Both launch settings are required; omitting
 both leaves Music Assistant unloaded, while providing only one fails startup.
-This integration currently adds bounded catalog search only—it does not expose
-Music Assistant players, queues, playback, or a generic command API.
+This integration currently adds bounded catalog search and neutral intent
+preparation only—it does not expose Music Assistant player ids, queues,
+playback execution, or a generic command API.
 
 Before enabling the Agent or observation schedule, the same bridge and data
 configuration can be validated without `HOB_MODEL` or a model API key:
@@ -215,6 +216,12 @@ bounded read-only `search_home_media` tool. Deployments without a catalog keep
 the tool absent. Its model-facing projection removes expiry and all
 provider-native fields; `mediaRef` and `playable` remain discovery hints, not
 playback authority.
+When the same runtime also has a fresh neutral player inventory, it exposes
+`prepare_home_media_playback`. That tool re-resolves the opaque media reference
+and selected Hub player, then returns either a closed block reason or
+`requires_confirmation`. It creates no approval ticket, invokes no bridge, and
+cannot play, queue, or change volume; a future action path must rebuild and
+authorize the operation from fresh state after explicit confirmation.
 The production Hub also mounts an authority-selected, neutral media-player
 inventory and exposes it through the read-only `get_home_media_players` DSH
 tool. The HA adapter uses a strict additive `ha.media-player@1` read schema;

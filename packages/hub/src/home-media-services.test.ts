@@ -17,6 +17,9 @@ interface MediaServicesModule {
   readonly HomeMediaCatalogService: new (ctx: Context, options: Record<string, unknown>) => Service & {
     search(input: Record<string, unknown>): Promise<unknown>;
   };
+  readonly HomeMediaPlaybackPreparationService: new (ctx: Context, options: Record<string, unknown>) => Service & {
+    prepare(intent: unknown): unknown;
+  };
   readonly SyntheticMediaCatalogProvider: new (rows: readonly Record<string, unknown>[]) => {
     search(input: { readonly query: string; readonly kinds: readonly string[]; readonly limit: number; readonly signal: AbortSignal }): Promise<readonly unknown[]>;
   };
@@ -27,6 +30,7 @@ async function loadServices(): Promise<MediaServicesModule> {
     const loaded = await import("./home-media-services.js") as unknown as Partial<MediaServicesModule>;
     if (typeof loaded.HomeMediaPlayerService !== "function"
       || typeof loaded.HomeMediaCatalogService !== "function"
+      || typeof loaded.HomeMediaPlaybackPreparationService !== "function"
       || typeof loaded.SyntheticMediaCatalogProvider !== "function") {
       throw new Error("home media service exports are incomplete");
     }
@@ -268,4 +272,97 @@ test("aborts an in-flight catalog search when its Cordis service is disposed", a
   finish?.();
   await assert.rejects(() => pending, /search failed/i);
   await ctx.fiber.dispose();
+});
+
+test("prepares an exact media intent from a fresh HomeWorld projection without widening the catalog service", async () => {
+  const {
+    HomeMediaCatalogService,
+    HomeMediaPlaybackPreparationService,
+    SyntheticMediaCatalogProvider,
+  } = await loadServices();
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  const catalogFiber = await ctx.plugin(HomeMediaCatalogService, {
+    tenantId: "household-test",
+    catalogId: "synthetic-test",
+    generation: 1,
+    sourceLabel: "Synthetic household library",
+    mediaRefTtlMs: 60_000,
+    maxQueryChars: 128,
+    maxResults: 3,
+    provider: new SyntheticMediaCatalogProvider([
+      { providerItemId: "jazz-1", title: "晚间爵士", kind: "playlist", playable: true },
+    ]),
+    now: () => 1_000,
+    mediaRefFactory: () => "syntheticOpaqueRef001",
+  });
+  const search = await ctx.homeMediaCatalog.search({
+    query: "爵士",
+    limit: 1,
+    signal: new AbortController().signal,
+  });
+  const mediaRef = search.candidates[0]?.mediaRef;
+  assert.equal(mediaRef, "syntheticOpaqueRef001");
+  const preparationFiber = await ctx.plugin(HomeMediaPlaybackPreparationService, {
+    tenantId: "household-test",
+    now: () => 1_001,
+  });
+  try {
+    const result = ctx.homeMediaPlaybackPreparation.prepare({
+      kind: "play_media",
+      playerHwCapabilityId: "hwc-a",
+      mediaRef,
+      queueMode: "replace_and_play",
+    });
+    assert.deepEqual(result, {
+      status: "requires_confirmation",
+      intent: {
+        kind: "play_media",
+        playerHwCapabilityId: "hwc-a",
+        mediaRef: "syntheticOpaqueRef001",
+        queueMode: "replace_and_play",
+      },
+      player: {
+        hwCapabilityId: "hwc-a",
+        displayLabel: "房间音响",
+        spaces: [{ hwSpaceId: "hws-a", name: "多媒体室" }],
+        playbackState: "idle",
+        volume: { reported: false },
+      },
+      media: {
+        title: "晚间爵士",
+        kind: "playlist",
+        sourceLabel: "Synthetic household library",
+        playable: true,
+      },
+    });
+    assert.deepEqual(
+      Reflect.ownKeys(ctx.homeMediaCatalog).filter((key) => typeof key === "string"),
+      ["ctx", "name", "search"],
+    );
+    for (const forbidden of ["prepare", "resolveMediaRef", "play", "queue", "execute"]) {
+      assert.equal(forbidden in ctx.homeMediaCatalog, false, `catalog service exposed ${forbidden}`);
+      assert.equal(forbidden in ctx.homeMediaPlaybackPreparation, forbidden === "prepare");
+    }
+  } finally {
+    await preparationFiber.dispose();
+    await catalogFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps playback preparation unavailable without both the world and explicit catalog", async () => {
+  const { HomeMediaPlaybackPreparationService } = await loadServices();
+  const missingBoth = new Context();
+  const missingBothFiber = missingBoth.plugin(HomeMediaPlaybackPreparationService, { tenantId: "household-test" });
+  assert.equal(missingBoth.get("homeMediaPlaybackPreparation"), undefined);
+  await missingBothFiber.dispose();
+  await missingBoth.fiber.dispose();
+
+  const missingCatalog = new Context();
+  await missingCatalog.plugin(StubWorld);
+  const missingCatalogFiber = missingCatalog.plugin(HomeMediaPlaybackPreparationService, { tenantId: "household-test" });
+  assert.equal(missingCatalog.get("homeMediaPlaybackPreparation"), undefined);
+  await missingCatalogFiber.dispose();
+  await missingCatalog.fiber.dispose();
 });

@@ -52,6 +52,16 @@ class StubMediaPlayerService extends Service {
   release() {}
 }
 
+class StubMediaPlaybackPreparationService extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeMediaPlaybackPreparation");
+  }
+
+  prepare() {
+    return { status: "blocked", reason: "media_ref_unavailable" };
+  }
+}
+
 class RecordingAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = [];
 
@@ -227,6 +237,24 @@ test("mounts player discovery only when a neutral player inventory is available"
     adapter: new RecordingAdapter(),
   });
   assert.equal(ctx.tools.schemas().some((schema) => schema.name === "get_home_media_players"), true);
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("mounts confirmation-only media preparation only when the Hub seam is available", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  await ctx.plugin(StubMediaPlaybackPreparationService);
+  const fiber = await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter: new RecordingAdapter(),
+  });
+  assert.equal(ctx.tools.schemas().some((schema) => schema.name === "prepare_home_media_playback"), true);
+  const definition = ctx.tools.get("prepare_home_media_playback");
+  assert.ok(definition);
+  assert.match(definition.description, /does not.*(?:execute|play|control)/i);
   await fiber.dispose();
   await ctx.fiber.dispose();
 });

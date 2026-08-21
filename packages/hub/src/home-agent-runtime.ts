@@ -48,6 +48,7 @@ import {
 } from "@hob-agent/agent-layer/composition";
 import {
   HomeMediaCatalogService,
+  HomeMediaPlaybackPreparationService,
   HomeMediaPlayerService,
   type HomeMediaCatalogServiceOptions,
 } from "./home-media-services.js";
@@ -133,6 +134,10 @@ export class HomeAgentRuntime {
       await this.context.plugin(HomeRetentionService);
       if (this.options.mediaCatalog !== undefined) {
         await this.context.plugin(HomeMediaCatalogService, this.options.mediaCatalog);
+        await this.context.plugin(HomeMediaPlaybackPreparationService, {
+          tenantId: this.options.mediaCatalog.tenantId,
+          ...(this.options.mediaCatalog.now === undefined ? {} : { now: this.options.mediaCatalog.now }),
+        });
       }
       await mountDshHomeAgent(this.context, this.options.agent);
       await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });

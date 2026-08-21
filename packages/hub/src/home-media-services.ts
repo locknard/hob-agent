@@ -13,12 +13,17 @@ import {
   projectMediaPlayerInventory,
   type MediaPlayerInventory,
 } from "./media-player-inventory.js";
+import {
+  prepareMediaPlayIntent,
+  type MediaPlaybackPreparation,
+} from "./media-play-intent.js";
 import type { HomeWorldService } from "./home-world-service.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
     homeMediaPlayers: HomeMediaPlayerService;
     homeMediaCatalog: HomeMediaCatalogService;
+    homeMediaPlaybackPreparation: HomeMediaPlaybackPreparationService;
   }
 }
 
@@ -235,6 +240,8 @@ export interface HomeMediaCatalogServiceOptions extends Omit<MediaCatalogOptions
   readonly provider: DisposableMediaCatalogProvider;
 }
 
+const catalogCores = new WeakMap<Context, MediaCatalog>();
+
 /** Search-only Cordis seam; native ref resolution remains inside Hub core. */
 export class HomeMediaCatalogService extends Service {
   readonly search: (input: {
@@ -249,6 +256,7 @@ export class HomeMediaCatalogService extends Service {
     const stopController = new AbortController();
     const provider = options.provider;
     const catalog = new MediaCatalog(options);
+    catalogCores.set(ctx.root, catalog);
     this.search = (input) => {
       const signal = AbortSignal.any([input.signal, stopController.signal]);
       return catalog.search({
@@ -259,9 +267,49 @@ export class HomeMediaCatalogService extends Service {
       });
     };
     this.ctx.effect(() => async () => {
+      catalogCores.delete(ctx.root);
       stopController.abort(new Error("Home media catalog stopped"));
       await provider.dispose?.();
     }, "home-media-catalog.stop");
+  }
+}
+
+export interface HomeMediaPlaybackPreparationServiceOptions {
+  readonly tenantId: string;
+  readonly now?: () => number;
+}
+
+type HomeMediaPlaybackPreparationContext = Context & {
+  homeWorld: HomeWorldService;
+  homeMediaCatalog: HomeMediaCatalogService;
+};
+
+/** Hub-owned, read-only join of one fresh player and one short-lived catalog candidate. */
+export class HomeMediaPlaybackPreparationService extends Service {
+  static inject = ["homeWorld", "homeMediaCatalog"];
+
+  readonly prepare: (intent: unknown) => MediaPlaybackPreparation;
+
+  constructor(ctx: Context, options: HomeMediaPlaybackPreparationServiceOptions) {
+    super(ctx, "homeMediaPlaybackPreparation");
+    if (!options
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.tenantId)
+      || (options.now !== undefined && typeof options.now !== "function")) {
+      throw new TypeError("Media playback preparation configuration is invalid");
+    }
+    const now = options.now ?? Date.now;
+    this.prepare = (intent) => {
+      const serviceContext = this.ctx as HomeMediaPlaybackPreparationContext;
+      const catalog = catalogCores.get(ctx.root);
+      if (catalog === undefined) throw new Error("Media playback preparation is unavailable");
+      return prepareMediaPlayIntent({
+        intent,
+        tenantId: options.tenantId,
+        now: now(),
+        catalog,
+        inventory: projectMediaPlayerInventory(serviceContext.homeWorld.snapshot.call(serviceContext.homeWorld)),
+      });
+    };
   }
 }
 
