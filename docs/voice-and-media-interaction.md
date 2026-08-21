@@ -351,9 +351,11 @@ the result is uncertain and does not retry automatically.
 
 ## Delivery sequence
 
-1. **V0 — contract and visual prototype:** freeze this state machine; add a
-   responsive, accessible, simulated-state component with no microphone,
-   network, model, or action authority.
+1. **V0 — contract and visual prototype (implemented):** the authenticated
+   `/voice-preview` route renders the frozen state machine as a responsive,
+   accessible, simulated-state component. It has no script, microphone,
+   network, model, catalog search, or action authority. State selection is an
+   inert visual-review affordance and unknown states fail closed.
 2. **V1 — read-only voice turn:** push-to-talk, final transcript review,
    cancellation, captions, optional TTS, and one DSH advice turn. This remains
    non-applying and can coexist with the Phase 0 document workflow only as an

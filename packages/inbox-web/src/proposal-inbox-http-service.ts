@@ -5,6 +5,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 
 import type { InboxRejectionFeedbackCode, InboxReviewInput } from "./proposal-inbox.js";
 import { INBOX_CSS } from "./inbox-styles.js";
+import { renderVoiceSurface } from "./voice-surface.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_FORM_BYTES = 4 * 1024;
@@ -115,6 +116,13 @@ export class ProposalInboxHttpService extends Service {
         return html === undefined
           ? send(response, 404, "Control center unavailable")
           : sendHtml(response, 200, document(html, "Control center · hob-agent", "overview"), method === "HEAD");
+      }
+      if ((method === "GET" || method === "HEAD") && url.pathname === "/voice-preview") {
+        const stateValues = url.searchParams.getAll("state");
+        const html = stateValues.length > 1 ? undefined : renderVoiceSurface(stateValues[0] ?? "idle");
+        return html === undefined
+          ? send(response, 404, "Voice preview state not found")
+          : sendHtml(response, 200, document(html, "Voice lab · hob-agent", "voice"), method === "HEAD");
       }
       if ((method === "GET" || method === "HEAD") && url.pathname === "/proposals") {
         return sendHtml(response, 200, document(this.inbox.renderList(), "Home · hob-agent", "inbox"), method === "HEAD");
@@ -293,9 +301,9 @@ function sendCss(response: ServerResponse, status: number, css: string, head: bo
   response.end(head ? undefined : css);
 }
 
-function document(content: string, title: string, current: "overview" | "inbox"): string {
-  const currentAttribute = (page: "overview" | "inbox") => page === current ? ` aria-current="page"` : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f3f7f2"><title>${title}</title><link rel="stylesheet" href="/assets/inbox.css"></head><body><a class="skip-link" href="#main-content">Skip to main content</a><div class="app-shell"><header class="app-topbar"><a class="brand" href="/control-center"><strong>hob-agent</strong><span>Household agent</span></a><span class="topbar-note">Local review</span></header><div class="app-body"><nav class="app-nav" aria-label="Primary"><a href="/control-center"${currentAttribute("overview")}><span class="nav-mark" aria-hidden="true">O</span>Overview</a><a href="/proposals"${currentAttribute("inbox")}><span class="nav-mark" aria-hidden="true">I</span>Inbox</a></nav><div class="app-content">${content}</div></div></div></body></html>`;
+function document(content: string, title: string, current: "overview" | "inbox" | "voice"): string {
+  const currentAttribute = (page: "overview" | "inbox" | "voice") => page === current ? ` aria-current="page"` : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f3f7f2"><title>${title}</title><link rel="stylesheet" href="/assets/inbox.css"></head><body><a class="skip-link" href="#main-content">Skip to main content</a><div class="app-shell"><header class="app-topbar"><a class="brand" href="/control-center"><strong>hob-agent</strong><span>Household agent</span></a><span class="topbar-note">Local review</span></header><div class="app-body"><nav class="app-nav" aria-label="Primary"><a href="/control-center"${currentAttribute("overview")}><span class="nav-mark" aria-hidden="true">O</span>Overview</a><a href="/proposals"${currentAttribute("inbox")}><span class="nav-mark" aria-hidden="true">I</span>Inbox</a><a href="/voice-preview"${currentAttribute("voice")}><span class="nav-mark" aria-hidden="true">V</span>Voice lab</a></nav><div class="app-content">${content}</div></div></div></body></html>`;
 }
 
 function mediaType(value: string | undefined): string | undefined {

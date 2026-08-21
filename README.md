@@ -200,6 +200,11 @@ input/output mode for the single DSH runtime; media search is read-only, and
 playback cannot bypass Hub policy, confirmation, action tickets, verification,
 or audit. See
 [`docs/voice-and-media-interaction.md`](docs/voice-and-media-interaction.md).
+When the local Inbox is enabled, `/voice-preview` exposes the Phase 0 V0
+"home pulse" prototype. It is an authenticated, script-free visual state lab:
+it does not request microphone access, call a model, search a catalog, or
+control a device. It exists to review the interaction language before the
+governed voice and action paths are enabled.
 The Hub now contains the first non-networked `mediaCatalog@1` boundary: a
 trusted provider can return strictly bounded Music Assistant-compatible media
 kinds, while Agent-facing candidates receive only an opaque, tenant- and

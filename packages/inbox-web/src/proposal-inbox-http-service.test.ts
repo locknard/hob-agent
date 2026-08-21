@@ -74,9 +74,10 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   const controlCenterHtml = await controlCenter.text();
   assert.match(controlCenterHtml, /Control center/);
   const primaryNavigation = controlCenterHtml.match(/<nav class="app-nav"[^>]*>([\s\S]*?)<\/nav>/)?.[1] ?? "";
-  assert.equal((primaryNavigation.match(/<a /g) ?? []).length, 2);
+  assert.equal((primaryNavigation.match(/<a /g) ?? []).length, 3);
   assert.match(primaryNavigation, />Overview<\/a>/);
   assert.match(primaryNavigation, />Inbox<\/a>/);
+  assert.match(primaryNavigation, />Voice lab<\/a>/);
   assert.equal(primaryNavigation.includes("#observations"), false);
 
   const namedControlCenter = await fetch(`${ctx.homeInboxHttp.origin}/control-center`, {
@@ -100,6 +101,23 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.match(stylesheetText, /\.brand\s*\{[^}]*min-height:\s*2\.75rem/s);
   assert.match(stylesheetText, /\.advice-form\s*\{/);
   assert.match(stylesheetText, /\.hardware-suggestions\s*\{/);
+  assert.match(stylesheetText, /\.home-pulse\s*\{/);
+  assert.match(stylesheetText, /data-voice-state="listening"/);
+  assert.match(stylesheetText, /prefers-reduced-motion:\s*reduce/);
+
+  const voicePreview = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview?state=awaiting_confirmation`, {
+    headers: { authorization },
+  });
+  assert.equal(voicePreview.status, 200);
+  const voicePreviewHtml = await voicePreview.text();
+  assert.match(voicePreviewHtml, /data-voice-state="awaiting_confirmation"/);
+  assert.match(voicePreviewHtml, /aria-current="page"[^>]*>[^<]*<span[^>]*>V<\/span>Voice lab/);
+  assert.equal(voicePreviewHtml.includes("<script"), false);
+
+  const invalidVoiceState = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview?state=%3Cscript%3E`, {
+    headers: { authorization },
+  });
+  assert.equal(invalidVoiceState.status, 404);
 
   const html = await fetch(`${ctx.homeInboxHttp.origin}/proposals`, {
     headers: { authorization },
