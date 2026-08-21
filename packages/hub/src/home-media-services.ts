@@ -18,12 +18,16 @@ import {
   type MediaPlaybackPreparation,
 } from "./media-play-intent.js";
 import type { HomeWorldService } from "./home-world-service.js";
+import type { OneShotActionGateway, OneShotActionRead } from "./one-shot-action-plane.js";
+import type { MusicAssistantPlaybackClient } from "./music-assistant-websocket-client.js";
+import type { BridgeActionResult } from "../../../contracts/bridge-actions.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
     homeMediaPlayers: HomeMediaPlayerService;
     homeMediaCatalog: HomeMediaCatalogService;
     homeMediaPlaybackPreparation: HomeMediaPlaybackPreparationService;
+    homeMediaPlayback: HomeMediaPlaybackExecutionService;
   }
 }
 
@@ -311,6 +315,157 @@ export class HomeMediaPlaybackPreparationService extends Service {
       });
     };
   }
+}
+
+export interface HomeMediaPlaybackExecutionServiceOptions {
+  readonly tenantId: string;
+  readonly client: MusicAssistantPlaybackClient;
+  /** Resolves a neutral Hub capability to the private Music Assistant player id. */
+  readonly playerIdForCapability: (capabilityId: string) => string | undefined;
+  readonly now?: () => number;
+}
+
+/**
+ * Hub-private Music Assistant execution owner.
+ *
+ * The service accepts only a neutral capability id and a short-lived opaque
+ * mediaRef. It resolves both inside Hub, sends the provider URI only to the
+ * authenticated MA client, and converts MA's exact player state back to the
+ * one-shot action gateway's neutral value.
+ */
+export class HomeMediaPlaybackExecutionService extends Service {
+  static inject = ["homeMediaCatalog"];
+
+  readonly gateway: OneShotActionGateway;
+  readonly execute: OneShotActionGateway["execute"];
+  readonly readState: OneShotActionGateway["readState"];
+
+  private readonly tenantId: string;
+  private readonly client: MusicAssistantPlaybackClient;
+  private readonly playerIdForCapability: (capabilityId: string) => string | undefined;
+  private readonly now: () => number;
+  private readonly requestedMediaByCapability = new Map<string, { readonly mediaRef: string; readonly providerItemId: string }>();
+
+  constructor(ctx: Context, options: HomeMediaPlaybackExecutionServiceOptions) {
+    super(ctx, "homeMediaPlayback");
+    if (!options
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.tenantId)
+      || !options.client
+      || typeof options.client.playMedia !== "function"
+      || typeof options.client.stopMedia !== "function"
+      || typeof options.client.readPlayerState !== "function"
+      || typeof options.playerIdForCapability !== "function"
+      || (options.now !== undefined && typeof options.now !== "function")) {
+      throw new TypeError("Music Assistant playback configuration is invalid");
+    }
+    this.tenantId = options.tenantId;
+    this.client = options.client;
+    this.playerIdForCapability = options.playerIdForCapability;
+    this.now = options.now ?? Date.now;
+    this.gateway = {
+      execute: (input) => this.executeAction(input),
+      readState: (input) => this.readActionState(input),
+    };
+    this.execute = this.gateway.execute;
+    this.readState = this.gateway.readState;
+    this.ctx.effect(() => () => this.requestedMediaByCapability.clear(), "home-media-playback.stop");
+  }
+
+  private async executeAction(input: Parameters<OneShotActionGateway["execute"]>[0]): Promise<BridgeActionResult> {
+    const playerId = this.playerId(input.capabilityId);
+    if (playerId === undefined) return { status: "rejected", reason: "invalid_target" };
+    const action = input.action;
+    if (action.kind === "play_media") {
+      const catalog = this.catalog();
+      const target = catalog.resolveExecutionTarget({
+        tenantId: this.tenantId,
+        mediaRef: action.mediaRef,
+        now: this.timestamp(),
+      });
+      if (target === undefined || !target.candidate.playable) {
+        return { status: "rejected", reason: "invalid_target" };
+      }
+      const result = await this.client.playMedia({
+        playerId,
+        mediaUri: target.providerItemId,
+        queueMode: action.queueMode,
+        signal: input.signal,
+      });
+      if (result.status === "acknowledged") {
+        this.requestedMediaByCapability.set(input.capabilityId, {
+          mediaRef: target.candidate.mediaRef,
+          providerItemId: target.providerItemId,
+        });
+      }
+      return mapPlaybackResult(result, input.signal);
+    }
+    if (action.kind === "stop_media") {
+      const result = await this.client.stopMedia({ playerId, signal: input.signal });
+      if (result.status === "acknowledged") this.requestedMediaByCapability.delete(input.capabilityId);
+      return mapPlaybackResult(result, input.signal);
+    }
+    return { status: "rejected", reason: "unsupported" };
+  }
+
+  private async readActionState(input: Parameters<OneShotActionGateway["readState"]>[0]): Promise<OneShotActionRead> {
+    const playerId = this.playerId(input.capabilityId);
+    if (playerId === undefined) return { status: "unavailable", reason: "player_not_configured" };
+    if (input.signal.aborted) return { status: "unavailable", reason: "cancelled" };
+    const state = await this.client.readPlayerState({ playerId, signal: input.signal, includeQueueItems: true });
+    if (state.status !== "available") return { status: "unavailable", reason: state.reason ?? "state_unavailable" };
+    const observedAt = new Date(this.timestamp()).toISOString();
+    const requested = this.requestedMediaByCapability.get(input.capabilityId);
+    if (requested !== undefined
+      && (state.currentMediaUri === requested.providerItemId
+        || state.queuedMediaUris?.includes(requested.providerItemId))) {
+      return { status: "available", value: requested.mediaRef, observedAt, fresh: true };
+    }
+    if (state.playbackState === "idle" || state.playbackState === "stopped") {
+      return { status: "available", value: null, observedAt, fresh: true };
+    }
+    if (state.currentMediaUri === undefined) return { status: "unknown", reason: "active_media_unknown" };
+    const candidate = this.catalog().resolveProviderItem({
+      tenantId: this.tenantId,
+      providerItemId: state.currentMediaUri,
+      now: this.timestamp(),
+    });
+    if (candidate === undefined) return { status: "unknown", reason: "active_media_outside_catalog" };
+    return { status: "available", value: candidate.mediaRef, observedAt, fresh: true };
+  }
+
+  private playerId(capabilityId: string): string | undefined {
+    if (!boundedText(capabilityId, 256)) return undefined;
+    let value: string | undefined;
+    try {
+      value = this.playerIdForCapability(capabilityId);
+    } catch {
+      return undefined;
+    }
+    return boundedText(value, 512) ? value : undefined;
+  }
+
+  private catalog(): MediaCatalog {
+    const catalog = catalogCores.get(this.ctx.root);
+    if (catalog === undefined) throw new Error("Music Assistant media catalog is unavailable");
+    return catalog;
+  }
+
+  private timestamp(): number {
+    const value = this.now();
+    if (!Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000_000) {
+      throw new Error("Music Assistant playback clock is invalid");
+    }
+    return value;
+  }
+}
+
+function mapPlaybackResult(
+  result: { readonly status: "acknowledged" | "rejected" | "unknown"; readonly reason?: string },
+  signal: AbortSignal,
+): BridgeActionResult {
+  if (result.status === "acknowledged") return { status: "acknowledged" };
+  if (result.status === "rejected") return { status: "rejected", reason: "failed" };
+  return { status: "unknown", reason: signal.aborted || result.reason === "cancelled" ? "cancelled" : "upstream_unavailable" };
 }
 
 export interface SyntheticMediaCatalogRow {

@@ -83,8 +83,13 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     join(repositoryRoot, "contracts", "bridge-contract-v0.ts"),
     join(hubSourceRoot, "home-assistant-service.ts"),
     join(hubSourceRoot, "home-assistant-service.test.ts"),
+    join(hubSourceRoot, "home-inbox.ts"),
+    join(hubSourceRoot, "home-inbox.test.ts"),
   ].filter(existsSync).map((path) => relative(repositoryRoot, path));
-  assert.deepEqual(removedEntries, [], "deprecated contract and HomeAssistantService entries must stay deleted");
+  assert.deepEqual(removedEntries, [], "superseded contracts, ecosystem services, and the second runtime entry must stay deleted");
+
+  const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
+  assert.equal(rootPackage.scripts?.["inbox:home"], undefined, "the product exposes one runtime entry");
 
   const packageFiles = ["package.json", "packages/hub/package.json", "packages/agent-layer/package.json", "packages/inbox-web/package.json", "contracts/package.json"]
     .map((path) => join(repositoryRoot, path));

@@ -7,6 +7,7 @@ import {
   type Envelope,
 } from "../../../contracts/bridge-contract.js";
 import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
+import type { ActionsExtension, BridgeActionDescriptor } from "../../../contracts/bridge-actions.js";
 import {
   createXiaomiHomeAdapterRegistration,
   deriveXiaomiRemoteInstanceId,
@@ -106,6 +107,206 @@ test("projects a bounded MIoT snapshot through the neutral bridge contract", asy
     assert.equal(syncStart.remoteInstanceId, deriveXiaomiRemoteInstanceId("cn", snapshot.installationId));
     assert.equal(syncStart.remoteInstanceId.includes(snapshot.installationId), false);
   }
+});
+
+test("translates one bound neutral boolean action through an authorized Xiaomi transport", async () => {
+  const writes: unknown[] = [];
+  const registration = createXiaomiHomeAdapterRegistration({
+    credentialRequirements: [],
+    create: () => ({
+      connect: async () => snapshot,
+      changes: async function* (signal) {
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      },
+      setProperty: async (input) => { writes.push(input); },
+      resync: async () => snapshot,
+      dispose: async () => {},
+    }),
+  });
+  const adapter = registration.factory({
+    bridgeId: "xiaomi-cn-home",
+    config: { region: "cn", transport: "cloud" },
+    credentials: { resolve: async () => undefined, describe: async () => ({ configured: false }) },
+  });
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  for (let index = 0; index < 6; index += 1) await iterator.next();
+
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  const result = await handle?.execute({
+    requestId: "action-xiaomi",
+    action: {
+      kind: "set_boolean",
+      target: {
+        hwCapabilityId: "cap-light",
+        binding: {
+          bridgeId: "xiaomi-cn-home",
+          nativeId: "123456789",
+          nativeInstanceId: "service:2/property:1",
+        },
+      },
+      value: false,
+    },
+  }, { signal: controller.signal });
+  assert.deepEqual(result, { status: "acknowledged" });
+  assert.deepEqual(writes, [{ did: "123456789", siid: 2, piid: 1, value: false, signal: controller.signal }]);
+  controller.abort();
+  await adapter.control.dispose();
+});
+
+test("translates one bound neutral stop-media action through the transport stop seam", async () => {
+  const stops: unknown[] = [];
+  const controller = new AbortController();
+  const mediaSnapshot = {
+    ...snapshot,
+    devices: snapshot.devices.map((device) => ({
+      ...device,
+      properties: device.properties.map((property, index) => index === 0
+        ? { ...property, supportedActions: ["stop_media" as const] }
+        : property),
+    })),
+  };
+  const registration = createXiaomiHomeAdapterRegistration({
+    credentialRequirements: [],
+    create: () => ({
+      connect: async () => mediaSnapshot,
+      changes: async function* (signal) {
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      },
+      resync: async () => mediaSnapshot,
+      stopMedia: async (input) => { stops.push(input); },
+      dispose: async () => {},
+    }),
+  });
+  const adapter = registration.factory({
+    bridgeId: "xiaomi-cn-media",
+    config: { region: "cn", transport: "cloud" },
+    credentials: { resolve: async () => undefined, describe: async () => ({ configured: false }) },
+  });
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  for (let index = 0; index < 6; index += 1) await iterator.next();
+
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  const result = await handle?.execute({
+    requestId: "stop-media-xiaomi",
+    action: {
+      kind: "stop_media",
+      target: {
+        hwCapabilityId: "cap-player",
+        binding: {
+          bridgeId: "xiaomi-cn-media",
+          nativeId: "123456789",
+          nativeInstanceId: "service:2/property:1",
+        },
+      },
+    },
+  }, { signal: controller.signal });
+  assert.deepEqual(result, { status: "acknowledged" });
+  assert.deepEqual(stops, [{ did: "123456789", signal: controller.signal }]);
+
+  const invalidBinding = await handle?.execute({
+    requestId: "stop-media-xiaomi-invalid-binding",
+    action: {
+      kind: "stop_media",
+      target: {
+        hwCapabilityId: "cap-player",
+        binding: {
+          bridgeId: "xiaomi-cn-media",
+          nativeId: "123456789",
+          nativeInstanceId: "service:99/property:99",
+        },
+      },
+    },
+  }, { signal: controller.signal });
+  assert.deepEqual(invalidBinding, { status: "rejected", reason: "invalid_target" });
+  assert.equal(stops.length, 1);
+
+  controller.abort();
+  await adapter.control.dispose();
+});
+
+test("describes only explicit Xiaomi reversible controls", async () => {
+  const explicitSnapshot = {
+    installationId: "account-realm:home-actions",
+    devices: [{
+      did: "123456789",
+      online: true,
+      properties: [{
+        siid: 2,
+        piid: 1,
+        value: true,
+        format: "bool",
+        writable: true,
+      }, {
+        siid: 2,
+        piid: 2,
+        value: 37,
+        format: "uint8",
+        writable: true,
+        supportedActions: ["set_level" as const],
+        levelRange: { min: 0, max: 100 },
+      }],
+    }],
+  };
+  const controller = new AbortController();
+  const registration = createXiaomiHomeAdapterRegistration({
+    credentialRequirements: [],
+    create: () => ({
+      connect: async () => explicitSnapshot,
+      changes: async function* (signal) {
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      },
+      resync: async () => explicitSnapshot,
+      dispose: async () => {},
+      setProperty: async () => {},
+    }),
+  });
+  const adapter = registration.factory({
+    bridgeId: "xiaomi-actions",
+    config: { region: "cn", transport: "cloud" },
+    credentials: { resolve: async () => undefined, describe: async () => ({ configured: false }) },
+  });
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  for (let index = 0; index < 6; index += 1) await iterator.next();
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  const booleanDescriptor = handle?.describe({
+    target: {
+      hwCapabilityId: "cap-boolean",
+      binding: {
+        bridgeId: "xiaomi-actions",
+        nativeId: "123456789",
+        nativeInstanceId: "service:2/property:1",
+      },
+    },
+    current: { value: true, format: "bool", writable: true, available: true },
+  }) as BridgeActionDescriptor | undefined;
+  assert.deepEqual(booleanDescriptor?.action, { kind: "set_boolean", value: false });
+  const levelDescriptor = handle?.describe({
+    target: {
+      hwCapabilityId: "cap-level",
+      binding: {
+        bridgeId: "xiaomi-actions",
+        nativeId: "123456789",
+        nativeInstanceId: "service:2/property:2",
+      },
+    },
+    current: { value: 37, format: "uint8", writable: true, available: true },
+  }) as BridgeActionDescriptor | undefined;
+  assert.deepEqual(levelDescriptor?.action, { kind: "set_level", level: 0 });
+  const unsupportedStop = handle?.describe({
+    target: {
+      hwCapabilityId: "cap-level",
+      binding: {
+        bridgeId: "xiaomi-actions",
+        nativeId: "123456789",
+        nativeInstanceId: "service:2/property:2",
+      },
+    },
+    current: { value: 37, format: "uint8", writable: true, available: true },
+  });
+  assert.notEqual(unsupportedStop?.action.kind, "stop_media");
+  controller.abort();
+  await adapter.control.dispose();
 });
 
 test("emits ordered property and reachability changes and disposes its transport", async () => {

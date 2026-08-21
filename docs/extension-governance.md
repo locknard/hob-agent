@@ -195,7 +195,7 @@ credential 文件。
 | Read-only tool/data | `home.read`, `home.observe`, `analysis.propose` | 可按租户 policy 自动 grant；输出 bounded neutral shape |
 | Proposal | `home.proposal.create` | 只产生 reviewable proposal，不应用持久行为 |
 | Bridge read | `bridge.read.<adapterType>` | 仅受信/隔离 adapter；通过 neutral contract、schema catalog 和 bridge registry |
-| UI contribution | `ui.card.contribute`, `ui.view.contribute` | 仅 declarative schema；读数据仍按 scope/policy |
+| UI contribution | `ui.card.contribute`, `ui.view.contribute`, `ui.layout.contribute` | Phase 2 仅 declarative schema；读数据与 intent 仍按 scope/policy。未来 isolated app 需要独立 phase gate |
 | Network | `network.outbound` + host/port allowlist | deny by default；不得由 payload 扩展 allowlist |
 | Filesystem | `filesystem.read` / `filesystem.write` + virtual root | deny by default；仅插件 data dir 或声明的受控输入 |
 | Process | `process.spawn` | deny by default；Phase 0/1 不授予任意 shell/child process |
@@ -284,14 +284,21 @@ native route、调用 executor 或自报 risk。Hub 重新计算 risk、检查 a
 
 ### 7.4 UI
 
-Phase 0 不接受插件 UI。未来 UI contribution 只允许 versioned declarative card/view,
-label、status、bounded data query 和指向 Hub proposal/review 的 action intent：
+Phase 0 不接受插件 UI。完整 View Provider、Host Shell、语义路由与切换契约见
+`frontend-layout-extensions.md`。Phase 2 UI contribution 只允许 versioned declarative
+card/view/layout、label、status、bounded data query 和指向 Hub proposal/review 的 action
+intent：
 
 - 不允许任意 HTML/JS/CSS、服务端路由、iframe 逃逸、websocket、凭证读取或模型 prompt 注入；
 - 仅能显示当前 scope 的脱敏 neutral snapshot、插件健康、提案和 audit 状态；
 - UI 点击先进入 Hub policy/proposal/approval，不直达 bridge 或 executor；
 - renderer 做 schema、长度、URL、HTML/markdown 和 accessibility 检查，插件失效时 UI
   变为 unavailable，不显示过期 authority。
+
+两个仓库内 built-in View Provider 可以作为 T0 代码通过同一 View Registry 注册，以证明
+契约没有第一方特殊通道；这不开放 third-party loader。真正的 executable View Application
+不与 Host 同 origin、不同享 DOM/cookie/network/secret。只有独立 origin sandbox、CSP、
+versioned broker、资源/崩溃隔离和前端 conformance 完成后，才可在 Phase 3 单独评审。
 
 ## 8. Signature、更新、回滚和兼容性
 
@@ -468,6 +475,22 @@ Phase 1 默认不启用 bridge write、action/artifact host、任意 UI code、�
 - public catalog 若启用，才评估 24h minimum publication age、publisher reputation、staged
   rollout 和 emergency override；这些是分发风控，不替代本地 verification；
 - 每个 capability 单独从 Phase 1 read-only grant 提升，历史 grants 不自动升级。
+
+Phase 2 的 UI 仅包含声明式 card/view/layout recipe。它可以形成完整 Dashboard 或不同信息
+架构，但不能执行第三方 JavaScript。
+
+### Phase 3（隔离的 executable View Application）
+
+只有同时满足以下条件，才允许第三方布局运行自定义前端代码：
+
+- 独立 origin sandbox，禁止访问 Host DOM、cookie、credential、service worker、任意网络和
+  其他插件；CSP、frame policy 和资源预算可自动验证；
+- 只通过 versioned Presentation/Intent Broker 通信；输入是 scope-filtered neutral projection，
+  输出只是待 Hub 重新验证的 typed intent；
+- Host Shell 始终拥有布局切换、safe fallback、身份、approval 和恢复入口；插件无法覆盖；
+- mount/unmount、timeout、crash、revocation、upgrade、responsive、keyboard、screen reader、
+  reduced-motion、contrast 和数据 freshness conformance 全部通过；
+- executable layout 与 bridge/tool/action 权限分别授权，不能因同属一个 Plugin 包互相升级。
 
 ## 12. 现在不做和不可推断的事项
 

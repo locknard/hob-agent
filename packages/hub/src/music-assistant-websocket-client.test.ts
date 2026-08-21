@@ -21,6 +21,14 @@ interface ClientModule {
       readonly limit: number;
       readonly signal: AbortSignal;
     }): Promise<unknown>;
+    playMedia(input: {
+      readonly playerId: string;
+      readonly mediaUri: string;
+      readonly queueMode: "replace_and_play" | "play_next" | "add_to_queue";
+      readonly signal: AbortSignal;
+    }): Promise<unknown>;
+    stopMedia(input: { readonly playerId: string; readonly signal: AbortSignal }): Promise<unknown>;
+    readPlayerState(input: { readonly playerId: string; readonly signal: AbortSignal }): Promise<unknown>;
     dispose(): void | Promise<void>;
   };
   readonly probeMusicAssistantEndpoint: (options: Record<string, unknown>) => Promise<unknown>;
@@ -271,4 +279,133 @@ test("does not open a socket for an already-cancelled or over-capacity search", 
   assert.equal(sockets.length, 4);
   await client.dispose();
   await Promise.allSettled(pending);
+});
+
+test("uses Music Assistant's official queue commands for play, stop, and exact state reads", async () => {
+  const { MusicAssistantWebSocketSearchClient } = await loadClient();
+  const sockets: FakeSocket[] = [];
+  const ids = ["auth-play-0001", "play-media-01", "auth-stop-0001", "stop-media-01", "auth-read-0001", "read-state-01"];
+  const client = new MusicAssistantWebSocketSearchClient({
+    baseUrl: "https://music.example.test",
+    resolveToken: async () => "private-long-lived-token",
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    messageIdFactory: () => ids.shift(),
+  });
+  const signal = new AbortController().signal;
+
+  const playing = client.playMedia({
+    playerId: "ma-player-1",
+    mediaUri: "library://playlist/1",
+    queueMode: "replace_and_play",
+    signal,
+  });
+  const playSocket = sockets[0]!;
+  playSocket.receive(SERVER_INFO);
+  await flush();
+  playSocket.receive({ message_id: "auth-play-0001", result: { authenticated: true }, partial: false });
+  await flush();
+  assert.deepEqual(playSocket.sent[1], {
+    message_id: "play-media-01",
+    command: "player_queues/play_media",
+    args: { queue_id: "ma-player-1", media: "library://playlist/1", option: "replace" },
+  });
+  playSocket.receive({ message_id: "play-media-01", result: null, partial: false });
+  assert.deepEqual(await playing, { status: "acknowledged" });
+
+  const stopping = client.stopMedia({ playerId: "ma-player-1", signal });
+  const stopSocket = sockets[1]!;
+  stopSocket.receive(SERVER_INFO);
+  await flush();
+  stopSocket.receive({ message_id: "auth-stop-0001", result: { authenticated: true }, partial: false });
+  await flush();
+  assert.deepEqual(stopSocket.sent[1], {
+    message_id: "stop-media-01",
+    command: "player_queues/stop",
+    args: { queue_id: "ma-player-1" },
+  });
+  stopSocket.receive({ message_id: "stop-media-01", result: null, partial: false });
+  assert.deepEqual(await stopping, { status: "acknowledged" });
+
+  const reading = client.readPlayerState({ playerId: "ma-player-1", signal });
+  const readSocket = sockets[2]!;
+  readSocket.receive(SERVER_INFO);
+  await flush();
+  readSocket.receive({ message_id: "auth-read-0001", result: { authenticated: true }, partial: false });
+  await flush();
+  assert.deepEqual(readSocket.sent[1], {
+    message_id: "read-state-01",
+    command: "player_queues/all",
+    args: {},
+  });
+  readSocket.receive({
+    message_id: "read-state-01",
+    result: [{ queue_id: "ma-player-1", state: "playing", current_item: { uri: "library://playlist/1" } }],
+    partial: false,
+  });
+  assert.deepEqual(await reading, {
+    status: "available",
+    playerId: "ma-player-1",
+    playbackState: "playing",
+    currentMediaUri: "library://playlist/1",
+  });
+  await client.dispose();
+});
+
+test("can include the bounded official queue-items read for queued playback verification", async () => {
+  const { MusicAssistantWebSocketSearchClient } = await loadClient();
+  const sockets: FakeSocket[] = [];
+  const ids = ["auth-all-0001", "all-state-01", "auth-items-01", "queue-items-01"];
+  const client = new MusicAssistantWebSocketSearchClient({
+    baseUrl: "https://music.example.test",
+    resolveToken: async () => "private-long-lived-token",
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    messageIdFactory: () => ids.shift(),
+  });
+  const reading = client.readPlayerState({
+    playerId: "ma-player-1",
+    signal: new AbortController().signal,
+    includeQueueItems: true,
+  });
+  const allSocket = sockets[0]!;
+  allSocket.receive(SERVER_INFO);
+  await flush();
+  allSocket.receive({ message_id: "auth-all-0001", result: { authenticated: true }, partial: false });
+  await flush();
+  allSocket.receive({
+    message_id: "all-state-01",
+    result: [{ queue_id: "ma-player-1", state: "playing", current_item: { uri: "ma://track/current" } }],
+    partial: false,
+  });
+  await flush();
+  const itemsSocket = sockets[1]!;
+  itemsSocket.receive(SERVER_INFO);
+  await flush();
+  itemsSocket.receive({ message_id: "auth-items-01", result: { authenticated: true }, partial: false });
+  await flush();
+  assert.deepEqual(itemsSocket.sent[1], {
+    message_id: "queue-items-01",
+    command: "player_queues/items",
+    args: { queue_id: "ma-player-1", limit: 500, offset: 0 },
+  });
+  itemsSocket.receive({
+    message_id: "queue-items-01",
+    result: [{ media_item: { uri: "ma://track/current" } }, { media_item: { uri: "ma://track/queued" } }],
+    partial: false,
+  });
+  assert.deepEqual(await reading, {
+    status: "available",
+    playerId: "ma-player-1",
+    playbackState: "playing",
+    currentMediaUri: "ma://track/current",
+    queuedMediaUris: ["ma://track/current", "ma://track/queued"],
+  });
+  await client.dispose();
 });

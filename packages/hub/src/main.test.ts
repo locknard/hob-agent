@@ -42,6 +42,7 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   }]);
   assert.equal(options.runtime.homeWorld.catalog.hasAdapter("home-assistant"), true);
   assert.equal(options.runtime.homeProposals.path, "/tmp/hob-agent-main-test/proposals.sqlite");
+  assert.equal(options.runtime.homeReviewCenter?.path, "/tmp/hob-agent-main-test/one-shot-actions.sqlite");
   assert.equal(options.runtime.homeArtifacts.path, "/tmp/hob-agent-main-test/artifacts.sqlite");
   assert.equal(options.runtime.homeAuthorityCandidates.path, "/tmp/hob-agent-main-test/authority-candidates.sqlite");
   assert.equal(options.runtime.homeObservationAudit.path, "/tmp/hob-agent-main-test/observation-audit.sqlite");
@@ -55,9 +56,30 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   assert.equal(JSON.stringify(options.runtime.homeWorld.bridges).includes("home-assistant-secret"), false);
   assert.equal(options.runtime.inboxHttp, undefined);
   assert.equal(options.runtime.mediaCatalog, undefined);
+  assert.deepEqual(options.runtime.homeSafety?.bindings, []);
 });
 
-test("mounts only the explicit Music Assistant read-only catalog composition", () => {
+test("passes explicit safety bindings only to the Hub safety owner", () => {
+  const binding = {
+    id: "kitchen-leak",
+    hwCapabilityId: "hwc-kitchen-leak",
+    kind: "water_leak",
+    title: "厨房漏水",
+    sourceLabel: "厨房漏水传感器",
+    stateAttribute: "state",
+    activeValues: ["on"],
+    clearValues: ["off"],
+  } as const;
+  const runtime = createHomeHubProcessOptions({
+    ...ENV,
+    HOB_SAFETY_BINDINGS: JSON.stringify([binding]),
+  }).runtime;
+
+  assert.deepEqual(runtime.homeSafety?.bindings, [binding]);
+  assert.equal("safetyBindings" in runtime.agent, false);
+});
+
+test("mounts explicit Music Assistant catalog and governed playback composition", () => {
   const options = createHomeHubProcessOptions({ ...ENV, ...MUSIC_ASSISTANT_ENV });
   const mediaCatalog = options.runtime.mediaCatalog;
 
@@ -69,8 +91,20 @@ test("mounts only the explicit Music Assistant read-only catalog composition", (
     readonly constructor: { readonly name: string };
   } | undefined;
   assert.equal(client?.constructor.name, "MusicAssistantWebSocketSearchClient");
+  assert.equal(options.runtime.mediaPlayback, undefined);
   assert.equal(options.runtime.launchEnvironment.get("HOB_MUSIC_ASSISTANT_TOKEN"), undefined);
   assert.equal(JSON.stringify(options).includes("music-assistant-private-token"), false);
+
+  const playback = createHomeHubProcessOptions({
+    ...ENV,
+    ...MUSIC_ASSISTANT_ENV,
+    HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS: JSON.stringify({
+      "hwc-media-room": "ma-player-room",
+    }),
+  }).runtime.mediaPlayback;
+  assert.equal(playback?.tenantId, "household");
+  assert.equal(playback?.playerIdForCapability("hwc-media-room"), "ma-player-room");
+  assert.equal(playback?.client.constructor.name, "MusicAssistantWebSocketSearchClient");
 });
 
 test("fails closed for incomplete Music Assistant production composition", () => {
@@ -89,11 +123,12 @@ test("passes generated action authority only to HomeWorld and never to the Agent
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-action-authority-"));
   try {
     await writeFile(join(dataDirectory, "action-authority.json"), JSON.stringify({
-      version: 1,
+      version: 2,
       bindings: [{
         hwCapabilityId: "hwc-example",
         bridgeId: "ha-main",
         approved: true,
+        policyClass: "direct",
         revision: 4,
       }],
     }), { mode: 0o600 });
@@ -106,6 +141,7 @@ test("passes generated action authority only to HomeWorld and never to the Agent
     const actionAuthority = options.runtime.homeWorld.actionAuthorityConfig;
     assert.equal(actionAuthority?.["hwc-example"]?.bridgeId, "ha-main");
     assert.equal(actionAuthority?.["hwc-example"]?.configRevision, 4);
+    assert.equal(actionAuthority?.["hwc-example"]?.policyClass, "direct");
     assert.equal("actionAuthorityConfig" in options.runtime.agent, false);
     assert.equal("actionAuthorityConfig" in options.runtime, false);
     assert.equal(JSON.stringify(options.runtime.agent).includes("hwc-example"), false);
@@ -138,11 +174,24 @@ test("forwards only the Inbox verifier and port into the process composition", (
     ...ENV,
     HOB_INBOX_AUTH_TOKEN: inboxToken,
     HOB_INBOX_PORT: "9876",
+    HOB_INBOX_PRINCIPAL_ID: "household-member",
+    HOB_INBOX_PRINCIPAL_ROLE: "adult_member",
+    HOB_INBOX_DEVICE_KIND: "private",
+    HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID: "household-member",
   });
   const authorization = `Basic ${Buffer.from(`home:${inboxToken}`).toString("base64")}`;
 
   assert.equal(options.runtime.inboxHttp?.port, 9876);
   assert.equal(options.runtime.inboxHttp?.authenticate(authorization), true);
+  assert.deepEqual(options.runtime.inboxHttp?.principal, {
+    principalId: "household-member",
+    role: "adult_member",
+    present: true,
+    device: {
+      kind: "private",
+      boundPrincipalId: "household-member",
+    },
+  });
   assert.equal(JSON.stringify(options).includes(inboxToken), false);
 });
 

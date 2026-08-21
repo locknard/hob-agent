@@ -62,6 +62,16 @@ class StubMediaPlaybackPreparationService extends Service {
   }
 }
 
+class StubMediaConversationService extends Service {
+  constructor(ctx: Context) {
+    super(ctx, "homeMediaConversation");
+  }
+
+  handle() {
+    return { status: "blocked", reason: "authenticated_actor_required" };
+  }
+}
+
 class RecordingAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = [];
 
@@ -259,6 +269,23 @@ test("mounts confirmation-only media preparation only when the Hub seam is avail
   await ctx.fiber.dispose();
 });
 
+test("mounts the governed media conversation tool only when its Hub owner is available", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  await ctx.plugin(StubMediaConversationService);
+  const fiber = await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter: new RecordingAdapter(),
+  });
+
+  assert.equal(ctx.tools.schemas().some((schema) => schema.name === "home_media_conversation"), true);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("mounts the sole production Agent through the DSH runtime", async () => {
   const ctx = new Context();
   await ctx.plugin(StubWorldService);
@@ -338,7 +365,8 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   await ctx.homeAgent.agent.whenIdle();
 
   assert.equal(adapter.requests.length, 1);
-  assert.match(adapter.requests[0]?.system ?? "", /cannot control devices/i);
+  assert.match(adapter.requests[0]?.system ?? "", /media action.*home_media_conversation.*authenticated present household member/is);
+  assert.match(adapter.requests[0]?.system ?? "", /Persistent behavior changes remain review-only proposals/is);
   assert.match(adapter.requests[0]?.system ?? "", /same.*media.*label.*not.*same.*endpoint/is);
   assert.match(adapter.requests[0]?.system ?? "", /mediaRef.*does not grant.*authority/is);
   assert.match(adapter.requests[0]?.system ?? "", /empty.*media.*search.*not.*prove.*no.*match/is);

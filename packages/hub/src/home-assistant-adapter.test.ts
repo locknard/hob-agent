@@ -7,6 +7,7 @@ import {
   type Envelope,
 } from "../../../contracts/bridge-contract.js";
 import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
+import type { ActionsExtension, BridgeActionDescriptor } from "../../../contracts/bridge-actions.js";
 import type { ForeignRulesHandle } from "../../../contracts/bridge-foreign-rules.js";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
@@ -416,6 +417,7 @@ test("factory construction is synchronous and does not resolve credentials or to
     extensions: [
       { id: "foreignRules", version: "2.0.0" },
       { id: "orgHints", version: "1.0.0" },
+      { id: "actions", version: "1.0.0" },
     ],
   });
   void socket;
@@ -482,6 +484,140 @@ test("exposes existing automations through the bounded read-only foreignRules ex
   assert.equal(JSON.stringify(rules).includes("automation.arrival_light"), false);
   assert.equal(JSON.stringify(catalog).includes("must-not-cross-contract"), false);
   assert.equal(adapter.extension("foreignRules@1" as never), undefined);
+  await adapter.control.dispose();
+});
+
+test("translates one bound neutral boolean action through the actions extension", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  assert.equal(typeof handle?.execute, "function");
+  const execution = handle!.execute({
+    requestId: "action-1",
+    action: {
+      kind: "set_boolean",
+      target: {
+        hwCapabilityId: "cap-light",
+        binding: {
+          bridgeId: "bridge-ha",
+          nativeId: "device-1",
+          nativeInstanceId: "entity-stable-1",
+        },
+      },
+      value: true,
+    },
+  }, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.at(-1)!;
+  assert.deepEqual(command, {
+    id: command.id,
+    type: "call_service",
+    domain: "light",
+    service: "turn_on",
+    target: { entity_id: "light.kitchen" },
+    service_data: {},
+  });
+  socket.receive({ id: command.id, type: "result", success: true, result: null });
+  assert.deepEqual(await execution, { status: "acknowledged" });
+  await adapter.control.dispose();
+});
+
+test("translates one bound neutral stop-media action through media_player.media_stop", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "media_player.room");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  const execution = handle!.execute({
+    requestId: "stop-media-1",
+    action: {
+      kind: "stop_media",
+      target: {
+        hwCapabilityId: "cap-player",
+        binding: {
+          bridgeId: "bridge-ha",
+          nativeId: "device-1",
+          nativeInstanceId: "entity-stable-1",
+        },
+      },
+    },
+  }, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.at(-1)!;
+  assert.deepEqual(command, {
+    id: command.id,
+    type: "call_service",
+    domain: "media_player",
+    service: "media_stop",
+    target: { entity_id: "media_player.room" },
+    service_data: {},
+  });
+  socket.receive({ id: command.id, type: "result", success: true, result: null });
+  assert.deepEqual(await execution, { status: "acknowledged" });
+  await adapter.control.dispose();
+});
+
+test("describes the next boolean action from the adapter's current state", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "switch.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  const descriptor = handle?.describe({
+    target: {
+      hwCapabilityId: "cap-light",
+      binding: {
+        bridgeId: "bridge-ha",
+        nativeId: "device-1",
+        nativeInstanceId: "entity-stable-1",
+      },
+    },
+    current: { state: "on", available: true },
+  }) as BridgeActionDescriptor | undefined;
+  assert.deepEqual(descriptor?.action, { kind: "set_boolean", value: false });
+  await adapter.control.dispose();
+});
+
+test("describes cover level only when the adapter reports a supported, known position", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToCoverBootstrap(socket, { current_position: 37, supported_features: 4 });
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  const descriptor = handle?.describe({
+    target: {
+      hwCapabilityId: "cap-cover",
+      binding: {
+        bridgeId: "bridge-ha",
+        nativeId: "device-cover-1",
+        nativeInstanceId: "entity-cover-1",
+      },
+    },
+    current: { state: "open", level: 0.37, setLevelSupported: true, available: true },
+  }) as BridgeActionDescriptor | undefined;
+  assert.deepEqual(descriptor?.action, { kind: "set_level", level: 0 });
   await adapter.control.dispose();
 });
 
@@ -662,6 +798,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
     extensionHandles: [
       { key: "foreignRules@2", available: true },
       { key: "orgHints@1", available: false },
+      { key: "actions@1", available: true },
     ],
   });
 

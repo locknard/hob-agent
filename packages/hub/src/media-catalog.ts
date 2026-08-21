@@ -42,6 +42,11 @@ export interface MediaCatalogCandidate {
   readonly expiresAt: string;
 }
 
+export interface MediaCatalogExecutionTarget {
+  readonly candidate: MediaCatalogCandidate;
+  readonly providerItemId: string;
+}
+
 export interface MediaCatalogSearchInput {
   readonly query: string;
   readonly limit?: number;
@@ -253,6 +258,48 @@ export class MediaCatalog {
     return stored.candidate;
   }
 
+  /** Hub-private execution join. The provider identity stays inside this method's caller. */
+  resolveExecutionTarget(input: {
+    readonly tenantId: string;
+    readonly mediaRef: string;
+    readonly now: number;
+  }): MediaCatalogExecutionTarget | undefined {
+    if (!input || !canonicalId.test(input.tenantId) || !opaqueMediaRef.test(input.mediaRef)) return undefined;
+    const now = this.timestamp(input.now);
+    const stored = this.refs.get(input.mediaRef);
+    if (stored === undefined
+      || stored.tenantId !== input.tenantId
+      || stored.catalogId !== this.catalogId
+      || stored.generation !== this.generation
+      || now >= stored.expiresAt) {
+      return undefined;
+    }
+    return Object.freeze({ candidate: stored.candidate, providerItemId: stored.providerItemId });
+  }
+
+  /** Hub-private reverse join used to verify the provider-reported active item. */
+  resolveProviderItem(input: {
+    readonly tenantId: string;
+    readonly providerItemId: string;
+    readonly now: number;
+  }): MediaCatalogCandidate | undefined {
+    if (!input
+      || !canonicalId.test(input.tenantId)
+      || !boundedProviderIdentity(input.providerItemId)) return undefined;
+    const now = this.timestamp(input.now);
+    this.pruneExpiredRefs(now);
+    for (const stored of this.refs.values()) {
+      if (stored.tenantId === input.tenantId
+        && stored.catalogId === this.catalogId
+        && stored.generation === this.generation
+        && stored.providerItemId === input.providerItemId
+        && now < stored.expiresAt) {
+        return stored.candidate;
+      }
+    }
+    return undefined;
+  }
+
   private query(value: unknown): string {
     if (typeof value !== "string") throw new MediaCatalogError("invalid_query", "Media catalog query is invalid");
     const query = value.trim();
@@ -302,4 +349,11 @@ function isBoundedDisplayText(value: unknown, maxLength: number): value is strin
     && value.trim() === value
     && value.length >= 1
     && value.length <= maxLength;
+}
+
+function boundedProviderIdentity(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 2_048
+    && !/[\u0000-\u001F\u007F]/u.test(value);
 }

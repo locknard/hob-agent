@@ -4,6 +4,7 @@ import {
   type MediaCatalogProvider,
   type MediaCatalogProviderSearchInput,
 } from "./media-catalog.js";
+import type { MusicAssistantPlaybackClient } from "./music-assistant-websocket-client.js";
 
 export interface MusicAssistantSearchClient {
   search(input: {
@@ -53,6 +54,8 @@ const MAX_DURATION_SECONDS = 2_678_400;
  */
 export class MusicAssistantMediaCatalogProvider implements MediaCatalogProvider {
   readonly searchCoverage = "best_effort" as const;
+  /** Hub-private execution seam; it is never copied into catalog candidates. */
+  readonly playbackClient: MusicAssistantPlaybackClient | undefined;
   private readonly client: MusicAssistantSearchClient;
   private disposed = false;
 
@@ -64,6 +67,7 @@ export class MusicAssistantMediaCatalogProvider implements MediaCatalogProvider 
       throw new TypeError("Music Assistant search client disposal is invalid");
     }
     this.client = client;
+    this.playbackClient = isPlaybackClient(client) ? client : undefined;
   }
 
   async search(input: MediaCatalogProviderSearchInput): Promise<readonly MusicAssistantMediaCatalogRow[]> {
@@ -115,6 +119,12 @@ export class MusicAssistantMediaCatalogProvider implements MediaCatalogProvider 
     this.disposed = true;
     await this.client.dispose?.();
   }
+}
+
+function isPlaybackClient(value: MusicAssistantSearchClient): value is MusicAssistantSearchClient & MusicAssistantPlaybackClient {
+  return typeof (value as Partial<MusicAssistantPlaybackClient>).playMedia === "function"
+    && typeof (value as Partial<MusicAssistantPlaybackClient>).stopMedia === "function"
+    && typeof (value as Partial<MusicAssistantPlaybackClient>).readPlayerState === "function";
 }
 
 function validateInput(input: MediaCatalogProviderSearchInput): void {

@@ -6,12 +6,19 @@ import {
   type CreateProposalInput,
   type HubVerifiedProposalSource,
   type ProposalEnvelope,
+  type ProposalCreationResult,
   type ProposalCalibrationItem,
   type ProposalListQuery,
   type ProposalQualitySummary,
   type ProposalRetentionEvidenceReference,
+  type ProposalClearDedupLatchInput,
+  type ProposalTrialAdvanceInput,
+  type ProposalEnableInput,
+  type ProposalDecideInput,
+  type ProposalSnoozeInput,
   type ReviewProposalInput,
   type SqliteProposalStoreOptions,
+  ProposalStoreError,
 } from "./proposal-store.js";
 import type { HomeWorldService } from "./home-world-service.js";
 import {
@@ -75,14 +82,23 @@ export class HomeProposalService extends Service {
     return this.store.create(input);
   }
 
+  createGoverned(input: CreateProposalInput) {
+    return this.store.createGoverned(input);
+  }
+
   async createDraft(input: CreateHomeProposalDraftInput): Promise<ProposalEnvelope> {
-    const artifactCandidate = validateDraftInput(input);
-    const pending = this.store.list({ status: "pending_review", limit: 1 })[0];
-    if (pending !== undefined) {
-      if (pending.provenance.producer === input.provenance.producer
-        && pending.idempotencyKey === input.idempotencyKey) return pending;
-      throw new Error("A household proposal is already pending review");
+    const result = await this.createDraftGoverned(input);
+    if (result.kind === "capacity_full") {
+      throw new ProposalStoreError("capacity_full", "Review capacity is full; retry explicitly after a review slot opens");
     }
+    if (result.kind === "suppressed") {
+      throw new ProposalStoreError("dedup_latched", "This behavior identity has been marked do-not-suggest");
+    }
+    return result.proposal;
+  }
+
+  async createDraftGoverned(input: CreateHomeProposalDraftInput): Promise<ProposalCreationResult> {
+    const artifactCandidate = validateDraftInput(input);
     const world = this.ctx.get("homeWorld") as HomeWorldService | undefined;
     if (world === undefined) {
       throw new Error("HomeWorld is required to create a proposal draft");
@@ -107,11 +123,15 @@ export class HomeProposalService extends Service {
       if (candidateCapabilityIds.some((id) => !selectedCapabilities.has(id))) {
         throw new TypeError("home proposal artifact candidate capabilities must belong to selected devices");
       }
-      const unsafeTarget = artifactCandidate.content.actions.some((action) =>
-        action.kind !== "notify_local"
-        && selectedCapabilities.get(action.target.hwCapabilityId)?.semanticKind === "lock");
-      if (unsafeTarget) {
-        throw new TypeError("home proposal artifact candidate cannot target a safety-sensitive capability");
+      for (const action of artifactCandidate.content.actions) {
+        if (action.kind === "notify_local") continue;
+        const authority = world.resolveActionAuthority(action.target.hwCapabilityId);
+        if (authority.status !== "available") {
+          throw new TypeError("home proposal artifact candidate requires explicit action policy");
+        }
+        if (authority.policyClass === "administrator") {
+          throw new TypeError("home proposal artifact candidate cannot target an administrator policy capability");
+        }
       }
       if (input.selectedHwCapabilityIds !== undefined
         && candidateCapabilityIds.some((id) => !input.selectedHwCapabilityIds!.includes(id))) {
@@ -129,8 +149,9 @@ export class HomeProposalService extends Service {
     ]));
     const catalogs = await world.foreignRuleCatalog();
     const catalogsByBridge = new Map(catalogs.map((catalog) => [catalog.bridgeId, catalog]));
-    const conflictAvailable = relevantBridgeIds.size > 0
-      && [...relevantBridgeIds].every((bridgeId) => catalogsByBridge.get(bridgeId)?.status === "available");
+    const conflictAvailable = selectedDevices.length === 0
+      || (relevantBridgeIds.size > 0
+        && [...relevantBridgeIds].every((bridgeId) => catalogsByBridge.get(bridgeId)?.status === "available"));
     const rules = catalogs.flatMap((catalog) =>
       relevantBridgeIds.has(catalog.bridgeId) && catalog.status === "available" ? catalog.rules : []);
     const proposalText = `${input.title} ${input.summary} ${input.intent.description}`;
@@ -221,10 +242,11 @@ export class HomeProposalService extends Service {
       };
     });
 
-    return this.store.create({
+    return this.store.createGoverned({
       kind: input.kind,
       title: input.title,
       summary: input.summary,
+      ...(input.dedupKey === undefined ? {} : { dedupKey: input.dedupKey }),
       idempotencyKey: input.idempotencyKey,
       provenance: input.provenance,
       evidence: {
@@ -267,6 +289,38 @@ export class HomeProposalService extends Service {
 
   list(query?: ProposalListQuery): readonly ProposalEnvelope[] {
     return this.store.list(query);
+  }
+
+  proposalCapacity(): ReturnType<SqliteProposalStore["proposalCapacity"]> {
+    return this.store.proposalCapacity();
+  }
+
+  snoozeProposal(input: ProposalSnoozeInput): ProposalEnvelope {
+    return this.store.snoozeProposal(input);
+  }
+
+  decideProposal(input: ProposalDecideInput): ProposalEnvelope {
+    return this.store.decideProposal(input);
+  }
+
+  clearDedupLatch(input: ProposalClearDedupLatchInput) {
+    return this.store.clearDedupLatch(input);
+  }
+
+  advanceProposalTrial(input: ProposalTrialAdvanceInput): ProposalEnvelope {
+    return this.store.advanceProposalTrial(input);
+  }
+
+  enableProposal(input: ProposalEnableInput): ProposalEnvelope {
+    return this.store.enableProposal(input);
+  }
+
+  listDedupLatches() {
+    return this.store.listDedupLatches();
+  }
+
+  listDedupLatchAudit(limit?: number) {
+    return this.store.listDedupLatchAudit(limit);
   }
 
   qualitySummary(): ProposalQualitySummary {
@@ -336,8 +390,11 @@ export interface CreateHomeProposalDraftInput {
   readonly kind: CreateProposalInput["kind"];
   readonly title: string;
   readonly summary: string;
+  /** Stable behavior identity; idempotencyKey remains one producer attempt. */
+  readonly dedupKey?: string;
   readonly idempotencyKey: string;
   readonly provenance: CreateProposalInput["provenance"];
+  /** Device scope for evidence and coverage; household insights may use an empty scope. */
   readonly selectedHwIds: readonly string[];
   readonly selectedHwCapabilityIds?: readonly string[];
   readonly evidenceLookbackHours?: number;
@@ -377,7 +434,8 @@ function validateDraftInput(
     || rationale.uncertainties.some((value) => !boundedRationaleText(value))) {
     throw new TypeError("home proposal rationale is invalid or unbounded");
   }
-  if (!Array.isArray(input.selectedHwIds) || input.selectedHwIds.length < 1 || input.selectedHwIds.length > 20
+  const minSelectedHwIds = input.kind === "household-insight" ? 0 : 1;
+  if (!Array.isArray(input.selectedHwIds) || input.selectedHwIds.length < minSelectedHwIds || input.selectedHwIds.length > 20
     || new Set(input.selectedHwIds).size !== input.selectedHwIds.length
     || input.selectedHwIds.some((value) => typeof value !== "string" || value.length === 0 || value.length > 200)) {
     throw new TypeError("home proposal selectedHwIds are invalid");

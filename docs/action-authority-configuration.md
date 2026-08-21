@@ -18,23 +18,27 @@ present, an unreadable, symlinked, permission-wide, malformed, duplicated, or
 unsupported file fails startup closed. The loader never falls back to an old
 in-memory value.
 
-The v1 file is strict JSON:
+The v2 file is strict JSON:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "bindings": [
     {
       "hwCapabilityId": "hwc-example",
       "bridgeId": "ha-main",
       "approved": true,
+      "policyClass": "confirmation",
       "revision": 1
     }
   ]
 }
 ```
 
-Only those exact fields are allowed. `revision` is a positive safe integer
+Only those exact fields are allowed. `policyClass` is a required reviewed
+execution class: `direct`, `confirmation`, or `administrator`. Onboarding may
+suggest a class from a neutral semantic hint; the local human configuration
+records the explicit class that production execution reads. `revision` is a positive safe integer
 owned by the local human configuration workflow and is monotonic per
 `hwCapabilityId`; it is not inferred from file metadata or array order. Each
 capability appears at most once and selects exactly one bridge. An explicit
@@ -47,10 +51,10 @@ availability, schema claim, or provider payload. Duplicate JSON keys are
 rejected before ordinary JSON parsing can apply last-key-wins behavior.
 
 For each validated entry, the Hub computes `configIdentity` as a SHA-256 digest
-of canonical bytes containing the exact v1 entry except `revision`, under an
-`action-authority-config-v1` domain separator. The entry's explicit `revision`
+of canonical bytes containing the exact v2 entry except `revision`, including
+`policyClass`, under an `action-authority-config-v2` domain separator. The entry's explicit `revision`
 becomes `configRevision`. Reordering entries therefore does not change any
-candidate, while changing one capability's bridge or approval affects only
+candidate, while changing one capability's bridge, approval, or policy class affects only
 that capability. Reusing a revision with different content is rejected within
 one process/config load; durable candidate history later rejects replay of a
 superseded identity.

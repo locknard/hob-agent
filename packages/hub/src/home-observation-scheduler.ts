@@ -8,12 +8,31 @@ export interface HomeObservationSchedulerLike {
   wait(delayMs: number, signal: AbortSignal): Promise<void>;
 }
 
+export interface HomeObservationScheduleConfiguration {
+  readonly enabled: boolean;
+  readonly intervalMinutes?: number;
+  readonly quietHours?: { readonly start: string; readonly end: string };
+}
+
+/**
+ * The persisted onboarding record is the Hub-owned schedule source. The
+ * scheduler reads it at startup and accepts the same typed shape for a live
+ * update after the source has committed.
+ */
+export interface HomeObservationOnboardingPort {
+  snapshot(): {
+    readonly observation?: HomeObservationScheduleConfiguration;
+  };
+}
+
 export interface HomeObservationSchedulerOptions {
   readonly intervalMinutes?: number;
+  readonly quietHours?: { readonly start: string; readonly end: string };
   readonly runOnStart?: boolean;
   readonly readinessPollMs?: number;
   readonly scheduler?: HomeObservationSchedulerLike;
   readonly clock?: () => string;
+  readonly onboarding?: HomeObservationOnboardingPort;
 }
 
 export type HomeObservationOutcome =
@@ -27,6 +46,7 @@ export type HomeObservationOutcome =
 export interface HomeObservationStatus {
   readonly enabled: boolean;
   readonly intervalMinutes?: number;
+  readonly quietHours?: { readonly start: string; readonly end: string };
   readonly runOnStart: boolean;
   readonly state: "waiting" | "running" | "stopped";
   readonly lastAttempt?: {
@@ -81,53 +101,68 @@ export class HomeObservationSchedulerService extends Service {
 
   private readonly scheduler: HomeObservationSchedulerLike;
   private readonly clock: () => string;
-  private readonly intervalMinutes: number | undefined;
-  private readonly intervalMs: number | undefined;
   private readonly readinessPollMs: number;
-  private readonly runOnStart: boolean;
+  private intervalMinutes: number | undefined;
+  private intervalMs: number | undefined;
+  private quietHours: HomeObservationScheduleConfiguration["quietHours"];
+  private runOnStart: boolean;
   private state: HomeObservationStatus["state"] = "waiting";
   private lastAttempt: HomeObservationStatus["lastAttempt"];
   private stopped = false;
+  private initialized = false;
+  private recurringController: AbortController | undefined;
+  private readonly activeRuns = new Set<Promise<void>>();
 
   constructor(ctx: Context, options: HomeObservationSchedulerOptions = {}) {
     super(ctx, "homeObservationScheduler");
-    if (options.intervalMinutes !== undefined
-      && (!Number.isSafeInteger(options.intervalMinutes)
-        || options.intervalMinutes < MIN_INTERVAL_MINUTES
-        || options.intervalMinutes > MAX_INTERVAL_MINUTES)) {
-      throw new TypeError(`observation interval must be from ${MIN_INTERVAL_MINUTES} to ${MAX_INTERVAL_MINUTES} minutes`);
-    }
-    if (options.runOnStart === true && options.intervalMinutes === undefined) {
+    const persisted = options.onboarding?.snapshot().observation;
+    const initial = persisted === undefined
+      ? {
+          enabled: options.intervalMinutes !== undefined,
+          ...(options.intervalMinutes === undefined ? {} : { intervalMinutes: options.intervalMinutes }),
+          ...(options.quietHours === undefined ? {} : { quietHours: options.quietHours }),
+        }
+      : persisted;
+    validateSchedule(initial);
+    const runOnStart = persisted === undefined ? options.runOnStart ?? false : false;
+    if (runOnStart && !initial.enabled) {
       throw new TypeError("observation run-on-start requires a recurring interval");
     }
     const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
     if (!Number.isSafeInteger(readinessPollMs) || readinessPollMs < 1_000 || readinessPollMs > 300_000) {
       throw new TypeError("observation readiness poll must be from 1000 to 300000 milliseconds");
     }
-    this.intervalMinutes = options.intervalMinutes;
-    this.intervalMs = options.intervalMinutes === undefined ? undefined : options.intervalMinutes * 60_000;
+    this.intervalMinutes = initial.enabled ? initial.intervalMinutes : undefined;
+    this.intervalMs = this.intervalMinutes === undefined ? undefined : this.intervalMinutes * 60_000;
+    this.quietHours = initial.quietHours;
     this.readinessPollMs = readinessPollMs;
-    this.runOnStart = options.runOnStart ?? false;
+    this.runOnStart = runOnStart;
     this.scheduler = options.scheduler ?? defaultScheduler;
     this.clock = options.clock ?? (() => new Date().toISOString());
   }
 
   protected [Service.init](): void {
-    if (this.intervalMs === undefined) {
-      this.ctx.effect(() => () => {
-        this.stopped = true;
-        this.state = "stopped";
-      }, "home-observation-controller.stop");
-      return;
-    }
-    const controller = new AbortController();
-    const task = this.run(controller.signal).catch(() => undefined);
+    this.initialized = true;
+    this.startRecurring();
     this.ctx.effect(() => async () => {
       this.stopped = true;
       this.state = "stopped";
-      controller.abort();
-      await task;
+      this.stopRecurring();
+      await Promise.all([...this.activeRuns]);
     }, "home-observation-scheduler.stop");
+  }
+
+  /** Applies a committed Hub-owned schedule to the live scheduler. */
+  configure(configuration: HomeObservationScheduleConfiguration): void {
+    validateSchedule(configuration);
+    if (this.stopped) throw new Error("observation scheduler is stopped");
+    this.intervalMinutes = configuration.enabled ? configuration.intervalMinutes : undefined;
+    this.intervalMs = this.intervalMinutes === undefined ? undefined : this.intervalMinutes * 60_000;
+    this.quietHours = configuration.quietHours;
+    if (this.initialized) {
+      this.stopRecurring();
+      this.startRecurring();
+    }
   }
 
   async observeNow(signal: AbortSignal = new AbortController().signal): Promise<HomeObservationOutcome> {
@@ -176,6 +211,7 @@ export class HomeObservationSchedulerService extends Service {
     return {
       enabled: this.intervalMinutes !== undefined,
       ...(this.intervalMinutes === undefined ? {} : { intervalMinutes: this.intervalMinutes }),
+      ...(this.quietHours === undefined ? {} : { quietHours: { ...this.quietHours } }),
       runOnStart: this.runOnStart,
       state: this.state,
       ...(this.lastAttempt === undefined ? {} : { lastAttempt: { ...this.lastAttempt } }),
@@ -198,7 +234,7 @@ export class HomeObservationSchedulerService extends Service {
   private async run(signal: AbortSignal): Promise<void> {
     const intervalMs = this.intervalMs;
     if (intervalMs === undefined) return;
-    if (this.runOnStart) {
+    if (this.runOnStart && !this.isQuietHours()) {
       while (!signal.aborted) {
         const outcome = await this.observeRecurring("startup", signal);
         if (outcome !== "world_not_ready") break;
@@ -207,8 +243,33 @@ export class HomeObservationSchedulerService extends Service {
     }
     while (!signal.aborted) {
       await this.scheduler.wait(intervalMs, signal);
-      if (!signal.aborted) await this.observeRecurring("scheduled", signal);
+      if (!signal.aborted && !this.isQuietHours()) await this.observeRecurring("scheduled", signal);
     }
+  }
+
+  private isQuietHours(): boolean {
+    if (this.quietHours === undefined) return false;
+    const now = new Date(this.clock());
+    if (!Number.isFinite(now.getTime())) return true;
+    const current = now.getHours() * 60 + now.getMinutes();
+    const start = clockMinutes(this.quietHours.start);
+    const end = clockMinutes(this.quietHours.end);
+    if (start === end) return false;
+    return start < end ? current >= start && current < end : current >= start || current < end;
+  }
+
+  private startRecurring(): void {
+    if (!this.initialized || this.stopped || this.intervalMs === undefined) return;
+    const controller = new AbortController();
+    this.recurringController = controller;
+    const task = this.run(controller.signal).catch(() => undefined);
+    this.activeRuns.add(task);
+    task.then(() => this.activeRuns.delete(task), () => this.activeRuns.delete(task));
+  }
+
+  private stopRecurring(): void {
+    this.recurringController?.abort();
+    this.recurringController = undefined;
   }
 }
 
@@ -274,4 +335,31 @@ function observationTimestamp(clock: () => string): string {
     throw new TypeError("observation clock must return an ISO timestamp");
   }
   return value;
+}
+
+function validateSchedule(configuration: HomeObservationScheduleConfiguration): void {
+  if (typeof configuration.enabled !== "boolean") {
+    throw new TypeError("observation enabled flag must be boolean");
+  }
+  if (configuration.intervalMinutes !== undefined
+    && (!Number.isSafeInteger(configuration.intervalMinutes)
+      || configuration.intervalMinutes < MIN_INTERVAL_MINUTES
+      || configuration.intervalMinutes > MAX_INTERVAL_MINUTES)) {
+    throw new TypeError(`observation interval must be from ${MIN_INTERVAL_MINUTES} to ${MAX_INTERVAL_MINUTES} minutes`);
+  }
+  if (configuration.enabled && configuration.intervalMinutes === undefined) {
+    throw new TypeError("enabled observation requires a recurring interval");
+  }
+  if (configuration.quietHours !== undefined
+    && (!validClockTime(configuration.quietHours.start) || !validClockTime(configuration.quietHours.end))) {
+    throw new TypeError("observation quiet hours must use HH:MM");
+  }
+}
+
+function validClockTime(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value);
+}
+
+function clockMinutes(value: string): number {
+  return Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5));
 }

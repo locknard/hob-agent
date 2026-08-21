@@ -50,6 +50,7 @@ interface HomeProposalPort {
     kind: "automation-draft" | "household-insight";
     title: string;
     summary: string;
+    dedupKey: string;
     idempotencyKey: string;
     provenance: { producer: string; sessionId?: string; toolCallId?: string; turnId?: string };
     selectedHwIds: readonly string[];
@@ -290,6 +291,8 @@ export function apply(ctx: Context): void {
       kind: { type: "string", enum: ["automation-draft", "household-insight"], required: true },
       title: { type: "string", required: true },
       summary: { type: "string", required: true },
+      /** Stable behavior identity; idempotencyKey is only one producer attempt. */
+      dedupKey: { type: "string", required: true },
       householdValue: { type: "string", required: true },
       whyNow: { type: "string", required: true },
       uncertainties: { type: "array", items: { type: "string" }, required: true },
@@ -321,6 +324,7 @@ export function apply(ctx: Context): void {
         kind: args.kind,
         title: args.title,
         summary: args.summary,
+        dedupKey: args.dedupKey,
         idempotencyKey: args.idempotencyKey,
         provenance: {
           producer: "dsh-home-agent",

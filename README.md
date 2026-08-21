@@ -62,6 +62,10 @@ pnpm credentials:model
 # Optional local review UI (HTTP Basic user is `home`):
 export HOB_INBOX_AUTH_TOKEN='at-least-32-random-characters-kept-local'
 export HOB_INBOX_PORT=8787
+export HOB_INBOX_PRINCIPAL_ID='household-member'
+export HOB_INBOX_PRINCIPAL_ROLE='adult_member'
+export HOB_INBOX_DEVICE_KIND='private'
+export HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID='household-member'
 # Optional local observation cadence (disabled unless explicitly set):
 export HOB_OBSERVATION_INTERVAL_MINUTES=360
 export HOB_OBSERVE_ON_START=false
@@ -112,6 +116,8 @@ echo:
 pnpm credentials:music-assistant
 export HOB_MUSIC_ASSISTANT_BASE_URL='http://music-assistant.local:8095'
 export HOB_MUSIC_ASSISTANT_CREDENTIAL_REF='keychain:hob-agent/media:music-assistant:access-token'
+# Optional governed playback binding: neutral Hub capability → private MA player id
+export HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS='{"hwc-media-room":"ma-player-room"}'
 ```
 
 The command writes only the fixed Keychain locator
@@ -120,9 +126,19 @@ metadata. It never discovers or serializes `HOB_MUSIC_ASSISTANT_TOKEN`; an
 explicit development `env:HOB_MUSIC_ASSISTANT_TOKEN` reference is the only
 environment-backed alternative. Both launch settings are required; omitting
 both leaves Music Assistant unloaded, while providing only one fails startup.
-This integration currently adds bounded catalog search and neutral intent
-preparation only—it does not expose Music Assistant player ids, queues,
-playback execution, or a generic command API.
+Catalog search and neutral intent preparation load with that pair. Adding the
+explicit player binding enables governed `play_media` and `stop_media` through
+the Hub one-shot action plane, including exact Music Assistant state readback
+and the normal ten-second undo window. Provider player ids and media URIs remain
+inside Hub configuration and the authenticated Music Assistant client.
+
+Safety alerts use explicit neutral capability bindings. Configure each trusted
+sensor with its active and clear values; Hub keeps the incident open through
+disconnects and resolves it after a fresh clear value arrives:
+
+```sh
+export HOB_SAFETY_BINDINGS='[{"id":"kitchen-leak","hwCapabilityId":"hwc-kitchen-leak","kind":"water_leak","title":"厨房漏水","sourceLabel":"厨房漏水传感器","stateAttribute":"state","activeValues":["on"],"clearValues":["off"]}]'
+```
 
 Before enabling the Agent or observation schedule, the same bridge and data
 configuration can be validated without `HOB_MODEL` or a model API key:
@@ -171,64 +187,53 @@ when it creates no proposal), records a metadata-only observation attempt under
 [`docs/one-shot-observation.md`](docs/one-shot-observation.md) and
 [`docs/observation-disposition.md`](docs/observation-disposition.md).
 
-To review persisted proposals afterward without reconnecting HA or starting
-DSH, keep only `HOB_DATA_DIR` and `HOB_INBOX_AUTH_TOKEN` set and run:
-
-```sh
-pnpm inbox:home
-```
-
-The command prints its authenticated `127.0.0.1` URL. It can record an approval
-or rejection, but approval still cannot apply an automation or control a
-device. It also shows the five most recent metadata-only observation attempts.
-The Inbox includes an all-time count-only household calibration summary over
-proposal decisions, structured feedback, observation outcomes, and bounded
-Agent-reported no-proposal dispositions.
-When the full runtime is connected, **Ask about your home** accepts one bounded
+The single full runtime serves the authenticated local product after
+`HOB_INBOX_AUTH_TOKEN` and the four explicit Inbox identity values shown above
+are configured. It can record an approval or rejection, while persistent
+automation changes continue through proposal, preparation and second consent.
+It also shows recent metadata-only observation attempts and the household
+calibration summary over decisions and outcomes. **Ask about your home** accepts one bounded
 question and returns a locally persisted, structured advice document. The
-Agent may suggest a reversible trial and optional sensing capabilities, but it
-cannot change a rule or device. Stored answers remain readable in standalone
-Inbox mode. See [`docs/household-advice.md`](docs/household-advice.md).
-See [`docs/standalone-inbox.md`](docs/standalone-inbox.md) and
-[`docs/observation-audit.md`](docs/observation-audit.md), plus
+Agent may suggest a reversible trial and optional sensing capabilities.
+Persistent behavior follows proposal, evidence, trial and approval; device
+actions follow the Hub action gate. Stored answers remain readable after a
+restart. See [`docs/household-advice.md`](docs/household-advice.md),
+[`docs/observation-audit.md`](docs/observation-audit.md), and
 [`docs/household-calibration-summary.md`](docs/household-calibration-summary.md).
 The recommended sequence for a real-home trial is documented in
 [`docs/household-pilot.md`](docs/household-pilot.md).
 
-The accepted post-pilot product direction also includes an accessible,
-voice-first household surface and governed media playback. Voice remains an
-input/output mode for the single DSH runtime; media search is read-only, and
-playback cannot bypass Hub policy, confirmation, action tickets, verification,
-or audit. See
+The product includes an accessible voice-first household surface and governed
+media playback. Voice remains an input mode for the single DSH runtime. Media
+discovery is read-only; playback passes through Hub policy, action tickets,
+confirmation when required, verification and audit. See
 [`docs/voice-and-media-interaction.md`](docs/voice-and-media-interaction.md).
-When the local Inbox is enabled, `/voice-preview` exposes the Phase 0 V0
-"home pulse" prototype. It is an authenticated, script-free visual state lab:
-it does not request microphone access, call a model, search a catalog, or
-control a device. It exists to review the interaction language before the
-governed voice and action paths are enabled.
-The Hub now contains the first non-networked `mediaCatalog@1` boundary: a
-trusted provider can return strictly bounded Music Assistant-compatible media
-kinds, while Agent-facing candidates receive only an opaque, tenant- and
-generation-bound short-lived reference. Provider ids, URLs, account data,
-tokens, raw payloads, player control, queues, and playback remain unavailable.
+When the local product is enabled, `/voice-preview` exposes the authenticated
+push-to-talk surface. A direct member gesture opens Web Speech, live and final
+captions remain visible, three bounded recognition failures lead to text input,
+and the final transcript enters the canonical `/conversation` route.
+
+The Hub owns the `mediaCatalog@1` boundary. A trusted Music Assistant-compatible
+provider returns bounded neutral media kinds, while Agent-facing candidates use
+opaque, tenant- and generation-bound short-lived references. Provider ids,
+URLs, account data, tokens and raw payloads remain inside the provider boundary.
 When a neutral catalog service is explicitly mounted, the DSH Agent gains the
 bounded read-only `search_home_media` tool. Deployments without a catalog keep
 the tool absent. Its model-facing projection removes expiry and all
 provider-native fields; `mediaRef` and `playable` remain discovery hints, not
 playback authority.
 When the same runtime also has a fresh neutral player inventory, it exposes
-`prepare_home_media_playback`. That tool re-resolves the opaque media reference
-and selected Hub player, then returns either a closed block reason or
-`requires_confirmation`. It creates no approval ticket, invokes no bridge, and
-cannot play, queue, or change volume; a future action path must rebuild and
-authorize the operation from fresh state after explicit confirmation.
+the media conversation tool. It re-resolves the opaque media reference and the
+selected Hub player, asks for a missing queue choice, prepares the exact neutral
+`play_media` action and requests the same governed action ticket used for other
+household effects. Direct playback completes only after fresh policy and
+read-back verification; confirmation and administrator classes route to their
+respective owners.
 The production Hub also mounts an authority-selected, neutral media-player
 inventory and exposes it through the read-only `get_home_media_players` DSH
 tool. The HA adapter uses a strict additive `ha.media-player@1` read schema;
-reported volume is evidence only, same-label endpoints remain distinct, and no
-playback or volume operation is introduced. A deterministic synthetic catalog
-can be mounted explicitly in component/runtime tests but is never enabled by
-the production launch parser.
+reported volume is evidence, and same-label endpoints remain distinct. A
+deterministic synthetic catalog is available only to component/runtime tests.
 The Hub also contains a transport-injected, read-only Music Assistant search
 provider. It maps the reviewed grouped `music/search` subset into neutral
 catalog rows, enforces one total result budget, propagates cancellation, and
@@ -239,11 +244,10 @@ The `search_home_media` result carries machine-readable `complete` or
 `best_effort` coverage so the model does not have to infer completeness from
 empty candidates.
 
-For behavioral evidence, keep the full runtime connected and use **Observe
-now** in its authenticated Inbox. This starts one paid turn through the same
+For behavioral evidence, keep the runtime connected and use **Observe now** in
+the authenticated product. This starts one paid turn through the same
 readiness, pending-proposal, Agent-idle, and audit gates as periodic
-observation, without enabling a recurring cadence. The standalone
-`pnpm inbox:home` review process cannot start observations.
+observation, without enabling a recurring cadence.
 
 To create a private review draft of the neutral room/device map without calling
 a model or replacing `HOME.md`, set an explicit private `HOB_HOME_DIR` and run:
@@ -267,8 +271,9 @@ bounded read-only `get_home_evidence` tool, plus the review-only
 `get_home_rules` catalog inspection tool and `create_home_proposal` tool. Hub-owned evidence and
 `foreignRules@2` conflict checks are attached before a proposal enters the
 Inbox. A catalog is usable only when its exact `epochId + lastSeq` matches the
-bridge's committed watermark. Device actions, configuration writes, and
-proposal application remain deliberately unavailable.
+bridge's committed watermark. Device actions use the Hub's exact descriptor,
+policy, action-ticket, verification and audit owners. Persistent behavior uses
+proposal, preparation, trial and explicit enablement.
 
 The Hub also contains the first non-applying neutral Artifact foundation:
 strict immutable ECA revisions, stable canonical hashes, append-only lifecycle
@@ -348,10 +353,12 @@ while any proposal is pending household review. The interval is limited to one
 hour through seven days. See
 [`docs/observation-scheduling.md`](docs/observation-scheduling.md).
 
-Inbox HTTP is absent unless `HOB_INBOX_AUTH_TOKEN` is explicitly configured.
-When enabled it binds only to `127.0.0.1`, requires authentication on every
-request, and enforces same-origin review and observation POSTs. The launch
-config retains only a credential verifier, not the raw token.
+Inbox HTTP starts when its token and explicit principal identity are configured.
+It binds to `127.0.0.1`, authenticates every request, and enforces same-origin
+review and observation POSTs. A private device also declares a principal
+binding that exactly matches `HOB_INBOX_PRINCIPAL_ID`; a shared device omits the
+binding and receives shared-device permissions. The launch config retains a
+credential verifier while the secret stays in its configured secret source.
 
 When `HOB_HOME_DIR` is set, the three household Markdown files are loaded as a
 bounded startup snapshot through DSH's prompt/context registry. They personalize

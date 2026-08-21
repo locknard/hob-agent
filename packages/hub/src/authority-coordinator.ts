@@ -26,6 +26,8 @@ export interface AuthorityResyncSnapshot {
   readonly bindings: readonly AuthorityBindingObservation[];
 }
 
+export type ActionAuthorityPolicyClass = "direct" | "confirmation" | "administrator";
+
 export interface AuthorityResyncPort {
   requestResync(bridgeId: string, signal?: AbortSignal): Promise<ControlResult>;
   waitForSyncComplete(bridgeId: string, generation: number, signal?: AbortSignal): Promise<AuthorityResyncSnapshot>;
@@ -34,6 +36,8 @@ export interface AuthorityResyncPort {
 export interface ActionAuthorityConfiguration {
   readonly bridgeId: string;
   readonly approved: boolean;
+  /** Reviewed Hub policy class; semantic hints never supply this value. */
+  readonly policyClass: ActionAuthorityPolicyClass;
   /** Hub-owned canonical digest of the complete authority configuration. */
   readonly configIdentity: string;
   /** Monotonic Hub-owned configuration revision; never defaults implicitly. */
@@ -44,6 +48,7 @@ export interface ActionAuthorityConfiguration {
 export interface ActionAuthorityConfigurationResolution {
   readonly status: "configured" | "not_configured" | "invalid";
   readonly approved: boolean;
+  readonly policyClass?: ActionAuthorityPolicyClass;
   readonly configIdentity?: string;
   readonly configRevision?: number;
 }
@@ -81,11 +86,16 @@ export interface StateAuthorityResolution {
   readonly reason?: StateAuthorityFailureReason;
 }
 
-export interface ActionAuthorityResolution {
-  readonly status: "available" | "unavailable";
-  readonly bridgeId?: string;
-  readonly reason?: "not_configured" | "not_approved" | "configured_binding_unavailable" | "unknown_capability";
-}
+export type ActionAuthorityResolution =
+  | {
+      readonly status: "available";
+      readonly bridgeId: string;
+      readonly policyClass: ActionAuthorityPolicyClass;
+    }
+  | {
+      readonly status: "unavailable";
+      readonly reason: "not_configured" | "not_approved" | "configured_binding_unavailable" | "unknown_capability";
+    };
 
 export interface StateAuthorityRequest {
   readonly hwCapabilityId: string;
@@ -102,7 +112,7 @@ export class AuthorityCoordinator {
   private readonly capabilities = new Map<string, WorldCapability>();
   private readonly stateAuthorityConfig: ReadonlyMap<string, string>;
   private readonly initialStateAuthorities: ReadonlyMap<string, string>;
-  private readonly actionAuthorityConfig: ReadonlyMap<string, unknown>;
+  private actionAuthorityConfig: ReadonlyMap<string, unknown>;
   private readonly stateAuthorities = new Map<string, string>();
   private readonly resyncPort?: AuthorityResyncPort;
   private readonly resyncTimeoutMs: number;
@@ -158,6 +168,14 @@ export class AuthorityCoordinator {
 
   capabilitiesSnapshot(): readonly WorldCapability[] {
     return [...this.capabilities.values()].sort((left, right) => compare(left.hwCapabilityId, right.hwCapabilityId)).map(cloneCapability);
+  }
+
+  /** Replaces the Hub-owned action projection after its durable source commits. */
+  replaceActionAuthorityConfig(
+    configuration: ReadonlyMap<string, ActionAuthorityConfiguration>
+      | Readonly<Record<string, ActionAuthorityConfiguration>>,
+  ): void {
+    this.actionAuthorityConfig = readActionMap(configuration);
   }
 
   chooseStateAuthority(
@@ -335,7 +353,7 @@ export class AuthorityCoordinator {
       && candidate.validity === "valid"
       && hasBinding(capability, candidate.bridgeId));
     return available
-      ? { status: "available", bridgeId: configured.bridgeId }
+      ? { status: "available", bridgeId: configured.bridgeId, policyClass: configured.policyClass }
       : { status: "unavailable", reason: "configured_binding_unavailable" };
   }
 
@@ -356,6 +374,7 @@ export class AuthorityCoordinator {
     return Object.freeze({
       status: "configured" as const,
       approved: configured.approved,
+      policyClass: configured.policyClass,
       configIdentity: configured.configIdentity,
       configRevision: configured.configRevision,
     });
@@ -498,7 +517,7 @@ function parseActionAuthorityConfiguration(value: unknown): ActionAuthorityConfi
     const record = value as Record<string, unknown>;
     const configRevision = record.configRevision;
     const keys = Object.keys(record).sort();
-    if (keys.length !== 4 || keys.some((key, index) => key !== ["approved", "bridgeId", "configIdentity", "configRevision"][index])) {
+    if (keys.length !== 5 || keys.some((key, index) => key !== ["approved", "bridgeId", "configIdentity", "configRevision", "policyClass"][index])) {
       return undefined;
     }
     if (typeof record.bridgeId !== "string"
@@ -506,6 +525,7 @@ function parseActionAuthorityConfiguration(value: unknown): ActionAuthorityConfi
       || record.bridgeId.length > 200
       || record.bridgeId !== record.bridgeId.trim()
       || typeof record.approved !== "boolean"
+      || !isActionAuthorityPolicyClass(record.policyClass)
       || typeof record.configIdentity !== "string"
       || !ACTION_AUTHORITY_CONFIG_IDENTITY.test(record.configIdentity)
       || !isPositiveSafeInteger(configRevision)) {
@@ -514,12 +534,17 @@ function parseActionAuthorityConfiguration(value: unknown): ActionAuthorityConfi
     return {
       bridgeId: record.bridgeId,
       approved: record.approved,
+      policyClass: record.policyClass,
       configIdentity: record.configIdentity,
       configRevision,
     };
   } catch {
     return undefined;
   }
+}
+
+function isActionAuthorityPolicyClass(value: unknown): value is ActionAuthorityPolicyClass {
+  return value === "direct" || value === "confirmation" || value === "administrator";
 }
 
 function isPositiveSafeInteger(value: unknown): value is number {

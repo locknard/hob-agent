@@ -50,6 +50,7 @@ function automationArguments(artifactCandidate?: unknown): Record<string, unknow
     householdValue: "Reduce unnecessary lighting without changing arrival comfort.",
     whyNow: "A repeated post-baseline pattern is available for review.",
     uncertainties: ["Whether late arrivals intentionally keep this light on."],
+    dedupKey: "home:arrival-light",
     idempotencyKey: "arrival-light:v1",
     selectedHwIds: ["hw-1"],
     selectedHwCapabilityIds: ["hwc-1"],
@@ -108,6 +109,7 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
     householdValue: "Reduce unnecessary lighting without changing arrival comfort.",
     whyNow: "A repeated post-baseline pattern is available for review.",
     uncertainties: ["Whether late arrivals intentionally keep this light on."],
+    dedupKey: "home:arrival-light",
     idempotencyKey: "arrival-light:v1",
     selectedHwIds: ["hw-1"],
     selectedHwCapabilityIds: ["hwc-1"],
@@ -133,6 +135,7 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
     whyNow: "A repeated post-baseline pattern is available for review.",
     uncertainties: ["Whether late arrivals intentionally keep this light on."],
   });
+  assert.equal(draft?.dedupKey, "home:arrival-light");
   assert.deepEqual(draft?.selectedHwCapabilityIds, ["hwc-1"]);
   assert.equal(draft?.evidenceLookbackHours, 24);
   assert.deepEqual(draft?.artifactCandidate, VALID_ARTIFACT_CANDIDATE);
@@ -267,6 +270,7 @@ test("rejects an autonomous proposal while inventory coverage is incomplete", as
     householdValue: "No value can be established from an incomplete scan.",
     whyNow: "The inventory scan is incomplete.",
     uncertainties: ["The rest of the household inventory is unknown."],
+    dedupKey: "home:incomplete-scan",
     idempotencyKey: "incomplete-scan:v1",
     selectedHwIds: ["hw-1"],
     riskLevel: "low",
@@ -302,6 +306,7 @@ test("rejects an autonomous proposal while existing-rule coverage is incomplete"
     householdValue: "Avoid duplicating existing household behavior.",
     whyNow: "The existing-rule scan is incomplete.",
     uncertainties: ["Unread rules may already implement this behavior."],
+    dedupKey: "home:unchecked-rule-overlap",
     idempotencyKey: "unchecked-rules:v1",
     selectedHwIds: ["hw-1"],
     riskLevel: "low",
@@ -333,6 +338,7 @@ test("rejects an autonomous proposal before household calibration is read", asyn
     householdValue: "Respect prior household review.",
     whyNow: "Calibration was not read.",
     uncertainties: ["Prior review outcomes are unknown."],
+    dedupKey: "home:uncalibrated-suggestion",
     idempotencyKey: "uncalibrated:v1",
     selectedHwIds: ["hw-1"],
     riskLevel: "low",

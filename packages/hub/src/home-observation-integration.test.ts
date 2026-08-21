@@ -114,6 +114,12 @@ class AcceptanceWorld extends Service {
       rules: [{ ruleRef: "opaque-rule-1", name: "Existing light schedule", enabled: true }],
     }];
   }
+
+  resolveActionAuthority(hwCapabilityId: string) {
+    return hwCapabilityId === "hwc-1"
+      ? { status: "available" as const, bridgeId: "bridge-a", policyClass: "direct" as const }
+      : { status: "unavailable" as const, reason: "not_configured" as const };
+  }
 }
 
 class ObservationScriptAdapter {
@@ -178,6 +184,7 @@ class ObservationScriptAdapter {
         householdValue: "Reduce unnecessary repeated lighting while preserving household comfort.",
         whyNow: "A post-baseline event is available with complete temporal coverage.",
         uncertainties: ["Whether the observed light activity was intentional."],
+        dedupKey: "home:light-activity",
         idempotencyKey: "acceptance:light-activity:v1",
         selectedHwIds: ["hw-1"],
         selectedHwCapabilityIds: ["hwc-1"],
@@ -389,8 +396,8 @@ test("answers a curtain question through governed DSH evidence into the local In
   if (answer?.status !== "completed") return;
   assert.equal(answer.report.hardwareSuggestions[0]?.capability, "illuminance");
   assert.equal(answer.report.hardwareSuggestions[0]?.necessity, "optional");
-  assert.match(ctx.homeInbox.renderAdvice(answer.id) ?? "", /No-purchase alternative/);
-  assert.match(ctx.homeInbox.renderList(), /Why does the curtain/);
+  assert.equal(ctx.homeInbox.getProductAdviceTurn(answer.id)?.status, "completed");
+  assert.equal(ctx.homeInbox.getProductAdviceTurn(answer.id)?.question, "Why does the curtain sometimes open too early and sometimes too late?");
   assert.equal(ctx.homeInbox.list().length, 0);
   assert.deepEqual(ctx.homeAgent.traceSnapshot()?.tools.map((tool) => tool.name), [
     "skill",

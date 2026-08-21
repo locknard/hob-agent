@@ -41,6 +41,15 @@ Postgres/Redis, a native chat application, or a new skill format during Phase 0.
   `apple-design` skill together with the relevant frontend design and browser
   verification skills. Treat interaction behavior and visual design as one
   product decision, not as separate finishing passes.
+- For agent-native interaction logic, route the work through the installed
+  `ai-native-ux`, `state-machine`, and `user-flow-diagram` skills. Define the
+  human/Agent authority boundary, valid states, guarded transitions, recovery
+  exits, and screen-level branches before polishing layouts.
+- For voice or conversational work, also use `conversational-ux`; for model,
+  bridge, or tool latency, also use `loading-states`. A voice flow must cover
+  permission denial, no input, partial recognition, escalating reprompts, and a
+  text exit. A wait longer than ten seconds must allow background continuation
+  or cancellation without losing the active turn.
 - The approved source is `emilkowalski/skills@apple-design`. Review upstream
   changes before replacing the installed version; do not substitute an
   unrelated Apple-look theme with weaker interaction guidance.
@@ -65,6 +74,18 @@ Postgres/Redis, a native chat application, or a new skill format during Phase 0.
 
 ## Engineering discipline
 
+### Root-cause replacement and affirmative specification
+
+- Define the intended behavior in focused tests, then replace the obsolete model
+  at its owning boundary. Remove superseded branches and compatibility shims in
+  the same change. A documented external contract may retain an ingress adapter
+  with an explicit removal condition.
+- State requirements, plans, code comments, documentation and product copy as
+  direct, affirmative rules. Each sentence says what the system does and which
+  invariant it preserves.
+
+### Verification and change quality
+
 - Write a focused failing test before production behavior, then implement the
   smallest change that makes it pass. Keep tests deterministic and local.
 - Run `pnpm test` and `pnpm check` before handing off a change. Do not claim a
@@ -75,6 +96,23 @@ Postgres/Redis, a native chat application, or a new skill format during Phase 0.
   only when they are necessary for the active Phase 0 milestone.
 - Record durable architectural decisions in repository documentation before
   making changes that establish a new cross-package contract.
+
+## Product deliverables
+
+- User-visible interfaces, PDFs, slide decks, reports, screenshots, and exported
+  files contain the finished product or business content that serves the stated
+  user outcome.
+- Keep implementation reasoning, design deliberation, debugging history,
+  verification mechanics, limitations, trade-offs, and future plans in chat
+  updates, code comments, pull-request descriptions, engineering documents, or
+  planning files.
+- Product UI copy speaks from the household member's side of the screen. It uses
+  direct labels for the current state and available action. Meta-copy about the
+  page, the implementation, or the demonstration belongs in a dedicated help or
+  empty-state explanation only when that explanation is itself part of the
+  product.
+- Include methodology or implementation records inside a deliverable when the
+  user explicitly requests those records as deliverable content.
 
 ## Agent delegation
 

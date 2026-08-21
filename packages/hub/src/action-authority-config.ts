@@ -1,12 +1,16 @@
-import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { constants, chmodSync, lstatSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-import type { ActionAuthorityConfiguration } from "./authority-coordinator.js";
+import type {
+  ActionAuthorityConfiguration,
+  ActionAuthorityPolicyClass,
+} from "./authority-coordinator.js";
 import { canonicalAssessmentInput } from "./artifact-assessments.js";
 
 export const ACTION_AUTHORITY_CONFIG_FILE = "action-authority.json";
+export const ACTION_AUTHORITY_CONFIG_VERSION = 2;
 export const MAX_ACTION_AUTHORITY_CONFIG_BYTES = 64 * 1024;
 export const MAX_ACTION_AUTHORITY_BINDINGS = 256;
 
@@ -35,6 +39,7 @@ interface ActionAuthorityBindingFileEntry {
   readonly hwCapabilityId: string;
   readonly bridgeId: string;
   readonly approved: boolean;
+  readonly policyClass: ActionAuthorityPolicyClass;
   readonly revision: number;
 }
 
@@ -43,9 +48,55 @@ export interface ActionAuthorityConfigurationLoaderDependencies {
   readonly afterFileMetadata?: () => void | Promise<void>;
 }
 
+export interface ActionAuthorityBindingWriteInput {
+  readonly hwCapabilityId: string;
+  readonly bridgeId: string;
+  readonly approved: boolean;
+  readonly policyClass: ActionAuthorityPolicyClass;
+  readonly revision: number;
+}
+
 /** Returns the one fixed Phase 0 path under the supplied data directory. */
 export function actionAuthorityConfigurationPath(dataDirectory: string): string {
   return join(resolveDataDirectoryPath(dataDirectory), ACTION_AUTHORITY_CONFIG_FILE);
+}
+
+/**
+ * Replaces the canonical action-authority file in one private atomic rename.
+ * The returned projection is the exact value accepted by AuthorityCoordinator;
+ * callers update the running coordinator only after this write succeeds.
+ */
+export function writeActionAuthorityConfiguration(
+  path: string,
+  bindings: readonly ActionAuthorityBindingWriteInput[],
+): Readonly<Record<string, ActionAuthorityConfiguration>> {
+  if (!isAbsolute(path) || !path.endsWith(`/${ACTION_AUTHORITY_CONFIG_FILE}`)) throw invalidInput();
+  if (!Array.isArray(bindings) || bindings.length > MAX_ACTION_AUTHORITY_BINDINGS) throw resourceExhausted();
+  const normalized = bindings.map((binding) => {
+    if (!isPlainRecord(binding)) throw invalidInput();
+    const hwCapabilityId = boundedId(binding.hwCapabilityId);
+    const bridgeId = boundedId(binding.bridgeId);
+    if (typeof binding.approved !== "boolean" || !isPolicyClass(binding.policyClass) || !isPositiveSafeInteger(binding.revision)) throw invalidInput();
+    return { hwCapabilityId, bridgeId, approved: binding.approved, policyClass: binding.policyClass, revision: binding.revision } satisfies ActionAuthorityBindingFileEntry;
+  });
+  if (new Set(normalized.map((binding) => binding.hwCapabilityId)).size !== normalized.length) throw invalidInput();
+  normalized.sort((left, right) => compareCodePoints(left.hwCapabilityId, right.hwCapabilityId));
+  const parent = dirname(path);
+  assertPrivateDirectory(parent);
+  assertPrivateTarget(path);
+  const raw = `${JSON.stringify({ version: ACTION_AUTHORITY_CONFIG_VERSION, bindings: normalized })}\n`;
+  if (Buffer.byteLength(raw, "utf8") > MAX_ACTION_AUTHORITY_CONFIG_BYTES) throw resourceExhausted();
+  const temporaryPath = join(parent, `.${ACTION_AUTHORITY_CONFIG_FILE}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temporaryPath, raw, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    chmodSync(temporaryPath, 0o600);
+    renameSync(temporaryPath, path);
+    chmodSync(path, 0o600);
+  } catch {
+    try { unlinkSync(temporaryPath); } catch { /* retain the original source when cleanup cannot run */ }
+    throw new ActionAuthorityConfigurationError("read_failed", "configuration file could not be replaced");
+  }
+  return parseActionAuthorityConfiguration(raw);
 }
 
 /**
@@ -161,7 +212,9 @@ function parseActionAuthorityConfiguration(raw: string): Readonly<Record<string,
   } catch {
     throw new ActionAuthorityConfigurationError("invalid_json", "configuration JSON is malformed");
   }
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["bindings", "version"]) || value.version !== 1) {
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ["bindings", "version"])
+    || value.version !== ACTION_AUTHORITY_CONFIG_VERSION) {
     throw invalidInput();
   }
   if (!Array.isArray(value.bindings) || value.bindings.length > MAX_ACTION_AUTHORITY_BINDINGS) {
@@ -171,7 +224,8 @@ function parseActionAuthorityConfiguration(raw: string): Readonly<Record<string,
   const entries: ActionAuthorityBindingFileEntry[] = [];
   const seen = new Set<string>();
   for (const binding of value.bindings) {
-    if (!isPlainRecord(binding) || !hasExactKeys(binding, ["approved", "bridgeId", "hwCapabilityId", "revision"])) {
+    if (!isPlainRecord(binding)
+      || !hasExactKeys(binding, ["approved", "bridgeId", "hwCapabilityId", "policyClass", "revision"])) {
       throw invalidInput();
     }
     const entry = parseBinding(binding);
@@ -186,6 +240,7 @@ function parseActionAuthorityConfiguration(raw: string): Readonly<Record<string,
     const configuration = Object.freeze({
       bridgeId: entry.bridgeId,
       approved: entry.approved,
+      policyClass: entry.policyClass,
       configIdentity: computeConfigurationIdentity(entry),
       configRevision: entry.revision,
     });
@@ -202,25 +257,33 @@ function parseActionAuthorityConfiguration(raw: string): Readonly<Record<string,
 function parseBinding(value: Record<string, unknown>): ActionAuthorityBindingFileEntry {
   const hwCapabilityId = boundedId(value.hwCapabilityId);
   const bridgeId = boundedId(value.bridgeId);
-  if (typeof value.approved !== "boolean" || !isPositiveSafeInteger(value.revision)) throw invalidInput();
+  if (typeof value.approved !== "boolean"
+    || !isPolicyClass(value.policyClass)
+    || !isPositiveSafeInteger(value.revision)) throw invalidInput();
   return {
     hwCapabilityId,
     bridgeId,
     approved: value.approved,
+    policyClass: value.policyClass,
     revision: value.revision,
   };
 }
 
 function computeConfigurationIdentity(entry: ActionAuthorityBindingFileEntry): `sha256:${string}` {
   const canonical = canonicalAssessmentInput({
-    kind: "action-authority-config-v1",
+    kind: "action-authority-config-v2",
     input: {
       approved: entry.approved,
       bridgeId: entry.bridgeId,
       hwCapabilityId: entry.hwCapabilityId,
+      policyClass: entry.policyClass,
     },
   });
   return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+}
+
+function isPolicyClass(value: unknown): value is ActionAuthorityPolicyClass {
+  return value === "direct" || value === "confirmation" || value === "administrator";
 }
 
 function boundedId(value: unknown): string {
@@ -287,6 +350,27 @@ function invalidInput(): ActionAuthorityConfigurationError {
 
 function invalidFilesystem(): ActionAuthorityConfigurationError {
   return new ActionAuthorityConfigurationError("unsafe_filesystem", "configuration filesystem boundary is invalid");
+}
+
+function resourceExhausted(): ActionAuthorityConfigurationError {
+  return new ActionAuthorityConfigurationError("resource_exhausted", "configuration exceeds the resource limit");
+}
+
+function assertPrivateDirectory(path: string): void {
+  let metadata;
+  try { metadata = lstatSync(path); } catch { throw invalidFilesystem(); }
+  if (metadata.isSymbolicLink() || !metadata.isDirectory() || privateMode(metadata.mode) !== 0o700) throw invalidFilesystem();
+  try { realpathSync(path); } catch { throw invalidFilesystem(); }
+}
+
+function assertPrivateTarget(path: string): void {
+  try {
+    const metadata = lstatSync(path);
+    if (metadata.isSymbolicLink() || !metadata.isFile() || privateMode(metadata.mode) !== 0o600) throw invalidFilesystem();
+  } catch (error) {
+    if (error instanceof ActionAuthorityConfigurationError) throw error;
+    if (!isMissingError(error)) throw invalidFilesystem();
+  }
 }
 
 function compareCodePoints(left: string, right: string): number {

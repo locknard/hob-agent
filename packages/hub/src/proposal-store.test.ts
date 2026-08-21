@@ -141,6 +141,373 @@ test("deduplicates a producer idempotency key without adding another audit event
   store.close();
 });
 
+test("returns capacity_full without persisting or later admitting a sixth proposal", () => {
+  let now = createdAt;
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
+  try {
+    const proposals = Array.from({ length: 5 }, (_, index) => store.create(input({
+      dedupKey: `capacity-behavior:${index}`,
+      idempotencyKey: `capacity-idempotency:${index}`,
+    })));
+    const snoozed = store.snoozeProposal({
+      proposalId: proposals[0]!.id,
+      expectedRevision: proposals[0]!.revision,
+      until: "tomorrow",
+    });
+    assert.equal(snoozed.status, "pending_review");
+    assert.equal(snoozed.snoozeCount, 1);
+    assert.ok(snoozed.snoozedUntil);
+    assert.equal(store.proposalCapacity().used, 5);
+    const full = store.createGoverned(input({
+      dedupKey: "capacity-overflow",
+      idempotencyKey: "capacity-overflow-idempotency",
+    }));
+    assert.deepEqual(full, { kind: "capacity_full" });
+    assert.equal(store.list({ status: "pending_review" }).length, 5);
+
+    now = snoozed.snoozedUntil!;
+    const reopened = store.get(snoozed.id);
+    assert.equal(reopened?.status, "pending_review");
+    assert.equal(reopened?.snoozedUntil, undefined);
+    assert.equal(reopened?.snoozeCount, 1);
+    assert.equal(reopened?.revision, snoozed.revision + 1);
+
+    const rejected = store.review({
+      proposalId: proposals[1]!.id,
+      expectedRevision: proposals[1]!.revision,
+      decision: "rejected",
+      reviewer: "household-owner",
+      feedbackCode: "not_useful",
+    });
+    assert.equal(rejected.status, "rejected");
+    assert.equal(store.list({ status: "pending_review" }).length, 4);
+    assert.equal(store.list({ status: "pending_review" }).some((proposal) => proposal.dedupKey === "capacity-overflow"), false);
+  } finally {
+    store.close();
+  }
+});
+
+test("merges new evidence into an existing behavior identity while capacity is full", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const target = store.create(input({
+      dedupKey: "capacity-merge",
+      idempotencyKey: "capacity-merge:v1",
+    }));
+    for (let index = 1; index < 5; index += 1) {
+      store.create(input({
+        dedupKey: `capacity-merge:${index}`,
+        idempotencyKey: `capacity-merge:${index}:v1`,
+      }));
+    }
+    const secondReference = {
+      bridgeId: "ha-main",
+      hwId: "hw-7",
+      capabilityId: "hwc-4",
+      observedAt: "2026-08-19T01:00:00.000Z",
+    } as const;
+    const merged = store.createGoverned(input({
+      dedupKey: "capacity-merge",
+      idempotencyKey: "capacity-merge:v2",
+      evidence: {
+        ...input().evidence,
+        references: [secondReference],
+      },
+    }));
+    assert.equal(merged.kind, "merged");
+    if (merged.kind !== "merged") throw new Error("expected evidence merge");
+    assert.equal(merged.proposal.id, target.id);
+    assert.equal(merged.mergedEvidenceCount, 1);
+    assert.equal(merged.proposal.evidence.references.length, 2);
+    assert.equal(store.list({ status: "pending_review" }).length, 5);
+  } finally {
+    store.close();
+  }
+});
+
+test("keeps a dedup latch suppressing a proposal while review capacity is full", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const latched = store.create(input({
+      dedupKey: "latched-at-capacity",
+      idempotencyKey: "latched-at-capacity:v1",
+    }));
+    const decision = store.decideProposal({
+      proposalId: latched.id,
+      expectedRevision: latched.revision,
+      decision: "do_not_suggest",
+      reviewer: "household-owner",
+    });
+    assert.equal(decision.status, "rejected");
+    for (let index = 0; index < 5; index += 1) {
+      store.create(input({
+        dedupKey: `latched-capacity:${index}`,
+        idempotencyKey: `latched-capacity:${index}:v1`,
+      }));
+    }
+    const suppressed = store.createGoverned(input({
+      dedupKey: "latched-at-capacity",
+      idempotencyKey: "latched-at-capacity:v2",
+    }));
+    assert.deepEqual(suppressed, {
+      kind: "suppressed",
+      reason: "dedup_latched",
+      dedupKey: "latched-at-capacity",
+    });
+    assert.equal(store.list({ status: "pending_review" }).length, 5);
+  } finally {
+    store.close();
+  }
+});
+
+test("does not admit a capacity rejection after a store restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-capacity-"));
+  const path = join(directory, "proposals.sqlite");
+  const firstStore = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const full = Array.from({ length: 5 }, (_, index) => firstStore.create(input({
+      dedupKey: `restart-capacity:${index}`,
+      idempotencyKey: `restart-capacity:${index}`,
+    })));
+    assert.deepEqual(firstStore.createGoverned(input({
+      dedupKey: "restart-overflow",
+      idempotencyKey: "restart-overflow:v1",
+    })), { kind: "capacity_full" });
+    firstStore.review({
+      proposalId: full[0]!.id,
+      expectedRevision: full[0]!.revision,
+      decision: "rejected",
+      reviewer: "household-owner",
+      feedbackCode: "not_useful",
+    });
+  } finally {
+    firstStore.close();
+  }
+  const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    assert.equal(reopened.list({ status: "pending_review" }).some((proposal) => proposal.dedupKey === "restart-overflow"), false);
+    assert.equal(reopened.list({ status: "pending_review" }).length, 4);
+  } finally {
+    reopened.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("allows exactly two snoozes and exposes the three bounded targets", () => {
+  let now = createdAt;
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
+  try {
+    const proposal = store.create(input({ dedupKey: "snooze-behavior", idempotencyKey: "snooze-1" }));
+    const first = store.snoozeProposal({ proposalId: proposal.id, expectedRevision: proposal.revision, until: "weekend" });
+    const second = store.snoozeProposal({ proposalId: first.id, expectedRevision: first.revision, until: "next_week" });
+    assert.equal(second.snoozeCount, 2);
+    assert.throws(
+      () => store.snoozeProposal({ proposalId: second.id, expectedRevision: second.revision, until: "tomorrow" }),
+      /snooze/i,
+    );
+    assert.throws(
+      () => store.snoozeProposal({ proposalId: second.id, expectedRevision: second.revision, until: "invalid" as never }),
+      /snooze/i,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("reject_once closes only the current proposal while do_not_suggest atomically latches its stable behavior identity", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const once = store.create(input({ dedupKey: "same-light-behavior", idempotencyKey: "reject-once-1" }));
+    const rejectedOnce = store.decideProposal({
+      proposalId: once.id,
+      expectedRevision: once.revision,
+      decision: "reject_once",
+      reviewer: "household-owner",
+    });
+    assert.equal(rejectedOnce.status, "rejected");
+    assert.equal(rejectedOnce.decision?.kind, "reject_once");
+    assert.deepEqual(store.listDedupLatches(), []);
+
+    const replacement = store.create(input({ dedupKey: "same-light-behavior", idempotencyKey: "reject-once-2" }));
+    assert.notEqual(replacement.id, once.id);
+    const latched = store.decideProposal({
+      proposalId: replacement.id,
+      expectedRevision: replacement.revision,
+      decision: "do_not_suggest",
+      reviewer: "household-owner",
+    });
+    assert.equal(latched.status, "rejected");
+    assert.equal(latched.decision?.kind, "do_not_suggest");
+    assert.deepEqual(store.listDedupLatches().map((item) => item.dedupKey), ["same-light-behavior"]);
+    assert.throws(
+      () => store.create(input({ dedupKey: "same-light-behavior", idempotencyKey: "reject-once-3" })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "dedup_latched",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("clears a do-not-suggest latch only through an explicit audited governance command", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const proposal = store.create(input({ dedupKey: "clearable-behavior", idempotencyKey: "clearable-1" }));
+    store.decideProposal({
+      proposalId: proposal.id,
+      expectedRevision: proposal.revision,
+      decision: "do_not_suggest",
+      reviewer: "household-owner",
+    });
+    assert.equal(store.hasDedupLatch("clearable-behavior"), true);
+    const cleared = store.clearDedupLatch({
+      dedupKey: "clearable-behavior",
+      reviewer: "household-owner",
+      note: "The household wants to reconsider this behavior.",
+    });
+    assert.equal(cleared.action, "cleared");
+    assert.equal(cleared.actor, "household-owner");
+    assert.equal(store.hasDedupLatch("clearable-behavior"), false);
+    assert.equal(store.listDedupLatchAudit().at(-1)?.action, "cleared");
+    assert.equal(store.create(input({ dedupKey: "clearable-behavior", idempotencyKey: "clearable-2" })).status, "pending_review");
+  } finally {
+    store.close();
+  }
+});
+
+test("requires a completed seven-day trial and a second explicit approval before enablement", () => {
+  let now = createdAt;
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
+  try {
+    const proposal = store.create(input({ dedupKey: "two-thumbs", idempotencyKey: "two-thumbs-1" }));
+    const direction = store.review({
+      proposalId: proposal.id,
+      expectedRevision: proposal.revision,
+      decision: "approved",
+      reviewer: "household-owner",
+      feedbackCode: "useful_as_is",
+    });
+    assert.equal(direction.rolloutState, "trial_active");
+    assert.equal(direction.trial?.durationDays, 7);
+    assert.equal(direction.applicationStatus, "not_available");
+    assert.throws(() => store.enableProposal({
+      proposalId: direction.id,
+      expectedRevision: direction.revision,
+      reviewer: "household-owner",
+    }), /trial/i);
+
+    now = direction.trial!.endsAt;
+    const ready = store.advanceProposalTrial({
+      proposalId: direction.id,
+      expectedRevision: direction.revision,
+    });
+    assert.equal(ready.rolloutState, "enable_pending");
+    const enabled = store.enableProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      reviewer: "household-owner",
+      note: "The seven-day trial met the household criteria.",
+    });
+    assert.equal(enabled.rolloutState, "enabled");
+    assert.equal(enabled.applicationStatus, "not_available");
+    assert.deepEqual(enabled.audit.map((event) => event.action), [
+      "created",
+      "approved",
+      "trial_completed",
+      "enabled",
+    ]);
+  } finally {
+    store.close();
+  }
+});
+
+test("merges new evidence for an unresolved behavior without creating a second proposal", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const first = store.create(input({
+      dedupKey: "evidence-behavior",
+      idempotencyKey: "evidence-1",
+      evidence: {
+        ...input().evidence,
+        references: [{
+          bridgeId: "ha-main",
+          hwId: "hw-7",
+          capabilityId: "hwc-4",
+          observedAt: "2026-08-19T00:59:00.000Z",
+          source: "current-state",
+        }],
+      },
+    }));
+    const merged = store.create(input({
+      dedupKey: "evidence-behavior",
+      idempotencyKey: "evidence-2",
+      title: "A refreshed wording must not replace the reviewed card",
+      evidence: {
+        ...input().evidence,
+        references: [{
+          bridgeId: "ha-main",
+          hwId: "hw-7",
+          capabilityId: "hwc-4",
+          observedAt: "2026-08-19T01:00:00.000Z",
+          source: "current-state",
+        }],
+      },
+    }));
+    assert.equal(merged.id, first.id);
+    assert.equal(merged.revision, first.revision + 1);
+    assert.equal(merged.title, first.title);
+    assert.equal(merged.newEvidence, true);
+    assert.equal(merged.evidence.references.length, 2);
+    assert.equal(merged.audit.at(-1)?.action, "evidence_merged");
+    assert.deepEqual(store.create(input({
+      dedupKey: "evidence-behavior",
+      idempotencyKey: "evidence-2",
+    })), merged);
+  } finally {
+    store.close();
+  }
+});
+
+test("naturally expires after fourteen days, preserves the audit, and permits a fresh proposal for the behavior", async () => {
+  let now = createdAt;
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-governance-expiry-"));
+  const path = join(directory, "proposals.sqlite");
+  const firstStore = new SqliteProposalStore({ path, now: () => now });
+  const first = firstStore.create(input({ dedupKey: "expiry-behavior", idempotencyKey: "expiry-1" }));
+  firstStore.close();
+
+  now = "2026-09-02T01:00:00.000Z";
+  const reopened = new SqliteProposalStore({ path, now: () => now });
+  try {
+    const expired = reopened.get(first.id);
+    assert.equal(expired?.status, "expired");
+    assert.equal(expired?.review?.decision, "expired");
+    assert.equal(expired?.audit.at(-1)?.action, "expired");
+    const replacement = reopened.create(input({ dedupKey: "expiry-behavior", idempotencyKey: "expiry-2" }));
+    assert.notEqual(replacement.id, first.id);
+  } finally {
+    reopened.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("serializes same-behavior creation across two SQLite connections", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-governance-concurrent-"));
+  const path = join(directory, "proposals.sqlite");
+  const firstStore = new SqliteProposalStore({ path, now: () => createdAt });
+  const secondStore = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const first = firstStore.create(input({ dedupKey: "concurrent-behavior", idempotencyKey: "concurrent-1" }));
+    const second = secondStore.create(input({ dedupKey: "concurrent-behavior", idempotencyKey: "concurrent-2" }));
+    assert.equal(second.id, first.id);
+    assert.equal(firstStore.list().length, 1);
+    assert.equal(secondStore.get(first.id)?.evidence.references.length, first.evidence.references.length);
+  } finally {
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects an asynchronous retention evidence callback before committing", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {

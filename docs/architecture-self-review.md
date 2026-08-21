@@ -1,456 +1,140 @@
 # Architecture self-review
 
-Date: 2026-08-20
+Date: 2026-08-22
+Scope: V4 household product runtime and DeepSeek Harness alignment
 
-## Scope conclusion
+## Conclusion
 
-The DSH migration is complete at the runtime composition boundary: DSH owns the
-Agent loop, session, prompt, tools, provider seam, token measurement,
-compaction transaction, and lifecycle. Hob-agent has
-no direct `pi-ai` or `pi-agent-core` dependency. The official
-`dsh-llm-pi-ai` package is the only provider adapter and carries its SDK as a
-transitive implementation detail.
+The repository has one runtime. DeepSeek Harness owns the Agent loop, model
+provider seam, session, prompt assembly, tool registry, cancellation, token
+measurement and compaction transaction. Cordis composes the single TypeScript
+service. `pi-agent-core` is absent, and `pi-ai` remains an internal dependency
+of the official `dsh-llm-pi-ai` adapter.
 
-This repository now provides an executable Phase 0 composition root. It creates
-one Cordis `Context`, mounts the neutral `HomeWorldService` before the Home
-Agent, and owns bounded process shutdown. Official DSH session persistence,
-bounded household prompt context, the DSH Skill registry/loader, and one
-reviewed first-party household-observation Skill are composed. When an explicit
-household directory is configured, a tenant provider contributes a strict
-bounded subset of `SKILL.md` through that same registry. It rechecks canonical
-containment, rejects symlinks, caps file/catalog bytes and entries, rereads on
-demand, exposes no resource path, and ranks below reviewed product Skills.
-Tenant instructions remain untrusted model input and grant no tool or policy
-authority.
+The Hub owns every household authority boundary. Bridges publish versioned
+neutral descriptions; the Agent sees governed tools; layouts receive a bounded
+presentation projection. Adapter-native payloads, credentials, bridge clients,
+Cordis context and executors remain outside the Agent and layout contracts.
 
-Long-running observation sessions now mount the official DSH token meter,
-basic compaction engine, and replay-safe tool-result pruner. The Home Product
-Bundle overrides only the basic engine's supported summarizer hook so a coding
-checkpoint is not used as household memory. Metadata-only compaction/prune
-events reach the Inbox trace; summaries, raw outputs, provider errors, and
-internal compaction ids do not.
+The V4 migration has one authenticated Product Shell and one household command
+path. The retired Inbox runtime and Control Center have been removed.
 
-The official DSH invariant registry is enabled before the first Agent is
-created. Its executable session, Agent, scope, loop, LLM, tool, system-prompt,
-and compaction companions check their package-owned event relationships at
-runtime; rc.7 companions that explicitly declare no runtime invariant remain
-unit/load-test concerns rather than decorative registrations.
+## Runtime ownership
 
-The neutral bridge read path is implemented through migration step 6: one
-Zod-first v6.3 base contract plus the additive v6.4 read-only capability
-semantic kind and v6.5 neutral space topology, catalog/registry/scoped credentials, epoch-aware
-SQLite ingest, canonical identity and authority, world-model indexing, the HA
-adapter, and the neutral agent snapshot. Actions and artifact hosting remain an
-explicit M3 boundary rather than a second runtime hidden in Phase 0.
+- `packages/hub` owns bridge registration, state ingestion, SQLite persistence,
+  world indexing, proposals, onboarding, advice, corrections, safety, one-shot
+  actions, batch actions, scheduling and policy-enforced execution.
+- `packages/agent-layer` mounts the DSH Agent and exposes only bounded household
+  tools. A tool can request work from a Hub owner; it cannot acquire bridge or
+  execution authority.
+- `packages/inbox-web` renders the canonical product projection and carries
+  authenticated commands to typed Hub ports. Host-owned safety, review counts,
+  authentication and command dispatch stay outside replaceable layouts.
+- `contracts` owns the Zod-first neutral bridge boundary. HA and Xiaomi are
+  equal adapters behind this boundary.
 
-Bridge credentials may now use exact bridge/alias-scoped macOS Keychain
-locators. Launch projection does not enumerate or passively read Keychain;
-resolution happens only for the configured bridge and declared alias when the
-adapter connects. Secret-like fields, including nested API/access keys, are
-rejected from ordinary bridge configuration.
+## Action and safety closure
 
-The authenticated local Control Center now leads with household review work
-and plain-language service health. Pending proposals do not masquerade as a
-system fault, degraded consistency cannot appear ready, non-spatial service
-objects do not create false room-review work, and provider/adapter/sequence
-identifiers remain behind native progressive disclosure. It is still a
-read-only projection and provides no configuration or execution control.
+Every one-shot action is prepared from an exact `actions@1` descriptor. Before
+dispatch, `HomeWorldService` reads the descriptor again and compares the target,
+neutral action, schema and display metadata. A changed or stale description
+produces `invalid_target` and no adapter call.
 
-The Control Center also exposes the Hub-owned retention status as a
-metadata-only details section: aggregate/per-bridge capacity, complete versus
-partial/degraded coverage, coverage floor, and latest retention audit time,
-result, and bytes deleted. It does not read journal records, proposal text, or
-device values and never shows the internal retention policy id. An untouched
-bridge honestly says **Not run yet** without making a healthy complete view
-look degraded; partial/degraded coverage and exhausted capacity remain
-attention states, with a fixed 90% used/max early warning and invalid quota
-metadata failing closed. There is no retention button, HTTP mutation, Agent
-tool, or timer.
+The action plane applies three policy classes:
 
-M3a now adds a review-only proposal path inside the same root: a private SQLite
-proposal store, hub-owned evidence/conflict projection, DSH proposal tool, and
-local Inbox facade. Approval remains a terminal review decision and cannot
-apply an artifact or control a device.
+1. `direct` for reversible actions initiated by an authenticated present member;
+2. `confirmation` for broader reversible effects that require an explicit
+   present-person confirmation;
+3. `administrator` for locks, valves, security and other high-impact effects,
+   approved on a private device bound to an adult administrator.
 
-## Verified boundaries
+State verification requires a recent successful bridge contact. A stale bridge
+turns both action verification and safety resolution into `unknown`. Startup
+converts persisted `approved` or `executing` tickets into the durable
+`interrupted_before_verification` state; it never repeats the action.
 
-- The Home Agent exposes bounded structured `get_home_calibration` review
-  history, compact paginated `get_home_inventory`, metadata-only post-baseline
-  `get_home_activity` candidate triage, bounded paginated
-  `get_home_snapshot`, bounded read-only `get_home_evidence`, and
-  review-only `create_home_proposal`; none has device or configuration
-  authority. Inventory discovery omits current values, capability identities,
-  schemas, and native identities. During autonomous observations, a runtime
-  gate rejects proposal creation until a stable ordered inventory cursor is
-  exhausted.
-- Temporal evidence reads only selected current hub capability IDs and
-  post-`sync-complete` state changes in the current epoch. Bootstrap rows are
-  excluded, raw attributes/native identifiers stay in the Hub, and partial
-  coverage is explicit.
-- Temporal proposal claims are rebound by the Hub from selected current
-  capability IDs; exact epoch/sequence references and coverage reach the Inbox,
-  while the model cannot author journal provenance.
-- Every new DSH Home Agent proposal includes a bounded expected household
-  value, timing rationale, and one to six explicit uncertainties. The Inbox
-  labels these as model-authored rationale, while Hub evidence, overlap, and
-  risk remain separate authoritative sections. Existing v1 rows without the
-  additive rationale remain readable.
-- The Hub binds mutually exclusive selected-device space coverage into each
-  new Home Agent draft. This exposes incomplete or ambiguous mapping in the
-  Inbox without names or identifiers and without trusting the model to report
-  its own context gap; legacy v1 proposals remain readable.
-- Proposal evidence, bridge watermarks, history gaps, and existing-rule
-  conflicts are hub-produced. `foreignRules@2` catalogs are accepted only when
-  their exact `epochId + lastSeq` matches the committed bridge watermark.
-- Proposal creation is idempotent per producer/key. Review uses optimistic
-  revisions, terminal decisions are immutable, and approval has
-  `applicationStatus: not_available`. New approve/reject decisions persist a
-  bounded quality-feedback code in both review state and append-only audit;
-  legacy v1 reviews remain readable and feedback cannot mutate household
-  knowledge automatically. The Inbox projects only all-time counts of these
-  codes and observation outcomes for calibration; it does not reinterpret
-  proposal content or notes.
-- The Agent calibration tool adds at most 20 recent reviewed proposal titles
-  and structured decisions to those counts. It strips reviewer identity and
-  notes, treats historical titles as untrusted, and cannot write memory or
-  relax current evidence, conflict, policy, or approval gates. Autonomous
-  proposal creation requires one successful fixed-window calibration read, so
-  feedback awareness is not left to prompt compliance.
-- Autonomous observation is disabled by default. The Hub owns its bounded
-  cadence, requires a ready world and idle DSH Agent, and permits only one
-  pending household proposal at a time. Each scheduled, manual, startup, or
-  one-shot attempt also enters a separate metadata-only Hub audit ledger before
-  the model can run; unfinished rows become interrupted on restart.
-- The long-running full runtime also exposes an authenticated, same-origin
-  **Observe now** action. It invokes the same Hub controller, readiness gates,
-  DSH Agent turn, proposal boundary, and audit ledger as scheduled observation;
-  the standalone review composition cannot invoke it. This adds no second loop.
-- Completed audit attempts may retain only turn duration, token counters, and
-  tool success/failure counts from the exact observation turn. This makes
-  no-proposal cost visible without persisting prompts, tool payloads, provider
-  identity, household state, or inferred monetary pricing.
-- One-root acceptance coverage now exercises the canonical DSH tool loop from
-  observation through trusted Hub evidence binding into the Inbox. The Home
-  Agent retains its trace service explicitly so cross-plugin Inbox reads do not
-  bypass Cordis injection ownership. Proposal detail slices the cumulative DSH
-  session projection to the exact turn containing its stored root tool-call ID,
-  so historical turns and their token cost are not attributed to the proposal.
-- `pnpm validate:home` provides a model-free, aggregate-only readiness cut over
-  the production HomeWorld paths before autonomous observation is enabled. It
-  emits no household identities, values, URLs, credentials, or raw errors.
-- Readiness also requires bridge traffic in the current process. A restored
-  consistent cut remains readable but cannot make validation, mapping, or
-  observation race ahead of the new adapter bootstrap and its epoch-bound
-  extension catalogs.
-- The DSH Agent can inspect the existing neutral `foreignRules@2` catalog
-  through bounded `get_home_rules` pages before proposing an automation. An
-  autonomous runtime gate requires a complete stable cursor sequence rather
-  than trusting prompt compliance. The Hub still owns the authoritative
-  proposal-time conflict check, and no rule body or mutation path crosses the
-  tool boundary.
-- Authoritative conflict coverage is scoped to every bridge binding of the
-  selected devices. An unrelated bridge without a rule catalog cannot block a
-  proposal, while a selected or merged cross-bridge device still fails closed
-  unless every relevant catalog is available.
-- The paginated DSH snapshot boundary strips adapter-native device,
-  capability-instance, space, and schema identifiers. Model-visible states are
-  correlated only by opaque Hub capability ID and neutral bridge ID; the full
-  native binding projection remains Hub-internal for indexing and evidence.
-- `pnpm observe:home` provides an explicit one-shot real-household acceptance
-  path. It shares the scheduler's Hub-owned readiness, pending-proposal, and
-  Agent-idle gates but mounts neither recurring scheduling nor Inbox HTTP.
-- `pnpm draft:home-map` turns a ready neutral snapshot into a bounded private
-  `HOME.import.md` review artifact without calling a model or overwriting
-  household knowledge. It reports single-space, unassigned, and multiple-space
-  coverage separately; ambiguous devices appear once as explicit confirmation
-  tasks rather than being duplicated across apparently settled rooms. Native
-  identifiers and current values remain absent.
-- Aggregate validation exposes the count of pending identity-governance work,
-  while the private map draft renders deduplicated possible-device links using
-  only display names, opaque Hub IDs, and closed source provenance. It omits
-  claims and evidence, and remains record-only: no draft edit approves or
-  applies an identity merge.
-- Private map review order is human-oriented by display name with Hub identity
-  only as a stable tie-breaker. Names remain untrusted presentation data and
-  cannot influence identity, placement, or authority.
-- The neutral `orgHints@1` stream extension can mark a device explicitly
-  non-spatial from structured adapter evidence. The Hub accepts it only in the
-  committed replay epoch; names never drive this classification, and merged
-  devices fail back to unknown unless every source agrees. This keeps service
-  objects out of room-review work without making HA vocabulary part of core.
-  Inventory and snapshot tools expose only the resulting `non_spatial` value,
-  with prompt guidance that it proves neither physical type nor action safety.
-- `pnpm inbox:home` mounts only the durable proposal store, metadata-only
-  observation audit, and authenticated localhost review surface. It requires
-  no bridge or model configuration and retains the same terminal, non-applying
-  approval semantics.
-- Optional Inbox HTTP is disabled without an explicit credential, binds only to
-  `127.0.0.1`, stores only a derived verifier, authenticates every request, and
-  requires exact same-origin bounded review POSTs.
-- API-key profiles enter the official adapter through DSH `CredentialProvider`;
-  the adapter resolves the selected SecretRef per operation.
-- `CredentialProvider.describe()` now reports actual current availability, in
-  accordance with the DSH contract, instead of treating a locator as a value.
-- OAuth tokens are never downgraded to API keys. The provider-neutral OAuth seam
-  preserves SecretVault storage, refresh serialization, expiry metadata, and
-  redacted failures, and fails closed without a real DSH OAuth adapter.
-- Provider probes use DSH `LlmRuntime`; profile ordering, cooldowns, failover,
-  Keychain isolation, and error classification retain the stronger mechanisms
-  adapted from OpenClaw without importing its runtime.
-- Runtime ownership tests reject the removed Pi runtime, direct Pi SDK imports,
-  and named legacy entry points.
-- Runtime invariant companions fail structural DSH protocol violations under
-  the owning upstream package instead of adding a product-side shadow checker.
-- Bridge architecture guards reject ecosystem vocabulary in the agent layer,
-  removed bridge contracts/services, and raw HA payloads in the canonical
-  world model.
-- Optional per-instance semantic kinds let HA and an authorized Xiaomi
-  transport classify observations with one closed vocabulary while preserving
-  source schemas and bindings. They grant no equivalence, binding, or action
-  authority; unknown capabilities remain unclassified.
-- Capability bindings may carry a Hub-owned opaque space identity, and the
-  snapshot exposes a neutral space catalog. HA entity-area overrides and
-  device-area inheritance are supported; authorized Xiaomi transports may
-  supply room metadata. Equal names across bridges never auto-merge.
-- Aggregate validation and Agent topology now use mutually exclusive
-  single-space, unassigned, and multiple-space device counts. Unknown space
-  references are unassigned and cross-binding ambiguity cannot inflate the
-  apparent household-map coverage.
-- Compact inventory pagination now treats the requested count as an upper bound
-  and adapts each result below the DSH pruning threshold. The coverage cursor
-  advances only through fully model-visible devices; an oversized single
-  device fails closed instead of creating false whole-home coverage.
-- Bridge IDs and remote installation IDs are independently bound; a changed
-  remote identity fails closed until an explicit rebind.
-- SQLite journals, registry data, world-model files, proposals, observation
-  audits, DSH sessions, and WAL/SHM sidecars are private; production launch
-  requires an explicit durable data directory.
-- The stable Home Agent session is created or resumed through the official DSH
-  SQLite provider. Raw conversation and tool events remain DSH-owned local
-  data, while Inbox trace reconstruction stays bounded and metadata-only.
-- State authority changes use a candidate resync and a new consistent watermark
-  before one atomic coordinator commit. Snapshot reads cannot invoke the
-  chooser as an implicit failover path.
-- Hub world and capability IDs are deterministic opaque identifiers across
-  restart and observation order. Device identity remains separate from the
-  bridge-salted principal registry.
+Batch commands preflight all exact descriptors before dispatch and preserve one
+result per target. Verified, pending-confirmation, failed and unknown results
+remain separate. No aggregate success can hide a partial outcome.
 
-## Completed architecture gates
+Safety incidents are Host-owned and persist independently from the selected
+layout. Acknowledgement stops attention feedback. Fresh trusted sensor state
+owns resolution.
 
-### P0 — executable composition root
+## Review and proposal closure
 
-`packages/hub` now owns one process entry that creates the root Cordis context,
-provides an immutable allowlisted DSH launch environment, mounts the neutral
-HomeWorld bridge runtime followed by `mountDshHomeAgent`, and disposes the
-entire tree through the root fiber. Startup failure closes already-mounted
-resources. SIGINT/SIGTERM cleanup is bounded to five seconds and a repeated
-signal escalates to immediate exit.
+Runtime confirmations and persistent proposals have separate stores, commands,
+counts, expiry semantics and badges.
 
-The Phase 0 composition root belongs to `packages/hub`, which remains the
-single service process. The hub may depend on a narrow agent-layer composition
-export; the agent layer must not depend back on hub implementation modules and
-continues to consume household data only through the neutral HomeWorld service
-seam. This keeps process ownership in the monolith without creating a third
-runtime or a second service.
+- Runtime confirmations display a TTL, fail closed on expiry, write expiry
+  activity and accept one decision. Runtime rejection never creates a proposal
+  latch.
+- Persistent proposals use a five-slot capacity. `pending` and `snoozed` both
+  occupy a slot. New evidence merges into the matching unresolved `dedupKey`.
+  A full set returns `capacity_full` and retains no sixth candidate or overflow
+  queue.
+- “Only this time” closes the current proposal. “Do not suggest this again”
+  records the durable deduplication latch and returns a visible acknowledgement.
+- Direction approval, trial and enablement remain separate consent steps.
 
-## Open architecture gaps
+## Advice, correction and media closure
 
-The immediate next step is the bounded real-household pilot described in
-[`household-pilot.md`](household-pilot.md), not another Agent Runtime layer.
-The pilot's review outcomes and observed run metrics should decide which gap
-below becomes product work next.
+Advice turns persist accepted, progress, streaming, background, completed,
+failed and cancelled states. SSE replay uses durable event cursors. Restart
+recovery resumes the same background question, and completion notifications are
+acknowledged only after a successful page response.
 
-### Implemented foundation — non-applying Artifact Registry
+Corrections have three explicit destinations. Household facts update the marked
+`MEMORY.md` section; preferences update the marked `SOUL.md` section; future
+behavior creates a governed proposal. A durable single-flight reservation makes
+concurrent idempotent submissions converge on one result. The product always
+returns “已更新” with the destination or proposal identity.
 
-The Hub now has a strict neutral ECA Artifact revision contract, canonical
-content hashing, immutable SQLite revisions, append-only lifecycle/audit rows,
-and separately versioned evidence, risk, and authority assessments. Dynamic
-watermarks, policy decisions, and authority candidates never mutate the stable
-Artifact bytes. Reads re-validate persisted rows and exact artifact references;
-resource limits, idempotency, restart recovery, transaction rollback, corrupt
-records, and private SQLite sidecars fail closed.
+Media conversation resolves exact players and opaque catalog references, asks
+for missing queue intent, prepares a typed `play_media` action and enters the
+same action-ticket owner used by every other device effect. Music Assistant is
+a provider behind the neutral media catalog. Playback authority comes from the
+Hub policy and fresh read-back, never from search results or model text.
 
-The production Cordis composition mounts only a read service. It exposes
-bounded revision, audit, and assessment queries plus metadata-only diagnostics.
-It deliberately exposes no create, assessment-recording, compile, simulation,
-approval, bridge, credential, or execution method. The Control Center reports
-that the Registry is available while explicitly reporting compilation,
-simulation, and execution as unavailable.
+## Onboarding closure
 
-The Proposal store now provides the prerequisite source gate: a synchronous
-callback over only the exact current approved automation revision. It validates
-SQL metadata against the persisted envelope, the complete two-event review
-audit chain, application-unavailable state, and bounded evidence before
-returning a deeply frozen Hub projection. Non-current, pending, rejected,
-legacy-unreviewed, or corrupt sources fail closed. Retention projections now
-revalidate the owning proposal row before returning journal pins.
+The eight onboarding checkpoints are durable and resumable. They cover household
+and assistant naming, read-only bridge discovery, map confirmation, private
+device binding, per-capability action authority, safety rehearsal, observation
+consent and the first real question. Step 8 creates a durable advice turn before
+the checkpoint completes and redirects to that exact conversation. Missing
+household storage, bridge choices or advice ownership leaves the current step
+explicitly blocked.
 
-New production automation drafts also carry the exact closed neutral ECA
-candidate that the household reviews. The Agent can author only trigger,
-conditions, ordered actions, rollback, and postconditions; it cannot supply an
-Artifact identity, hash, watermark, assessment, authority route, approval, or
-execution state. HomeProposalService re-validates the shared Artifact content
-schema, selected current devices, capability ownership, temporal evidence
-selection, and known safety-sensitive targets before persistence. The Inbox
-escapes and renders the exact candidate while exposing no install or execution
-path. Legacy Proposal rows remain readable but the source gate rejects those
-without a candidate.
+## Web product and layout boundary
 
-The Hub-only producer core now consumes this gate, derives a stable opaque
-Artifact identity/idempotency key, copies the exact reviewed content without
-reinterpretation, and writes revision one through the immutable Registry. A
-restart replay returns the same row and audit. It accepts no caller content,
-assessment, route, actor, or Registry key and owns no bridge, credential, or
-remote-write port.
+The Product Shell serves `/home`, `/conversation`, `/review-center`, `/activity`,
+`/control`, `/settings`, `/onboarding` and `/voice-preview`. Life and Control
+views consume the same projection and submit the same intents. The `ProductLayout`
+seam can replace ordinary content while authentication, safety, review badges
+and command dispatch remain fixed.
 
-This still does not complete M3b. The producer is intentionally not mounted in
-the root production Context: evidence identity now binds the exact approved
-Proposal evidence and capability scope; risk identity binds evidence,
-authority, and conflict inputs, and the Registry refuses a risk row unless both
-referenced assessments already exist for the exact artifact ref and input
-identities; authority identity binds the Hub-private fresh-world binding input.
+The local HTTP credential is a trusted deployment credential. Launch
+configuration binds that credential to one explicit principal, presence state
+and private/shared device class. A deployment that exposes the service beyond
+loopback places it behind an identity-aware local gateway and supplies the
+corresponding binding; the Phase 0 server itself stays loopback-only.
 
-Two additional Hub-only, non-applying assessment producer cores now exist but
-remain unmounted. `ArtifactEvidenceProducer` re-reads the exact Artifact and
-approved Proposal source, derives all neutral capability references, and reads
-fresh HomeWorld query/snapshot watermarks and coverage. `ArtifactAuthorityProducer`
-re-reads the exact Artifact, consumes a source-owned opaque fresh-world binding
-input, resolves candidates through the private registry, and persists an
-authority assessment; notify-only artifacts use an explicit empty authority
-scope. Neither producer calls a bridge or control path.
+## Verification
 
-The isolated Hub-private authority candidate registry core now persists opaque
-candidate lifecycle and metadata-only audit. `AuthorityCoordinator` also
-validates explicit action configuration with `configIdentity` and
-`configRevision`. The candidate registry is consumed only by the unmounted
-authority producer. An unmounted `HomeWorldAuthorityBindingSource` binds its
-opaque inputs to fresh relevant bridge watermarks, and an unmounted
-`ArtifactRiskProducer` applies the fixed Hub policy after exact evidence,
-authority, and Hub-private conflict input validation. The unmounted
-`ArtifactRiskConflictSource` rebinds the exact approved Proposal conflict check
-and scans a bounded read-only Artifact Registry view; incomplete scans and
-source mismatches stay unavailable. A required opaque source identity binds the
-full checked Proposal conflict input and every consulted Artifact row, so a
-zero-finding refresh is not mistaken for the previous catalog/Registry cut.
-An unmounted `ArtifactMutationCoordinator` now sequences exact Artifact,
-evidence, authority, and risk producers and returns a deeply frozen
-metadata-only receipt only after same-run dependencies agree. Earlier immutable
-rows from a failed run remain explicitly incomplete and require an explicit
-idempotent retry; no startup replay or outbox is introduced before an external
-side effect exists. Root production invocation and fresh current-catalog
-conflict refresh are still absent. Agent, Inbox, bridge, and plugin contexts
-must remain unable to discover that mutation seam. M3c compiler/dry-run cores
-and durable results exist behind an unmounted private coordinator; production
-coordination and the action plane remain unavailable, and device writes remain
-disabled.
+- Architecture guards reject legacy Pi runtime ownership, adapter vocabulary in
+  the Agent layer and raw ecosystem payloads beyond the bridge boundary.
+- Domain and HTTP tests cover restart interruption, stale bridge state,
+  impossible confirmation decisions, capacity limits, correction concurrency,
+  onboarding replay, batch partial results and media confirmation.
+- Browser verification covers all eight routes at 1440×900 and 390×844 with one
+  `main` landmark, zero horizontal overflow and zero console warnings/errors.
+- Fresh release commands: `pnpm test` (1,184 passing tests), `pnpm check`,
+  `git diff --check`, and a repository secret scan.
 
-Production startup now admits one fixed, owner-only
-`<HOB_DATA_DIR>/action-authority.json` source. The loader rejects symlinks,
-wide permissions, duplicate JSON keys, unknown/provider-shaped fields, and
-unsafe IDs, then computes per-capability Hub-owned configuration identities.
-Only the resulting private coordinator map reaches `HomeWorldService`; the
-Agent, Inbox, Artifact, plugins, and bridges never receive the file or bridge
-selection. Exact adapter schema and schema version are included in the private
-binding digest, so a version-only mapping change cannot silently reuse an old
-candidate. Candidate production and compiler coordination remain unmounted,
-and no executor or action route exists.
+## Current architectural direction
 
-### Implemented foundation — approved Proposal preparation
-
-The earlier unmounted Artifact producers and compiler path are now composed by
-`HomeAgentRuntime` behind a durable, non-applying job boundary. A qualifying
-automation approval and its job commit in the same Proposal-store transaction;
-only that post-commit event wakes the root-private runner. The runner claims the
-exact Proposal revision and sequences Artifact, evidence, authority, risk,
-fresh conflict/world-cut capture, compile, and dry-run. It persists only closed
-stage/error metadata and never stores arbitrary exception text.
-
-The runtime root uniquely owns the Proposal store, Artifact Registry, and
-Authority Candidate Registry. Cordis receives borrowed Proposal review and
-Artifact read projections, but no queue, writable registry, candidate resolver,
-or preparation handle. Shutdown drains preparation before disposing Context and
-closing stores. Startup deliberately does not scan or resume old queued/running
-jobs; retry remains an explicit future review control. There is still no action
-ticket, executor, bridge write, remote automation installation, or rollback
-path.
-
-### Implemented foundation — canonical ingest-journal retention
-
-The neutral ingest journal has a deterministic logical hard quota and fails
-closed through bridge pause/quarantine, and now exposes one explicit per-bridge
-retention operation. Real-household validation reports aggregate used, maximum,
-and remaining logical bytes so exhaustion is visible before an unattended pilot.
-A first live HA run reached 48% of the former 16 MiB default in roughly half an
-hour while retaining no rejections or history gaps. That measured rate could
-not support the product's bounded 168-hour evidence window. The default is now
-256 MiB per bridge: enough headroom for the observed seven-day rate after the
-semantic de-noising below, while remaining a finite fail-closed quota.
-
-In the run's first 14 post-baseline minutes, 42% of comparable HA state events
-repeated the preceding neutral attributes.
-The HA adapter now suppresses those consecutive semantic duplicates before it
-allocates a canonical envelope, reducing both journal growth and false Agent
-activity without discarding a neutral state change. A fresh 10-minute run on
-the updated path retained 291 post-baseline state events with zero consecutive
-semantic duplicates, zero rejections, and zero history gaps; the aggregate
-capacity report showed roughly 3% of the new quota in use.
-
-`applyRetention` preserves the current manifest-verified recovery cut, the
-minimum 168-hour temporal evidence window, open history gaps, and explicitly
-supplied durable proposal references. The complete decision snapshot,
-deletions, byte ledger, immutable audit, and coverage floor are protected by
-one `BEGIN IMMEDIATE` transaction; a concurrent second SQLite connection cannot
-insert a gap between selection and deletion. Partial coverage remains explicit.
-
-The Hub-owned retention service now collects verified proposal references and
-invokes the explicit operation without a scheduler; the Control Center exposes
-its metadata-only capacity/coverage/audit status. A separate bounded physical
-SQLite reclamation step remains future work. Rejection, gap, and heartbeat
-metadata remain conservatively retained because their current schema has no
-receipt timestamp.
-
-### P2 — non-local Inbox delivery
-
-Authenticated local delivery is implemented. LAN/remote exposure is not: it
-would require TLS, device/user identity, stronger session management, and a
-separate threat review. Do not make the bind host configurable as a shortcut.
-
-### P1 — session retention and household reset
-
-Restart-safe session history now uses the official DSH SQLite provider at the
-production data path. The provider has no retention or deletion API. Define a
-governed household reset/export policy upstream before offering either action;
-do not mutate DSH tables directly.
-
-### Implemented foundation — household Skills
-
-An explicit household directory can now load bounded `SOUL.md`, `HOME.md`, and
-`MEMORY.md` startup snapshots through the DSH prompt/context registry without
-expanding tool authority. The tenant `SKILL.md` provider is also implemented
-through the official DSH `SkillProvider` seam, with the containment and resource
-limits described above; the general-purpose upstream filesystem provider is
-not mounted over household content. Remaining product work includes an
-installation/review UI, change provenance, explicit enable/disable state, and
-eventual process isolation for third-party executable plugins. `HEARTBEAT.md`,
-hot reload, and memory writes remain deferred. Do not create a parallel
-registry.
-
-### P2 — bounded probe lifecycle
-
-`ProfileLiveProbeOptions.createRuntime` returns only an LLM boundary and has no
-disposer contract. A future factory that creates a Cordis fiber must return an
-owned disposable handle so probes cannot leak adapters, timers, or services.
-
-## Cleanup decisions
-
-- Renamed the Home Agent composition API so the product surface no longer
-  exposes the internal Pi-backed adapter name.
-- Removed the duplicate profile credential mounting helper; the production
-  composition and `DshProfileCredentialProvider` are the single path.
-- Removed the unused process-local OAuth refresh coordinator; the active store
-  serialization and cross-process refresh lock remain.
-- Removed the unused `DshLlmRuntime` structural alias.
-- Retained auth-profile, fallback, OAuth lifecycle, external-CLI, and diagnostic
-  modules that are not yet wired to a process root: they are tested product
-  governance foundations, not alternate runtimes. Their product availability
-  remains explicitly marked incomplete.
+The next work broadens household coverage inside these boundaries: richer
+neutral capability descriptions, additional bridge adapters, declarative layout
+providers and real-home reliability evidence. It extends the single DSH/Cordis
+runtime and the existing Hub owners.

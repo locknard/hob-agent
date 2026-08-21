@@ -14,6 +14,7 @@ import {
   type Envelope,
   type WorldCapability,
 } from "../../../contracts/bridge-contract.js";
+import type { ActionsExtension, BridgeActionRequest } from "../../../contracts/bridge-actions.js";
 import { BridgeCatalog, type AdapterRegistration } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore, type BridgeConfigEntry } from "./bridge-registry.js";
 import { AuthorityCoordinator } from "./authority-coordinator.js";
@@ -276,6 +277,7 @@ test("projects a private authority candidate input with revision-bound opaque id
   const actionConfig = {
     bridgeId: "bridge-authority",
     approved: true,
+    policyClass: "direct" as const,
     configIdentity: `sha256:${"a".repeat(64)}`,
     configRevision: 4,
   };
@@ -338,6 +340,7 @@ test("changes the authority binding identity when the selected runtime schema ve
     "hwc-light": {
       bridgeId: "bridge-authority-versioned",
       approved: true,
+      policyClass: "direct",
       configIdentity: `sha256:${"a".repeat(64)}`,
       configRevision: 4,
     },
@@ -413,6 +416,7 @@ test("fails closed when the selected runtime descriptor is missing, ambiguous, o
     "hwc-light": {
       bridgeId,
       approved: true,
+      policyClass: "direct",
       configIdentity: `sha256:${"b".repeat(64)}`,
       configRevision: 4,
     },
@@ -483,6 +487,7 @@ test("returns an explicit unavailable placeholder without configuration and fail
         "hwc-light": {
           bridgeId: "bridge-authority-placeholder",
           approved: true,
+          policyClass: "direct",
           configIdentity: "not-a-sha256-digest",
           configRevision: 1,
         },
@@ -544,6 +549,7 @@ test("fails closed for an unbound remote without invoking bridge control", async
       "hwc-light": {
         bridgeId: "bridge-unbound",
         approved: true,
+        policyClass: "direct",
         configIdentity: `sha256:${"e".repeat(64)}`,
         configRevision: 1,
       },
@@ -590,6 +596,7 @@ test("fails closed when one authority target has ambiguous capability bindings",
       "hwc-light": {
         bridgeId: "bridge-ambiguous",
         approved: true,
+        policyClass: "direct",
         configIdentity: `sha256:${"f".repeat(64)}`,
         configRevision: 1,
       },
@@ -846,6 +853,162 @@ test("fails closed for a declared extension without a usable handle", async () =
   assert.equal(ctx.homeWorld.journal("bridge-ext")?.contains("must-not-run"), false);
 
   await fiber.dispose();
+});
+
+test("routes one neutral action only through the configured authoritative bridge binding", async () => {
+  const catalog = new BridgeCatalog();
+  const base = new SyntheticBridge({
+    bridgeId: "bridge-actions",
+    remoteInstanceId: "remote-actions",
+    extensions: [{ id: "actions", version: "1.0.0" }],
+  });
+  for (const event of snapshotFor("bridge-actions", "remote-actions")) base.enqueue(event);
+  let captured: BridgeActionRequest | undefined;
+  const actions: ActionsExtension = {
+    describe: (request) => ({
+      action: { kind: "set_boolean", value: request.current.state !== "on" },
+      reversible: true,
+    }),
+    execute: async (request) => {
+      captured = request;
+      return { status: "acknowledged" };
+    },
+  };
+  const adapter: BridgeAdapter = {
+    info: base.info,
+    control: base.control,
+    events: (signal) => base.events(signal),
+    extension: (name) => name === "actions@1" ? actions as never : undefined,
+  };
+  catalog.register(registration(() => adapter));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-actions")],
+    new Map(),
+    {
+      identityManager: deterministicIdentityManager(),
+      actionAuthorityConfig: {
+        "hwc-light": {
+          bridgeId: "bridge-actions",
+          approved: true,
+          policyClass: "direct",
+          configIdentity: `sha256:${"a".repeat(64)}`,
+          configRevision: 1,
+        },
+      },
+      monitorIntervalMs: 0,
+    },
+  ));
+
+  try {
+    await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-actions"]?.diagnostics.connectionState === "ready");
+    assert.deepEqual(ctx.homeWorld.actionDescriptorFor("hwc-light"), {
+      action: { kind: "set_boolean", value: false },
+      reversible: true,
+    });
+    const result = await ctx.homeWorld.executeOneShotAction({
+      requestId: "action-1",
+      hwCapabilityId: "hwc-light",
+      action: { kind: "set_boolean", value: false },
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(result, { status: "acknowledged" });
+    assert.deepEqual(captured, {
+      requestId: "action-1",
+      action: {
+        kind: "set_boolean",
+        target: {
+          hwCapabilityId: "hwc-light",
+          binding: {
+            bridgeId: "bridge-actions",
+            nativeId: "bridge-actions-lamp",
+            nativeInstanceId: "bridge-actions-lamp:main",
+          },
+        },
+        value: false,
+      },
+    });
+
+    const stopResult = await ctx.homeWorld.executeOneShotAction({
+      requestId: "action-stop-media",
+      hwCapabilityId: "hwc-light",
+      action: { kind: "stop_media" },
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(stopResult, { status: "rejected", reason: "invalid_target" });
+    assert.equal(captured?.action.kind, "set_boolean");
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("keeps unknown current state read-only before asking an adapter for an intent", async () => {
+  const catalog = new BridgeCatalog();
+  const base = new SyntheticBridge({
+    bridgeId: "bridge-unknown-action",
+    remoteInstanceId: "remote-unknown-action",
+    extensions: [{ id: "actions", version: "1.0.0" }],
+  });
+  for (const event of snapshotFor("bridge-unknown-action", "remote-unknown-action")) {
+    if (event.event.kind === "state") {
+      base.enqueue({
+        ...event,
+        event: {
+          kind: "state",
+          state: { ...event.event.state, attrs: { state: "unknown" } },
+        },
+      });
+    } else {
+      base.enqueue(event);
+    }
+  }
+  let descriptorCalls = 0;
+  const actions: ActionsExtension = {
+    describe: () => {
+      descriptorCalls += 1;
+      return { action: { kind: "set_boolean", value: true }, reversible: true };
+    },
+    execute: async () => ({ status: "acknowledged" }),
+  };
+  const adapter: BridgeAdapter = {
+    info: base.info,
+    control: base.control,
+    events: (signal) => base.events(signal),
+    extension: (name) => name === "actions@1" ? actions as never : undefined,
+  };
+  catalog.register(registration(() => adapter));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-unknown-action")],
+    new Map(),
+    {
+      identityManager: deterministicIdentityManager(),
+      actionAuthorityConfig: {
+        "hwc-light": {
+          bridgeId: "bridge-unknown-action",
+          approved: true,
+          policyClass: "direct",
+          configIdentity: `sha256:${"b".repeat(64)}`,
+          configRevision: 1,
+        },
+      },
+      monitorIntervalMs: 0,
+    },
+  ));
+
+  try {
+    await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-unknown-action"]?.diagnostics.connectionState === "ready");
+    assert.equal(ctx.homeWorld.actionDescriptorFor("hwc-light"), undefined);
+    assert.equal(descriptorCalls, 0);
+  } finally {
+    await fiber.dispose();
+  }
 });
 
 test("includes reduced device and bridge health in the neutral snapshot", async () => {

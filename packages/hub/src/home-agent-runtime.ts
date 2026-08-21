@@ -48,10 +48,36 @@ import {
 } from "@hob-agent/agent-layer/composition";
 import {
   HomeMediaCatalogService,
+  HomeMediaPlaybackExecutionService,
   HomeMediaPlaybackPreparationService,
   HomeMediaPlayerService,
   type HomeMediaCatalogServiceOptions,
+  type HomeMediaPlaybackExecutionServiceOptions,
 } from "./home-media-services.js";
+import {
+  HomeMediaConversationService,
+  type HomeMediaConversationServiceOptions,
+} from "./home-media-conversation-service.js";
+import {
+  HouseholdReviewCenterService,
+  type HouseholdReviewCenterServiceOptions,
+} from "./household-review-center-service.js";
+import {
+  HomeOnboardingCoordinatorService,
+  type HomeOnboardingCoordinatorOptions,
+} from "./home-onboarding-coordinator.js";
+import {
+  HomeSafetyService,
+  type HomeSafetyServiceOptions,
+} from "./home-safety-service.js";
+import {
+  HomeCorrectionService,
+  type HomeCorrectionServiceOptions,
+} from "./home-correction-service.js";
+import {
+  HomeBatchActionService,
+  type HomeBatchActionServiceOptions,
+} from "./home-batch-action-service.js";
 
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
@@ -60,8 +86,21 @@ export interface HomeAgentRuntimeOptions {
   readonly homeAuthorityCandidates?: AuthorityCandidateRegistryOptions;
   readonly homeObservationAudit?: HomeObservationAuditServiceOptions;
   readonly homeAdvice?: HomeAdviceServiceOptions;
+  readonly homeReviewCenter?: HouseholdReviewCenterServiceOptions;
+  /** Durable Hub-owned batch coordination over the existing one-shot action owner. */
+  readonly homeBatchActions?: Omit<HomeBatchActionServiceOptions, "reviewCenter">;
+  /** Durable Hub-owned onboarding state and typed step effects. */
+  readonly homeOnboarding?: HomeOnboardingCoordinatorOptions;
+  /** Explicit Hub-owned safety bindings; each binding names one hwCapabilityId. */
+  readonly homeSafety?: HomeSafetyServiceOptions;
+  /** Durable Hub-owned completed-conversation correction state and workspace. */
+  readonly homeCorrections?: HomeCorrectionServiceOptions;
   /** Explicit read-only media catalog. Omit to keep catalog search unavailable. */
   readonly mediaCatalog?: HomeMediaCatalogServiceOptions;
+  /** Explicit governed Music Assistant execution owner for the media action gateway. */
+  readonly mediaPlayback?: HomeMediaPlaybackExecutionServiceOptions;
+  /** Governed media request orchestration. The runtime mounts it with the catalog and review owner. */
+  readonly mediaConversation?: HomeMediaConversationServiceOptions;
   readonly inboxHttp?: ProposalInboxHttpOptions;
   readonly observation?: HomeObservationSchedulerOptions;
   readonly agent: DshHomeAgentCompositionOptions;
@@ -138,10 +177,72 @@ export class HomeAgentRuntime {
           tenantId: this.options.mediaCatalog.tenantId,
           ...(this.options.mediaCatalog.now === undefined ? {} : { now: this.options.mediaCatalog.now }),
         });
+        if (this.options.mediaPlayback !== undefined) {
+          await this.context.plugin(HomeMediaPlaybackExecutionService, this.options.mediaPlayback);
+        }
+      } else if (this.options.mediaPlayback !== undefined) {
+        throw new Error("Music Assistant playback requires an explicit media catalog");
+      }
+      await this.context.plugin(
+        HouseholdReviewCenterService,
+        {
+          ...(this.options.homeReviewCenter ?? { path: ":memory:" }),
+          ...(this.options.homeReviewCenter?.actionDescriptorSource === undefined
+            ? {
+                actionDescriptorSource: {
+                  actionDescriptorFor: (capabilityId: string) =>
+                    this.context.homeWorld.actionDescriptorFor(capabilityId),
+                },
+              }
+            : {}),
+        },
+      );
+      await this.context.plugin(HomeBatchActionService, {
+        ...(this.options.homeBatchActions ?? {}),
+        reviewCenter: this.context.homeReviewCenter,
+      });
+      if (this.options.mediaCatalog !== undefined) {
+        await this.context.plugin(HomeMediaConversationService, this.options.mediaConversation ?? {});
       }
       await mountDshHomeAgent(this.context, this.options.agent);
       await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
-      await this.context.plugin(HomeObservationSchedulerService, this.options.observation ?? {});
+      if (this.options.homeOnboarding !== undefined) {
+        await this.context.plugin(HomeOnboardingCoordinatorService, {
+          ...this.options.homeOnboarding,
+          ...(this.options.homeOnboarding.actionAuthority === undefined ? {
+            actionAuthority: {
+              configure: (input) => this.context.homeWorld.configureActionAuthority(input),
+            },
+          } : {}),
+          ...(this.options.homeOnboarding.observation === undefined ? {
+            observation: {
+              configure: (input) => {
+                try {
+                  this.context.homeObservationScheduler.configure(input);
+                  return { status: "configured" as const };
+                } catch {
+                  return { status: "blocked" as const, reason: "runtime_configuration_failed" };
+                }
+              },
+            },
+          } : {}),
+        });
+      }
+      await this.context.plugin(
+        HomeSafetyService,
+        this.options.homeSafety ?? { path: ":memory:", bindings: [] },
+      );
+      if (this.options.homeCorrections !== undefined) {
+        await this.context.plugin(HomeCorrectionService, this.options.homeCorrections);
+      }
+      const observationOptions: HomeObservationSchedulerOptions = {
+        ...(this.options.observation ?? {}),
+        ...(this.options.homeOnboarding !== undefined
+          && this.options.observation?.onboarding === undefined
+          ? { onboarding: this.context.homeOnboarding }
+          : {}),
+      };
+      await this.context.plugin(HomeObservationSchedulerService, observationOptions);
       await this.context.plugin(ProposalInboxService, {
         preparation: {
           retry: (input) => this.retryPreparation(input),

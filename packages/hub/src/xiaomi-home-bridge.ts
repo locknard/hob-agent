@@ -21,6 +21,17 @@ import {
   type JsonValue,
   type StateEvent,
 } from "../../../contracts/bridge-contract.js";
+import {
+  ACTIONS_EXTENSION,
+  bridgeActionDescriptorRequestSchema,
+  bridgeActionDescriptorSchema,
+  bridgeActionRequestSchema,
+  type BridgeActionDescriptor,
+  type BridgeActionDescriptorRequest,
+  type ActionsExtension,
+  type BridgeActionRequest,
+  type BridgeActionResult,
+} from "../../../contracts/bridge-actions.js";
 
 export const XIAOMI_HOME_ADAPTER_TYPE = "xiaomi-home";
 export const XIAOMI_HOME_PROPERTY_SCHEMA = "miot.property";
@@ -61,7 +72,13 @@ export interface XiaomiHomeNativeProperty {
   readonly sourceTs?: string;
   /** Set only by a transport that resolved the MIoT specification. */
   readonly semanticKind?: CapabilitySemanticKind;
+  /** Explicit adapter-owned control support resolved by the transport. */
+  readonly supportedActions?: readonly XiaomiHomeActionKind[];
+  /** Native numeric range for an explicitly supported set_level intent. */
+  readonly levelRange?: { readonly min: number; readonly max: number };
 }
+
+export type XiaomiHomeActionKind = "set_level" | "stop_media";
 
 export interface XiaomiHomeNativeDevice {
   readonly did: string;
@@ -96,6 +113,17 @@ export interface XiaomiHomeTransport {
   connect(signal: AbortSignal): Promise<XiaomiHomeSnapshot>;
   changes(signal: AbortSignal): AsyncIterable<XiaomiHomeChange>;
   resync(signal: AbortSignal): Promise<XiaomiHomeSnapshot>;
+  setProperty?(input: {
+    readonly did: string;
+    readonly siid: number;
+    readonly piid: number;
+    readonly value: JsonValue;
+    readonly signal: AbortSignal;
+  }): Promise<void>;
+  stopMedia?(input: {
+    readonly did: string;
+    readonly signal: AbortSignal;
+  }): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -146,6 +174,7 @@ export class XiaomiHomeBridgeAdapter implements BridgeAdapter {
   private resyncPromise: Promise<ControlResult> | undefined;
   private knownDevices = new Set<string>();
   private knownProperties = new Set<string>();
+  private knownPropertyActions = new Map<string, XiaomiHomeNativeProperty>();
 
   constructor(
     private readonly context: AdapterFactoryContext<XiaomiHomeAdapterConfig>,
@@ -156,7 +185,9 @@ export class XiaomiHomeBridgeAdapter implements BridgeAdapter {
       coreVersion: CORE_VERSION,
       ecosystem: "xiaomi-home",
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
-      extensions: Object.freeze([]),
+      extensions: Object.freeze(this.transport.setProperty === undefined && this.transport.stopMedia === undefined
+        ? []
+        : [ACTIONS_EXTENSION]),
     });
     this.control = Object.freeze({
       requestResync: (signal: AbortSignal) => this.requestResync(signal),
@@ -172,7 +203,54 @@ export class XiaomiHomeBridgeAdapter implements BridgeAdapter {
     return this.run(signal);
   }
 
-  extension<K extends keyof ExtensionHandleRegistry>(_name: K): ExtensionHandleRegistry[K] | undefined {
+  extension<K extends keyof ExtensionHandleRegistry>(name: K): ExtensionHandleRegistry[K] | undefined {
+    if (name === "actions@1" && (this.transport.setProperty !== undefined || this.transport.stopMedia !== undefined)) {
+      const handle: ActionsExtension = {
+        describe: (request) => this.describeAction(request),
+        execute: (request, options) => this.executeAction(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
+    return undefined;
+  }
+
+  private describeAction(requestValue: BridgeActionDescriptorRequest): BridgeActionDescriptor | undefined {
+    const parsed = bridgeActionDescriptorRequestSchema.safeParse(requestValue);
+    if (!parsed.success || this.state !== "running") return undefined;
+    const target = parsed.data.target;
+    if (target.binding.bridgeId !== this.context.bridgeId || parsed.data.current.available === false) return undefined;
+    const property = this.knownPropertyActions.get(propertyBindingKey(
+      target.binding.nativeId,
+      target.binding.nativeInstanceId,
+    ));
+    if (property === undefined) return undefined;
+    if (property.supportedActions?.includes("stop_media") && this.transport.stopMedia !== undefined) {
+      return bridgeActionDescriptorSchema.parse({
+        action: { kind: "stop_media" },
+        reversible: false,
+      });
+    }
+    if (property.writable !== true) return undefined;
+    const currentValue = property.value;
+    if (property.format === "bool" || property.format === "boolean") {
+      if (typeof currentValue !== "boolean") return undefined;
+      const descriptor = { action: { kind: "set_boolean" as const, value: !currentValue }, reversible: true };
+      return bridgeActionDescriptorSchema.parse(descriptor);
+    }
+    if (property.supportedActions?.includes("set_level")
+      && typeof currentValue === "number"
+      && Number.isFinite(currentValue)
+      && property.levelRange !== undefined
+      && validLevelRange(property.levelRange)
+      && currentValue >= property.levelRange.min
+      && currentValue <= property.levelRange.max) {
+      const currentLevel = toNormalizedLevel(currentValue, property.levelRange);
+      const descriptor = {
+        action: { kind: "set_level" as const, level: currentLevel > 0 ? 0 : 1 },
+        reversible: true,
+      };
+      return bridgeActionDescriptorSchema.parse(descriptor);
+    }
     return undefined;
   }
 
@@ -209,6 +287,7 @@ export class XiaomiHomeBridgeAdapter implements BridgeAdapter {
         }
         const state = projectPropertyState(change.did, change.property);
         if (!this.knownProperties.has(propertyBindingKey(state.nativeId, state.nativeInstanceId))) continue;
+        this.knownPropertyActions.set(propertyBindingKey(state.nativeId, state.nativeInstanceId), change.property);
         yield current.envelope({ kind: "state", state });
       }
     } catch (error) {
@@ -219,6 +298,7 @@ export class XiaomiHomeBridgeAdapter implements BridgeAdapter {
       this.queue = undefined;
       this.knownDevices.clear();
       this.knownProperties.clear();
+      this.knownPropertyActions.clear();
       queue.close();
       if (this.activeTransport) {
         this.activeTransport = false;
@@ -241,6 +321,89 @@ export class XiaomiHomeBridgeAdapter implements BridgeAdapter {
     this.knownProperties = new Set(snapshot.devices.flatMap((device) =>
       device.properties.map((property) => propertyBindingKey(device.did, propertyInstanceId(property))),
     ));
+    this.knownPropertyActions = new Map(snapshot.devices.flatMap((device) =>
+      device.properties.map((property) => [propertyBindingKey(device.did, propertyInstanceId(property)), property] as const),
+    ));
+  }
+
+  private async executeAction(requestValue: BridgeActionRequest, signal: AbortSignal): Promise<BridgeActionResult> {
+    const parsed = bridgeActionRequestSchema.safeParse(requestValue);
+    if (!parsed.success || signal.aborted) {
+      return { status: "unknown", reason: signal.aborted ? "cancelled" : "upstream_unavailable" };
+    }
+    const request = parsed.data;
+    const target = request.action.target;
+    if (target.binding.bridgeId !== this.context.bridgeId || this.state !== "running") {
+      return { status: "rejected", reason: "invalid_target" };
+    }
+    if (request.action.kind === "stop_media") {
+      const stopMedia = this.transport.stopMedia;
+      if (stopMedia === undefined) return { status: "rejected", reason: "unsupported" };
+      if (!this.knownDevices.has(target.binding.nativeId)
+        || !this.knownProperties.has(propertyBindingKey(target.binding.nativeId, target.binding.nativeInstanceId))) {
+        return { status: "rejected", reason: "invalid_target" };
+      }
+      const property = this.knownPropertyActions.get(propertyBindingKey(
+        target.binding.nativeId,
+        target.binding.nativeInstanceId,
+      ));
+      if (!property?.supportedActions?.includes("stop_media")) {
+        return { status: "rejected", reason: "unsupported" };
+      }
+      try {
+        await stopMedia.call(this.transport, {
+          did: target.binding.nativeId,
+          signal,
+        });
+        return signal.aborted
+          ? { status: "unknown", reason: "cancelled" }
+          : { status: "acknowledged" };
+      } catch {
+        return signal.aborted
+          ? { status: "unknown", reason: "cancelled" }
+          : { status: "rejected", reason: "failed" };
+      }
+    }
+    const property = this.knownPropertyActions.get(propertyBindingKey(
+      target.binding.nativeId,
+      target.binding.nativeInstanceId,
+    ));
+    if (property === undefined || property.writable !== true) {
+      return { status: "rejected", reason: "invalid_target" };
+    }
+    if (request.action.kind === "set_boolean" && !["bool", "boolean"].includes(property.format)) {
+      return { status: "rejected", reason: "unsupported" };
+    }
+    if (request.action.kind === "set_level"
+      && (!property.supportedActions?.includes("set_level")
+        || property.levelRange === undefined
+        || !validLevelRange(property.levelRange))) {
+      return { status: "rejected", reason: "unsupported" };
+    }
+    if (request.action.kind !== "set_boolean" && request.action.kind !== "set_level") {
+      return { status: "rejected", reason: "unsupported" };
+    }
+    const write = this.transport.setProperty;
+    if (write === undefined) return { status: "rejected", reason: "unavailable" };
+    const value = request.action.kind === "set_boolean"
+      ? request.action.value
+      : fromNormalizedLevel(request.action.level, property.levelRange!);
+    try {
+      await write.call(this.transport, {
+        did: target.binding.nativeId,
+        siid: property.siid,
+        piid: property.piid,
+        value,
+        signal,
+      });
+      return signal.aborted
+        ? { status: "unknown", reason: "cancelled" }
+        : { status: "acknowledged" };
+    } catch {
+      return signal.aborted
+        ? { status: "unknown", reason: "cancelled" }
+        : { status: "rejected", reason: "failed" };
+    }
   }
 
   private requestResync(signal: AbortSignal): Promise<ControlResult> {
@@ -426,6 +589,29 @@ function validateProperty(property: XiaomiHomeNativeProperty): void {
     && !capabilitySemanticKindSchema.safeParse(property.semanticKind).success) {
     throw new BridgeStreamError("protocol_error", "Xiaomi transport returned an invalid semantic kind");
   }
+  if (property.supportedActions !== undefined) {
+    if (!Array.isArray(property.supportedActions)
+      || property.supportedActions.some((action) => action !== "set_level" && action !== "stop_media")) {
+      throw new BridgeStreamError("protocol_error", "Xiaomi transport returned invalid action support");
+    }
+  }
+  if (property.levelRange !== undefined && !validLevelRange(property.levelRange)) {
+    throw new BridgeStreamError("protocol_error", "Xiaomi transport returned an invalid level range");
+  }
+}
+
+function validLevelRange(value: { readonly min: number; readonly max: number }): boolean {
+  return Number.isFinite(value.min) && Number.isFinite(value.max)
+    && value.min < value.max && value.max - value.min <= Number.MAX_SAFE_INTEGER;
+}
+
+function toNormalizedLevel(value: number, range: { readonly min: number; readonly max: number }): number {
+  const normalized = (value - range.min) / (range.max - range.min);
+  return Math.max(0, Math.min(1, normalized));
+}
+
+function fromNormalizedLevel(level: number, range: { readonly min: number; readonly max: number }): number {
+  return range.min + level * (range.max - range.min);
 }
 
 function propertyInstanceId(property: Pick<XiaomiHomeNativeProperty, "siid" | "piid">): string {

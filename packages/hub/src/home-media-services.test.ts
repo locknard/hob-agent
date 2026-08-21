@@ -20,6 +20,12 @@ interface MediaServicesModule {
   readonly HomeMediaPlaybackPreparationService: new (ctx: Context, options: Record<string, unknown>) => Service & {
     prepare(intent: unknown): unknown;
   };
+  readonly HomeMediaPlaybackExecutionService: new (ctx: Context, options: Record<string, unknown>) => Service & {
+    readonly gateway: {
+      execute(input: Record<string, unknown>): Promise<unknown>;
+      readState(input: Record<string, unknown>): Promise<unknown>;
+    };
+  };
   readonly SyntheticMediaCatalogProvider: new (rows: readonly Record<string, unknown>[]) => {
     search(input: { readonly query: string; readonly kinds: readonly string[]; readonly limit: number; readonly signal: AbortSignal }): Promise<readonly unknown[]>;
   };
@@ -31,6 +37,7 @@ async function loadServices(): Promise<MediaServicesModule> {
     if (typeof loaded.HomeMediaPlayerService !== "function"
       || typeof loaded.HomeMediaCatalogService !== "function"
       || typeof loaded.HomeMediaPlaybackPreparationService !== "function"
+      || typeof loaded.HomeMediaPlaybackExecutionService !== "function"
       || typeof loaded.SyntheticMediaCatalogProvider !== "function") {
       throw new Error("home media service exports are incomplete");
     }
@@ -365,4 +372,115 @@ test("keeps playback preparation unavailable without both the world and explicit
   assert.equal(missingCatalog.get("homeMediaPlaybackPreparation"), undefined);
   await missingCatalogFiber.dispose();
   await missingCatalog.fiber.dispose();
+});
+
+test("executes and reads back Music Assistant media from one explicit private player binding", async () => {
+  const {
+    HomeMediaCatalogService,
+    HomeMediaPlaybackExecutionService,
+    SyntheticMediaCatalogProvider,
+  } = await loadServices();
+  const calls: Record<string, unknown>[] = [];
+  let playbackState: "playing" | "idle" = "idle";
+  let currentMediaUri: string | undefined;
+  const client = {
+    playMedia: async (input: Record<string, unknown>) => {
+      calls.push({ kind: "play", ...input });
+      playbackState = "playing";
+      currentMediaUri = input.mediaUri as string;
+      return { status: "acknowledged" as const };
+    },
+    stopMedia: async (input: Record<string, unknown>) => {
+      calls.push({ kind: "stop", ...input });
+      playbackState = "idle";
+      currentMediaUri = undefined;
+      return { status: "acknowledged" as const };
+    },
+    readPlayerState: async () => ({
+      status: "available" as const,
+      playerId: "ma-player-1",
+      playbackState,
+      ...(currentMediaUri === undefined ? {} : { currentMediaUri }),
+    }),
+  };
+  const ctx = new Context();
+  const catalogFiber = await ctx.plugin(HomeMediaCatalogService, {
+    tenantId: "household-test",
+    catalogId: "music-assistant",
+    generation: 1,
+    sourceLabel: "Music Assistant",
+    mediaRefTtlMs: 60_000,
+    maxQueryChars: 128,
+    maxResults: 3,
+    provider: new SyntheticMediaCatalogProvider([
+      { providerItemId: "ma://playlist/jazz-1", title: "晚间爵士", kind: "playlist", playable: true },
+    ]),
+    now: () => 1_000,
+    mediaRefFactory: () => "maOpaqueMediaRef001",
+  });
+  const search = await ctx.homeMediaCatalog.search({
+    query: "爵士",
+    kinds: ["playlist"],
+    limit: 1,
+    signal: new AbortController().signal,
+  });
+  const mediaRef = search.candidates[0]?.mediaRef;
+  const executionFiber = await ctx.plugin(HomeMediaPlaybackExecutionService, {
+    tenantId: "household-test",
+    client,
+    playerIdForCapability: (capabilityId: string) => capabilityId === "hwc-a" ? "ma-player-1" : undefined,
+    now: () => 1_001,
+  });
+  try {
+    const service = ctx.homeMediaPlayback;
+    const play = await service.gateway.execute({
+      ticketId: "ticket-1",
+      requestId: "request-1",
+      capabilityId: "hwc-a",
+      action: { kind: "play_media", mediaRef, queueMode: "replace_and_play" },
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(play, { status: "acknowledged" });
+    assert.deepEqual(calls[0], {
+      kind: "play",
+      playerId: "ma-player-1",
+      mediaUri: "ma://playlist/jazz-1",
+      queueMode: "replace_and_play",
+      signal: calls[0]?.signal,
+    });
+    assert.equal(JSON.stringify(play).includes("ma://"), false);
+    const readPlaying = await service.gateway.readState({
+      capabilityId: "hwc-a",
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(readPlaying, {
+      status: "available",
+      value: mediaRef,
+      observedAt: "1970-01-01T00:00:01.001Z",
+      fresh: true,
+    });
+
+    const stop = await service.gateway.execute({
+      ticketId: "ticket-2",
+      requestId: "request-2",
+      capabilityId: "hwc-a",
+      action: { kind: "stop_media" },
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(stop, { status: "acknowledged" });
+    const readStopped = await service.gateway.readState({
+      capabilityId: "hwc-a",
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(readStopped, {
+      status: "available",
+      value: null,
+      observedAt: "1970-01-01T00:00:01.001Z",
+      fresh: true,
+    });
+  } finally {
+    await executionFiber.dispose();
+    await catalogFiber.dispose();
+    await ctx.fiber.dispose();
+  }
 });

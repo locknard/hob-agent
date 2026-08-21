@@ -19,6 +19,7 @@ import {
   createInboxBasicAuthenticator,
   type InboxAuthenticator,
 } from "@hob-agent/inbox-web/http";
+import type { InboxReviewActor } from "@hob-agent/inbox-web/service";
 
 import type { BridgeAwareCredentialSource } from "./bridge-credentials.js";
 import { createBuiltinBridgeCatalog } from "./bridge-bundle.js";
@@ -29,10 +30,13 @@ import {
   parseMusicAssistantCredentialRef,
 } from "./music-assistant-credential-setup.js";
 import { toMusicAssistantWebSocketUrl } from "./music-assistant-websocket-client.js";
+import { parseHomeSafetyBindings, type HomeSafetyBinding } from "./home-safety-service.js";
 
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const SECRET_CONFIG_KEY_PATTERN = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
 const REQUIRED_HOME_ENV = ["HOB_DATA_DIR", "HOB_BRIDGES", "HOB_MODEL"] as const;
+const INBOX_REVIEW_ROLES = ["admin", "adult_member", "member", "child", "guest"] as const;
+const INBOX_DEVICE_KINDS = ["private", "shared"] as const;
 
 export type LaunchEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -50,11 +54,15 @@ export interface HomeHubLaunchConfig {
   readonly registryPath: string;
   readonly worldModelPath: string;
   readonly proposalPath: string;
+  readonly oneShotActionPath: string;
+  readonly batchActionPath: string;
   readonly artifactPath: string;
   readonly authorityCandidatePath: string;
   readonly observationAuditPath: string;
   readonly advicePath: string;
+  readonly safetyPath: string;
   readonly sessionPath: string;
+  readonly onboardingPath: string;
   readonly householdDirectory?: string;
   readonly bridges: readonly BridgeConfigEntry<unknown>[];
   readonly bridgeCredentialSource: BridgeAwareCredentialSource;
@@ -69,15 +77,19 @@ export interface HomeHubLaunchConfig {
   readonly inboxHttp?: {
     readonly port: number;
     readonly authenticate: InboxAuthenticator;
+    readonly principal: InboxReviewActor;
   };
   readonly observation?: {
     readonly intervalMinutes: number;
     readonly runOnStart: boolean;
   };
+  readonly safetyBindings: readonly HomeSafetyBinding[];
   /** Explicit read-only Music Assistant transport; omitted unless both launch settings exist. */
   readonly musicAssistant?: {
     readonly baseUrl: string;
     readonly resolveToken: (signal: AbortSignal) => Promise<string | undefined>;
+    /** Hub-private neutral capability to Music Assistant player binding. */
+    readonly playerIdForCapability?: (capabilityId: string) => string | undefined;
   };
   /** DSH sees only the selected provider's standard credential alias. */
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
@@ -91,30 +103,6 @@ export interface HomeWorldLaunchConfig {
   readonly bridges: readonly BridgeConfigEntry<unknown>[];
   readonly bridgeCredentialSource: BridgeAwareCredentialSource;
   readonly catalog: BridgeCatalog;
-}
-
-export interface HomeInboxLaunchConfig {
-  readonly proposalPath: string;
-  readonly artifactPath: string;
-  readonly observationAuditPath: string;
-  readonly advicePath: string;
-  readonly inboxHttp: NonNullable<HomeHubLaunchConfig["inboxHttp"]>;
-}
-
-/** Reads only the persisted local Inbox slice; no bridge or model is loaded. */
-export function readHomeInboxLaunchConfig(environment: LaunchEnvironment): HomeInboxLaunchConfig {
-  const dataDirectory = requiredDataDirectory(environment);
-  const inboxHttp = parseInboxHttp(environment.HOB_INBOX_AUTH_TOKEN, environment.HOB_INBOX_PORT);
-  if (inboxHttp === undefined) {
-    throw new Error("HOB_INBOX_AUTH_TOKEN is required for the standalone Inbox");
-  }
-  return {
-    proposalPath: join(dataDirectory, "proposals.sqlite"),
-    artifactPath: join(dataDirectory, "artifacts.sqlite"),
-    observationAuditPath: join(dataDirectory, "observation-audit.sqlite"),
-    advicePath: join(dataDirectory, "home-advice.sqlite"),
-    inboxHttp,
-  };
 }
 
 /** Reads only the neutral HomeWorld launch slice; no model credential is required. */
@@ -187,20 +175,32 @@ export function readHomeHubLaunchConfig(
         values: { [credentialEnv]: requiredValue(environment, credentialEnv).trim() },
       }])
     : createLaunchEnvironmentSnapshot([]);
-  const inboxHttp = parseInboxHttp(environment.HOB_INBOX_AUTH_TOKEN, environment.HOB_INBOX_PORT);
+  const inboxHttp = parseInboxHttp(
+    environment.HOB_INBOX_AUTH_TOKEN,
+    environment.HOB_INBOX_PORT,
+    environment.HOB_INBOX_PRINCIPAL_ID,
+    environment.HOB_INBOX_PRINCIPAL_ROLE,
+    environment.HOB_INBOX_DEVICE_KIND,
+    environment.HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID,
+  );
   const householdDirectory = parseHouseholdDirectory(environment.HOB_HOME_DIR);
   const observation = parseObservationSchedule(
     environment.HOB_OBSERVATION_INTERVAL_MINUTES,
     environment.HOB_OBSERVE_ON_START,
   );
+  const safetyBindings = parseSafetyBindingsConfiguration(environment.HOB_SAFETY_BINDINGS);
   return {
     ...world,
     proposalPath: join(world.dataDirectory, "proposals.sqlite"),
+    oneShotActionPath: join(world.dataDirectory, "one-shot-actions.sqlite"),
+    batchActionPath: join(world.dataDirectory, "batch-actions.sqlite"),
     artifactPath: join(world.dataDirectory, "artifacts.sqlite"),
     authorityCandidatePath: join(world.dataDirectory, "authority-candidates.sqlite"),
     observationAuditPath: join(world.dataDirectory, "observation-audit.sqlite"),
     advicePath: join(world.dataDirectory, "home-advice.sqlite"),
+    safetyPath: join(world.dataDirectory, "home-safety.sqlite"),
     sessionPath: join(world.dataDirectory, "dsh-sessions.sqlite"),
+    onboardingPath: join(world.dataDirectory, "onboarding.sqlite"),
     ...(householdDirectory === undefined ? {} : { householdDirectory }),
     agent: {
       provider: model.provider,
@@ -210,9 +210,19 @@ export function readHomeHubLaunchConfig(
     },
     ...(inboxHttp === undefined ? {} : { inboxHttp }),
     ...(observation === undefined ? {} : { observation }),
+    safetyBindings,
     ...(musicAssistant === undefined ? {} : { musicAssistant }),
     launchEnvironment,
   };
+}
+
+function parseSafetyBindingsConfiguration(value: string | undefined): readonly HomeSafetyBinding[] {
+  if (value === undefined || value.trim() === "") return Object.freeze([]);
+  try {
+    return parseHomeSafetyBindings(JSON.parse(value));
+  } catch {
+    throw new Error("Invalid HOB_SAFETY_BINDINGS");
+  }
 }
 
 function parseMusicAssistantConfiguration(
@@ -221,9 +231,11 @@ function parseMusicAssistantConfiguration(
 ): HomeHubLaunchConfig["musicAssistant"] {
   const baseUrlValue = environment.HOB_MUSIC_ASSISTANT_BASE_URL;
   const credentialRefValue = environment.HOB_MUSIC_ASSISTANT_CREDENTIAL_REF;
+  const playerBindingsValue = environment.HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS;
   const hasBaseUrl = typeof baseUrlValue === "string" && baseUrlValue.trim() !== "";
   const hasCredentialRef = typeof credentialRefValue === "string" && credentialRefValue.trim() !== "";
-  if (!hasBaseUrl && !hasCredentialRef) return undefined;
+  const hasPlayerBindings = typeof playerBindingsValue === "string" && playerBindingsValue.trim() !== "";
+  if (!hasBaseUrl && !hasCredentialRef && !hasPlayerBindings) return undefined;
   if (!hasBaseUrl) {
     throw new Error("HOB_MUSIC_ASSISTANT_BASE_URL is required with HOB_MUSIC_ASSISTANT_CREDENTIAL_REF");
   }
@@ -243,6 +255,9 @@ function parseMusicAssistantConfiguration(
   } catch {
     throw new Error("Invalid HOB_MUSIC_ASSISTANT_CREDENTIAL_REF");
   }
+  const playerIdForCapability = hasPlayerBindings
+    ? parseMusicAssistantPlayerBindings(playerBindingsValue)
+    : undefined;
   return {
     baseUrl,
     resolveToken: async (signal) => {
@@ -253,7 +268,37 @@ function parseMusicAssistantConfiguration(
       if (signal.aborted) return undefined;
       return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
     },
+    ...(playerIdForCapability === undefined ? {} : { playerIdForCapability }),
   };
+}
+
+function parseMusicAssistantPlayerBindings(
+  value: string | undefined,
+): (capabilityId: string) => string | undefined {
+  let input: unknown;
+  try {
+    input = JSON.parse(value ?? "");
+  } catch {
+    throw new Error("Invalid HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS");
+  }
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Invalid HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS");
+  }
+  const bindings = Object.create(null) as Record<string, string>;
+  const entries = Object.entries(input);
+  if (entries.length === 0 || entries.length > 128) {
+    throw new Error("Invalid HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS");
+  }
+  for (const [capabilityId, playerId] of entries) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(capabilityId)
+      || typeof playerId !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,511}$/.test(playerId)) {
+      throw new Error("Invalid HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS");
+    }
+    bindings[capabilityId] = playerId;
+  }
+  const frozen = Object.freeze(bindings);
+  return (capabilityId) => frozen[capabilityId];
 }
 
 function parseObservationSchedule(
@@ -289,8 +334,13 @@ function parseHouseholdDirectory(value: string | undefined): string | undefined 
 function parseInboxHttp(
   token: string | undefined,
   portValue: string | undefined,
+  principalIdValue: string | undefined,
+  roleValue: string | undefined,
+  deviceKindValue: string | undefined,
+  boundPrincipalIdValue: string | undefined,
 ): HomeHubLaunchConfig["inboxHttp"] {
-  if (token === undefined && portValue === undefined) return undefined;
+  const values = [token, portValue, principalIdValue, roleValue, deviceKindValue, boundPrincipalIdValue];
+  if (values.every((value) => value === undefined)) return undefined;
   if (token === undefined) throw new Error("HOB_INBOX_AUTH_TOKEN is required when Inbox HTTP is configured");
   let authenticate: InboxAuthenticator;
   try {
@@ -299,7 +349,65 @@ function parseInboxHttp(
     throw new Error("Invalid HOB_INBOX_AUTH_TOKEN; expected 32 to 512 characters");
   }
   const port = portValue === undefined ? 8_787 : parseProductionPort(portValue);
-  return { port, authenticate };
+  const principalId = requiredInboxPrincipalId(principalIdValue);
+  const role = requiredInboxRole(roleValue);
+  const deviceKind = requiredInboxDeviceKind(deviceKindValue);
+  const boundPrincipalId = boundPrincipalIdValue === undefined
+    ? undefined
+    : requiredInboxText(boundPrincipalIdValue, "HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID");
+  if (deviceKind === "private" && boundPrincipalId === undefined) {
+    throw new Error("HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID is required for a private Inbox device");
+  }
+  if (deviceKind === "private" && boundPrincipalId !== principalId) {
+    throw new Error("HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID must match HOB_INBOX_PRINCIPAL_ID");
+  }
+  if (deviceKind === "shared" && boundPrincipalId !== undefined) {
+    throw new Error("A shared Inbox device uses no private principal binding");
+  }
+  return {
+    port,
+    authenticate,
+    principal: {
+      principalId,
+      role,
+      present: true,
+      device: {
+        kind: deviceKind,
+        ...(boundPrincipalId === undefined ? {} : { boundPrincipalId }),
+      },
+    },
+  };
+}
+
+function requiredInboxPrincipalId(value: string | undefined): string {
+  return requiredInboxText(value, "HOB_INBOX_PRINCIPAL_ID");
+}
+
+function requiredInboxRole(value: string | undefined): InboxReviewActor["role"] {
+  const role = requiredInboxText(value, "HOB_INBOX_PRINCIPAL_ROLE");
+  if (!(INBOX_REVIEW_ROLES as readonly string[]).includes(role)) {
+    throw new Error("Invalid HOB_INBOX_PRINCIPAL_ROLE; expected admin, adult_member, member, child, or guest");
+  }
+  return role as InboxReviewActor["role"];
+}
+
+function requiredInboxDeviceKind(value: string | undefined): InboxReviewActor["device"]["kind"] {
+  const kind = requiredInboxText(value, "HOB_INBOX_DEVICE_KIND");
+  if (!(INBOX_DEVICE_KINDS as readonly string[]).includes(kind)) {
+    throw new Error("Invalid HOB_INBOX_DEVICE_KIND; expected private or shared");
+  }
+  return kind as InboxReviewActor["device"]["kind"];
+}
+
+function requiredInboxText(value: string | undefined, name: string): string {
+  const normalized = value?.trim();
+  if (normalized === undefined || normalized.length === 0) {
+    throw new Error(`${name} is required when Inbox HTTP is configured`);
+  }
+  if (normalized.length > 200 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`Invalid ${name}`);
+  }
+  return normalized;
 }
 
 function parseProductionPort(value: string): number {

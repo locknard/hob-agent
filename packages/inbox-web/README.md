@@ -1,34 +1,28 @@
-# Proposal inbox
+# Household review surface
 
-The local Control Center is available at `/` and `/control-center`. It leads
-with household decisions and plain-language connection, home-map, Agent, and
-observation status. Pending proposals are normal review work rather than a
-system-health warning. Provider, adapter, bridge, and sequence identifiers are
-kept in a closed technical-diagnostics disclosure. The page never reads or
-returns credential values, raw device payloads, remote bridge identity, or an
-execution control.
+The authenticated local surface uses the Product Shell as its single renderer.
+The root path redirects to `/home`. Canonical destinations are:
 
-The proposal review surface is available at `/proposals`: list, detail,
-evidence watermarks, conflict findings, dry-run result, risk, and optimistic
-approve/reject. Reviews collect one bounded quality reason plus an optional
-note so useful, duplicate, weakly evidenced, incorrect, preference-mismatched,
-or risky suggestions can be distinguished without reinterpreting prose.
-New Agent proposals also display expected household value, timing, and
-uncertainties in a clearly model-authored section separate from Hub evidence.
-The Hub's selected-device space coverage is displayed separately again, with
-single-space, unassigned, and multiple-space counts but no household names.
-Approval records intent only; this package has no apply,
-automation-install, or device-control method.
+- `/home` — the household overview and current connection state;
+- `/conversation` — one household question with its live progress;
+- `/review-center` — two independent queues: time-limited runtime confirmations and persistent household proposals;
+- `/activity` — bounded actions and explanations;
+- `/control` — explicit one-shot controls supplied by the Hub;
+- `/settings` — connections, model, access, and household preferences;
+- `/onboarding` — the guided first-run setup.
 
-The package also owns the pure `renderAgentLoopTimeline` fragment used to show
-the local DSH trajectory beside a proposal. It accepts only the metadata-safe
-`AgentLoopTrace` read model; it does not receive raw session messages or create
-another agent/runtime connection.
+The review center keeps runtime confirmations and persistent proposals separate.
+Runtime confirmations show a countdown and expire into an audit record. Proposal
+capacity includes snoozed proposals, and proposal decisions remain with the
+proposal owner. The page presents household language first and keeps technical
+diagnostics one level deeper.
 
-`ProposalInboxService` mounts in the same Cordis root after the DSH Home Agent
-and composes durable hub proposal state with that trace. The current slice
-provides escaped HTML fragments and a review controller; authenticated HTTP
-delivery is an optional sibling service. It is disabled without an explicit
-credential, binds only to `127.0.0.1`, requires HTTP Basic authentication
-(`home` plus the configured local token), rejects cross-origin review POSTs,
-bounds form bodies, and emits restrictive browser security headers.
+The Inbox consumes neutral projections from Hub services. The Hub supplies
+runtime confirmation authority, proposal governance, safety incidents, and
+explicit one-shot action descriptors. A missing descriptor produces a read-only
+control. Semantic hints and device names provide display context only.
+
+The package keeps household data local. Authenticated HTTP delivery is an
+optional sibling service, disabled without an explicit local credential, bound
+to `127.0.0.1`, protected by HTTP Basic authentication, bounded request
+bodies, same-origin review mutations, and restrictive browser security headers.

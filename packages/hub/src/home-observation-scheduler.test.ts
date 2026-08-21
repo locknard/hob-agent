@@ -90,6 +90,19 @@ class StubObservationAudit extends Service {
   list() { return []; }
 }
 
+class StubOnboarding extends Service {
+  constructor(ctx: Context) { super(ctx, "homeOnboarding"); }
+  snapshot() {
+    return {
+      observation: {
+        enabled: true,
+        intervalMinutes: 720,
+        configuredAt: "2026-08-19T03:00:00.000Z",
+      },
+    };
+  }
+}
+
 async function setup() {
   const ctx = new Context();
   await ctx.plugin(StubWorld);
@@ -284,4 +297,61 @@ test("keeps recurring scheduling alive after one audit failure without calling t
 
   await fiber.dispose();
   await ctx.fiber.dispose();
+});
+
+test("restores the persisted onboarding schedule and applies a new schedule at the scheduler boundary", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  await ctx.plugin(StubOnboarding);
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    onboarding: ctx.homeOnboarding,
+    scheduler: { wait: (_delay, signal) => new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+  try {
+    assert.deepEqual(ctx.homeObservationScheduler.snapshot(), {
+      enabled: true,
+      intervalMinutes: 720,
+      runOnStart: false,
+      state: "waiting",
+    });
+    ctx.homeObservationScheduler.configure({ enabled: true, intervalMinutes: 1_440 });
+    assert.equal(ctx.homeObservationScheduler.snapshot().intervalMinutes, 1_440);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("honors the persisted quiet-hours boundary for recurring observations", async () => {
+  const waits: { readonly release: () => void }[] = [];
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    intervalMinutes: 60,
+    quietHours: { start: "22:00", end: "08:00" },
+    scheduler: { wait: (_delay, signal) => new Promise<void>((resolve) => {
+      const release = () => resolve();
+      waits.push({ release });
+      signal.addEventListener("abort", release, { once: true });
+    }) },
+    clock: () => "2026-08-19T23:30:00",
+  });
+  try {
+    waits[0]?.release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(ctx.homeAgent.observations, 0);
+    assert.equal(waits.length, 2);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
 });

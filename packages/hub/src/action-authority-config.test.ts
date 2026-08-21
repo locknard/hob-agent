@@ -19,13 +19,14 @@ import {
   ACTION_AUTHORITY_CONFIG_FILE,
   actionAuthorityConfigurationPath,
   loadActionAuthorityConfiguration,
+  writeActionAuthorityConfiguration,
 } from "./action-authority-config.js";
 
 const VALID = {
-  version: 1,
+  version: 2,
   bindings: [
-    { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-main", approved: true, revision: 3 },
-    { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, revision: 1 },
+    { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-main", approved: true, policyClass: "confirmation", revision: 3 },
+    { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, policyClass: "direct", revision: 1 },
   ],
 };
 
@@ -67,14 +68,50 @@ test("loads strict bindings into opaque coordinator configurations", async () =>
     assert.deepEqual(Object.keys(result), ["hwc-curtain-level", "hwc-lamp"]);
     assert.equal(result["hwc-curtain-level"]?.bridgeId, "ha-main");
     assert.equal(result["hwc-curtain-level"]?.approved, true);
+    assert.equal(result["hwc-curtain-level"]?.policyClass, "confirmation");
     assert.equal(result["hwc-curtain-level"]?.configRevision, 3);
     assert.match(result["hwc-curtain-level"]?.configIdentity ?? "", /^sha256:[0-9a-f]{64}$/);
     assert.equal(result["hwc-lamp"]?.approved, false);
+    assert.equal(result["hwc-lamp"]?.policyClass, "direct");
     assert.equal("hwCapabilityId" in (result["hwc-curtain-level"] ?? {}), false);
     assert.equal("revision" in (result["hwc-curtain-level"] ?? {}), false);
     assert.equal("nativeId" in (result["hwc-curtain-level"] ?? {}), false);
     assert.equal(Object.isFrozen(result), true);
     assert.equal(Object.isFrozen(result["hwc-curtain-level"]!), true);
+  });
+});
+
+test("loads an explicit policy class and binds it into the canonical identity", async () => {
+  await withDataDirectory(async (directory) => {
+    await writeJson(directory, {
+      version: 2,
+      bindings: [{
+        hwCapabilityId: "hwc-water-valve",
+        bridgeId: "ha-main",
+        approved: true,
+        policyClass: "administrator",
+        revision: 1,
+      }],
+    });
+    const administrator = await loadActionAuthorityConfiguration(directory);
+    assert.equal(administrator["hwc-water-valve"]?.policyClass, "administrator");
+
+    await rm(actionAuthorityConfigurationPath(directory));
+    await writeJson(directory, {
+      version: 2,
+      bindings: [{
+        hwCapabilityId: "hwc-water-valve",
+        bridgeId: "ha-main",
+        approved: true,
+        policyClass: "confirmation",
+        revision: 2,
+      }],
+    });
+    const confirmation = await loadActionAuthorityConfiguration(directory);
+    assert.notEqual(
+      confirmation["hwc-water-valve"]?.configIdentity,
+      administrator["hwc-water-valve"]?.configIdentity,
+    );
   });
 });
 
@@ -87,10 +124,10 @@ test("keeps per-capability identity stable across entry ordering and changes it 
 
     await rm(actionAuthorityConfigurationPath(directory));
     await writeJson(directory, {
-      version: 1,
+      version: 2,
       bindings: [
-        { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, revision: 99 },
-        { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-main", approved: true, revision: 4 },
+        { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, policyClass: "direct", revision: 99 },
+        { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-main", approved: true, policyClass: "confirmation", revision: 4 },
       ],
     });
     const reordered = await loadActionAuthorityConfiguration(directory);
@@ -100,10 +137,10 @@ test("keeps per-capability identity stable across entry ordering and changes it 
 
     await rm(actionAuthorityConfigurationPath(directory));
     await writeJson(directory, {
-      version: 1,
+      version: 2,
       bindings: [
-        { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-secondary", approved: true, revision: 5 },
-        { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, revision: 1 },
+        { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-secondary", approved: true, policyClass: "confirmation", revision: 5 },
+        { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, policyClass: "direct", revision: 1 },
       ],
     });
     const rebound = await loadActionAuthorityConfiguration(directory);
@@ -112,10 +149,10 @@ test("keeps per-capability identity stable across entry ordering and changes it 
 
     await rm(actionAuthorityConfigurationPath(directory));
     await writeJson(directory, {
-      version: 1,
+      version: 2,
       bindings: [
-        { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-main", approved: false, revision: 6 },
-        { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, revision: 1 },
+        { hwCapabilityId: "hwc-curtain-level", bridgeId: "ha-main", approved: false, policyClass: "confirmation", revision: 6 },
+        { hwCapabilityId: "hwc-lamp", bridgeId: "xiaomi-main", approved: false, policyClass: "direct", revision: 1 },
       ],
     });
     const revoked = await loadActionAuthorityConfiguration(directory);
@@ -128,11 +165,13 @@ test("rejects malformed, duplicate, unknown, oversized, and route-bearing conten
   await withDataDirectory(async (directory) => {
     const invalidInputs = [
       "{\"version\":1,\"version\":1,\"bindings\":[]}",
-      JSON.stringify({ version: 2, bindings: [] }),
-      JSON.stringify({ version: 1, bindings: [], extra: "must-not-echo" }),
-      JSON.stringify({ version: 1, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, revision: 0 }] }),
-      JSON.stringify({ version: 1, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, revision: 1, route: "secret-route" }] }),
-      JSON.stringify({ version: 1, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, revision: 1 }, { hwCapabilityId: "hwc-a", bridgeId: "ha-b", approved: true, revision: 2 }] }),
+      JSON.stringify({ version: 1, bindings: [] }),
+      JSON.stringify({ version: 2, bindings: [], extra: "must-not-echo" }),
+      JSON.stringify({ version: 2, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, policyClass: "direct", revision: 0 }] }),
+      JSON.stringify({ version: 2, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, policyClass: "direct", revision: 1, route: "secret-route" }] }),
+      JSON.stringify({ version: 2, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, policyClass: "direct", revision: 1 }, { hwCapabilityId: "hwc-a", bridgeId: "ha-b", approved: true, policyClass: "direct", revision: 2 }] }),
+      JSON.stringify({ version: 2, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, revision: 1 }] }),
+      JSON.stringify({ version: 2, bindings: [{ hwCapabilityId: "hwc-a", bridgeId: "ha-a", approved: true, policyClass: "observe", revision: 1 }] }),
       "not-json",
       "x".repeat(65 * 1024),
     ];
@@ -154,22 +193,22 @@ test("rejects malformed, duplicate, unknown, oversized, and route-bearing conten
 test("rejects invalid identifiers, revisions, and security-shaped fields", async () => {
   await withDataDirectory(async (directory) => {
     const invalidEntries = [
-      { hwCapabilityId: "", bridgeId: "ha-main", approved: true, revision: 1 },
-      { hwCapabilityId: "hwc-a", bridgeId: " ha-main", approved: true, revision: 1 },
-      { hwCapabilityId: "hwc-a\nforged", bridgeId: "ha-main", approved: true, revision: 1 },
-      { hwCapabilityId: "hwc/a", bridgeId: "ha-main", approved: true, revision: 1 },
-      { hwCapabilityId: "__proto__", bridgeId: "ha-main", approved: true, revision: 1 },
-      { hwCapabilityId: "https://native.invalid", bridgeId: "ha-main", approved: true, revision: 1 },
-      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, revision: 1.5 },
-      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, revision: Number.MAX_SAFE_INTEGER + 1 },
-      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, revision: 1, nativeId: "native-secret" },
-      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, revision: 1, schema: "ha.cover" },
-      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, revision: 1, credential: "token" },
-      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, revision: 1, registrationGeneration: 3 },
+      { hwCapabilityId: "", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1 },
+      { hwCapabilityId: "hwc-a", bridgeId: " ha-main", approved: true, policyClass: "direct", revision: 1 },
+      { hwCapabilityId: "hwc-a\nforged", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1 },
+      { hwCapabilityId: "hwc/a", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1 },
+      { hwCapabilityId: "__proto__", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1 },
+      { hwCapabilityId: "https://native.invalid", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1 },
+      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1.5 },
+      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: Number.MAX_SAFE_INTEGER + 1 },
+      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1, nativeId: "native-secret" },
+      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1, schema: "ha.cover" },
+      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1, credential: "token" },
+      { hwCapabilityId: "hwc-a", bridgeId: "ha-main", approved: true, policyClass: "direct", revision: 1, registrationGeneration: 3 },
     ];
     for (const entry of invalidEntries) {
       await rm(actionAuthorityConfigurationPath(directory), { force: true });
-      await writeJson(directory, { version: 1, bindings: [entry] });
+      await writeJson(directory, { version: 2, bindings: [entry] });
       await assert.rejects(() => loadActionAuthorityConfiguration(directory), /action authority configuration/i);
     }
   });
@@ -228,5 +267,21 @@ test("does not expose file content or provide mutation methods", async () => {
     assert.equal("watch" in config, false);
     assert.equal(constants.O_NOFOLLOW > 0, true);
     assert.equal((await readFile(actionAuthorityConfigurationPath(directory), "utf8")).includes("ha-main"), true);
+  });
+});
+
+test("writes the onboarding-selected action classes atomically into the canonical private source", async () => {
+  await withDataDirectory(async (directory) => {
+    const projected = writeActionAuthorityConfiguration(actionAuthorityConfigurationPath(directory), [{
+      hwCapabilityId: "hwc-lamp",
+      bridgeId: "ha-main",
+      approved: true,
+      policyClass: "direct",
+      revision: 1,
+    }]);
+    assert.equal(projected["hwc-lamp"]?.policyClass, "direct");
+    assert.equal(projected["hwc-lamp"]?.approved, true);
+    assert.deepEqual(await loadActionAuthorityConfiguration(directory), projected);
+    assert.equal((await lstat(actionAuthorityConfigurationPath(directory))).mode & 0o777, 0o600);
   });
 });

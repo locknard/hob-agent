@@ -63,6 +63,16 @@ interface MediaCatalog {
     readonly mediaRef: string;
     readonly now: number;
   }): MediaCatalogCandidate | undefined;
+  resolveProviderItem(input: {
+    readonly tenantId: string;
+    readonly providerItemId: string;
+    readonly now: number;
+  }): MediaCatalogCandidate | undefined;
+  resolveExecutionTarget(input: {
+    readonly tenantId: string;
+    readonly mediaRef: string;
+    readonly now: number;
+  }): { readonly candidate: MediaCatalogCandidate; readonly providerItemId: string } | undefined;
 }
 
 interface MediaCatalogModule {
@@ -335,6 +345,40 @@ test("binds mediaRefs to the tenant, catalog generation, and expiry", async () =
   setNow(2_000);
   assert.equal(
     catalog.resolveMediaRef({ tenantId: "household-a", mediaRef: candidate.mediaRef, now: 2_000 }),
+    undefined,
+  );
+});
+
+test("resolves an exact provider item back to the same opaque mediaRef for read-back", async () => {
+  const { catalog } = await fixture();
+  const result = await catalog.search({ query: "jazz", limit: 1 });
+  const candidate = result.candidates[0]!;
+  assert.deepEqual(
+    catalog.resolveProviderItem({
+      tenantId: "household-a",
+      providerItemId: "native-track-1",
+      now: 1_999,
+    }),
+    candidate,
+  );
+  assert.deepEqual(
+    catalog.resolveExecutionTarget({ tenantId: "household-a", mediaRef: candidate.mediaRef, now: 1_999 }),
+    { candidate, providerItemId: "native-track-1" },
+  );
+  assert.equal(
+    catalog.resolveProviderItem({
+      tenantId: "household-a",
+      providerItemId: "native-track-1",
+      now: 2_000,
+    }),
+    undefined,
+  );
+  assert.equal(
+    catalog.resolveProviderItem({
+      tenantId: "household-b",
+      providerItemId: "native-track-1",
+      now: 1_999,
+    }),
     undefined,
   );
 });

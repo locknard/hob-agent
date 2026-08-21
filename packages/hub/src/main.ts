@@ -1,6 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
 import type { SecretVault } from "@hob-agent/agent-layer/model-credentials";
@@ -56,7 +56,13 @@ export function createHomeHubProcessOptions(
   bridgeCredentialVault?: SecretVault,
 ): HomeHubProcessOptions {
   const config = readHomeHubLaunchConfig(environment, selectedCredential, bridgeCredentialVault);
-  const mediaCatalog = config.musicAssistant === undefined ? undefined : {
+  const musicAssistantClient = config.musicAssistant === undefined
+    ? undefined
+    : new MusicAssistantWebSocketSearchClient({
+        baseUrl: config.musicAssistant.baseUrl,
+        resolveToken: config.musicAssistant.resolveToken,
+      });
+  const mediaCatalog = musicAssistantClient === undefined ? undefined : {
     tenantId: "household",
     catalogId: "music-assistant",
     generation: 1,
@@ -64,13 +70,16 @@ export function createHomeHubProcessOptions(
     mediaRefTtlMs: 300_000,
     maxQueryChars: 128,
     maxResults: 3,
-    provider: new MusicAssistantMediaCatalogProvider(
-      new MusicAssistantWebSocketSearchClient({
-        baseUrl: config.musicAssistant.baseUrl,
-        resolveToken: config.musicAssistant.resolveToken,
-      }),
-    ),
+    provider: new MusicAssistantMediaCatalogProvider(musicAssistantClient),
   } as const;
+  const mediaPlayback = musicAssistantClient === undefined
+    || config.musicAssistant?.playerIdForCapability === undefined
+    ? undefined
+    : {
+        tenantId: "household",
+        client: musicAssistantClient,
+        playerIdForCapability: config.musicAssistant.playerIdForCapability,
+      } as const;
   return {
     runtime: {
       homeWorld: {
@@ -83,10 +92,21 @@ export function createHomeHubProcessOptions(
         actionAuthorityConfig,
       },
       homeProposals: { path: config.proposalPath },
+      homeReviewCenter: { path: config.oneShotActionPath },
+      homeBatchActions: { path: config.batchActionPath },
+      homeOnboarding: {
+        path: config.onboardingPath,
+        ...(config.householdDirectory === undefined ? {} : { householdDirectory: config.householdDirectory }),
+      },
       homeArtifacts: { path: config.artifactPath },
       homeAuthorityCandidates: { path: config.authorityCandidatePath },
       homeObservationAudit: { path: config.observationAuditPath },
       homeAdvice: { path: config.advicePath },
+      homeCorrections: {
+        path: join(config.dataDirectory, "home-corrections.sqlite"),
+        ...(config.householdDirectory === undefined ? {} : { householdDirectory: config.householdDirectory }),
+      },
+      homeSafety: { path: config.safetyPath, bindings: config.safetyBindings },
       agent: {
         ...config.agent,
         sessionPersistencePath: config.sessionPath,
@@ -94,9 +114,12 @@ export function createHomeHubProcessOptions(
           ? {}
           : { householdDirectory: config.householdDirectory }),
       },
-      ...(config.inboxHttp === undefined ? {} : { inboxHttp: config.inboxHttp }),
+      ...(config.inboxHttp === undefined ? {} : {
+        inboxHttp: { ...config.inboxHttp },
+      }),
       ...(config.observation === undefined ? {} : { observation: config.observation }),
       ...(mediaCatalog === undefined ? {} : { mediaCatalog }),
+      ...(mediaPlayback === undefined ? {} : { mediaPlayback }),
       launchEnvironment: config.launchEnvironment,
     },
   };

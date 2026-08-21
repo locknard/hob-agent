@@ -55,6 +55,45 @@ export interface MusicAssistantWebSocketSearchClientOptions {
   readonly timeoutMs?: number;
 }
 
+export type MusicAssistantPlaybackQueueMode = "replace_and_play" | "play_next" | "add_to_queue";
+
+export interface MusicAssistantPlaybackState {
+  readonly status: "available" | "unavailable";
+  readonly playerId: string;
+  readonly playbackState?: "playing" | "paused" | "buffering" | "idle" | "stopped" | "unknown";
+  readonly currentMediaUri?: string;
+  readonly queuedMediaUris?: readonly string[];
+  readonly reason?: "player_not_found" | "state_unavailable" | "upstream_unavailable" | "cancelled";
+}
+
+export interface MusicAssistantPlaybackClient {
+  playMedia(input: {
+    readonly playerId: string;
+    readonly mediaUri: string;
+    readonly queueMode: MusicAssistantPlaybackQueueMode;
+    readonly signal: AbortSignal;
+  }): Promise<{ readonly status: "acknowledged" | "rejected" | "unknown"; readonly reason?: string }>;
+  stopMedia(input: {
+    readonly playerId: string;
+    readonly signal: AbortSignal;
+  }): Promise<{ readonly status: "acknowledged" | "rejected" | "unknown"; readonly reason?: string }>;
+  readPlayerState(input: {
+    readonly playerId: string;
+    readonly signal: AbortSignal;
+    readonly includeQueueItems?: boolean;
+  }): Promise<MusicAssistantPlaybackState>;
+  dispose?(): void | Promise<void>;
+}
+
+type MusicAssistantCommandFailureKind = "cancelled" | "rejected" | "unavailable";
+
+class MusicAssistantCommandFailure extends Error {
+  constructor(readonly kind: MusicAssistantCommandFailureKind) {
+    super("Music Assistant command failed");
+    this.name = "MusicAssistantCommandFailure";
+  }
+}
+
 interface ServerInfo {
   readonly schemaVersion: number;
   readonly minSupportedSchemaVersion: number;
@@ -143,7 +182,7 @@ export function probeMusicAssistantEndpoint(
  * Hub-private, fixed-command MA transport. Each search uses one short-lived
  * authenticated socket; no generic command, player, queue, or native URI API is exposed.
  */
-export class MusicAssistantWebSocketSearchClient implements MusicAssistantSearchClient {
+export class MusicAssistantWebSocketSearchClient implements MusicAssistantSearchClient, MusicAssistantPlaybackClient {
   private readonly webSocketUrl: string;
   private readonly resolveToken: MusicAssistantWebSocketSearchClientOptions["resolveToken"];
   private readonly socketFactory: MusicAssistantSocketFactory;
@@ -182,6 +221,105 @@ export class MusicAssistantWebSocketSearchClient implements MusicAssistantSearch
     this.active.add(operation);
     const signal = combineSignals(input.signal, operation.signal);
     return this.runSearch(input, signal).finally(() => this.active.delete(operation));
+  }
+
+  playMedia(input: {
+    readonly playerId: string;
+    readonly mediaUri: string;
+    readonly queueMode: MusicAssistantPlaybackQueueMode;
+    readonly signal: AbortSignal;
+  }): Promise<{ readonly status: "acknowledged" | "rejected" | "unknown"; readonly reason?: string }> {
+    validatePlaybackInput(input);
+    return this.runPlaybackOperation(input.signal, (signal) => this.runAuthenticatedCommand(
+      "player_queues/play_media",
+      {
+        queue_id: input.playerId,
+        media: input.mediaUri,
+        option: queueOption(input.queueMode),
+      },
+      signal,
+    )).then(
+      () => ({ status: "acknowledged" as const }),
+      (error: unknown) => playbackFailure(error, input.signal),
+    );
+  }
+
+  stopMedia(input: {
+    readonly playerId: string;
+    readonly signal: AbortSignal;
+  }): Promise<{ readonly status: "acknowledged" | "rejected" | "unknown"; readonly reason?: string }> {
+    validatePlayerInput(input);
+    return this.runPlaybackOperation(input.signal, (signal) => this.runAuthenticatedCommand(
+      "player_queues/stop",
+      { queue_id: input.playerId },
+      signal,
+    )).then(
+      () => ({ status: "acknowledged" as const }),
+      (error: unknown) => playbackFailure(error, input.signal),
+    );
+  }
+
+  readPlayerState(input: {
+    readonly playerId: string;
+    readonly signal: AbortSignal;
+    readonly includeQueueItems?: boolean;
+  }): Promise<MusicAssistantPlaybackState> {
+    validatePlayerInput(input);
+    return this.runPlaybackOperation(input.signal, async (signal) => {
+      const result = await this.runAuthenticatedCommand("player_queues/all", {}, signal);
+      const queue = findQueue(result, input.playerId);
+      if (queue === undefined) {
+        return {
+          status: "unavailable" as const,
+          playerId: input.playerId,
+          reason: "player_not_found" as const,
+        };
+      }
+      const playbackState = queueState(queue.state);
+      if (playbackState === undefined) {
+        return {
+          status: "unavailable" as const,
+          playerId: input.playerId,
+          reason: "state_unavailable" as const,
+        };
+      }
+      const currentMediaUri = currentQueueMediaUri(queue.current_item);
+      const queuedMediaUris = input.includeQueueItems
+        ? await this.readQueueMediaUris(input.playerId, signal)
+        : undefined;
+      return {
+        status: "available" as const,
+        playerId: input.playerId,
+        playbackState,
+        ...(currentMediaUri === undefined ? {} : { currentMediaUri }),
+        ...(queuedMediaUris === undefined ? {} : { queuedMediaUris }),
+      };
+    }, true).catch((error: unknown) => ({
+      status: "unavailable" as const,
+      playerId: input.playerId,
+      reason: error instanceof MusicAssistantCommandFailure && error.kind === "cancelled"
+        ? "cancelled" as const
+        : "upstream_unavailable" as const,
+    }));
+  }
+
+  private async readQueueMediaUris(playerId: string, signal: AbortSignal): Promise<readonly string[]> {
+    const result = await this.runAuthenticatedCommand(
+      "player_queues/items",
+      { queue_id: playerId, limit: 500, offset: 0 },
+      signal,
+    );
+    if (!Array.isArray(result)) return Object.freeze([]);
+    const uris: string[] = [];
+    const seen = new Set<string>();
+    for (const item of result) {
+      const uri = currentQueueMediaUri(item);
+      if (uri !== undefined && !seen.has(uri)) {
+        seen.add(uri);
+        uris.push(uri);
+      }
+    }
+    return Object.freeze(uris);
   }
 
   dispose(): void {
@@ -295,11 +433,177 @@ export class MusicAssistantWebSocketSearchClient implements MusicAssistantSearch
     });
   }
 
+  private runPlaybackOperation<T>(
+    inputSignal: AbortSignal,
+    operation: (signal: AbortSignal) => Promise<T>,
+    _returnsState = false,
+  ): Promise<T> {
+    if (inputSignal.aborted || this.active.size >= MAX_CONCURRENT_SEARCHES) {
+      return Promise.reject(new MusicAssistantCommandFailure("cancelled"));
+    }
+    const controller = new AbortController();
+    this.active.add(controller);
+    const signal = combineSignals(inputSignal, controller.signal);
+    return operation(signal).finally(() => this.active.delete(controller));
+  }
+
+  private runAuthenticatedCommand(
+    command: string,
+    args: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      let socket: MusicAssistantSocketLike;
+      try {
+        socket = this.socketFactory(this.webSocketUrl);
+      } catch {
+        reject(new MusicAssistantCommandFailure("unavailable"));
+        return;
+      }
+      let settled = false;
+      let state: "server_info" | "auth" | "command" = "server_info";
+      let authMessageId: string | undefined;
+      let commandMessageId: string | undefined;
+      let unrelatedMessages = 0;
+      const finish = (value?: unknown, failure?: MusicAssistantCommandFailureKind) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        socket.close();
+        if (failure === undefined) resolve(value);
+        else reject(new MusicAssistantCommandFailure(failure));
+      };
+      const abort = () => finish(undefined, "cancelled");
+      const timer = setTimeout(() => finish(undefined, "unavailable"), this.timeoutMs);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        finish(undefined, "cancelled");
+        return;
+      }
+      socket.onerror = () => finish(undefined, "unavailable");
+      socket.onclose = () => finish(undefined, "unavailable");
+      socket.onmessage = (event) => {
+        void (async () => {
+          if (settled) return;
+          const value = parseBoundedMessage(event.data);
+          if (!isRecord(value)) {
+            finish(undefined, "unavailable");
+            return;
+          }
+          if (state === "server_info") {
+            const info = projectServerInfo(value);
+            if (info === undefined || endpointStatus(info) !== "credential_required") {
+              finish(undefined, "unavailable");
+              return;
+            }
+            state = "auth";
+            let token: string | undefined;
+            try {
+              token = await this.resolveToken(signal);
+            } catch {
+              finish(undefined, "unavailable");
+              return;
+            }
+            if (settled || signal.aborted || !validToken(token)) {
+              finish(undefined, signal.aborted ? "cancelled" : "unavailable");
+              return;
+            }
+            authMessageId = this.nextMessageId();
+            socket.send(JSON.stringify({ message_id: authMessageId, command: "auth", args: { token } }));
+            return;
+          }
+          const messageId = boundedText(value.message_id, 128) ? value.message_id : undefined;
+          if (state === "auth" && messageId === authMessageId) {
+            if (!isRecord(value.result)
+              || value.result.authenticated !== true
+              || value.error_code !== undefined) {
+              finish(undefined, "rejected");
+              return;
+            }
+            state = "command";
+            commandMessageId = this.nextMessageId();
+            socket.send(JSON.stringify({ message_id: commandMessageId, command, args }));
+            return;
+          }
+          if (state === "command" && messageId === commandMessageId) {
+            if (value.error_code !== undefined) {
+              finish(undefined, "rejected");
+              return;
+            }
+            if (value.partial === true) return;
+            finish(value.result);
+            return;
+          }
+          unrelatedMessages += 1;
+          if (unrelatedMessages > MAX_UNRELATED_MESSAGES) finish(undefined, "unavailable");
+        })().catch(() => finish(undefined, "unavailable"));
+      };
+    });
+  }
+
   private nextMessageId(): string {
     const messageId = this.messageIdFactory();
     if (!boundedText(messageId, 128) || messageId.length < 8) throw searchFailure();
     return messageId;
   }
+}
+
+function validatePlaybackInput(input: {
+  readonly playerId: string;
+  readonly mediaUri: string;
+  readonly queueMode: MusicAssistantPlaybackQueueMode;
+  readonly signal: AbortSignal;
+}): void {
+  validatePlayerInput(input);
+  if (!boundedText(input.mediaUri, 2_048)
+    || !["replace_and_play", "play_next", "add_to_queue"].includes(input.queueMode)) {
+    throw new TypeError("Music Assistant playback input is invalid");
+  }
+}
+
+function validatePlayerInput(input: { readonly playerId: string; readonly signal: AbortSignal }): void {
+  if (!input || !boundedText(input.playerId, 512) || !(input.signal instanceof AbortSignal)) {
+    throw new TypeError("Music Assistant player input is invalid");
+  }
+}
+
+function queueOption(mode: MusicAssistantPlaybackQueueMode): "replace" | "next" | "add" {
+  if (mode === "replace_and_play") return "replace";
+  if (mode === "play_next") return "next";
+  return "add";
+}
+
+function playbackFailure(
+  error: unknown,
+  signal: AbortSignal,
+): { readonly status: "rejected" | "unknown"; readonly reason: string } {
+  if (signal.aborted || (error instanceof MusicAssistantCommandFailure && error.kind === "cancelled")) {
+    return { status: "unknown", reason: "cancelled" };
+  }
+  if (error instanceof MusicAssistantCommandFailure && error.kind === "rejected") {
+    return { status: "rejected", reason: "command_rejected" };
+  }
+  return { status: "unknown", reason: "upstream_unavailable" };
+}
+
+function findQueue(value: unknown, playerId: string): Record<string, unknown> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.find((item) => isRecord(item) && item.queue_id === playerId);
+}
+
+function queueState(value: unknown): MusicAssistantPlaybackState["playbackState"] | undefined {
+  if (value === "playing" || value === "paused" || value === "buffering" || value === "idle" || value === "stopped") {
+    return value;
+  }
+  return value === "unknown" ? "unknown" : undefined;
+}
+
+function currentQueueMediaUri(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  if (boundedText(value.uri, 2_048)) return value.uri;
+  if (isRecord(value.media_item) && boundedText(value.media_item.uri, 2_048)) return value.media_item.uri;
+  return undefined;
 }
 
 function validateSearchInput(input: {

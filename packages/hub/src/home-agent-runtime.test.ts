@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 
 import {
   createLaunchEnvironmentSnapshot,
@@ -11,8 +12,23 @@ import {
 
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { createHomeAgentRuntime } from "./home-agent-runtime.js";
+import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home-onboarding-store.js";
 import { SyntheticMediaCatalogProvider } from "./home-media-services.js";
 import { SqliteProposalStore } from "./proposal-store.js";
+import { SyntheticBridge } from "./synthetic-bridge.js";
+import { WorldIdentityManager } from "./world-identity.js";
+import type { BridgeAdapter } from "../../../contracts/bridge-contract.js";
+import type { ActionsExtension } from "../../../contracts/bridge-actions.js";
+
+const fixtureReviewPrincipal = {
+  principalId: "household-member",
+  role: "adult_member" as const,
+  present: true,
+  device: {
+    kind: "private" as const,
+    boundPrincipalId: "household-member",
+  },
+};
 
 function launchEnvironment() {
   return createLaunchEnvironmentSnapshot([{
@@ -26,6 +42,107 @@ function homeWorldOptions() {
     catalog: new BridgeCatalog(),
     bridges: [],
     monitorIntervalMs: 0,
+  };
+}
+
+function actionHomeWorldOptions() {
+  const bridge = new SyntheticBridge({
+    bridgeId: "runtime-actions",
+    remoteInstanceId: "runtime-actions-remote",
+    extensions: [{ id: "actions", version: "1.0.0" }],
+  });
+  const epochId = "runtime-actions-epoch";
+  bridge.enqueue({
+    epochId,
+    seq: 1,
+    event: {
+      kind: "sync-start",
+      snapshotId: "runtime-actions-snapshot",
+      remoteInstanceId: "runtime-actions-remote",
+      reason: "initial",
+    },
+  });
+  bridge.enqueue({
+    epochId,
+    seq: 2,
+    event: {
+      kind: "device-upserted",
+      device: {
+        nativeId: "runtime-device",
+        capabilities: [{ nativeInstanceId: "runtime-capability", schema: "runtime.synthetic", schemaVersion: "1.0.0" }],
+      },
+    },
+  });
+  bridge.enqueue({
+    epochId,
+    seq: 3,
+    event: {
+      kind: "state",
+      state: {
+        nativeId: "runtime-device",
+        nativeInstanceId: "runtime-capability",
+        attrs: { state: "on" },
+        time: { sourceTsQuality: "none" },
+        origin: "observed",
+      },
+    },
+  });
+  bridge.enqueue({
+    epochId,
+    seq: 4,
+    event: {
+      kind: "sync-complete",
+      manifest: { snapshotId: "runtime-actions-snapshot", deviceEnvelopeCount: 1, stateEnvelopeCount: 1 },
+    },
+  });
+  const actions: ActionsExtension = {
+    describe: () => ({ action: { kind: "set_boolean", value: false }, reversible: true }),
+    execute: async () => ({ status: "acknowledged" }),
+  };
+  const adapter: BridgeAdapter = {
+    info: bridge.info,
+    control: bridge.control,
+    events: (signal) => (async function* () {
+      yield* bridge.events(signal);
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    })(),
+    extension: (name) => name === "actions@1" ? actions as never : undefined,
+  };
+  const catalog = new BridgeCatalog();
+  catalog.register({
+    adapterType: "synthetic",
+    configSchema: z.object({}).strict(),
+    credentialRequirements: [],
+    capabilitySchemas: [{
+      schema: "runtime.synthetic",
+      majorVersion: 1,
+      attrsSchema: z.record(z.string(), z.unknown()),
+      canonicalHash: "runtime.synthetic-v1",
+    } as never],
+    factory: () => adapter,
+  });
+  return {
+    catalog,
+    bridges: [{ bridgeId: "runtime-actions", adapterType: "synthetic", config: {} }],
+    monitorIntervalMs: 0,
+    identityManager: new WorldIdentityManager({
+      idFactory: (kind) => ({
+        hw: "hw-runtime",
+        hwCapability: "hwc-runtime",
+        hwSpace: "hws-runtime",
+        proposal: "proposal-runtime",
+        audit: "audit-runtime",
+      })[kind],
+    }),
+    actionAuthorityConfig: {
+      "hwc-runtime": {
+        bridgeId: "runtime-actions",
+        approved: true,
+        policyClass: "direct" as const,
+        configIdentity: `sha256:${"c".repeat(64)}`,
+        configRevision: 1,
+      },
+    },
   };
 }
 
@@ -48,13 +165,15 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 7), [
+  assert.deepEqual(pluginOrder.slice(0, 9), [
     "HomeWorldService",
     "HomeMediaPlayerService",
     "HomeObservationAuditService",
     "HomeProposalService",
     "HomeArtifactService",
     "HomeRetentionService",
+    "HouseholdReviewCenterService",
+    "HomeBatchActionService",
     "DshHomeAgentComposition",
   ]);
   assert.equal(runtime.context.root, runtime.context);
@@ -69,6 +188,7 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeObservationAudit.name, "homeObservationAudit");
   assert.equal(runtime.context.homeArtifacts.capabilities().canExecute, false);
   assert.equal(runtime.context.homeAdvice.name, "homeAdvice");
+  assert.equal(runtime.context.homeBatchActions.name, "homeBatchActions");
   assert.equal(runtime.context.homeInbox.name, "homeInbox");
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(pluginOrder.includes("ProposalInboxService"), true);
@@ -84,10 +204,72 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeObservationAudit, undefined);
   assert.equal(runtime.context.homeArtifacts, undefined);
   assert.equal(runtime.context.homeAdvice, undefined);
+  assert.equal(runtime.context.homeBatchActions, undefined);
   assert.equal(runtime.context.homeInbox, undefined);
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
   await runtime.stop();
+});
+
+test("wires the HomeWorld action descriptor source into the runtime review center", async () => {
+  const runtime = createHomeAgentRuntime({
+    homeWorld: actionHomeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "runtime-action-descriptor-test",
+    },
+  });
+
+  try {
+    await runtime.start();
+    let descriptor: unknown;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      descriptor = runtime.context.homeReviewCenter.actionDescriptorFor("hwc-runtime");
+      if (descriptor !== undefined) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(descriptor, {
+      action: { kind: "set_boolean", value: false },
+      reversible: true,
+      policyClass: "direct",
+    });
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("mounts one durable household review center and disposes it with the root", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-runtime-review-center-"));
+  const reviewCenterPath = join(directory, "one-shot-actions.sqlite");
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    homeReviewCenter: { path: reviewCenterPath },
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "review-center-runtime-test",
+    },
+  });
+
+  try {
+    await runtime.start();
+    const reviewCenter = (runtime.context as unknown as { homeReviewCenter?: {
+      counts(): { readonly runtimeConfirmations: number };
+    } }).homeReviewCenter;
+    assert.notEqual(reviewCenter, undefined);
+    assert.equal(existsSync(reviewCenterPath), true);
+    assert.deepEqual(reviewCenter?.counts(), {
+      runtimeConfirmations: 0,
+    });
+  } finally {
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+
+  assert.equal(runtime.context.homeReviewCenter, undefined);
 });
 
 test("mounts an explicit synthetic media catalog before the DSH Agent", async () => {
@@ -116,8 +298,10 @@ test("mounts an explicit synthetic media catalog before the DSH Agent", async ()
   try {
     assert.equal(runtime.context.homeMediaCatalog.name, "homeMediaCatalog");
     assert.equal(runtime.context.homeMediaPlaybackPreparation.name, "homeMediaPlaybackPreparation");
+    assert.equal(runtime.context.homeMediaConversation.name, "homeMediaConversation");
     assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "search_home_media"), true);
     assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "prepare_home_media_playback"), true);
+    assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "home_media_conversation"), true);
     const result = await runtime.context.tools.execute({
       callId: "synthetic-jazz-search" as never,
       name: "search_home_media",
@@ -148,6 +332,7 @@ test("mounts an explicit synthetic media catalog before the DSH Agent", async ()
   }
   assert.equal(runtime.context.homeMediaCatalog, undefined);
   assert.equal(runtime.context.homeMediaPlaybackPreparation, undefined);
+  assert.equal(runtime.context.homeMediaConversation, undefined);
 });
 
 test("mounts the explicit retention coordinator without starting a timer", async () => {
@@ -206,14 +391,19 @@ test("mounts authenticated Inbox HTTP only when explicitly configured", async ()
       model: "deepseek-v4-flash",
       sessionId: "inbox-http-test",
     },
-    inboxHttp: { port: 0, authenticate: () => true },
+    inboxHttp: { port: 0, authenticate: () => true, principal: fixtureReviewPrincipal },
   });
 
   await runtime.start();
-  assert.match(runtime.context.homeInboxHttp.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
-  assert.equal(runtime.context.homeObservationScheduler.snapshot().enabled, false);
-  assert.match(runtime.context.homeInbox.renderList(), /Observe now/i);
-  await runtime.stop();
+  try {
+    assert.match(runtime.context.homeInboxHttp.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.equal(runtime.context.homeObservationScheduler.snapshot().enabled, false);
+    const home = await fetch(`${runtime.context.homeInboxHttp.origin}/home`);
+    assert.equal(home.status, 200);
+    assert.match(await home.text(), /data-route="overview"/);
+  } finally {
+    await runtime.stop();
+  }
   assert.equal(runtime.context.homeInboxHttp, undefined);
 });
 
@@ -236,9 +426,51 @@ test("mounts the opt-in Hub observation scheduler after the DSH Home Agent", asy
 
   await runtime.start();
   assert.equal(runtime.context.homeObservationScheduler.name, "homeObservationScheduler");
-  assert.match(runtime.context.homeInbox.renderList(), /Observation: waiting/);
+  assert.equal(runtime.context.homeObservationScheduler.snapshot().state, "waiting");
   await runtime.stop();
   assert.equal(runtime.context.homeObservationScheduler, undefined);
+});
+
+test("uses the persisted onboarding observation schedule as the production runtime source", async () => {
+  const initial = initialHomeOnboardingState("2026-08-19T04:00:00.000Z");
+  const completedSteps = [1, 2, 3, 4, 5, 6] as const;
+  const steps = { ...initial.steps };
+  for (const step of completedSteps) steps[step] = { status: "completed", updatedAt: initial.updatedAt, summary: "已完成" };
+  const store = new InMemoryHomeOnboardingStore({
+    ...initial,
+    currentStep: 7,
+    completedSteps,
+    steps,
+    observation: {
+      enabled: true,
+      intervalMinutes: 720,
+      quietHours: { start: "22:00", end: "08:00" },
+      configuredAt: initial.updatedAt,
+    },
+  });
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    homeOnboarding: { store },
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "onboarding-observation-runtime-test",
+    },
+  });
+
+  await runtime.start();
+  try {
+    assert.deepEqual(runtime.context.homeObservationScheduler.snapshot(), {
+      enabled: true,
+      intervalMinutes: 720,
+      quietHours: { start: "22:00", end: "08:00" },
+      runOnStart: false,
+      state: "waiting",
+    });
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("provides the immutable DSH launch environment before any runtime plugin mounts", () => {

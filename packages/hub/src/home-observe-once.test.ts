@@ -16,6 +16,10 @@ const ENV = {
   DEEPSEEK_API_KEY: "test-model-key",
   HOB_INBOX_AUTH_TOKEN: "x".repeat(32),
   HOB_INBOX_PORT: "8787",
+  HOB_INBOX_PRINCIPAL_ID: "household-member",
+  HOB_INBOX_PRINCIPAL_ROLE: "adult_member",
+  HOB_INBOX_DEVICE_KIND: "private",
+  HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID: "household-member",
   HOB_OBSERVATION_INTERVAL_MINUTES: "360",
 };
 

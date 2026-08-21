@@ -1,0 +1,758 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  renderProductShell,
+  type ProductShellModel,
+} from "./product-shell.js";
+import { PRODUCT_SHELL_CSS } from "./product-shell-styles.js";
+
+function model(overrides: Partial<ProductShellModel> = {}): ProductShellModel {
+  return {
+    route: "overview",
+    household: { name: "小海的家", agentName: "阿灶", memberName: "小海", memberRole: "管理员" },
+    connection: { state: "quiet", lastChanged: "刚刚" },
+    runtimeConfirmations: [
+      {
+        id: "water-valve",
+        title: "关闭厨房总水阀",
+        effect: "厨房漏水处置中",
+        source: "安全警报处置",
+        eligibleActor: "需要管理员",
+        expiresIn: "3 分钟",
+        expiresAt: "2026-08-21T13:03:00.000Z",
+        expiresLabel: "今天 21:03",
+        policyClass: "administrator",
+      },
+    ],
+    proposals: [
+      {
+        id: "media-power",
+        revision: 1,
+        title: "睡前自动关掉多媒体室电源",
+        summary: "观察了 12 天 · 14 天后自然过期",
+        why: ["连续 12 天，你在 23:00 之后手动关掉多媒体室的插线板"],
+        willDo: ["每天 23:30，若多媒体室 30 分钟无人且没有播放，关闭插线板"],
+        dependency: "需要「插座」授权（当前未开）",
+        snoozeCount: 0,
+        stage: "direction",
+      },
+    ],
+    spaces: [
+      {
+        id: "living-room",
+        name: "客厅",
+        deviceCount: 8,
+        peopleCount: 2,
+        metrics: [{ label: "温度", value: "24.5°" }, { label: "湿度", value: "52%" }],
+        devices: ["顶灯 · 开", "灯带 · 开", "空调 26°"],
+      },
+    ],
+    activity: [
+      {
+        id: "activity-1",
+        dateGroup: "today",
+        time: "21:12",
+        title: "客厅顶灯 已打开 · 空调调到 26°",
+        attribution: "hob",
+        actor: "阿灶",
+        cause: ["门磁传感器打开", "触发场景「回家」v3", "执行客厅顶灯与空调动作"],
+      },
+    ],
+    ...overrides,
+  };
+}
+
+test("renders a responsive shell with independent runtime and proposal badges", () => {
+  const html = renderProductShell(model());
+
+  assert.match(html, /<aside[^>]+aria-label="家庭导航"/);
+  assert.match(html, /<nav[^>]+aria-label="家庭导航"/);
+  assert.match(html, /等待你放行/);
+  assert.match(html, /给家的建议/);
+  assert.match(html, /data-badge="runtime"/);
+  assert.match(html, /data-badge="proposal"/);
+  assert.match(html, /data-count="1"/);
+  assert.match(html, /data-count="1\/5"/);
+  assert.equal(html.includes("data-count=\"2\""), false);
+  assert.match(html, /<main[^>]+id="product-main"/);
+  assert.match(html, /小海的家/);
+});
+
+test("keeps a host-owned safety banner above navigation and distinguishes quiet from disconnected", () => {
+  const html = renderProductShell(model({
+    connection: { state: "disconnected", lastContact: "3 小时前" },
+    safetyAlerts: [{
+      id: "leak",
+      title: "厨房漏水传感器有水",
+      body: "先关闭厨房总水阀，再确认现场。",
+      source: "漏水传感器",
+      status: "active",
+      actionLabel: "查看处置",
+    }],
+  }));
+
+  assert.match(html, /data-host-owned="true"/);
+  assert.match(html, /role="alert"/);
+  assert.match(html, /href="\/review-center"/);
+  assert.match(html, /action="\/safety\/leak\/acknowledge"/);
+  assert.match(html, /我已看到/);
+  assert.match(html, /data-snooze-allowed="false"/);
+  assert.doesNotMatch(html.slice(0, html.indexOf('<a class="product-skip-link"')), /暂缓|稍后提醒/iu);
+  assert.ok(html.indexOf("data-host-owned=\"true\"") < html.indexOf("家庭导航"));
+  assert.match(html, /连接中断/);
+  assert.match(html, /最后联系 3 小时前/);
+  assert.equal(html.includes("连接正常 · 家中无变化"), false);
+});
+
+test("shows one Hub-owned background completion notice with the original conversation link", () => {
+  const html = renderProductShell(model({
+    route: "overview",
+    completionNotification: {
+      adviceId: "advice-background-1",
+      status: "completed",
+      completedAt: "2026-08-22T08:00:00.000Z",
+    },
+  }));
+
+  assert.match(html, /data-background-completion="completed"/);
+  assert.match(html, /后台问题已经有结果/);
+  assert.match(html, /href="\/conversation\/advice-background-1"/);
+});
+
+test("keeps an acknowledged safety fact visible while lowering the announcement level", () => {
+  const html = renderProductShell(model({
+    safetyAlerts: [{
+      id: "smoke:1",
+      title: "烟雾传感器触发",
+      source: "走廊烟雾传感器",
+      status: "acknowledged",
+      severity: "safety",
+      snoozeAllowed: false,
+      canAcknowledge: false,
+    }],
+  }));
+  assert.match(html, /已看到 · 事实仍在持续/);
+  assert.match(html, /data-safety-status="acknowledged"/);
+  assert.match(html, /aria-live="polite"/);
+  assert.equal(html.includes("我已看到"), false);
+});
+
+test("projects unknown household facts and connection states without inventing a configured home", () => {
+  const unknown = renderProductShell(model({
+    household: {},
+    connection: { state: "unknown" },
+    spaces: [],
+    activity: [],
+    route: "overview",
+  }));
+
+  assert.match(unknown, /家庭名称待设置/);
+  assert.match(unknown, /正在确认家庭连接/);
+  assert.match(unknown, /正在确认家里的状态/);
+  assert.match(unknown, /家庭空间会在连接完成后显示/);
+  assert.doesNotMatch(unknown, /家庭状态稳定|小海|管理员/);
+
+  const connecting = renderProductShell(model({
+    household: {},
+    connection: { state: "connecting" },
+    spaces: [],
+  }));
+  assert.match(connecting, /正在连接家里/);
+  assert.match(connecting, /正在读取家里的当前状态/);
+
+  const settings = renderProductShell(model({
+    route: "settings",
+    household: {},
+  }));
+  assert.match(settings, /当前成员.*待设置/s);
+  assert.match(settings, /身份.*待确认/s);
+  assert.doesNotMatch(settings, /小海|管理员手机确认/);
+
+  const conversation = renderProductShell(model({
+    route: "conversation",
+    household: {},
+  }));
+  assert.match(conversation, /和家庭助手对话/);
+  assert.match(conversation, /家庭名称待设置/);
+  assert.doesNotMatch(conversation, /阿灶|小海的家/);
+  assert.match(conversation, /处理进度和结果会显示在这里/);
+  assert.doesNotMatch(conversation, /可撤销窗口|告诉你已完成的动作|10 秒/);
+});
+
+test("renders the bounded activity projection without inert filter controls", () => {
+  const html = renderProductShell(model({ route: "activity" }));
+
+  assert.doesNotMatch(html, /class="product-filters"/);
+  assert.doesNotMatch(html, /<select[^>]+activity-/);
+  assert.match(html, /家里发生了什么/);
+});
+
+test("renders streaming stop/background states and only offers a ten-second undo for verified work", () => {
+  const overview = renderProductShell(model({
+    activeTurn: {
+      id: "turn-1",
+      question: "把客厅灯打开",
+      status: "inspecting",
+      stage: "checking_home",
+      statusMessage: "正在查看客厅灯",
+      canStop: true,
+    },
+  }));
+  assert.match(overview, /正在查看客厅灯/);
+  assert.match(overview, /href="\/conversation\/turn-1"/);
+
+  const html = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      id: "turn-1",
+      question: "把客厅灯打开",
+      status: "streaming",
+      stage: "checking_home",
+      elapsedSeconds: 12,
+      streamText: "我正在核对客厅灯的当前状态。",
+      canStop: true,
+      canBackground: true,
+    },
+    undo: {
+      id: "undo-1",
+      label: "客厅顶灯已打开",
+      inverseLabel: "撤销这次打开",
+      remainingSeconds: 8,
+      status: "available",
+    },
+  }));
+
+  assert.match(html, /我正在核对客厅灯的当前状态/);
+  assert.match(html, />停止</);
+  assert.match(html, /稍后处理/);
+  assert.match(html, /撤销/);
+  assert.match(html, /10 秒内/);
+  assert.match(html, /remaining-seconds="8"/);
+
+  const failed = renderProductShell(model({
+    route: "conversation",
+    activeTurn: { id: "turn-2", question: "关灯", status: "failed", error: "家中连接正在恢复" },
+    undo: { id: "undo-2", label: "关灯", inverseLabel: "撤销", remainingSeconds: 9, status: "unknown" },
+  }));
+  assert.match(failed, /家中连接正在恢复/);
+  assert.equal(failed.includes("10 秒内"), false);
+});
+
+test("renders only completed answers as completion and keeps idle or unknown turns waiting", () => {
+  const idle = renderProductShell(model({
+    route: "conversation",
+    activeTurn: { id: "idle-1", question: "现在家里怎么样？", status: "idle" },
+  }));
+  assert.match(idle, /等待你继续提问|等待处理/);
+  assert.doesNotMatch(idle, /已完成|已经完成/);
+
+  const unknown = renderProductShell(model({
+    route: "conversation",
+    activeTurn: { id: "unknown-1", question: "现在家里怎么样？", status: "unknown" },
+  }));
+  assert.match(unknown, /正在确认这次问题的状态|等待处理/);
+  assert.doesNotMatch(unknown, /已完成|已经完成/);
+
+  const completed = renderProductShell(model({
+    route: "conversation",
+    activeTurn: { id: "completed-1", question: "现在家里怎么样？", status: "completed", answer: "家里状态稳定。" },
+  }));
+  assert.match(completed, /家里状态稳定/);
+  assert.match(completed, /已完成/);
+});
+
+test("states missing proposal evidence and actions without inventing recent context or a seven-day trial", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    selectedProposalId: "proposal-empty",
+    proposals: [{
+      id: "proposal-empty",
+      revision: 1,
+      title: "一项待补充的家庭建议",
+      status: "pending",
+      stage: "direction",
+    }],
+    selectedProposal: {
+      id: "proposal-empty",
+      revision: 1,
+      title: "一项待补充的家庭建议",
+      status: "pending",
+      stage: "direction",
+    },
+  }));
+  assert.match(html, /暂无已记录证据/);
+  assert.match(html, /待补充/);
+  assert.doesNotMatch(html, /最近家里的情况/);
+  assert.doesNotMatch(html, /试运行 7 天/);
+});
+
+test("offers explicit correction choices only on a completed conversation turn", () => {
+  const completed = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      id: "advice-1",
+      question: "窗帘为什么有时开得太早？",
+      status: "completed",
+      answer: "最近两周有几次手动调整。",
+    },
+  }));
+  assert.match(completed, /action="\/conversation\/advice-1\/correction"/);
+  assert.match(completed, /name="correctionType" value="household_fact"/);
+  assert.match(completed, /name="correctionType" value="household_preference"/);
+  assert.match(completed, /name="correctionType" value="future_behavior"/);
+  assert.match(completed, /name="idempotencyKey" value="advice-1:correction"/);
+  assert.match(completed, /name="correction"/);
+  assert.doesNotMatch(completed, /action="\/conversation\/advice-1\/correction"[^>]*>[^]*name="correctionType" value="other"/);
+
+  const failed = renderProductShell(model({
+    route: "conversation",
+    activeTurn: { id: "advice-failed", question: "刚才发生了什么？", status: "failed" },
+  }));
+  assert.doesNotMatch(failed, /correctionType/);
+});
+
+test("shows correction acknowledgement only when the Hub projection supplies it", () => {
+  const ordinary = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      id: "advice-ordinary",
+      question: "家里现在安静吗？",
+      status: "completed",
+      answer: "连接正常，家中没有新的变化。",
+    },
+  }));
+  assert.doesNotMatch(ordinary, /已更新/);
+  const acknowledged = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      id: "advice-1",
+      question: "窗帘为什么有时开得太早？",
+      status: "completed",
+      answer: "最近两周有几次手动调整。",
+      correctionAck: "已更新",
+      correctionDestination: "处理中心 · 给家的建议",
+      correctionProposalId: "proposal-1",
+      correctionProposalCount: 1,
+    },
+  }));
+  assert.match(acknowledged, /已更新/);
+  assert.match(acknowledged, /处理中心 · 给家的建议/);
+  assert.match(acknowledged, /当前 1 条建议/);
+});
+
+test("separates proposal snooze from the two-consent detail and explains activity cause attribution", () => {
+  const review = renderProductShell(model({ route: "reviews", selectedProposalId: "media-power" }));
+
+  assert.match(review, /data-runtime-countdown/);
+  assert.match(review, /data-expires-at="2026-08-21T13:03:00.000Z"/);
+  assert.match(review, /今天 21:03/);
+  assert.doesNotMatch(review, />2026-08-21T13:03:00.000Z</);
+  assert.match(review, /查看建议/);
+  assert.match(review, /暂缓/);
+  assert.match(review, /明天晚上/);
+  assert.match(review, /周末/);
+  assert.match(review, /下周/);
+  assert.match(review, /name="until" value="next_week"/);
+  assert.doesNotMatch(review, /value="next-week"/);
+  assert.match(review, /action="\/review-center\/proposals\/media-power\/review"/);
+  assert.match(review, /name="expectedRevision" value="1"/);
+  assert.match(review, /name="decision" value="approved"/);
+  assert.match(review, /name="feedbackCode" value="useful_as_is"/);
+  assert.doesNotMatch(review, /action="\/review-center\/proposals\/media-power\/advance"/);
+  assert.match(review, /确认方向，开始准备/);
+  assert.match(review, /试运行阶段/);
+  assert.match(review, /你决定是否长期使用/);
+  assert.match(review, /action="\/review-center\/proposals\/media-power\/reject"[^>]*>/);
+  assert.match(review, /action="\/review-center\/proposals\/media-power\/reject-latch"[^>]*>/);
+  assert.match(review, /需要「插座」授权/);
+
+  const activity = renderProductShell(model({ route: "activity" }));
+  assert.match(activity, /今天/);
+  assert.match(activity, /为什么会这样/);
+  assert.match(activity, /data-attribution="hob"/);
+  assert.match(activity, /由阿灶完成/);
+  assert.match(activity, /触发场景「回家」v3/);
+});
+
+test("uses the household agent name for agent-attributed activity", () => {
+  const activity = renderProductShell(model({
+    route: "activity",
+    household: { name: "山海的家", agentName: "小满" },
+  }));
+
+  assert.match(activity, /data-attribution="hob"[^>]*>小满</);
+  assert.doesNotMatch(activity, />阿灶</);
+});
+
+test("keeps the selected proposal visible through trial and renders the second enablement consent", () => {
+  const html = renderProductShell({
+    route: "reviews",
+    selectedProposalId: "proposal-enable",
+    proposals: [],
+    selectedProposal: {
+      id: "proposal-enable",
+      revision: 9,
+      title: "周末窗帘慢亮",
+      stage: "enable",
+      status: "approved",
+    },
+  });
+
+  assert.match(html, /周末窗帘慢亮/);
+  assert.match(html, /action="\/review-center\/proposals\/proposal-enable\/enable"/);
+  assert.match(html, /name="expectedRevision" value="9"/);
+  assert.match(html, /确认长期使用/);
+});
+
+test("ships responsive and preference-aware presentation tokens without decorative assets", () => {
+  const html = renderProductShell(model());
+  assert.match(PRODUCT_SHELL_CSS, /prefers-reduced-motion/);
+  assert.match(PRODUCT_SHELL_CSS, /prefers-reduced-transparency/);
+  assert.match(PRODUCT_SHELL_CSS, /prefers-contrast/);
+  assert.match(PRODUCT_SHELL_CSS, /max-width: 56rem/);
+  assert.match(PRODUCT_SHELL_CSS, /-apple-system/);
+  assert.equal(PRODUCT_SHELL_CSS.includes("gradient"), false);
+  assert.equal(PRODUCT_SHELL_CSS.includes("<svg"), false);
+  assert.doesNotMatch(html, /[⌄✓●→↗⚙⌂◷≋▱□]/);
+  assert.equal(html.includes('class="product-mobile-header"'), false);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-main > \.product-composer \{ position: fixed;/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-composer \{ grid-template-columns: minmax\(0, 1fr\) auto;/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-shell\[data-route="onboarding"\] \.product-mobile-nav \{ display: none;/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-shell\[data-route="onboarding"\] \.product-onboarding-list \{ display: none;/);
+});
+
+test("keeps control, settings, and onboarding as reachable server-rendered destinations", () => {
+  const control = renderProductShell(model({ route: "control" }));
+  const settings = renderProductShell(model({ route: "settings" }));
+  const onboarding = renderProductShell(model({ route: "onboarding", onboarding: { step: 5 } }));
+
+  assert.match(control, /<h1>家里的状态<\/h1>/);
+  assert.match(control, /正在更新这个空间的状态/);
+  assert.doesNotMatch(control, /action="\/control\/living-room-0"/);
+  assert.match(settings, /家庭设置/);
+  assert.match(settings, /继续首次设置/);
+  assert.match(onboarding, /第 5 步，共 8 步/);
+  assert.match(onboarding, /设置操作权限/);
+  assert.match(onboarding, /action="\/onboarding\/continue"/);
+});
+
+test("renders neutral control forms and explicit action feedback with a ten-second undo", () => {
+  const html = renderProductShell(model({
+    route: "control",
+    controlSpaces: [{
+      id: "living-room",
+      name: "客厅",
+      deviceCount: 1,
+      devices: ["顶灯 · 开"],
+      controls: [{ id: "cap-light", label: "顶灯", value: "开", actionLabel: "关闭" }],
+    }],
+    controlFeedback: {
+      capabilityId: "cap-light",
+      ticketId: "action-ticket-1",
+      status: "verified",
+      label: "关闭顶灯",
+      detail: "关闭顶灯已完成。",
+      undo: {
+        id: "action-ticket-1",
+        label: "关闭顶灯已完成",
+        inverseLabel: "恢复打开",
+        remainingSeconds: 9,
+        status: "available",
+      },
+    },
+  }));
+
+  assert.match(html, /action="\/control\/cap-light"/);
+  assert.match(html, /data-control-status="verified"/);
+  assert.match(html, /关闭顶灯已完成/);
+  assert.match(html, /action="\/actions\/action-ticket-1\/undo"/);
+  assert.match(html, /10 秒内/);
+  assert.doesNotMatch(html, /light\.living/);
+
+  const pending = renderProductShell(model({
+    route: "control",
+    controlFeedback: {
+      capabilityId: "cap-lock",
+      ticketId: "confirmation-1",
+      status: "pending_confirmation",
+      label: "锁上入户门",
+      detail: "锁上入户门正在等待你放行。",
+      expiresAt: "2026-08-20T10:00:10.000Z",
+    },
+  }));
+  assert.match(pending, /data-control-status="pending_confirmation"/);
+  assert.match(pending, /等待你放行/);
+  assert.match(pending, /data-control-expires-at="2026-08-20T10:00:10.000Z"/);
+
+  const failed = renderProductShell(model({
+    route: "control",
+    controlFeedback: {
+      capabilityId: "cap-light",
+      ticketId: "action-ticket-2",
+      status: "failed",
+      label: "关闭顶灯",
+      detail: "关闭顶灯没有完成，家里保持原状。",
+    },
+  }));
+  assert.match(failed, /data-control-status="failed"/);
+  assert.match(failed, /家里保持原状/);
+});
+
+test("renders bounded batch selection, policy preview, and per-item outcomes", () => {
+  const html = renderProductShell(model({
+    route: "control",
+    batchControl: {
+      preview: {
+        total: 3,
+        direct: 1,
+        confirmation: 1,
+        administrator: 1,
+        items: [
+          { capabilityId: "cap-light", label: "顶灯", actionLabel: "关闭", policyClass: "direct" },
+          { capabilityId: "cap-fan", label: "风扇", actionLabel: "调到二档", policyClass: "confirmation" },
+          { capabilityId: "cap-lock", label: "门锁", actionLabel: "锁门", policyClass: "administrator" },
+        ],
+      },
+      result: {
+        requestId: "batch-request-1",
+        counts: { total: 3, verified: 1, pending_confirmation: 1, failed: 1, unknown: 0 },
+        items: [
+          {
+            capabilityId: "cap-light",
+            requestId: "batch-request-1",
+            policyClass: "direct",
+            status: "verified",
+            ticketId: "ticket-light",
+            reason: "动作已完成并验证。",
+            verification: "verified",
+            label: "顶灯",
+          },
+          {
+            capabilityId: "cap-fan",
+            requestId: "batch-request-1",
+            policyClass: "confirmation",
+            status: "pending_confirmation",
+            ticketId: "ticket-fan",
+            reason: "等待现有确认所有者处理。",
+            verification: "pending_confirmation",
+            label: "风扇",
+          },
+          {
+            capabilityId: "cap-lock",
+            requestId: "batch-request-1",
+            policyClass: "administrator",
+            status: "failed",
+            reason: "管理员确认未完成。",
+            verification: "failed",
+            label: "门锁",
+          },
+        ],
+      },
+    },
+  }));
+
+  assert.match(html, /data-batch-control/);
+  assert.match(html, /action="\/control\/batch"/);
+  assert.match(html, /name="capabilityId" value="cap-light"/);
+  assert.match(html, /name="capabilityId" value="cap-fan"/);
+  assert.match(html, /name="capabilityId" value="cap-lock"/);
+  assert.match(html, /data-batch-policy-class="direct"/);
+  assert.match(html, /data-batch-policy-class="confirmation"/);
+  assert.match(html, /data-batch-policy-class="administrator"/);
+  assert.match(html, /data-batch-count="total"[^>]*>3/);
+  assert.match(html, /data-batch-count="direct"[^>]*>1/);
+  assert.match(html, /data-batch-count="confirmation"[^>]*>1/);
+  assert.match(html, /data-batch-count="administrator"[^>]*>1/);
+  assert.match(html, /data-batch-result-status="verified"[^>]*data-ticket-id="ticket-light"/);
+  assert.match(html, /data-batch-result-status="pending_confirmation"[^>]*data-ticket-id="ticket-fan"/);
+  assert.match(html, /data-batch-result-status="failed"/);
+  assert.match(html, /每项动作分别处理/);
+  assert.doesNotMatch(html, /整批.*成功|batch.*success/i);
+});
+
+test("does not render a batch action surface when the owner omits it", () => {
+  const html = renderProductShell(model({ route: "control" }));
+  assert.doesNotMatch(html, /data-batch-control/);
+});
+
+test("renders all eight onboarding steps with clear server-postable fields", () => {
+  const expectations: readonly [number, RegExp, RegExp][] = [
+    [1, /认识与起名|给家起个名字/, /name="agentName"/],
+    [2, /只读接桥|接入已有的家|只读/, /name="bridgeId"/],
+    [3, /家庭地图|确认现在的家/, /name="mapConfirmed"/],
+    [4, /成员与管理员|家里都有谁/, /name="memberName"/],
+    [5, /分档操作权限|设置操作权限/, /家庭能力列表正在准备|name="capability:/],
+    [6, /安全预演|红色的规矩/, /name="safetyAcknowledged"/],
+    [7, /第一周期待|第一周/, /name="observationInterval"/],
+    [8, /第一问|跟阿灶说句话/, /name="firstQuestion"/],
+  ];
+
+  for (const [step, content, field] of expectations) {
+    const html = renderProductShell(model({
+      route: "onboarding",
+      onboarding: { step },
+    }));
+    assert.match(html, new RegExp(`data-onboarding-step="${step}"`));
+    assert.match(html, content);
+    assert.match(html, field);
+    assert.match(html, new RegExp(`name="step" value="${step}"`));
+    assert.match(html, /method="post" action="\/onboarding\/continue"/);
+    assert.match(html, /<button[^>]+type="submit"/);
+  }
+
+  const safety = renderProductShell(model({ route: "onboarding", onboarding: { step: 6 } }));
+  assert.match(safety, /name="safetyAcknowledged"[^>]+required/);
+});
+
+test("renders only projected bridge and capability ids, with a blocked read-only state when choices are absent", () => {
+  const dynamic = {
+    route: "onboarding" as const,
+    onboarding: {
+      step: 2,
+      choices: {
+        status: "available" as const,
+        bridges: [
+          { id: "xiaomi-main", label: "小米家庭", description: "已完成只读同步", selectable: true },
+        ],
+        capabilities: [
+          { id: "cap-lamp", label: "客厅主灯 · 灯光", bridgeId: "xiaomi-main", bridgeLabel: "小米家庭", suggestedPolicyClass: "direct" as const },
+        ],
+      },
+    },
+  } as unknown as ProductShellModel;
+  const bridgeHtml = renderProductShell(model(dynamic));
+  assert.match(bridgeHtml, /value="xiaomi-main"/);
+  assert.match(bridgeHtml, /小米家庭/);
+  assert.doesNotMatch(bridgeHtml, /home-assistant/);
+
+  const permissionHtml = renderProductShell(model({
+    route: "onboarding",
+    onboarding: {
+      step: 5,
+      choices: dynamic.onboarding.choices,
+    } as unknown as ProductShellModel["onboarding"],
+  }));
+  assert.match(permissionHtml, /value="cap-lamp"/);
+  assert.match(permissionHtml, /name="capability:cap-lamp"/);
+  assert.doesNotMatch(permissionHtml, /lights_curtains|media_playback|ordinary_switches|climate|cross_space_batch/);
+
+  const unavailableHtml = renderProductShell(model({
+    route: "onboarding",
+    onboarding: { step: 2, choices: { status: "unavailable", reason: "world_unavailable", bridges: [], capabilities: [] } } as unknown as ProductShellModel["onboarding"],
+  }));
+  assert.match(unavailableHtml, /家庭设置正在准备|连接完成后从这里继续/);
+  assert.match(unavailableHtml, /disabled/);
+  assert.doesNotMatch(unavailableHtml, /value="home-assistant"/);
+});
+
+test("uses affirmative copy that matches the adult binding and observation schedule commands", () => {
+  const member = renderProductShell(model({ route: "onboarding", onboarding: { step: 4 } }));
+  assert.match(member, /在场的成年成员/);
+  assert.doesNotMatch(member, /默认都是管理员|不用建账号|不会拿到审批权/);
+
+  const schedule = renderProductShell(model({ route: "onboarding", onboarding: { step: 7 } }));
+  assert.match(schedule, /name="observationInterval"/);
+  assert.match(schedule, /name="observationEnabled"/);
+  assert.doesNotMatch(schedule, /firstWeekExpectation/);
+  assert.doesNotMatch(schedule, /不会突然|只看、不动手/);
+});
+
+test("accepts neutral step data while keeping household fields escaped and independently named", () => {
+  const html = renderProductShell(model({
+    route: "onboarding",
+    onboarding: {
+      step: 2,
+      steps: [
+        {
+          step: 2,
+          key: "bridge",
+          label: "只读接桥",
+          title: "把已有的家接进来",
+          body: "先读，不改变现有设备。",
+          fields: [
+            {
+              name: "bridgeId",
+              type: "select",
+              label: "选择家庭连接",
+              value: "ha-local",
+              options: [{ value: "ha-local", label: "Home Assistant（只读）" }],
+            },
+            {
+              name: "bridgeNote",
+              type: "textarea",
+              label: "需要说明的事",
+              value: "<本地>",
+            },
+          ],
+          submitLabel: "只读连接",
+        },
+      ],
+    },
+  }));
+
+  assert.match(html, /把已有的家接进来/);
+  assert.match(html, /name="bridgeId"/);
+  assert.match(html, /Home Assistant（只读）/);
+  assert.match(html, /name="bridgeNote"/);
+  assert.match(html, /&lt;本地&gt;/);
+  assert.match(html, />只读连接</);
+});
+
+test("uses product mobile destinations and keeps runtime and proposal badges separate", () => {
+  const html = renderProductShell(model({ route: "control" }));
+
+  assert.match(html, /class="product-mobile-nav-link"[^>]+data-mobile-route="overview"[^>]*>[\s\S]*?家/);
+  assert.match(html, /class="product-mobile-nav-link"[^>]+data-mobile-route="reviews"[^>]*>[\s\S]*?处理/);
+  assert.match(html, /class="product-mobile-nav-link"[^>]+data-mobile-route="control"[^>]*>[\s\S]*?空间/);
+  assert.match(html, /class="product-mobile-nav-link"[^>]+data-mobile-route="activity"[^>]*>[\s\S]*?活动/);
+  assert.match(html, /class="product-mobile-nav-link"[^>]+data-mobile-route="settings"[^>]*>[\s\S]*?设置/);
+  assert.doesNotMatch(html, /class="product-mobile-nav-link"[^>]+data-mobile-route="conversation"/);
+
+  const mobileNav = html.slice(html.indexOf('<nav class="product-mobile-nav"'));
+  assert.match(mobileNav, /data-badge="runtime"/);
+  assert.match(mobileNav, /data-badge="proposal"/);
+  assert.match(mobileNav, /aria-label="1 项等待你放行，1\/5 条建议"/);
+});
+
+test("keeps internal framing and implementation vocabulary out of household copy", () => {
+  const pages = [
+    renderProductShell(model()),
+    renderProductShell(model({ route: "conversation" })),
+    renderProductShell(model({ route: "reviews" })),
+    renderProductShell(model({ route: "activity" })),
+    renderProductShell(model({ route: "control" })),
+    renderProductShell(model({ route: "settings" })),
+    renderProductShell(model({ route: "onboarding" })),
+  ];
+
+  for (const html of pages) {
+    assert.doesNotMatch(html, /家庭上下文|同一份家庭事实|来源与权限|Enter 发送|建议位|提案进度|转后台|策略/);
+  }
+});
+
+test("uses one canonical ProductShell projection and ignores legacy aliases", () => {
+  const legacy = {
+    route: "overview" as const,
+    household: { name: "小海的家", agentName: "阿灶" },
+    connection: { state: "quiet" as const },
+    confirmations: [{ id: "legacy-runtime", title: "legacy-runtime" }],
+    reviews: {
+      runtimeConfirmations: [{ id: "legacy-review-runtime", title: "legacy-review-runtime" }],
+      proposals: [{ id: "legacy-review-proposal", revision: 1, title: "legacy-review-proposal" }],
+    },
+    home: { spaces: [{ id: "legacy-space", name: "legacy-space" }] },
+    turn: { id: "legacy-turn", question: "legacy-turn", status: "completed" as const },
+    safetyAlert: { id: "legacy-safety", title: "legacy-safety", status: "active" as const },
+  } as unknown as ProductShellModel;
+  const legacyHtml = renderProductShell(legacy);
+  assert.doesNotMatch(legacyHtml, /legacy-runtime|legacy-review|legacy-space|legacy-turn|legacy-safety/);
+
+  const canonicalHtml = renderProductShell(model({
+    runtimeConfirmations: [{ id: "canonical-runtime", title: "canonical-runtime" }],
+    spaces: [{ id: "canonical-space", name: "canonical-space" }],
+    activeTurn: { id: "canonical-turn", question: "canonical-turn", status: "completed" },
+    safetyAlerts: [{ id: "canonical-safety", title: "canonical-safety", status: "active" }],
+  }));
+  assert.match(canonicalHtml, /canonical-runtime|canonical-space|canonical-safety/);
+});

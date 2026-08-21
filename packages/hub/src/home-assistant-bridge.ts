@@ -20,6 +20,18 @@ import {
   type StateEvent as ContractStateEvent,
 } from "../../../contracts/bridge-contract.js";
 import {
+  ACTIONS_EXTENSION,
+  bridgeActionDescriptorRequestSchema,
+  bridgeActionDescriptorSchema,
+  bridgeActionRequestSchema,
+  bridgeActionResultSchema,
+  type ActionsExtension,
+  type BridgeActionDescriptor,
+  type BridgeActionDescriptorRequest,
+  type BridgeActionRequest,
+  type BridgeActionResult,
+} from "../../../contracts/bridge-actions.js";
+import {
   FOREIGN_RULES_EXTENSION,
   MAX_FOREIGN_RULES,
   type ForeignRuleCatalog,
@@ -264,6 +276,27 @@ export class HomeAssistantBridge {
     // the consistency boundary.  Do not retain an unbounded pending promise.
     const id = this.nextCommandId++;
     this.send({ id, type: "get_states" });
+  }
+
+  async callService(input: {
+    readonly domain: string;
+    readonly service: string;
+    readonly entityId: string;
+    readonly serviceData?: Readonly<Record<string, string | number | boolean>>;
+  }, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw signal.reason ?? new Error("Home Assistant action cancelled");
+    if (!/^[a-z][a-z0-9_]{0,63}$/.test(input.domain)
+      || !/^[a-z][a-z0-9_]{0,63}$/.test(input.service)
+      || !/^[a-z0-9_]+\.[a-z0-9_]+$/.test(input.entityId)) {
+      throw new TypeError("Home Assistant action is invalid");
+    }
+    await this.command("call_service", {
+      domain: input.domain,
+      service: input.service,
+      target: { entity_id: input.entityId },
+      service_data: { ...(input.serviceData ?? {}) },
+    });
+    if (signal.aborted) throw signal.reason ?? new Error("Home Assistant action cancelled");
   }
 
   private handleMessage(
@@ -611,7 +644,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       coreVersion: HOME_ASSISTANT_CORE_VERSION,
       ecosystem: "home-assistant",
       heartbeatIntervalMs: HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS,
-      extensions: Object.freeze([FOREIGN_RULES_EXTENSION, ORG_HINTS_EXTENSION]),
+      extensions: Object.freeze([FOREIGN_RULES_EXTENSION, ORG_HINTS_EXTENSION, ACTIONS_EXTENSION]),
     });
     this.control = Object.freeze({
       requestResync: (signal: AbortSignal) => this.requestResync(signal),
@@ -628,16 +661,74 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   }
 
   extension<K extends keyof ExtensionHandleRegistry>(name: K): ExtensionHandleRegistry[K] | undefined {
-    if (name !== "foreignRules@2") return undefined;
-    const handle: ForeignRulesHandle = {
-      catalog: async () => this.foreignRuleCatalog === undefined ? undefined : {
-        epochId: this.foreignRuleCatalog.epochId,
-        lastSeq: this.foreignRuleCatalog.lastSeq,
-        complete: this.foreignRuleCatalog.complete,
-        rules: this.foreignRuleCatalog.rules.map((rule) => ({ ...rule })),
-      },
-    };
-    return handle as ExtensionHandleRegistry[K];
+    if (name === "foreignRules@2") {
+      const handle: ForeignRulesHandle = {
+        catalog: async () => this.foreignRuleCatalog === undefined ? undefined : {
+          epochId: this.foreignRuleCatalog.epochId,
+          lastSeq: this.foreignRuleCatalog.lastSeq,
+          complete: this.foreignRuleCatalog.complete,
+          rules: this.foreignRuleCatalog.rules.map((rule) => ({ ...rule })),
+        },
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
+    if (name === "actions@1") {
+      const handle: ActionsExtension = {
+        describe: (request) => this.describeAction(request),
+        execute: (request, options) => this.executeAction(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
+    return undefined;
+  }
+
+  private describeAction(requestValue: BridgeActionDescriptorRequest): BridgeActionDescriptor | undefined {
+    const parsed = bridgeActionDescriptorRequestSchema.safeParse(requestValue);
+    if (!parsed.success || this.lifecycle !== "running" || this.bridge === undefined) return undefined;
+    const target = parsed.data.target;
+    if (target.binding.bridgeId !== this.context.bridgeId) return undefined;
+    const binding = [...this.bindingsByEntityId.values()].find((candidate) => (
+      candidate.nativeId === target.binding.nativeId
+      && candidate.nativeInstanceId === target.binding.nativeInstanceId
+    ));
+    if (binding === undefined) return undefined;
+    const current = this.stateAttrsByNativeInstanceId.get(binding.nativeInstanceId);
+    if (current === undefined) return undefined;
+    const descriptor = homeAssistantActionDescriptor(binding.entityId, current);
+    const validated = bridgeActionDescriptorSchema.safeParse(descriptor);
+    return validated.success ? validated.data : undefined;
+  }
+
+  private async executeAction(requestValue: BridgeActionRequest, signal: AbortSignal): Promise<BridgeActionResult> {
+    const parsed = bridgeActionRequestSchema.safeParse(requestValue);
+    if (!parsed.success || signal.aborted) {
+      return bridgeActionResultSchema.parse({
+        status: "unknown",
+        reason: signal.aborted ? "cancelled" : "upstream_unavailable",
+      });
+    }
+    const request = parsed.data;
+    const target = request.action.target;
+    if (target.binding.bridgeId !== this.context.bridgeId) {
+      return { status: "rejected", reason: "invalid_target" };
+    }
+    const binding = [...this.bindingsByEntityId.values()].find((candidate) => (
+      candidate.nativeId === target.binding.nativeId
+      && candidate.nativeInstanceId === target.binding.nativeInstanceId
+    ));
+    if (binding === undefined || this.bridge === undefined) {
+      return { status: "rejected", reason: "invalid_target" };
+    }
+    const command = homeAssistantActionCommand(request, binding.entityId);
+    if (command === undefined) return { status: "rejected", reason: "unsupported" };
+    try {
+      await this.bridge.callService(command, signal);
+      return { status: "acknowledged" };
+    } catch {
+      return signal.aborted
+        ? { status: "unknown", reason: "cancelled" }
+        : { status: "rejected", reason: "failed" };
+    }
   }
 
   private async *runEvents(signal: AbortSignal): AsyncGenerator<ContractEnvelope> {
@@ -1233,6 +1324,90 @@ function healthForNativeState(state: string): "reachable" | "unreachable" | "unk
   if (state === "unavailable") return "unreachable";
   if (state === "unknown") return "unknown";
   return "reachable";
+}
+
+function homeAssistantActionDescriptor(
+  entityId: string,
+  current: Readonly<Record<string, unknown>>,
+): BridgeActionDescriptor | undefined {
+  const domain = entityId.split(".", 1)[0];
+  const state = typeof current.state === "string" ? current.state : undefined;
+  if (domain === undefined || state === undefined || current.available === false
+    || state === "unknown" || state === "unavailable") return undefined;
+
+  if (["light", "switch", "fan", "input_boolean"].includes(domain)) {
+    if (state !== "on" && state !== "off") return undefined;
+    return { action: { kind: "set_boolean", value: state === "off" }, reversible: true };
+  }
+  if (domain === "lock") {
+    if (state !== "locked" && state !== "unlocked") return undefined;
+    return { action: { kind: "set_boolean", value: state === "locked" }, reversible: true };
+  }
+  if (domain === "cover") {
+    if (state !== "open" && state !== "closed") return undefined;
+    if (current.setLevelSupported === true && typeof current.level === "number"
+      && Number.isFinite(current.level) && current.level >= 0 && current.level <= 1) {
+      return {
+        action: { kind: "set_level", level: current.level > 0 ? 0 : 1 },
+        reversible: true,
+      };
+    }
+    return { action: { kind: "set_boolean", value: state === "closed" }, reversible: true };
+  }
+  if (domain === "media_player") {
+    if (["playing", "paused", "buffering"].includes(state)) {
+      return { action: { kind: "stop_media" }, reversible: false };
+    }
+    if (typeof current.volumeLevel === "number" && Number.isFinite(current.volumeLevel)
+      && current.volumeLevel >= 0 && current.volumeLevel <= 1) {
+      return {
+        action: { kind: "set_level", level: current.volumeLevel > 0 ? 0 : 1 },
+        reversible: true,
+      };
+    }
+  }
+  return undefined;
+}
+
+function homeAssistantActionCommand(
+  request: BridgeActionRequest,
+  entityId: string,
+): {
+  readonly domain: string;
+  readonly service: string;
+  readonly entityId: string;
+  readonly serviceData?: Readonly<Record<string, string | number | boolean>>;
+} | undefined {
+  const domain = entityId.split(".", 1)[0];
+  if (domain === undefined) return undefined;
+  const action = request.action;
+  if (action.kind === "set_boolean") {
+    if (["light", "switch", "fan", "input_boolean"].includes(domain)) {
+      return { domain, service: action.value ? "turn_on" : "turn_off", entityId, serviceData: {} };
+    }
+    if (domain === "lock") {
+      return { domain, service: action.value ? "unlock" : "lock", entityId, serviceData: {} };
+    }
+    if (domain === "cover") {
+      return { domain, service: action.value ? "open_cover" : "close_cover", entityId, serviceData: {} };
+    }
+    return undefined;
+  }
+  if (action.kind === "set_level") {
+    if (domain === "cover") {
+      return { domain, service: "set_cover_position", entityId, serviceData: { position: Math.round(action.level * 100) } };
+    }
+    if (domain === "light") {
+      return { domain, service: "turn_on", entityId, serviceData: { brightness_pct: Math.round(action.level * 100) } };
+    }
+    if (domain === "media_player") {
+      return { domain, service: "volume_set", entityId, serviceData: { volume_level: action.level } };
+    }
+  }
+  if (action.kind === "stop_media" && domain === "media_player") {
+    return { domain, service: "media_stop", entityId, serviceData: {} };
+  }
+  return undefined;
 }
 
 function aggregateHealth(states: readonly ("reachable" | "unreachable" | "unknown")[]): "reachable" | "unreachable" | "unknown" {

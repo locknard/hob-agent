@@ -96,12 +96,10 @@ is unavailable rather than presented as healthy. The Control Center places
 this report in native details and has no retention button, HTTP mutation,
 Agent tool, timer, or automatic deletion path.
 
-The full Home Agent Cordis runtime mounts this service as `homeRetention` after
+The Home Agent Cordis runtime mounts this service as `homeRetention` after
 the durable proposal service and HomeWorld. It performs no work at startup and
-owns no timer or scheduler. The standalone Inbox runtime intentionally does not
-mount it because it has no HomeWorld journals; retention remains unavailable
-there rather than silently falling back to an in-memory or caller-supplied
-journal.
+owns no timer or scheduler. The authenticated product reads this service only
+through its bounded projection.
 
 The standalone local operator facade opens only the explicitly configured
 bridge journal and proposal database for the duration of one command. It does

@@ -116,6 +116,42 @@ DSH cancellation to that service, caps the model request at three candidates,
 and has no player, queue, resolve, or action method. Catalog text is untrusted
 data; neither a result nor its `playable` hint grants authority.
 
+### V4 media conversation and clarification card
+
+The Hub-owned `HomeMediaConversationService` is the only orchestration seam for
+the media request card. It joins catalog search, one exact preparation, and the
+existing `HouseholdReviewCenterService` action-ticket owner. It does not retain
+a second ticket or confirmation state.
+
+The conversation accepts three bounded operations: `search`, `prepare`, and
+`request_action`. A prepared intent carries exactly one opaque `mediaRef`, one
+Hub `playerCapabilityId`, and one explicit `queueMode`. The Agent projection
+does not accept a provider URI, native player id, queue id, volume request,
+actor field, or confirmation command.
+
+When a required slot is absent or ambiguous, the service returns a closed
+`clarification` state. Its `slot` is one of `query`, `mediaRef`,
+`playerCapabilityId`, or `queueMode`; its `reason` is one of `missing`,
+`ambiguous`, `no_match`, or `not_playable`; and its options contain only exact
+opaque references or the three fixed queue modes. The caller asks for the
+missing slot and then submits the selected exact value. The service never
+guesses a player, media reference, or queue behavior.
+
+`request_action` calls `prepare` first and then calls
+`HouseholdReviewCenterService.requestAction` with the exact neutral
+`play_media` action. A `direct` result is executed and read back by the action
+plane; a `confirmation` or `administrator` result returns that plane's real
+`ticketId` and remains pending until its owner approves it. The media
+conversation service has no local confirmation reducer, expiry timer, or
+approval store.
+
+Click and spoken confirmation both call the existing action-ticket owner with
+the exact ticket id. A spoken confirmation additionally carries an explicit
+authenticated actor assertion from a present private device whose binding
+matches its principal. Missing actor data, ordinary advice text, and shared
+screen speech do not create identity and fail closed. A click cannot approve a
+different ticket by using the latest card or a request-local fallback.
+
 The neutral action describes the desired outcome rather than an HA service:
 
 ```text
@@ -315,8 +351,7 @@ uses a contained orbit in `thinking`, becomes still with a clear action card in
 status always carry the same meaning. `prefers-reduced-motion` replaces pulse
 and orbit animation with discrete color and label changes.
 
-The design extends the existing quiet household Control Center rather than
-adding a floating generic chatbot. The memorable element is a room-aware pulse
+The design extends the quiet household Product Shell. The memorable element is a room-aware pulse
 whose rings represent the requested room, selected media source, and action
 state. Everything around it stays restrained and operational.
 
@@ -383,31 +418,109 @@ two players, the Agent asks which one. With several equally plausible results,
 it presents at most three choices. With a timeout after dispatch, it says that
 the result is uncertain and does not retry automatically.
 
+## Phase 0 Web voice seam
+
+The `/voice-preview` path now serves the bounded Web V1 interaction rather than
+a state-picker prototype. Its push-to-talk control constructs the browser's
+`SpeechRecognition`/`webkitSpeechRecognition` implementation only after the
+household member's direct click. It shows the live partial transcript, keeps a
+final transcript in a reviewable state, and exposes Stop while recognition is
+active. A permission denial leaves the text route available. A no-input or
+recognition failure produces an escalating first and second recovery prompt;
+the third consecutive failure stops the voice loop and offers the text exit.
+
+The browser capability check is explicit. When Web Speech is unavailable, the
+surface says so and moves to text mode without opening a microphone or adding a
+product-owned cloud speech dependency. Raw audio is not persisted. Only a
+bounded final transcript can be submitted, through the existing same-origin `POST
+/conversation` form. The voice script does not call a media player, Hub
+action, bridge endpoint, or alternate conversation API. Therefore media and
+high-impact utterances enter the existing DSH turn and remain subject to the
+Hub's neutral confirmation and administrator gates.
+
+The server-rendered form and the browser adapter deliberately share the
+canonical conversation action. If that action is ever changed or replaced by
+an embedding, the adapter fails closed to text mode instead of posting to an
+unreviewed route. Stop aborts the active recognition session and never submits
+the partial transcript.
+
+## Hub-owned background advice lifecycle
+
+The Hub owns the Conversation advice turn from acceptance through its terminal
+result. A running advice moves to `background` through the typed
+`homeAdvice.background(id)` port, and that transition keeps the same advice id,
+question, and DSH turn. The SQLite advice row stores `running`, `background`,
+`completed`, or `failed` as the lifecycle state.
+
+The Hub stores a bounded semantic event cursor for each advice. Events contain
+the advice id, lifecycle stage, and timestamp, and the store retains at most
+the configured local progress bound (64 events by default, with a 1–256 guard).
+The durable `events(id, afterSeq)` query supports reconnect replay from the
+latest retained cursor. The store records lifecycle metadata only; prompts,
+reasoning, provider errors, and raw tool arguments remain outside this record.
+
+Completion and failure set one durable notification bit alongside the terminal
+row and terminal event. `consumeCompletionNotification(id)` returns the
+terminal status and event cursor once, then returns no notification on later
+consumption. `consumeNextCompletionNotification()` claims the oldest pending
+notification by `completedAt` ascending and `adviceId` ascending, which gives
+the Home page a stable FIFO-like order with a deterministic tie break. Each
+claim is atomic across store connections. A cancelled background turn records
+a failed terminal row with a `cancelled` event so the household receives the
+same durable completion path.
+
+An authenticated, present household actor enters the media conversation through
+an async-local request scope for the current Agent advice call. The scope
+isolates concurrent member requests, and the existing action-ticket owner
+receives that exact actor when advice requests media action. The Inbox passes
+the normalized HTTP principal explicitly; scheduled observation runs without a
+request actor and its action request returns a closed blocked state.
+
+Service restart reopens a `background` row and reattaches the original advice
+id to the current Hub Agent when the home is ready. The recovery path preserves
+the retained event cursor and resumes the same question. A running row remains
+owned by its original process and receives the existing startup recovery rule;
+an explicit `background` transition provides durable restart ownership. The Hub
+runs one bounded recovery timer at a low default frequency of one second while
+durable background work awaits a ready World and Agent. Service disposal clears
+the timer and leaves the background row available for a later process.
+
+The durable advice row stores no actor identity. Same-process background work
+keeps its in-memory actor scope. Restart recovery starts without an actor, so a
+later media action requires a new authenticated request scope and otherwise
+returns `authenticated_actor_required`.
+
+Cancellation applies only to the active running or background advice. Terminal
+advice rejects further cancellation and background transitions. Retry starts a
+new Hub-owned advice turn from a failed question after the home and Agent are
+ready, while the failed record and its terminal notification remain intact.
+
 ## Delivery sequence
 
-1. **V0 — contract and visual prototype (implemented):** the authenticated
-   `/voice-preview` route renders the frozen state machine as a responsive,
-   accessible, simulated-state component. It has no script, microphone,
-   network, model, catalog search, or action authority. State selection is an
-   inert visual-review affordance and unknown states fail closed.
-2. **V1 — read-only voice turn:** push-to-talk, final transcript review,
-   cancellation, captions, optional TTS, and one DSH advice turn. This remains
-   non-applying and can coexist with the Phase 0 document workflow only as an
-   explicitly bounded experiment, not as a general chat runtime.
-3. **V2 — media discovery:** the Hub-owned `mediaCatalog@1` boundary,
-   authority-selected neutral player inventory, HA exact read schema, two DSH
-   read-only tools, and an explicitly mounted synthetic provider are now in
+1. **V0 — contract and visual prototype (retired):** the former inert
+   `/voice-preview` state picker established the visual state vocabulary. It is
+   no longer the runtime interaction; a bounded initial-state query remains
+   only for deterministic rendering and does not provide an interaction path.
+2. **V1 — read-only Web voice turn (implemented):** push-to-talk, explicit
+   permission handling, partial/final captions, cancellation, three bounded
+   failures with a text exit, and one canonical DSH advice turn. This remains
+   non-applying: the browser submits only `/conversation`, and Hub policy and
+   confirmation continue to own every device or media effect.
+3. **V2 — media discovery (implemented):** the Hub-owned `mediaCatalog@1`
+   boundary, authority-selected neutral player inventory, HA exact read schema,
+   two DSH read-only tools, and an explicitly mounted synthetic provider are in
    place. The synthetic provider is never a production default or a Bridge
-   adapter. After the Phase 0 exit gate, add an explicitly configured Music
-   Assistant integration. Show choices and an exact pending action, including
-   queue behavior, but do not invoke a player.
-4. **V3 — governed playback:** after the real-household and action-plane entry
-   gates, add `play_media` to the exact approval-ticket, executor,
-   postcondition, and audit path. Start with one low-risk, reversible route and
-   synthetic crash/replay tests before a real adapter.
+   adapter. The search and player tools remain read-only.
+4. **V3 — governed playback (implemented):** the exact `play_media` intent now
+   flows through preparation and the existing action-ticket, executor,
+   postcondition, and audit path. The V4 conversation seam returns closed
+   clarification states, preserves exact opaque references, routes confirmation
+   through the ticket owner, and allows direct actions only after Hub policy
+   approval and read-back verification.
 5. **V4 — ambient household assistant:** evaluate local wake word, barge-in,
    multi-room handoff, household-member policy, and local speech providers only
    after push-to-talk privacy and reliability are proven.
 
-V0 and V1 must not weaken the Phase 0 rule that the production Agent cannot
-control devices. V3 cannot ship merely because the voice UI exists.
+V1 browser voice never calls a device or bridge directly. V3 device effects
+remain inside the Hub action plane and its policy, approval, verification, and
+audit boundaries.

@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   readHomeHubLaunchConfig,
-  readHomeInboxLaunchConfig,
   readHomeWorldLaunchConfig,
 } from "./launch-config.js";
 import {
@@ -30,6 +29,13 @@ const BASE_ENV = {
   DEEPSEEK_API_KEY: "must-not-enter-the-snapshot",
 };
 
+const INBOX_PRINCIPAL_ENV = {
+  HOB_INBOX_PRINCIPAL_ID: "household-member",
+  HOB_INBOX_PRINCIPAL_ROLE: "adult_member",
+  HOB_INBOX_DEVICE_KIND: "private",
+  HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID: "household-member",
+} as const;
+
 const MUSIC_ASSISTANT_BASE_URL = "https://music.example.test";
 const MUSIC_ASSISTANT_KEYCHAIN_REF = MUSIC_ASSISTANT_KEYCHAIN_CREDENTIAL_REF;
 
@@ -46,10 +52,12 @@ test("reads neutral bridge entries and selected model credential without putting
   }]);
   assert.equal(config.catalog.hasAdapter("home-assistant"), true);
   assert.equal(config.proposalPath, "/tmp/hob-agent-launch-test/proposals.sqlite");
+  assert.equal(config.oneShotActionPath, "/tmp/hob-agent-launch-test/one-shot-actions.sqlite");
   assert.equal(config.authorityCandidatePath, "/tmp/hob-agent-launch-test/authority-candidates.sqlite");
   assert.equal(config.observationAuditPath, "/tmp/hob-agent-launch-test/observation-audit.sqlite");
   assert.equal(config.advicePath, "/tmp/hob-agent-launch-test/home-advice.sqlite");
   assert.equal(config.sessionPath, "/tmp/hob-agent-launch-test/dsh-sessions.sqlite");
+  assert.equal(config.onboardingPath, "/tmp/hob-agent-launch-test/onboarding.sqlite");
   assert.equal(JSON.stringify(config.bridges).includes("home-assistant-secret"), false);
   assert.deepEqual(config.agent, { provider: "gpt", model: "gpt-5.4" });
   assert.equal(config.householdDirectory, undefined);
@@ -115,6 +123,63 @@ test("keeps the explicit Music Assistant credential lazy and out of launch JSON"
     token,
   );
   assert.deepEqual(reads, [MUSIC_ASSISTANT_KEYCHAIN_REF]);
+});
+
+test("accepts explicit neutral Music Assistant player bindings and rejects malformed mappings", () => {
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_MUSIC_ASSISTANT_BASE_URL: MUSIC_ASSISTANT_BASE_URL,
+    HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: MUSIC_ASSISTANT_KEYCHAIN_REF,
+    HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS: JSON.stringify({
+      "hwc-media-room": "ma-player-room",
+    }),
+  });
+
+  assert.equal(config.musicAssistant?.playerIdForCapability("hwc-media-room"), "ma-player-room");
+  assert.equal(config.musicAssistant?.playerIdForCapability("hwc-unknown"), undefined);
+  assert.equal(JSON.stringify(config).includes("ma-player-room"), false);
+
+  for (const value of [
+    "[]",
+    JSON.stringify({ "../capability": "ma-player-room" }),
+    JSON.stringify({ "hwc-media-room": "" }),
+  ]) {
+    assert.throws(
+      () => readHomeHubLaunchConfig({
+        ...BASE_ENV,
+        HOB_MUSIC_ASSISTANT_BASE_URL: MUSIC_ASSISTANT_BASE_URL,
+        HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: MUSIC_ASSISTANT_KEYCHAIN_REF,
+        HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS: value,
+      }),
+      /Invalid HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS/,
+    );
+  }
+});
+
+test("loads explicit safety bindings into the Hub-private launch contract", () => {
+  const binding = {
+    id: "kitchen-leak",
+    hwCapabilityId: "hwc-kitchen-leak",
+    kind: "water_leak",
+    title: "厨房漏水",
+    sourceLabel: "厨房漏水传感器",
+    stateAttribute: "state",
+    activeValues: ["on"],
+    clearValues: ["off"],
+  };
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_SAFETY_BINDINGS: JSON.stringify([binding]),
+  });
+
+  assert.deepEqual(config.safetyBindings, [binding]);
+  assert.throws(
+    () => readHomeHubLaunchConfig({
+      ...BASE_ENV,
+      HOB_SAFETY_BINDINGS: JSON.stringify([{ ...binding, deviceName: "不受信任的名字" }]),
+    }),
+    /Invalid HOB_SAFETY_BINDINGS/,
+  );
 });
 
 test("accepts only the reviewed Music Assistant SecretRef forms", () => {
@@ -203,23 +268,6 @@ test("rejects a Keychain bridge locator outside its exact bridge and alias scope
   );
 });
 
-test("reads the standalone Inbox slice without bridge or model configuration", () => {
-  const config = readHomeInboxLaunchConfig({
-    HOB_DATA_DIR: "/tmp/hob-agent-inbox-test",
-    HOB_INBOX_AUTH_TOKEN: "i".repeat(32),
-    HOB_INBOX_PORT: "9876",
-  });
-  assert.equal(config.proposalPath, "/tmp/hob-agent-inbox-test/proposals.sqlite");
-  assert.equal(config.artifactPath, "/tmp/hob-agent-inbox-test/artifacts.sqlite");
-  assert.equal(config.observationAuditPath, "/tmp/hob-agent-inbox-test/observation-audit.sqlite");
-  assert.equal(config.advicePath, "/tmp/hob-agent-inbox-test/home-advice.sqlite");
-  assert.equal(config.inboxHttp.port, 9876);
-  const authorization = `Basic ${Buffer.from(`home:${"i".repeat(32)}`).toString("base64")}`;
-  assert.equal(config.inboxHttp.authenticate(authorization), true);
-  assert.equal("bridges" in config, false);
-  assert.equal("agent" in config, false);
-});
-
 test("accepts only an explicit absolute household context directory", () => {
   const config = readHomeHubLaunchConfig({
     ...BASE_ENV,
@@ -268,13 +316,92 @@ test("enables authenticated local Inbox delivery without retaining the raw token
     ...BASE_ENV,
     HOB_INBOX_AUTH_TOKEN: inboxToken,
     HOB_INBOX_PORT: "9876",
+    ...INBOX_PRINCIPAL_ENV,
   });
   const authorization = `Basic ${Buffer.from(`home:${inboxToken}`).toString("base64")}`;
 
   assert.equal(config.inboxHttp?.port, 9876);
   assert.equal(config.inboxHttp?.authenticate(authorization), true);
   assert.equal(config.inboxHttp?.authenticate(undefined), false);
+  assert.deepEqual(config.inboxHttp?.principal, {
+    principalId: "household-member",
+    role: "adult_member",
+    present: true,
+    device: {
+      kind: "private",
+      boundPrincipalId: "household-member",
+    },
+  });
+  assert.notEqual(config.inboxHttp?.principal?.role, "admin");
   assert.equal(JSON.stringify(config).includes(inboxToken), false);
+});
+
+test("requires explicit review identity inputs for authenticated Inbox HTTP", () => {
+  const authenticated = {
+    ...BASE_ENV,
+    HOB_INBOX_AUTH_TOKEN: "i".repeat(32),
+  };
+  for (const name of Object.keys(INBOX_PRINCIPAL_ENV)) {
+    const missing = { ...authenticated, ...INBOX_PRINCIPAL_ENV, [name]: undefined };
+    assert.throws(
+      () => readHomeHubLaunchConfig(missing),
+      (error: unknown) => error instanceof Error && error.message.includes(name),
+      `missing ${name} must fail closed`,
+    );
+  }
+
+  for (const [name, value] of [
+    ["HOB_INBOX_PRINCIPAL_ROLE", "owner"],
+    ["HOB_INBOX_DEVICE_KIND", "personal"],
+  ] as const) {
+    assert.throws(
+      () => readHomeHubLaunchConfig({ ...authenticated, ...INBOX_PRINCIPAL_ENV, [name]: value }),
+      (error: unknown) => error instanceof Error && error.message.includes(name),
+      `invalid ${name} must fail closed`,
+    );
+  }
+
+  assert.throws(
+    () => readHomeHubLaunchConfig({
+      ...authenticated,
+      ...INBOX_PRINCIPAL_ENV,
+      HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID: "another-member",
+    }),
+    /HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID/,
+  );
+});
+
+test("treats every Inbox identity setting as an explicit HTTP configuration", () => {
+  assert.throws(
+    () => readHomeHubLaunchConfig({ ...BASE_ENV, HOB_INBOX_PRINCIPAL_ID: "household-member" }),
+    /HOB_INBOX_AUTH_TOKEN/,
+  );
+  assert.throws(
+    () => readHomeHubLaunchConfig({
+      ...BASE_ENV,
+      HOB_INBOX_AUTH_TOKEN: "i".repeat(32),
+      ...INBOX_PRINCIPAL_ENV,
+      HOB_INBOX_DEVICE_KIND: "shared",
+      HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID: "household-member",
+    }),
+    /shared.*binding|binding.*shared/i,
+  );
+});
+
+test("accepts a shared review device without inventing a private binding", () => {
+  const config = readHomeHubLaunchConfig({
+    ...BASE_ENV,
+    HOB_INBOX_AUTH_TOKEN: "i".repeat(32),
+    HOB_INBOX_PRINCIPAL_ID: "shared-member",
+    HOB_INBOX_PRINCIPAL_ROLE: "member",
+    HOB_INBOX_DEVICE_KIND: "shared",
+  });
+  assert.deepEqual(config.inboxHttp?.principal, {
+    principalId: "shared-member",
+    role: "member",
+    present: true,
+    device: { kind: "shared" },
+  });
 });
 
 test("fails closed for an invalid Inbox credential or production port without echoing secrets", () => {
@@ -288,6 +415,7 @@ test("fails closed for an invalid Inbox credential or production port without ec
       ...BASE_ENV,
       HOB_INBOX_AUTH_TOKEN: "local-inbox-token-that-is-longer-than-32-chars",
       HOB_INBOX_PORT: "0",
+      ...INBOX_PRINCIPAL_ENV,
     }),
     /HOB_INBOX_PORT/,
   );
@@ -440,14 +568,20 @@ test("reads only the explicit launch allowlist before lazy bridge credential res
     "HOB_BRIDGES",
     "HOB_MUSIC_ASSISTANT_BASE_URL",
     "HOB_MUSIC_ASSISTANT_CREDENTIAL_REF",
+    "HOB_MUSIC_ASSISTANT_PLAYER_BINDINGS",
     "HOB_MODEL",
     "HOB_MODEL_BASE_URL",
     "OPENAI_API_KEY",
     "HOB_INBOX_AUTH_TOKEN",
     "HOB_INBOX_PORT",
+    "HOB_INBOX_PRINCIPAL_ID",
+    "HOB_INBOX_PRINCIPAL_ROLE",
+    "HOB_INBOX_DEVICE_KIND",
+    "HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID",
     "HOB_HOME_DIR",
     "HOB_OBSERVATION_INTERVAL_MINUTES",
     "HOB_OBSERVE_ON_START",
+    "HOB_SAFETY_BINDINGS",
   ]);
   await config.bridgeCredentialSource.describeForBridge("ha-main", "access-token");
   assert.equal(reads.at(-1), "HOB_HA_TOKEN");

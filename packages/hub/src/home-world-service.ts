@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 import type { ZodType } from "zod";
@@ -9,6 +9,16 @@ import {
   type ForeignRuleSummary,
 } from "../../../contracts/bridge-foreign-rules.js";
 import { orgHintPayloadSchema } from "../../../contracts/bridge-org-hints.js";
+import {
+  bridgeActionDescriptorRequestSchema,
+  bridgeActionDescriptorSchema,
+  bridgeActionCurrentStateSchema,
+  bridgeActionResultSchema,
+  type ActionsExtension,
+  type BridgeActionCurrentState,
+  type BridgeActionDescriptor,
+  type BridgeActionResult,
+} from "../../../contracts/bridge-actions.js";
 
 import {
   canonicalExtensionKey,
@@ -64,6 +74,11 @@ import {
   type AuthorityResyncPort,
   type StateAuthorityResolution,
 } from "./authority-coordinator.js";
+import {
+  actionAuthorityConfigurationPath,
+  writeActionAuthorityConfiguration,
+  type ActionAuthorityBindingWriteInput,
+} from "./action-authority-config.js";
 import type { AuthorityCandidateResolveInput } from "./authority-candidate-registry.js";
 import {
   WorldIdentityManager,
@@ -126,6 +141,8 @@ export interface HomeWorldServiceOptions {
   readonly authorityResyncPort?: AuthorityResyncPort;
   readonly stateAuthorityConfig?: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
   readonly actionAuthorityConfig?: ConstructorParameters<typeof AuthorityCoordinator>[0]["actionAuthorityConfig"];
+  /** Canonical private source for runtime action authority updates. */
+  readonly actionAuthorityConfigPath?: string;
   readonly initialStateAuthorities?: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
   readonly authorityResyncTimeoutMs?: number;
 }
@@ -146,6 +163,27 @@ export interface HomeWorldBridgeRuntime {
   subscriptionAbort?: AbortController;
   task?: Promise<void>;
 }
+
+export type HomeWorldOneShotActionInput = {
+  readonly requestId: string;
+  readonly hwCapabilityId: string;
+  readonly signal: AbortSignal;
+  readonly action:
+    | { readonly kind: "set_boolean"; readonly value: boolean }
+    | { readonly kind: "set_level"; readonly level: number }
+    | { readonly kind: "play_media"; readonly mediaRef: string; readonly queueMode: "replace_and_play" | "play_next" | "add_to_queue" }
+    | { readonly kind: "stop_media" };
+};
+
+export interface HomeWorldActionAuthorityPolicyInput {
+  readonly directCapabilityIds: readonly string[];
+  readonly confirmationCapabilityIds: readonly string[];
+  readonly administratorCapabilityIds: readonly string[];
+}
+
+export type HomeWorldActionAuthorityPolicyResult =
+  | { readonly status: "configured"; readonly configurationRevision: number }
+  | { readonly status: "blocked"; readonly reason: "configuration_source_unavailable" | "unknown_capability" | "ambiguous_bridge" | "write_failed" };
 
 export interface HomeWorldForeignRuleCatalog {
   readonly bridgeId: string;
@@ -351,6 +389,7 @@ export class HomeWorldService extends Service {
   readonly authority: AuthorityCoordinator;
   registry!: BridgeRegistry;
   private readonly options: HomeWorldServiceOptions;
+  private readonly actionAuthorityConfigPathValue: string | undefined;
   private readonly entries: readonly BridgeConfigEntry<unknown>[];
   private readonly scheduler: HomeWorldScheduler;
   private readonly runtimesById = new Map<string, HomeWorldBridgeRuntime>();
@@ -368,6 +407,10 @@ export class HomeWorldService extends Service {
   constructor(ctx: Context, options: HomeWorldServiceOptions) {
     super(ctx, "homeWorld");
     this.options = options;
+    this.actionAuthorityConfigPathValue = options.actionAuthorityConfigPath
+      ?? (options.journalDirectory !== undefined && isAbsolute(options.journalDirectory)
+        ? actionAuthorityConfigurationPath(options.journalDirectory)
+        : undefined);
     this.catalog = options.catalog;
     this.suppliedRegistry = options.registry;
     if (options.worldModelIndex !== undefined && options.worldModelPath !== undefined) {
@@ -874,6 +917,173 @@ export class HomeWorldService extends Service {
   }
 
   /**
+   * Resolves the adapter's concrete next action for one exact, authoritative
+   * capability binding.  The Hub supplies current neutral state and accepts a
+   * descriptor only from a negotiated live actions extension. Every ambiguity,
+   * stale world row, unavailable bridge, or invalid adapter descriptor yields
+   * a read-only result.
+   */
+  actionDescriptorFor(hwCapabilityId: string): BridgeActionDescriptor | undefined {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
+    this.refreshIdentity();
+    const authority = this.authority.resolveActionAuthority(
+      hwCapabilityId,
+      this.authorityAvailability(hwCapabilityId),
+    );
+    if (authority.status !== "available" || authority.bridgeId === undefined) return undefined;
+    const capability = this.authority.capability(hwCapabilityId);
+    const bindings = capability?.bindings.filter((binding) => binding.bridgeId === authority.bridgeId) ?? [];
+    if (bindings.length !== 1) return undefined;
+    const [binding] = bindings;
+    if (binding === undefined) return undefined;
+    const runtime = this.runtimesById.get(authority.bridgeId);
+    if (runtime === undefined
+      || runtime.extensionAvailability["actions@1"] !== "available"
+      || runtime.ingest.diagnostics().connectionState !== "ready"
+      || runtime.journal.consistentWatermark?.(authority.bridgeId) === undefined) return undefined;
+    const deviceHealth = runtime.ingest.deviceHealth(binding.nativeId);
+    if (deviceHealth !== undefined && deviceHealth !== "reachable") return undefined;
+    const device = runtime.ingest.worldSnapshot().get(binding.nativeId);
+    if (device === undefined || device.validity !== "valid") return undefined;
+    const state = device.states.get(binding.nativeInstanceId);
+    if (state === undefined) return undefined;
+    const current = actionCurrentState(state.attrs);
+    if (current === undefined || !actionStateIsKnown(current)) return undefined;
+    let handle: ActionsExtension | undefined;
+    try {
+      handle = runtime.adapter.extension("actions@1") as ActionsExtension | undefined;
+    } catch {
+      return undefined;
+    }
+    if (handle === undefined || typeof handle.describe !== "function") return undefined;
+    const request = bridgeActionDescriptorRequestSchema.safeParse({
+      target: {
+        hwCapabilityId,
+        binding: {
+          bridgeId: binding.bridgeId,
+          nativeId: binding.nativeId,
+          nativeInstanceId: binding.nativeInstanceId,
+        },
+      },
+      current,
+    });
+    if (!request.success) return undefined;
+    try {
+      const descriptor = handle.describe(request.data);
+      const parsed = bridgeActionDescriptorSchema.safeParse(descriptor);
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Commits the onboarding-selected policy classes to the canonical private
+   * source and updates the running AuthorityCoordinator only after the rename
+   * succeeds. Capability-to-bridge ambiguity fails closed.
+   */
+  configureActionAuthority(
+    input: HomeWorldActionAuthorityPolicyInput,
+  ): HomeWorldActionAuthorityPolicyResult {
+    if (this.actionAuthorityConfigPathValue === undefined) {
+      return { status: "blocked", reason: "configuration_source_unavailable" };
+    }
+    this.refreshIdentity();
+    const entries: ActionAuthorityBindingWriteInput[] = [];
+    const selected = [
+      ...input.directCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "direct" as const })),
+      ...input.confirmationCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "confirmation" as const })),
+      ...input.administratorCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "administrator" as const })),
+    ];
+    const seen = new Set<string>();
+    for (const item of selected) {
+      if (seen.has(item.hwCapabilityId)) return { status: "blocked", reason: "unknown_capability" };
+      seen.add(item.hwCapabilityId);
+      const capability = this.authority.capability(item.hwCapabilityId);
+      if (capability === undefined) return { status: "blocked", reason: "unknown_capability" };
+      const bridgeIds = [...new Set(capability.bindings.map((binding) => binding.bridgeId))];
+      if (bridgeIds.length !== 1 || bridgeIds[0] === undefined) return { status: "blocked", reason: "ambiguous_bridge" };
+      const existing = this.authority.resolveActionAuthorityConfiguration(item.hwCapabilityId);
+      const revision = existing.status === "configured" && existing.configRevision !== undefined
+        ? existing.configRevision + 1
+        : 1;
+      entries.push({
+        hwCapabilityId: item.hwCapabilityId,
+        bridgeId: bridgeIds[0],
+        approved: true,
+        policyClass: item.policyClass,
+        revision,
+      });
+    }
+    try {
+      const projection = writeActionAuthorityConfiguration(this.actionAuthorityConfigPathValue, entries);
+      this.authority.replaceActionAuthorityConfig(projection);
+      const revisions = Object.values(projection).map((entry) => entry.configRevision);
+      return { status: "configured", configurationRevision: revisions.length === 0 ? 0 : Math.max(...revisions) };
+    } catch {
+      return { status: "blocked", reason: "write_failed" };
+    }
+  }
+
+  async executeOneShotAction(input: HomeWorldOneShotActionInput): Promise<BridgeActionResult> {
+    if (input.signal.aborted) return { status: "unknown", reason: "cancelled" };
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(input.requestId)
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(input.hwCapabilityId)) {
+      return { status: "rejected", reason: "invalid_target" };
+    }
+    const descriptor = this.actionDescriptorFor(input.hwCapabilityId);
+    if (descriptor === undefined || !sameActionIntent(descriptor.action, input.action)) {
+      return { status: "rejected", reason: "invalid_target" };
+    }
+    this.refreshIdentity();
+    const authority = this.authority.resolveActionAuthority(
+      input.hwCapabilityId,
+      this.authorityAvailability(input.hwCapabilityId),
+    );
+    if (authority.status !== "available" || authority.bridgeId === undefined) {
+      return { status: "rejected", reason: "unavailable" };
+    }
+    const capability = this.authority.capability(input.hwCapabilityId);
+    const bindings = capability?.bindings.filter((binding) => binding.bridgeId === authority.bridgeId) ?? [];
+    if (bindings.length !== 1) return { status: "rejected", reason: "invalid_target" };
+    const [binding] = bindings;
+    const runtime = this.runtimesById.get(authority.bridgeId);
+    if (binding === undefined || runtime?.extensionAvailability["actions@1"] !== "available") {
+      return { status: "rejected", reason: "unavailable" };
+    }
+    let handle: ActionsExtension | undefined;
+    try {
+      handle = runtime.adapter.extension("actions@1") as ActionsExtension | undefined;
+    } catch {
+      return { status: "rejected", reason: "unavailable" };
+    }
+    if (handle === undefined) return { status: "rejected", reason: "unavailable" };
+    const request = {
+      requestId: input.requestId,
+      action: {
+        ...input.action,
+        target: {
+          hwCapabilityId: input.hwCapabilityId,
+          binding: {
+            bridgeId: binding.bridgeId,
+            nativeId: binding.nativeId,
+            nativeInstanceId: binding.nativeInstanceId,
+          },
+        },
+      },
+    };
+    try {
+      const result = await handle.execute(request, { signal: input.signal });
+      const parsed = bridgeActionResultSchema.safeParse(result);
+      return parsed.success ? parsed.data : { status: "unknown", reason: "upstream_unavailable" };
+    } catch {
+      return input.signal.aborted
+        ? { status: "unknown", reason: "cancelled" }
+        : { status: "unknown", reason: "upstream_unavailable" };
+    }
+  }
+
+  /**
    * Hub-private input seam for authority assessment. The projection contains
    * only Hub capability facts and opaque digests; unresolved route, identity,
    * and registration state fail closed instead of becoming a placeholder.
@@ -1332,6 +1542,19 @@ export class HomeWorldService extends Service {
   }
 }
 
+function sameActionIntent(
+  expected: BridgeActionDescriptor["action"],
+  received: BridgeActionDescriptor["action"],
+): boolean {
+  if (expected.kind !== received.kind) return false;
+  if (expected.kind === "set_boolean" && received.kind === "set_boolean") return expected.value === received.value;
+  if (expected.kind === "set_level" && received.kind === "set_level") return expected.level === received.level;
+  if (expected.kind === "play_media" && received.kind === "play_media") {
+    return expected.mediaRef === received.mediaRef && expected.queueMode === received.queueMode;
+  }
+  return expected.kind === "stop_media" && received.kind === "stop_media";
+}
+
 function normalizeScheduler(scheduler: HomeWorldSchedulerLike | undefined): HomeWorldScheduler {
   if (scheduler === undefined) return defaultScheduler;
   if (typeof scheduler === "function") return { wait: scheduler };
@@ -1649,6 +1872,30 @@ function evidenceScalar(value: unknown): string | number | boolean | null | unde
     || (typeof value === "number" && Number.isFinite(value))
     ? value
     : undefined;
+}
+
+function actionCurrentState(
+  attrs: Readonly<Record<string, unknown>>,
+): BridgeActionCurrentState | undefined {
+  const current: Record<string, unknown> = {};
+  const scalarKeys = ["value", "state", "level", "brightness", "volumeLevel", "format", "writable", "setLevelSupported", "available"];
+  for (const key of scalarKeys) {
+    const value = attrs[key];
+    if (value === undefined) continue;
+    if (value === null || typeof value === "string" || typeof value === "boolean"
+      || (typeof value === "number" && Number.isFinite(value))) current[key] = value;
+  }
+  const parsed = bridgeActionCurrentStateSchema.safeParse(current);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function actionStateIsKnown(current: BridgeActionCurrentState): boolean {
+  if (current.available === false || current.state === "unknown" || current.state === "unavailable") return false;
+  return current.value !== undefined
+    || current.state !== undefined
+    || current.level !== undefined
+    || current.brightness !== undefined
+    || current.volumeLevel !== undefined;
 }
 
 function normalizeClock(value: string | number | Date): string {

@@ -8,6 +8,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HomeProposalService } from "./home-proposal-service.js";
 import {
+  ProposalStoreError,
   SqliteProposalStore,
   type ArtifactPreparationJob,
   type CreateProposalInput,
@@ -73,7 +74,11 @@ class StubHomeWorld extends Service {
   evidenceQueries: unknown[] = [];
   includeUnavailableBridge = false;
   includeUnavailableDevice = false;
+  bridgeConnectionState: "ready" | "degraded" = "ready";
+  bridgeHistoryGapCount = 0;
   extraCapabilities = 0;
+  capabilitySemanticKind: "light" | "lock" = "light";
+  actionPolicyClass: "direct" | "confirmation" | "administrator" | "unavailable" = "direct";
 
   constructor(ctx: Context) {
     super(ctx, "homeWorld");
@@ -91,7 +96,7 @@ class StubHomeWorld extends Service {
       generatedAt: "2026-08-19T01:00:00.000Z",
       spaces: [],
       bridges: {
-        "bridge-a": { diagnostics: { historyGapCount: 0 } },
+        "bridge-a": { diagnostics: { historyGapCount: this.bridgeHistoryGapCount } },
         ...(this.includeUnavailableBridge ? { "bridge-b": { diagnostics: { historyGapCount: 0 } } } : {}),
       },
       bridgeWatermarks: [
@@ -99,7 +104,7 @@ class StubHomeWorld extends Service {
         ...(this.includeUnavailableBridge ? [{ bridgeId: "bridge-b", epochId: "epoch-b", lastSeq: 4 }] : []),
       ],
       diagnostics: [
-        { bridgeId: "bridge-a", connectionState: "ready", historyGapCount: 0 },
+        { bridgeId: "bridge-a", connectionState: this.bridgeConnectionState, historyGapCount: this.bridgeHistoryGapCount },
         ...(this.includeUnavailableBridge
           ? [{ bridgeId: "bridge-b", connectionState: "ready", historyGapCount: 0 }]
           : []),
@@ -113,7 +118,7 @@ class StubHomeWorld extends Service {
           hwId: "hw-1",
           schema: "fixture.boolean",
           schemaVersion: "1.0.0",
-          semanticKind: "light" as const,
+          semanticKind: this.capabilitySemanticKind,
           bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
         }, ...Array.from({ length: this.extraCapabilities }, (_, index) => ({
           hwCapabilityId: `hwc-${index + 2}`,
@@ -153,6 +158,16 @@ class StubHomeWorld extends Service {
     }] : [])];
   }
 
+  resolveActionAuthority(hwCapabilityId: string) {
+    const numericId = Number.parseInt(hwCapabilityId.replace(/^hwc-/, ""), 10);
+    const isKnownCapability = Number.isInteger(numericId)
+      && numericId >= 1
+      && numericId <= this.extraCapabilities + 1;
+    return isKnownCapability && this.actionPolicyClass !== "unavailable"
+      ? { status: "available" as const, bridgeId: "bridge-a", policyClass: this.actionPolicyClass }
+      : { status: "unavailable" as const, reason: "not_configured" as const };
+  }
+
   queryRecentEvidence(input: unknown) {
     this.evidenceQueries.push(input);
     return {
@@ -179,6 +194,48 @@ class StubHomeWorld extends Service {
     };
   }
 }
+
+test("the proposal owner preserves degraded bridge evidence for a no-device insight draft", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.bridgeConnectionState = "degraded";
+  world.bridgeHistoryGapCount = 4;
+  const proposalsFiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+
+  const proposal = await ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Review a household preference",
+    summary: "A household member asked for a future behavior change.",
+    idempotencyKey: "correction:gapped-world:v1",
+    provenance: { producer: "hob-conversation-correction", sessionId: "adult-1" },
+    selectedHwIds: [],
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: {
+      type: "future_behavior",
+      description: "Review a household preference.",
+      rollback: "Reject or expire the proposal.",
+    },
+  });
+
+  assert.deepEqual(proposal.evidence.watermarks, [{
+    bridgeId: "bridge-a",
+    epochId: "epoch-a",
+    lastSeq: 8,
+    freshness: "stale",
+    gapCount: 4,
+  }]);
+  assert.deepEqual(proposal.spaceCoverage, {
+    selectedDevices: 0,
+    devicesWithSingleSpace: 0,
+    devicesWithoutSpace: 0,
+    devicesWithMultipleSpaces: 0,
+  });
+
+  await proposalsFiber.dispose();
+  await ctx.fiber.dispose();
+});
 
 test("scopes authoritative rule coverage to every bridge bound to selected devices", async () => {
   const ctx = new Context();
@@ -341,6 +398,42 @@ test("requires a Hub-verifiable artifact candidate for new automation drafts", a
     idempotencyKey: "candidate-on-insight:v1",
     artifactCandidate: automationCandidate,
   }), /artifact candidate/i);
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("uses explicit action policy for proposal safety and fails closed without it", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const base = {
+    kind: "automation-draft" as const,
+    title: "Review one bounded action",
+    summary: "A closed candidate for household review only.",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    rationale,
+    risk: { level: "low" as const, reasons: [] },
+    intent: {
+      type: "automation-draft",
+      description: "Review a bounded change.",
+      rollback: "Restore the previous state.",
+    },
+    artifactCandidate: automationCandidate,
+  };
+
+  world.actionPolicyClass = "administrator";
+  await assert.rejects(() => ctx.homeProposals.createDraft({ ...base, idempotencyKey: "policy:administrator:v1" }), /administrator policy/i);
+
+  world.actionPolicyClass = "unavailable";
+  await assert.rejects(() => ctx.homeProposals.createDraft({ ...base, idempotencyKey: "policy:missing:v1" }), /explicit action policy/i);
+
+  world.actionPolicyClass = "direct";
+  world.capabilitySemanticKind = "lock";
+  const proposal = await ctx.homeProposals.createDraft({ ...base, idempotencyKey: "policy:direct-lock-hint:v1" });
+  assert.equal(proposal.status, "pending_review");
+
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
@@ -528,23 +621,31 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
   });
   assert.equal(proposal.applicationStatus, "not_available");
 
-  await assert.rejects(() => ctx.homeProposals.createDraft({
+  const secondProposal = await ctx.homeProposals.createDraft({
     kind: "household-insight",
     title: "Another pending item",
-    summary: "This must wait for household review.",
+    summary: "This joins the bounded household review queue.",
     idempotencyKey: "another-item:v1",
     provenance: { producer: "dsh-home-agent" },
     selectedHwIds: ["hw-1"],
     rationale,
     risk: { level: "low", reasons: [] },
     intent: { type: "household-insight", description: "Wait.", rollback: "Discard it." },
-  }), /pending review/);
+  });
+  assert.equal(secondProposal.status, "pending_review");
   ctx.homeProposals.review({
     proposalId: proposal.id,
     expectedRevision: 1,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "incorrect_assumption",
+  });
+  ctx.homeProposals.review({
+    proposalId: secondProposal.id,
+    expectedRevision: 1,
+    decision: "rejected",
+    reviewer: "household-owner",
+    feedbackCode: "not_useful",
   });
 
   const currentStateProposal = await ctx.homeProposals.createDraft({
@@ -573,6 +674,107 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
 
   await fiber.dispose();
   await ctx.fiber.dispose();
+});
+
+test("keeps five unresolved household proposals and rejects the sixth", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+
+  for (let index = 1; index <= 5; index += 1) {
+    const proposal = await ctx.homeProposals.createDraft({
+      kind: "household-insight",
+      title: `Household suggestion ${index}`,
+      summary: `Bounded suggestion ${index} for household review.`,
+      idempotencyKey: `capacity:${index}:v1`,
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low", reasons: [] },
+      intent: {
+        type: "household-insight",
+        description: `Review suggestion ${index}.`,
+        rollback: "Close the suggestion.",
+      },
+    });
+    assert.equal(proposal.status, "pending_review");
+  }
+
+  assert.equal(ctx.homeProposals.list({ status: "pending_review" }).length, 5);
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Household suggestion 6",
+    summary: "This candidate waits for review capacity.",
+    idempotencyKey: "capacity:6:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: {
+      type: "household-insight",
+      description: "Wait for a review slot.",
+      rollback: "Keep the suggestion available for a later explicit retry.",
+    },
+  }), (error: unknown) => error instanceof ProposalStoreError && error.code === "capacity_full");
+  assert.equal(ctx.homeProposals.proposalCapacity().used, 5);
+  assert.equal(ctx.homeProposals.list({ status: "pending_review" }).some((proposal) => proposal.dedupKey === "capacity:6:v1"), false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("forwards stable behavior identity through draft creation and exposes governed snooze and decision commands", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const fiber = await ctx.plugin(HomeProposalService, {
+    path: ":memory:",
+    now: () => "2026-08-19T01:00:00.000Z",
+  });
+  try {
+    const first = await ctx.homeProposals.createDraft({
+      kind: "household-insight",
+      title: "Stable behavior identity",
+      summary: "Keep equivalent observations on one review card.",
+      dedupKey: "home:stable-behavior",
+      idempotencyKey: "home:stable-behavior:attempt-1",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low", reasons: [] },
+      intent: { type: "household-insight", description: "Review it.", rollback: "Reject it." },
+    });
+    const merged = await ctx.homeProposals.createDraft({
+      kind: "household-insight",
+      title: "A second phrasing",
+      summary: "The behavior identity remains stable.",
+      dedupKey: "home:stable-behavior",
+      idempotencyKey: "home:stable-behavior:attempt-2",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low", reasons: [] },
+      intent: { type: "household-insight", description: "Review it.", rollback: "Reject it." },
+    });
+    assert.equal(first.dedupKey, "home:stable-behavior");
+    assert.equal(merged.id, first.id);
+
+    const snoozed = ctx.homeProposals.snoozeProposal({
+      proposalId: first.id,
+      expectedRevision: merged.revision,
+      until: "tomorrow",
+    });
+    assert.equal(snoozed.snoozeCount, 1);
+    const rejected = ctx.homeProposals.decideProposal({
+      proposalId: snoozed.id,
+      expectedRevision: snoozed.revision,
+      decision: "reject_once",
+      reviewer: "household-owner",
+    });
+    assert.equal(rejected.decision?.kind, "reject_once");
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
 });
 
 test("rejects temporal capability selections outside the selected devices", async () => {

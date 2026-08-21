@@ -258,6 +258,7 @@ test("action authority fails closed without explicit configuration and never fal
       "hc-1": {
         bridgeId: "bridge-a",
         approved: true,
+        policyClass: "administrator",
         configIdentity: `sha256:${"c".repeat(64)}`,
         configRevision: 1,
       },
@@ -268,6 +269,9 @@ test("action authority fails closed without explicit configuration and never fal
     { bridgeId: "bridge-a", available: false, validity: "valid" },
     { bridgeId: "bridge-b", available: true, validity: "valid" },
   ]), { status: "unavailable", reason: "configured_binding_unavailable" });
+  assert.deepEqual(coordinator.resolveActionAuthority("hc-1", [
+    { bridgeId: "bridge-a", available: true, validity: "valid" },
+  ]), { status: "available", bridgeId: "bridge-a", policyClass: "administrator" });
   assert.deepEqual(new AuthorityCoordinator({ capabilities: [capability("hc-1")] }).resolveActionAuthority("hc-1", [
     { bridgeId: "bridge-a", available: true, validity: "valid" },
   ]), { status: "unavailable", reason: "not_configured" });
@@ -290,6 +294,7 @@ test("resolves a versioned action authority configuration without exposing route
       "hc-1": {
         bridgeId: "bridge-a",
         approved: true,
+        policyClass: "confirmation",
         configIdentity,
         configRevision: 3,
       },
@@ -299,6 +304,7 @@ test("resolves a versioned action authority configuration without exposing route
   assert.deepEqual(coordinator.resolveActionAuthorityConfiguration("hc-1"), {
     status: "configured",
     approved: true,
+    policyClass: "confirmation",
     configIdentity,
     configRevision: 3,
   });
@@ -318,12 +324,14 @@ test("fails closed for missing, malformed, or non-positive versioned action conf
       "hc-2": {
         bridgeId: "bridge-a",
         approved: true,
+        policyClass: "confirmation",
         configIdentity: "not-a-digest",
         configRevision: 1,
       } as never,
       "hc-3": {
         bridgeId: "bridge-a",
         approved: true,
+        policyClass: "confirmation",
         configIdentity,
         configRevision: 0,
       } as never,
@@ -359,6 +367,7 @@ test("snapshots action authority configuration and requires a new coordinator fo
   const actionConfig = {
     bridgeId: "bridge-a",
     approved: true,
+    policyClass: "direct" as const,
     configIdentity: `sha256:${"d".repeat(64)}`,
     configRevision: 3,
   };
@@ -375,4 +384,23 @@ test("snapshots action authority configuration and requires a new coordinator fo
     actionAuthorityConfig: { "hc-1": actionConfig },
   });
   assert.equal(second.resolveActionAuthorityConfiguration("hc-1").configRevision, 4);
+});
+
+test("applies a new action authority projection at runtime after onboarding writes it", () => {
+  const coordinator = new AuthorityCoordinator({ capabilities: [capability("hc-1")] });
+  assert.equal(coordinator.resolveActionAuthorityConfiguration("hc-1").status, "not_configured");
+  coordinator.replaceActionAuthorityConfig({
+    "hc-1": {
+      bridgeId: "bridge-a",
+      approved: true,
+      policyClass: "direct",
+      configIdentity: `sha256:${"e".repeat(64)}`,
+      configRevision: 1,
+    },
+  });
+  assert.deepEqual(coordinator.resolveActionAuthority("hc-1", [{ bridgeId: "bridge-a", available: true, validity: "valid" }]), {
+    status: "available",
+    bridgeId: "bridge-a",
+    policyClass: "direct",
+  });
 });

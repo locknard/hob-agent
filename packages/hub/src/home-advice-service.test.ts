@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HomeAdviceService } from "./home-advice-service.js";
+import type { OneShotActionActor } from "./one-shot-action-plane.js";
 
 const report = {
   summary: "Try a bounded schedule.",
@@ -12,6 +16,13 @@ const report = {
   unknowns: ["Indoor brightness is unavailable."],
   hardwareSuggestions: [],
   validationSteps: ["Review manual reversals."],
+};
+
+const authenticatedActor: OneShotActionActor = {
+  principalId: "adult-1",
+  role: "adult_member",
+  present: true,
+  device: { kind: "private", boundPrincipalId: "adult-1" },
 };
 
 function emptyTrace(tools: readonly { readonly id: string; readonly name: string }[] = []) {
@@ -63,6 +74,22 @@ class UnreadyWorld extends ReadyWorld {
   }
 }
 
+class RecoveringWorld extends ReadyWorld {
+  ready = false;
+
+  override snapshot() {
+    return {
+      bridges: { ha: {} },
+      bridgeWatermarks: [{ bridgeId: "ha" }],
+      diagnostics: [{
+        bridgeId: "ha",
+        connectionState: this.ready ? "ready" : "connecting",
+        currentProcessReadyAt: this.ready ? "2026-08-20T10:00:00.000Z" : undefined,
+      }],
+    };
+  }
+}
+
 class BusyAdviceAgent extends Service {
   readonly observationStatus = "running";
   constructor(ctx: Context) { super(ctx, "homeAgent"); }
@@ -95,6 +122,45 @@ class DeferredAdviceAgent extends Service {
   }
 }
 
+class RecordingActorScope extends Service {
+  readonly calls: OneShotActionActor[] = [];
+  private current: OneShotActionActor | undefined;
+
+  constructor(ctx: Context) { super(ctx, "homeMediaConversation"); }
+
+  runWithActor<T>(actor: OneShotActionActor, callback: () => T): T {
+    this.calls.push(actor);
+    this.current = actor;
+    return callback();
+  }
+
+  currentActor(): OneShotActionActor | undefined {
+    return this.current;
+  }
+}
+
+class ActorAwareAdviceAgent extends Service {
+  readonly observationStatus = "idle" as const;
+  readonly observedActors: Array<OneShotActionActor | undefined> = [];
+  private releaseRequest: (() => void) | undefined;
+
+  constructor(ctx: Context) { super(ctx, "homeAgent"); }
+
+  async requestAdvice() {
+    await Promise.resolve();
+    const scope = this.ctx.get("homeMediaConversation") as unknown as RecordingActorScope | undefined;
+    this.observedActors.push(scope?.currentActor());
+    return new Promise<typeof report>((resolve) => {
+      this.releaseRequest = () => resolve(report);
+    });
+  }
+
+  release() {
+    this.releaseRequest?.();
+    this.releaseRequest = undefined;
+  }
+}
+
 test("coordinates one ready Agent turn and persists its structured report", async () => {
   const ctx = new Context();
   await ctx.plugin(ReadyWorld);
@@ -116,6 +182,26 @@ test("coordinates one ready Agent turn and persists its structured report", asyn
   const completed = ctx.homeAdvice.get("advice-1");
   assert.ok(completed && completed.status === "completed");
   assert.deepEqual(ctx.homeAdvice.list({ limit: 5 }), [completed]);
+  await ctx.fiber.dispose();
+});
+
+test("keeps the authenticated actor in the media scope for a same-process background turn", async () => {
+  const ctx = new Context();
+  await ctx.plugin(ReadyWorld);
+  await ctx.plugin(ActorAwareAdviceAgent);
+  await ctx.plugin(RecordingActorScope);
+  await ctx.plugin(HomeAdviceService, {
+    path: ":memory:",
+    idFactory: () => "advice-actor-scope",
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+
+  const running = await ctx.homeAdvice.ask("Can I play music in the media room?", undefined, authenticatedActor);
+  assert.equal(ctx.homeAdvice.background(running.id), true);
+  ctx.homeAgent.release();
+  await eventually(() => ctx.homeAdvice.get(running.id)?.status === "completed");
+  assert.deepEqual(ctx.homeMediaConversation.calls, [authenticatedActor]);
+  assert.deepEqual(ctx.homeAgent.observedActors, [authenticatedActor]);
   await ctx.fiber.dispose();
 });
 
@@ -262,6 +348,194 @@ test("cancels an active request without creating a second store lifecycle", asyn
   assert.equal(ctx.homeAdvice.cancel(running.id), false);
   assert.equal(ctx.homeAdvice.events(running.id).at(-1)?.type, "cancelled");
   await ctx.fiber.dispose();
+});
+
+test("background preserves the advice id and turn, then exposes one durable completion notification", async () => {
+  const ctx = new Context();
+  await ctx.plugin(ReadyWorld);
+  await ctx.plugin(DeferredAdviceAgent);
+  await ctx.plugin(HomeAdviceService, {
+    path: ":memory:",
+    idFactory: () => "advice-background-service",
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+
+  const running = await ctx.homeAdvice.ask("Why does the curtain timing feel wrong?");
+  assert.equal(ctx.homeAdvice.background(running.id), true);
+  assert.equal(ctx.homeAdvice.background(running.id), false);
+  assert.equal(ctx.homeAdvice.activeRequestId(), running.id);
+  assert.equal(ctx.homeAdvice.get(running.id)?.status, "background");
+  await assert.rejects(ctx.homeAdvice.ask("Start another inspection."), /active_request/i);
+
+  ctx.homeAgent.release();
+  await eventually(() => ctx.homeAdvice.get(running.id)?.status === "completed");
+  assert.equal(ctx.homeAdvice.events(running.id).some((event) => event.type === "background"), true);
+  assert.equal(ctx.homeAdvice.events(running.id).at(-1)?.type, "completed");
+  assert.deepEqual(ctx.homeAdvice.peekNextCompletionNotification(), {
+    adviceId: running.id,
+    status: "completed",
+    completedAt: "2026-08-20T10:00:00.000Z",
+    eventId: 3,
+  });
+  assert.equal(ctx.homeAdvice.acknowledgeCompletionNotification(running.id), true);
+  assert.equal(ctx.homeAdvice.peekNextCompletionNotification(), undefined);
+  await ctx.fiber.dispose();
+});
+
+test("guards background cancellation and keeps the cancelled terminal notification one-shot", async () => {
+  const ctx = new Context();
+  await ctx.plugin(ReadyWorld);
+  await ctx.plugin(DeferredAdviceAgent);
+  await ctx.plugin(HomeAdviceService, {
+    path: ":memory:",
+    idFactory: () => "advice-background-cancelled",
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+
+  const running = await ctx.homeAdvice.ask("Should I add a light sensor?");
+  assert.equal(ctx.homeAdvice.background(running.id), true);
+  assert.equal(ctx.homeAdvice.cancel("unknown-advice"), false);
+  assert.equal(ctx.homeAdvice.cancel(running.id), true);
+  await eventually(() => ctx.homeAdvice.get(running.id)?.status === "failed");
+  assert.equal(ctx.homeAdvice.cancel(running.id), false);
+  assert.equal(ctx.homeAdvice.background(running.id), false);
+  assert.equal(ctx.homeAdvice.events(running.id).at(-1)?.type, "cancelled");
+  assert.deepEqual(ctx.homeAdvice.peekNextCompletionNotification()?.status, "cancelled");
+  assert.equal(ctx.homeAdvice.acknowledgeCompletionNotification(running.id), true);
+  assert.equal(ctx.homeAdvice.peekNextCompletionNotification(), undefined);
+  await ctx.fiber.dispose();
+});
+
+test("recovers a persisted background advice after service restart with the same id and event cursor", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-advice-service-reopen-"));
+  const path = join(directory, "advice.sqlite");
+
+  const first = new Context();
+  await first.plugin(ReadyWorld);
+  await first.plugin(DeferredAdviceAgent);
+  await first.plugin(HomeAdviceService, {
+    path,
+    idFactory: () => "advice-recovered",
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+  const running = await first.homeAdvice.ask("Why did the window open?");
+  assert.equal(first.homeAdvice.background(running.id), true);
+  assert.equal(first.homeAdvice.activeRequestId(), running.id);
+  await first.fiber.dispose();
+
+  const second = new Context();
+  await second.plugin(ReadyWorld);
+  await second.plugin(DeferredAdviceAgent);
+  await second.plugin(HomeAdviceService, { path, clock: () => "2026-08-20T10:00:00.000Z" });
+  await eventually(() => second.homeAdvice.activeRequestId() === running.id);
+  assert.equal(second.homeAdvice.get(running.id)?.status, "background");
+  assert.deepEqual(second.homeAdvice.events(running.id).map((event) => event.type), ["accepted", "background"]);
+
+  second.homeAgent.release();
+  await eventually(() => second.homeAdvice.get(running.id)?.status === "completed");
+  assert.equal(second.homeAdvice.peekNextCompletionNotification()?.adviceId, running.id);
+  assert.equal(second.homeAdvice.acknowledgeCompletionNotification(running.id), true);
+  await second.fiber.dispose();
+});
+
+test("does not restore an actor when a background advice recovers after restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-advice-service-actor-recovery-"));
+  const path = join(directory, "advice.sqlite");
+
+  const first = new Context();
+  await first.plugin(ReadyWorld);
+  await first.plugin(DeferredAdviceAgent);
+  await first.plugin(HomeAdviceService, {
+    path,
+    idFactory: () => "advice-actor-recovery",
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+  const original = await first.homeAdvice.ask("Why did the window open?", undefined, authenticatedActor);
+  assert.equal(first.homeAdvice.background(original.id), true);
+  await first.fiber.dispose();
+
+  const second = new Context();
+  await second.plugin(ReadyWorld);
+  await second.plugin(ActorAwareAdviceAgent);
+  await second.plugin(RecordingActorScope);
+  await second.plugin(HomeAdviceService, { path, clock: () => "2026-08-20T10:00:00.000Z" });
+  await eventually(() => second.homeAdvice.activeRequestId() === original.id);
+  assert.deepEqual(second.homeAgent.observedActors, [undefined]);
+  assert.deepEqual(second.homeMediaConversation.calls, []);
+  second.homeAgent.release();
+  await eventually(() => second.homeAdvice.get(original.id)?.status === "completed");
+  await second.fiber.dispose();
+});
+
+test("keeps a background recovery coordinator waiting through startup connection and reuses the same advice id", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-advice-service-delayed-recovery-"));
+  const path = join(directory, "advice.sqlite");
+
+  const first = new Context();
+  await first.plugin(ReadyWorld);
+  await first.plugin(DeferredAdviceAgent);
+  await first.plugin(HomeAdviceService, {
+    path,
+    idFactory: () => "advice-delayed-recovery",
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+  const original = await first.homeAdvice.ask("Why did the window open?");
+  assert.equal(first.homeAdvice.background(original.id), true);
+  await first.fiber.dispose();
+
+  const second = new Context();
+  await second.plugin(RecoveringWorld);
+  await second.plugin(DeferredAdviceAgent);
+  await second.plugin(HomeAdviceService, {
+    path,
+    backgroundRecoveryIntervalMs: 5,
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+  const secondWorld = second.get("homeWorld") as unknown as RecoveringWorld;
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(second.homeAdvice.activeRequestId(), undefined);
+  assert.equal(second.homeAgent.calls, 0);
+
+  secondWorld.ready = true;
+  await eventually(() => second.homeAdvice.activeRequestId() === original.id);
+  assert.equal(second.homeAgent.calls, 1);
+  assert.equal(second.homeAdvice.get(original.id)?.status, "background");
+  second.homeAgent.release();
+  await eventually(() => second.homeAdvice.get(original.id)?.status === "completed");
+  await second.fiber.dispose();
+});
+
+test("cancels pending background recovery on service disposal", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-advice-service-cancel-recovery-"));
+  const path = join(directory, "advice.sqlite");
+
+  const first = new Context();
+  await first.plugin(ReadyWorld);
+  await first.plugin(DeferredAdviceAgent);
+  await first.plugin(HomeAdviceService, {
+    path,
+    idFactory: () => "advice-cancel-recovery",
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+  const original = await first.homeAdvice.ask("Why did the window open?");
+  assert.equal(first.homeAdvice.background(original.id), true);
+  await first.fiber.dispose();
+
+  const second = new Context();
+  await second.plugin(RecoveringWorld);
+  await second.plugin(DeferredAdviceAgent);
+  await second.plugin(HomeAdviceService, {
+    path,
+    backgroundRecoveryIntervalMs: 5,
+    clock: () => "2026-08-20T10:00:00.000Z",
+  });
+  const secondAgent = second.get("homeAgent") as unknown as DeferredAdviceAgent;
+  const secondWorld = second.get("homeWorld") as unknown as RecoveringWorld;
+  await new Promise<void>((resolve) => setTimeout(resolve, 15));
+  await second.fiber.dispose();
+  secondWorld.ready = true;
+  await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  assert.equal(secondAgent.calls, 0);
 });
 
 async function eventually(predicate: () => boolean): Promise<void> {

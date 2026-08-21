@@ -5,11 +5,23 @@ import type { HomeAdviceReport } from "@hob-agent/agent-layer/home-advice-report
 import {
   SqliteHomeAdviceStore,
   validateHomeAdviceQuestion,
+  type HomeAdviceCompletionNotification,
+  type HomeAdviceProgressData,
+  type HomeAdviceProgressEvent,
+  type HomeAdviceProgressType,
   type HomeAdviceRecord,
   type HomeAdviceStore,
   type SqliteHomeAdviceStoreOptions,
 } from "./home-advice-store.js";
 import { isHomeWorldReady } from "./home-observation-scheduler.js";
+import type { OneShotActionActor } from "./one-shot-action-plane.js";
+
+export type {
+  HomeAdviceCompletionNotification,
+  HomeAdviceProgressData,
+  HomeAdviceProgressEvent,
+  HomeAdviceProgressType,
+} from "./home-advice-store.js";
 
 interface AdviceAgentPort {
   readonly observationStatus: "idle" | "running";
@@ -20,6 +32,13 @@ interface AdviceAgentPort {
 
 interface AdviceWorldPort {
   snapshot(): Parameters<typeof isHomeWorldReady>[0];
+}
+
+interface HomeMediaActorScopePort {
+  runWithActor<T>(
+    actor: OneShotActionActor,
+    callback: () => T | PromiseLike<T>,
+  ): T | PromiseLike<T>;
 }
 
 declare module "@deepseek-ai/cordis" {
@@ -36,30 +55,6 @@ export type HomeAdviceAvailability =
   | { readonly status: "active_request"; readonly activeAdviceId: string }
   | { readonly status: "model_unavailable" }
   | { readonly status: "stopped" };
-
-export type HomeAdviceProgressType =
-  | "accepted"
-  | "inspecting_home"
-  | "reading_inventory"
-  | "checking_rules"
-  | "evaluating_evidence"
-  | "composing_answer"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-export interface HomeAdviceProgressData {
-  readonly adviceId: string;
-  readonly at: string;
-  readonly stage: HomeAdviceProgressType;
-}
-
-export interface HomeAdviceProgressEvent {
-  /** Monotonic per-advice SSE replay identifier. */
-  readonly id: number;
-  readonly type: HomeAdviceProgressType;
-  readonly data: HomeAdviceProgressData;
-}
 
 export type HomeAdviceProgressListener = (event: HomeAdviceProgressEvent) => void;
 
@@ -82,27 +77,28 @@ export interface HomeAdviceServiceOptions extends SqliteHomeAdviceStoreOptions {
   readonly clock?: () => string;
   /** Polls the redacted DSH trace only while an advice request is running. */
   readonly progressPollIntervalMs?: number;
-  readonly maxProgressEventsPerAdvice?: number;
+  /** Bounds the low-frequency wait for a ready owner after startup. */
+  readonly backgroundRecoveryIntervalMs?: number;
   readonly maxProgressStreams?: number;
 }
 
 interface ActiveAdvice {
   readonly id: string;
   readonly question: string;
+  /** The actor remains process-local and never enters the durable advice record. */
+  readonly actor?: OneShotActionActor;
   readonly controller: AbortController;
   readonly traceToolIds: Set<string>;
   readonly progressTypes: Set<HomeAdviceProgressType>;
+  backgrounded: boolean;
   cancelRequested: boolean;
+  preserveBackgroundOnShutdown: boolean;
   removeExternalAbort: () => void;
 }
 
-interface ProgressLog {
-  readonly events: HomeAdviceProgressEvent[];
-  readonly listeners: Set<HomeAdviceProgressListener>;
-  terminal: boolean;
-}
+type HomeAdviceNonTerminalProgressType = Exclude<HomeAdviceProgressType, "completed" | "failed" | "cancelled">;
 
-const TOOL_PROGRESS: Readonly<Record<string, HomeAdviceProgressType>> = {
+const TOOL_PROGRESS: Readonly<Record<string, HomeAdviceNonTerminalProgressType>> = {
   get_home_inventory: "reading_inventory",
   get_home_snapshot: "inspecting_home",
   get_home_activity: "evaluating_evidence",
@@ -117,10 +113,12 @@ export class HomeAdviceService extends Service {
   private readonly store: HomeAdviceStore & { close?: () => void };
   private readonly clock: () => string;
   private readonly progressPollIntervalMs: number;
-  private readonly maxProgressEventsPerAdvice: number;
+  private readonly backgroundRecoveryIntervalMs: number;
   private readonly maxProgressStreams: number;
-  private readonly progressLogs = new Map<string, ProgressLog>();
+  /** Ephemeral fanout only; durable replay remains owned by the store. */
+  private readonly progressSubscribers = new Map<string, Set<HomeAdviceProgressListener>>();
   private active: ActiveAdvice | undefined;
+  private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
 
   constructor(ctx: Context, options: HomeAdviceServiceOptions) {
@@ -133,11 +131,11 @@ export class HomeAdviceService extends Service {
       1,
       10_000,
     );
-    this.maxProgressEventsPerAdvice = boundedOption(
-      options.maxProgressEventsPerAdvice ?? 64,
-      "home advice progress event limit",
+    this.backgroundRecoveryIntervalMs = boundedOption(
+      options.backgroundRecoveryIntervalMs ?? 1_000,
+      "home advice background recovery interval",
       1,
-      256,
+      60_000,
     );
     this.maxProgressStreams = boundedOption(
       options.maxProgressStreams ?? 128,
@@ -148,13 +146,26 @@ export class HomeAdviceService extends Service {
   }
 
   protected [Service.init](): void {
+    queueMicrotask(() => {
+      this.scheduleBackgroundRecovery(0);
+    });
     this.ctx.effect(() => () => {
       this.closed = true;
+      if (this.recoveryTimer !== undefined) {
+        clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = undefined;
+      }
       const active = this.active;
       if (active !== undefined) {
-        active.cancelRequested = true;
+        const record = this.store.get(active.id);
+        if (record?.status === "background") {
+          active.preserveBackgroundOnShutdown = true;
+        } else {
+          active.cancelRequested = true;
+        }
         active.controller.abort();
       }
+      this.progressSubscribers.clear();
       this.store.close?.();
     }, "home-advice.close");
   }
@@ -183,7 +194,19 @@ export class HomeAdviceService extends Service {
    * Persists a running request and returns immediately. The DSH turn is owned
    * by the Hub background lifecycle and never runs in the HTTP request path.
    */
-  async ask(question: string, signal?: AbortSignal): Promise<HomeAdviceRecord> {
+  async ask(
+    question: string,
+    signalOrActor?: AbortSignal | OneShotActionActor,
+    actor?: OneShotActionActor,
+  ): Promise<HomeAdviceRecord> {
+    const signal = isAbortSignal(signalOrActor) ? signalOrActor : undefined;
+    if (signalOrActor !== undefined && signal === undefined && !isPresentActor(signalOrActor)) {
+      throw new TypeError("an authenticated present actor is required");
+    }
+    const authenticatedActor = actor ?? (isPresentActor(signalOrActor) ? signalOrActor : undefined);
+    if (authenticatedActor !== undefined && !isPresentActor(authenticatedActor)) {
+      throw new TypeError("an authenticated present actor is required");
+    }
     const boundedQuestion = validateHomeAdviceQuestion(question);
     if (signal?.aborted) throw new Error("Home advice was cancelled");
     const availability = this.availability();
@@ -196,10 +219,13 @@ export class HomeAdviceService extends Service {
     const active: ActiveAdvice = {
       id,
       question: boundedQuestion,
+      ...(authenticatedActor === undefined ? {} : { actor: authenticatedActor }),
       controller,
       traceToolIds: new Set(),
       progressTypes: new Set(["accepted"]),
+      backgrounded: false,
       cancelRequested: false,
+      preserveBackgroundOnShutdown: false,
       removeExternalAbort: () => undefined,
     };
     if (signal !== undefined) {
@@ -218,9 +244,24 @@ export class HomeAdviceService extends Service {
     return running;
   }
 
+  /** Moves the active turn to a durable background owner without changing its id. */
+  background(id: string): boolean {
+    const active = this.active;
+    if (active === undefined || active.id !== id) return false;
+    const record = this.store.get(id);
+    if (record?.status !== "running") return false;
+    const backgroundAt = timestamp(this.clock);
+    if (!this.store.background({ id, backgroundAt })) return false;
+    active.backgrounded = true;
+    this.publishStoredEvent(id);
+    return true;
+  }
+
   cancel(id: string): boolean {
     const active = this.active;
     if (active === undefined || active.id !== id) return false;
+    const status = this.store.get(id)?.status;
+    if (status !== "running" && status !== "background") return false;
     active.cancelRequested = true;
     active.controller.abort();
     return true;
@@ -236,20 +277,76 @@ export class HomeAdviceService extends Service {
 
   events(id: string, afterSeq = 0): readonly HomeAdviceProgressEvent[] {
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new TypeError("Invalid home advice progress cursor");
-    return (this.progressLogs.get(id)?.events ?? []).filter((event) => event.id > afterSeq).map(copyEvent);
+    return this.store.events(id, afterSeq).map(copyEvent);
   }
 
   subscribe(id: string, listener: HomeAdviceProgressListener, afterSeq = 0): () => void {
     if (typeof listener !== "function") throw new TypeError("Home advice progress listener is required");
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new TypeError("Invalid home advice progress cursor");
-    const log = this.progressLogs.get(id);
-    if (log === undefined) return () => undefined;
-    for (const event of log.events) {
-      if (event.id > afterSeq) notify(listener, event);
+    for (const event of this.store.events(id, afterSeq)) notify(listener, event);
+    const current = this.store.get(id);
+    if (current === undefined || isTerminalStatus(current.status)) return () => undefined;
+    let listeners = this.progressSubscribers.get(id);
+    if (listeners === undefined) {
+      while (this.progressSubscribers.size >= this.maxProgressStreams) {
+        const oldest = this.progressSubscribers.keys().next().value;
+        if (typeof oldest !== "string") break;
+        this.progressSubscribers.delete(oldest);
+      }
+      listeners = new Set();
+      this.progressSubscribers.set(id, listeners);
     }
-    if (log.terminal) return () => undefined;
-    log.listeners.add(listener);
-    return () => log.listeners.delete(listener);
+    listeners.add(listener);
+    return () => {
+      listeners?.delete(listener);
+      if (listeners?.size === 0) this.progressSubscribers.delete(id);
+    };
+  }
+
+  peekNextCompletionNotification(): HomeAdviceCompletionNotification | undefined {
+    return this.store.peekNextCompletionNotification();
+  }
+
+  acknowledgeCompletionNotification(id: string): boolean {
+    return this.store.acknowledgeCompletionNotification(id);
+  }
+
+  /** Reattaches one durable background turn to the current Agent owner. */
+  recoverBackground(): boolean {
+    if (this.closed || this.active !== undefined) return false;
+    const world = this.ctx.get("homeWorld") as unknown as AdviceWorldPort | undefined;
+    const agent = this.ctx.get("homeAgent") as unknown as AdviceAgentPort | undefined;
+    if (world === undefined || agent === undefined || !isHomeWorldReady(world.snapshot()) || agent.observationStatus !== "idle") {
+      return false;
+    }
+    const record = this.store.list({ limit: 1, status: "background" })[0];
+    if (record === undefined || record.status !== "background") return false;
+    const active: ActiveAdvice = {
+      id: record.id,
+      question: record.question,
+      controller: new AbortController(),
+      traceToolIds: new Set(),
+      progressTypes: new Set(this.store.events(record.id).map((event) => event.type)),
+      backgrounded: true,
+      cancelRequested: false,
+      preserveBackgroundOnShutdown: false,
+      removeExternalAbort: () => undefined,
+    };
+    this.active = active;
+    void this.run(active, agent);
+    return true;
+  }
+
+  private scheduleBackgroundRecovery(delayMs: number): void {
+    if (this.closed || this.recoveryTimer !== undefined) return;
+    if (this.store.list({ limit: 1, status: "background" }).length === 0) return;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      if (this.closed) return;
+      if (this.active !== undefined || !this.recoverBackground()) {
+        this.scheduleBackgroundRecovery(this.backgroundRecoveryIntervalMs);
+      }
+    }, delayMs);
   }
 
   private async run(active: ActiveAdvice, agent: AdviceAgentPort): Promise<void> {
@@ -259,34 +356,41 @@ export class HomeAdviceService extends Service {
       ? undefined
       : setInterval(() => this.captureTrace(active, agent), this.progressPollIntervalMs);
     try {
-      const report = await agent.requestAdvice(active.question, active.controller.signal);
+      const requestAdvice = () => agent.requestAdvice(active.question, active.controller.signal);
+      const media = this.ctx.get("homeMediaConversation") as unknown as HomeMediaActorScopePort | undefined;
+      const report = active.actor === undefined || media === undefined
+        ? await requestAdvice()
+        : await media.runWithActor(active.actor, requestAdvice);
+      if (active.preserveBackgroundOnShutdown) return;
       if (active.cancelRequested || active.controller.signal.aborted) {
         this.finishFailed(active, "cancelled");
         return;
       }
       const completedAt = timestamp(this.clock);
-      this.store.complete({ id: active.id, report, completedAt });
-      this.emit(active.id, "completed", completedAt);
+      if (this.store.complete({ id: active.id, report, completedAt })) this.publishStoredEvent(active.id);
     } catch {
+      if (active.preserveBackgroundOnShutdown) return;
       this.finishFailed(active, active.cancelRequested || active.controller.signal.aborted ? "cancelled" : "failed");
     } finally {
       if (timer !== undefined) clearInterval(timer);
       active.removeExternalAbort();
       if (this.active?.id === active.id) this.active = undefined;
+      this.scheduleBackgroundRecovery(this.backgroundRecoveryIntervalMs);
     }
   }
 
   private finishFailed(active: ActiveAdvice, eventType: "failed" | "cancelled"): void {
+    if (active.preserveBackgroundOnShutdown) return;
     let completedAt: string | undefined;
     try {
-      if (this.store.get(active.id)?.status === "running") {
+      const status = this.store.get(active.id)?.status;
+      if (status === "running" || status === "background") {
         completedAt = timestamp(this.clock);
-        this.store.fail({ id: active.id, completedAt });
+        if (this.store.fail({ id: active.id, completedAt, eventType })) this.publishStoredEvent(active.id);
       }
     } catch {
       // Preserve the request boundary even if persistence is already closing.
     }
-    this.emit(active.id, eventType, completedAt);
   }
 
   private captureTrace(active: ActiveAdvice, agent: AdviceAgentPort): void {
@@ -302,32 +406,28 @@ export class HomeAdviceService extends Service {
     }
   }
 
-  private emit(id: string, type: HomeAdviceProgressType, at?: string): void {
+  private emit(
+    id: string,
+    type: Exclude<HomeAdviceProgressType, "completed" | "failed" | "cancelled">,
+    at?: string,
+  ): void {
     if (this.closed) return;
     const eventAt = at ?? safeTimestamp(this.clock);
     if (eventAt === undefined) return;
-    let log = this.progressLogs.get(id);
-    if (log === undefined) {
-      while (this.progressLogs.size >= this.maxProgressStreams) {
-        const oldest = this.progressLogs.keys().next().value;
-        if (typeof oldest !== "string") break;
-        this.progressLogs.delete(oldest);
-      }
-      log = { events: [], listeners: new Set(), terminal: false };
-      this.progressLogs.set(id, log);
+    this.store.appendProgress({ id, type, at: eventAt });
+    this.publishStoredEvent(id);
+  }
+
+  private publishStoredEvent(id: string): void {
+    if (this.closed) return;
+    const event = this.store.events(id).at(-1);
+    if (event === undefined) return;
+    const listeners = this.progressSubscribers.get(id);
+    if (listeners !== undefined) {
+      for (const listener of listeners) notify(listener, event);
     }
-    if (log.terminal) return;
-    const event: HomeAdviceProgressEvent = {
-      id: (log.events.at(-1)?.id ?? 0) + 1,
-      type,
-      data: { adviceId: id, at: eventAt, stage: type },
-    };
-    log.events.push(event);
-    while (log.events.length > this.maxProgressEventsPerAdvice) log.events.shift();
-    for (const listener of log.listeners) notify(listener, event);
-    if (type === "completed" || type === "failed" || type === "cancelled") {
-      log.terminal = true;
-      log.listeners.clear();
+    if (event.type === "completed" || event.type === "failed" || event.type === "cancelled") {
+      this.progressSubscribers.delete(id);
     }
   }
 }
@@ -342,6 +442,10 @@ function notify(listener: HomeAdviceProgressListener, event: HomeAdviceProgressE
 
 function copyEvent(event: HomeAdviceProgressEvent): HomeAdviceProgressEvent {
   return { id: event.id, type: event.type, data: { ...event.data } };
+}
+
+function isTerminalStatus(status: HomeAdviceRecord["status"]): status is "completed" | "failed" {
+  return status === "completed" || status === "failed";
 }
 
 function boundedOption(value: number, label: string, minimum: number, maximum: number): number {
@@ -365,4 +469,28 @@ function safeTimestamp(clock: () => string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as { aborted?: unknown }).aborted === "boolean"
+    && typeof (value as { addEventListener?: unknown }).addEventListener === "function";
+}
+
+function isPresentActor(value: unknown): value is OneShotActionActor {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as { principalId?: unknown }).principalId === "string"
+    && (value as { principalId: string }).principalId.length > 0
+    && ((value as { role?: unknown }).role === "admin"
+      || (value as { role?: unknown }).role === "adult_member"
+      || (value as { role?: unknown }).role === "member"
+      || (value as { role?: unknown }).role === "child"
+      || (value as { role?: unknown }).role === "guest")
+    && (value as { present?: unknown }).present === true
+    && typeof (value as { device?: unknown }).device === "object"
+    && (value as { device: { kind?: unknown } }).device !== null
+    && ((value as { device: { kind?: unknown } }).device.kind === "private"
+      || (value as { device: { kind?: unknown } }).device.kind === "shared");
 }

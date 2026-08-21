@@ -237,15 +237,10 @@ assessment/result identities, closed reasons, neutral diff/conflict, and the
 dry-run fact `writesPerformed: false`; it must not expose writable Registry
 objects, provider payloads, raw errors, or a route to the worker.
 
-The standalone Inbox composition described in
-[`standalone-inbox.md`](standalone-inbox.md) is read-only for this pipeline:
-it does not mount the worker, bridge, Agent, authority resolver, compiler,
-dry-run producer, queue writer, or Registry mutation handle. It cannot enqueue,
-retry, compile, simulate, install, enable, execute, or roll back. Any
-pre-existing proposal review controls remain governed review operations only;
-they do not turn the standalone process into a preparation worker. The
-preparation projection is therefore safe to inspect after a process restart
-without causing new home reads or pipeline work.
+The Inbox receives a read-only preparation projection. It receives no worker,
+bridge, Agent, authority resolver, compiler, dry-run producer, queue writer, or
+Registry mutation handle. Review controls remain governed proposal operations.
+Reading preparation state after a process restart causes no pipeline work.
 
 ### Inbox status and explicit retry boundary
 
@@ -253,13 +248,12 @@ The Proposal review projection may expose one exact preparation summary for
 `proposalId + proposalRevision`: `status`, `attempt`, optimistic `version`, and
 the closed `stage + error code` when failed, plus bounded created/updated time.
 It does not expose `jobId`, the job idempotency key, arbitrary error text, or queue enumeration.
-This read projection is available to both the full and standalone Inbox so a
-household can understand persisted state without causing work.
+This read projection lets a household understand persisted state without
+causing work.
 
-Retry is different from status. It is available only when the full
-`HomeAgentRuntime` injects a narrow root-owned retry port directly into the
-Inbox composition. It is not a Cordis queue service and is absent from the
-standalone Inbox. The command contains only the exact Proposal id/revision and
+Retry is different from status. `HomeAgentRuntime` injects a narrow root-owned
+retry port directly into the Inbox composition. It is not a Cordis queue
+service. The command contains only the exact Proposal id/revision and
 expected preparation version. The root resolves the private job, performs the
 existing failed-to-queued optimistic transition, and wakes that exact queued
 version only after the durable transition returns. A wake failure does not
@@ -309,8 +303,8 @@ Focused tests and crash/concurrency tests must prove:
   output, Inbox mutation routes, or bridge adapter inputs;
 - all dry-run statuses, including failed and unavailable, carry
   `writesPerformed: false`, and spies observe no device/remote write path; and
-- standalone Inbox inspection is read-only for jobs and Artifact results and
-  does not reconnect the bridge, start DSH, or run preparation.
+- Inbox inspection is read-only for jobs and Artifact results and starts no
+  preparation work.
 
 ## Non-goals
 

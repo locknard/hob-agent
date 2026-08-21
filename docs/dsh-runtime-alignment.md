@@ -147,6 +147,12 @@ Home Product Bundle 规范化和策略判定
 第三方 Plugin 不得覆盖家庭风险语义、伪造批准、绕过 executor 或跳过审计。安装成功、
 在 Agent scope 中可见和获得执行授权是三个不同状态。
 
+前端布局同样是 contribution 而不是第二个产品 runtime。Cordis 管理 Plugin package 与
+generation 的后端生命周期；浏览器 Host 通过独立 View Registry 挂载已验证的 layout
+contribution。生活视图、控制视图和未来第三方布局共享 presentation/intent contract，
+不能取得 Cordis Context 或继承同包 Skill、bridge、tool 的权限。详细契约见
+`frontend-layout-extensions.md`。
+
 ## DSH 与 hob-agent 的职责边界
 
 | 领域 | DSH Agent Runtime | hob-agent Home Product Bundle |
