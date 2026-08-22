@@ -286,7 +286,7 @@ corresponding binding; the Phase 0 server itself stays loopback-only.
   `main` landmark, zero horizontal overflow and zero console warnings/errors. The
   layout publication workspace additionally covers exact actor-attributed history,
   hidden generation identifiers and complete wrapping at 390 px.
-- Fresh release commands: `pnpm test` (1,227 passing tests), `pnpm check`,
+- Fresh release commands: `pnpm test` (1,229 passing tests), `pnpm check`,
   `git diff --check`, and a repository secret scan.
 
 ## Reviewed structural constraint
@@ -304,7 +304,10 @@ public contracts and Hub authority owner.
 
 ## Current architectural direction
 
-The next work broadens household coverage inside these boundaries: richer
-neutral capability descriptions, additional bridge adapters, declarative layout
-providers and real-home reliability evidence. It extends the single DSH/Cordis
-runtime and the existing Hub owners.
+The next product milestone is the single-process bootstrap state machine recorded
+in [`product-bootstrap-runtime.md`](./product-bootstrap-runtime.md). It makes local
+pairing, model selection and probe, bridge setup, scoped credential storage, and
+configuration activation available before the operational Agent mounts. Subsequent
+work broadens household coverage through richer neutral capability descriptions,
+additional bridge adapters, declarative layout providers and real-home reliability
+evidence inside the same DSH/Cordis runtime and existing Hub owners.

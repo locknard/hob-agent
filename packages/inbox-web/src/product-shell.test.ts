@@ -173,6 +173,7 @@ test("projects unknown household facts and connection states without inventing a
   }));
   assert.match(settings, /当前成员.*待设置/s);
   assert.match(settings, /身份.*待确认/s);
+  assert.doesNotMatch(settings, /连接详情|查看连接/);
   assert.doesNotMatch(settings, /小海|管理员手机确认/);
 
   const conversation = renderProductShell(model({
