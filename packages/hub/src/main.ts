@@ -208,7 +208,7 @@ function isMainModule(): boolean {
 if (isMainModule()) {
   void main().catch(() => {
     // Do not print arbitrary startup errors: they may contain a credential
-    // supplied by a provider or Home Assistant.
+    // supplied by a model provider or bridge.
     console.error("hob-agent failed to start");
     process.exitCode = 1;
   });

@@ -321,7 +321,11 @@ new ecosystem's predicates or actions still requires a core registry change. The
 next bridge-contract revision should carry a closed neutral semantic descriptor
 from each trusted product bundle, with Hub validation and policy retaining final
 authority. Third-party bundles can then add reviewed semantics through the catalog
-without adding adapter names to Artifact code.
+without adding adapter names to Artifact code. The same catalog metadata should
+own household-facing adapter names; onboarding currently recognizes the two
+built-in product bundle names while unknown adapters fall back to their registered
+type. Moving those names into trusted registration metadata makes future product
+bundles first-class without adding presentation branches to the Home domain.
 
 ## Current architectural direction
 
