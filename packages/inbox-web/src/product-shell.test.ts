@@ -1171,3 +1171,168 @@ test("renders the concern card with fact, unknown and suggestion layers from a r
   const quiet = renderProductShell(model());
   assert.doesNotMatch(quiet, /当前关注/);
 });
+
+
+test("closes a runtime confirmation with an honest outcome instead of a dead card", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    runtimeConfirmations: [
+      {
+        id: "door-lock",
+        title: "锁上大门",
+        status: "decided",
+        decisionSummary: "已由小海批准 · 已执行并核对：前门已上锁（18:42）",
+        policyClass: "administrator",
+      },
+      {
+        id: "door-lock-expired",
+        title: "锁上大门",
+        status: "expired",
+        reissueHref: "/control",
+        policyClass: "administrator",
+      },
+    ],
+  }));
+  assert.match(html, /已由小海批准 · 已执行并核对：前门已上锁（18:42）/);
+  assert.match(html, /时限内无人批准 · 未执行，已留记录/);
+  assert.match(html, /重新发起（重新计时）/);
+  assert.match(html, /href="\/control"/);
+});
+
+test("states the snooze budget with the attempt count", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    proposals: [{
+      id: "curtain",
+      revision: 1,
+      title: "周末早晨窗帘慢速拉开",
+      lifecycle: "ready",
+      status: "snoozed",
+      snoozeCount: 1,
+    }],
+  }));
+  assert.match(html, /暂缓也占建议名额；这是第 2 次，最多 2 次/);
+});
+
+test("activity carries full dates, the closed vocabulary and per-item verification", () => {
+  const html = renderProductShell(model({
+    route: "activity",
+    activity: [
+      {
+        id: "a-physical",
+        dateGroup: "today",
+        dateLabel: "今天 · 8 月 21 日",
+        time: "23:12",
+        title: "顶灯被墙面开关关闭",
+        attribution: "physical",
+        verification: "阿灶：你动手了，我注意到了；相反的自动动作已取消并留记录。",
+      },
+      {
+        id: "a-member",
+        dateGroup: "today",
+        dateLabel: "今天 · 8 月 21 日",
+        time: "22:40",
+        title: "客厅温度设为 24.5°C",
+        attribution: "member",
+        actor: "小海",
+      },
+      {
+        id: "a-system",
+        dateGroup: "today",
+        dateLabel: "今天 · 8 月 21 日",
+        time: "20:02",
+        title: "米家桥接短暂断线 38 秒，已自动恢复",
+        attribution: "system",
+      },
+    ],
+  }));
+  assert.match(html, /今天 · 8 月 21 日/);
+  assert.match(html, /data-attribution="physical">物理</);
+  assert.match(html, /data-attribution="member">你</);
+  assert.match(html, /data-attribution="system">系统</);
+  assert.match(html, /你动手了，我注意到了/);
+  assert.match(html, /data-activity-filter="physical"/);
+});
+
+test("offers quick phrases that hand one sentence to the agent", () => {
+  const html = renderProductShell(model({
+    concern: {
+      adviceId: "advice-1",
+      title: "窗帘今天开得比平时晚",
+      facts: ["今天 09:42 才打开"],
+    },
+  }));
+  assert.match(html, /class="product-quick-phrases"/);
+  assert.match(html, /现在家里怎么样？/);
+  assert.match(html, /href="\/voice"/);
+});
+
+test("explains that an answer's suggestion is preparing toward one decision", () => {
+  const html = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      id: "turn-1",
+      question: "窗帘为什么开得晚？",
+      status: "completed",
+      suggestions: ["先做一周可逆调整"],
+      correctionProposalId: "curtain",
+      correctionProposalCount: 3,
+    },
+  }));
+  assert.match(html, /后台准备中，方案备好后一次点头即启用/);
+  assert.match(html, /在处理中心查看/);
+  assert.doesNotMatch(html, /试运行|同意方向/);
+});
+
+test("keeps an acknowledged safety fact as a condensed persistent bar", () => {
+  const html = renderProductShell(model({
+    safetyAlerts: [{
+      id: "leak",
+      title: "厨房漏水",
+      status: "acknowledged",
+      actionLabel: "查看处置",
+    }],
+  }));
+  assert.match(html, /data-safety-status="acknowledged"/);
+  assert.match(html, /已看到 · 事实仍在持续/);
+  assert.doesNotMatch(html, /我已看到/);
+});
+
+test("speaks with the household's chosen name through onboarding", () => {
+  const html = renderProductShell(model({
+    route: "onboarding",
+    onboarding: {
+      step: 8,
+      status: "ready",
+      household: { householdName: "小海的家", agentName: "阿灶" },
+    },
+  }));
+  assert.match(html, /跟阿灶说句话吧/);
+  assert.doesNotMatch(html, /跟 hob 说句话吧/);
+});
+
+test("the wall control view shows approvals read-only and points to a private device", () => {
+  const html = renderProductShell(model({
+    route: "control",
+    view: {
+      activeId: "control",
+      currentPath: "/control",
+      choices: [{ id: "control", label: "控制视图" }],
+    },
+    controlSpaces: [{ id: "living", name: "客厅", controls: [] }],
+  }));
+  assert.match(html, /等待放行/);
+  assert.match(html, /共享屏不替人点头/);
+  assert.match(html, /查看全部/);
+  assert.doesNotMatch(html.slice(html.indexOf("等待放行")), /放行（管理员）/);
+});
+
+test("summarizes the home's status from real safety facts only", () => {
+  const quiet = renderProductShell(model({}));
+  assert.match(quiet, /没有待处理的安全事项/);
+
+  const alerting = renderProductShell(model({
+    safetyAlerts: [{ id: "leak", title: "厨房漏水", status: "active" }],
+  }));
+  assert.doesNotMatch(alerting, /没有待处理的安全事项/);
+});

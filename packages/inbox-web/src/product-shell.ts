@@ -67,6 +67,10 @@ export interface ProductRuntimeConfirmation {
   readonly policyClass?: "direct" | "confirmation" | "administrator" | "admin" | string;
   readonly canApprove?: boolean;
   readonly status?: "pending" | "expired" | "decided" | "superseded";
+  /** Household-readable closing line for a decided confirmation. */
+  readonly decisionSummary?: string;
+  /** Where the expired action can be re-initiated with a fresh window. */
+  readonly reissueHref?: string;
   readonly approveLabel?: string;
   readonly rejectLabel?: string;
 }
@@ -770,9 +774,12 @@ function renderOverviewHeader(model: NormalizedProductShellModel, options: Produ
 function renderOverviewStatus(model: NormalizedProductShellModel): string {
   const status = overviewConnectionStatus(model.connection);
   const disconnected = model.connection.state === "disconnected";
+  const safetyQuiet = model.safetyAlert === undefined && (model.connection.state === "connected" || model.connection.state === "quiet")
+    ? " · 没有待处理的安全事项"
+    : "";
   const detail = disconnected
     ? `${model.connection.lastContact === undefined ? "" : `最后联系 ${model.connection.lastContact} · `}连接中断期间不执行任何设备动作，也不把旧数据当作现在`
-    : model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`;
+    : `${model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`}${safetyQuiet}`;
   const recovery = disconnected ? `<a class="product-secondary-action" href="/settings">查看连接</a>` : "";
   return `<section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><div class="product-status-copy"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(detail)}</p></div>${recovery}</section>`;
 }
@@ -812,8 +819,10 @@ function renderOverviewEnergy(model: NormalizedProductShellModel): string {
 
 function renderOverviewComposer(disconnected = false): string {
   const placeholder = disconnected ? "可以提问；涉及设备的动作会等连接恢复" : "问问家，或说出你想做的事…";
-  const helper = disconnected ? "设备动作会在连接恢复后回到这里。" : "小范围动作会直接完成；影响较大的动作会先请你确认。";
-  return `<form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="${placeholder}" /><button type="submit">发送</button></form><p class="product-helper-copy">${helper}</p>`;
+  const helper = disconnected ? "设备动作会在连接恢复后回到这里。" : "快捷句会把这句话交给它：低风险直接做，其余走该走的闸门。";
+  const phrase = (question: string) => `<form method="post" action="/conversation"><button type="submit" name="question" value="${escapeHtml(question)}">${escapeHtml(question)}</button></form>`;
+  const phrases = disconnected ? "" : `<div class="product-quick-phrases">${phrase("现在家里怎么样？")}${phrase("今晚有什么要注意的吗？")}</div>`;
+  return `${phrases}<form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="${placeholder}" /><a class="product-voice-entry" href="/voice" aria-label="使用语音">语音</a><button type="submit">发送</button></form><p class="product-helper-copy">${helper}</p>`;
 }
 
 function overviewConnectionStatus(connection: ProductShellConnection): {
@@ -873,8 +882,11 @@ function renderTurn(turn: ProductTurn, agentName: string): string {
   const answer = turn.answer === undefined ? "已经完成。" : turn.answer;
   const layers = `${turn.verifiedFacts?.length ? `<section class="product-answer-layer product-answer-layer--verified"><h3>已确认</h3>${list(turn.verifiedFacts)}</section>` : ""}${turn.unknowns?.length ? `<section class="product-answer-layer product-answer-layer--unknown"><h3>仍待确认</h3>${list(turn.unknowns)}</section>` : ""}${turn.suggestions?.length ? `<section class="product-answer-layer product-answer-layer--suggestion"><h3>给家的建议</h3>${list(turn.suggestions)}</section>` : ""}`;
   const correction = turn.correctionAck === undefined ? "" : `<div class="product-correction"><strong>${escapeHtml(turn.correctionAck)}</strong>${turn.correctionDestination === undefined ? "" : `<span> · ${escapeHtml(turn.correctionDestination)}</span>`}${turn.correctionProposalCount === undefined ? "" : `<span> · 当前 ${Math.max(0, Math.floor(turn.correctionProposalCount))} 条建议</span>`}</div>`;
+  const proposalTrail = turn.correctionProposalId === undefined || turn.correctionAck !== undefined
+    ? ""
+    : `<div class="product-turn-proposal"><p>已按此创建一条建议（后台准备中，方案备好后一次点头即启用），不会自动执行。</p><a href="/review-center?proposal=${encodeURIComponent(turn.correctionProposalId)}">在处理中心查看</a></div>`;
   const correctionForm = turn.status === "completed" ? renderCorrectionForm(turn.id) : "";
-  return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><section class="product-answer"><h2>已完成</h2><p>${escapeHtml(answer)}</p>${layers}${correction}${correctionForm}</section></div></div>`;
+  return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><section class="product-answer"><h2>已完成</h2><p>${escapeHtml(answer)}</p>${layers}${correction}${proposalTrail}${correctionForm}</section></div></div>`;
 }
 
 function renderCorrectionForm(adviceId: string): string {
@@ -900,8 +912,21 @@ function renderRuntimeCard(item: ProductRuntimeConfirmation): string {
   const canApprove = item.canApprove !== false && status === "pending";
   const administrator = item.policyClass === "administrator" || item.policyClass === "admin";
   const tags = `${item.eligibleActor === undefined ? "" : `<span class="product-tag ${administrator ? "product-tag--red" : "product-tag--neutral"}">${escapeHtml(item.eligibleActor)}</span>`}${item.source === undefined ? "" : `<span class="product-tag product-tag--amber">来自：${escapeHtml(item.source)}</span>`}`;
-  const actions = status !== "pending" ? `<p class="product-muted">${status === "expired" ? "已过期 · 已记录到活动" : "这项动作已经结束"}</p>` : canApprove ? `<div class="product-card-actions"><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (administrator ? "放行（管理员）" : "放行"))}</button></form></div>` : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "请在可批准的设备上完成放行")} · 已推送到管理员手机</p>`;
+  const actions = status !== "pending" ? renderRuntimeOutcome(item, status) : canApprove ? `<div class="product-card-actions"><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (administrator ? "放行（管理员）" : "放行"))}</button></form></div>` : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "请在可批准的设备上完成放行")} · 已推送到管理员手机</p>`;
   return `<article class="product-card product-card--amber product-review-card" data-review-kind="runtime" data-review-id="${escapeHtml(item.id)}"><div class="product-card-tags">${tags}</div><h3>${escapeHtml(item.title)}</h3>${item.effect === undefined ? "" : `<p>${escapeHtml(item.effect)}</p>`}${renderRuntimeWindow(item)}${actions}</article>`;
+}
+
+function renderRuntimeOutcome(item: ProductRuntimeConfirmation, status: "expired" | "decided" | "superseded"): string {
+  if (status === "decided") {
+    return `<p class="product-runtime-outcome product-runtime-outcome--done">${escapeHtml(item.decisionSummary ?? "这项动作已经完成并核对。")}</p>`;
+  }
+  if (status === "superseded") {
+    return `<p class="product-muted">已在另一台设备上处理，这张卡不再需要你。</p>`;
+  }
+  const reissue = item.reissueHref === undefined
+    ? ""
+    : `<a class="product-secondary-action" href="${escapeHtml(localHref(item.reissueHref, "/review-center"))}">重新发起（重新计时）</a>`;
+  return `<p class="product-muted">已取消 · 时限内无人批准 · 未执行，已留记录。</p>${reissue}`;
 }
 
 function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
@@ -918,7 +943,7 @@ function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
   const statusLabel = proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
   const snoozedTwice = (proposal.snoozeCount ?? 0) >= 2;
-  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${snoozedTwice ? `<span class="product-subtle">下次请做决定</span>` : `<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options"><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="tomorrow">明天晚上</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="weekend">周末</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="next_week">下周</button></form></div><p class="product-snooze-note">这条建议最多暂缓两次，之后请做决定。</p></details>`}</div></article>`;
+  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${snoozedTwice ? `<span class="product-subtle">下次请做决定</span>` : renderSnoozeDisclosure(proposal)}</div></article>`;
 }
 
 function renderInsightCardActions(proposal: ProductProposal): string {
@@ -947,7 +972,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
     : `<details class="product-agent-journey"><summary>这条建议怎么得来的</summary>${renderAgentLoopTimeline(proposal.trace)}</details>`;
   const decide = insight
     ? renderInsightActions(proposal)
-    : `<div class="product-card-actions">${enableForm(proposal)}${modifyForm(proposal)}${renderSnoozeDisclosure(proposal.id)}${skipForm(proposal)}${latchForm(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停或关闭。</p>`;
+    : `<div class="product-card-actions">${enableForm(proposal)}${modifyForm(proposal)}${renderSnoozeDisclosure(proposal)}${skipForm(proposal)}${latchForm(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停或关闭。</p>`;
   return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${dependency}${insight ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
 }
 
@@ -972,9 +997,10 @@ function renderInsightActions(proposal: ProductProposal): string {
   return `<div class="product-card-actions"><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/helpful"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">有帮助</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">不需要</button></form></div><p>这类建议只是让你知道；要不要动手由你决定。</p>`;
 }
 
-function renderSnoozeDisclosure(proposalId: string): string {
-  const option = (value: string, label: string) => `<form method="post" action="/review-center/proposals/${encodedPathSegment(proposalId)}/snooze"><button type="submit" name="until" value="${value}">${label}</button></form>`;
-  return `<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options">${option("tomorrow", "明天晚上")}${option("weekend", "周末")}${option("next_week", "下周")}</div><p class="product-snooze-note">暂缓也占一个建议名额，同一条最多暂缓两次。</p></details>`;
+function renderSnoozeDisclosure(proposal: Pick<ProductProposal, "id" | "snoozeCount">): string {
+  const option = (value: string, label: string) => `<form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="${value}">${label}</button></form>`;
+  const attempt = Math.min((proposal.snoozeCount ?? 0) + 1, 2);
+  return `<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options">${option("tomorrow", "明天晚上")}${option("weekend", "周末")}${option("next_week", "下周")}</div><p class="product-snooze-note">暂缓也占建议名额；这是第 ${attempt} 次，最多 2 次。</p></details>`;
 }
 
 const AUTOMATION_PRESENTATION = {
@@ -1023,27 +1049,37 @@ function renderActivity(model: NormalizedProductShellModel): string {
     group.push(record);
     groups.set(key, group);
   }
-  const grouped = [...groups.entries()].map(([key, items]) => `<section><h2 class="product-activity-date">${escapeHtml(key === "today" ? "今天" : key === "yesterday" ? "昨天" : key)}</h2><ul class="product-activity-list">${items.map((item) => renderActivityItem(item, agentName)).join("")}</ul></section>`).join("");
+  const memberName = model.household.memberName;
+  const grouped = [...groups.entries()].map(([key, items]) => `<section><h2 class="product-activity-date">${escapeHtml(key === "today" ? "今天" : key === "yesterday" ? "昨天" : key)}</h2><ul class="product-activity-list">${items.map((item) => renderActivityItem(item, agentName, memberName)).join("")}</ul></section>`).join("");
   const selected = records.find((record) => record.id === model.selectedActivityId) ?? records[0];
-  const selectedActor = selected?.attribution === "hob" ? agentName : selected?.actor;
+  const selectedActor = selected === undefined ? undefined : selected.attribution === "hob" ? agentName : selected.actor;
   const side = selected === undefined ? `<section class="product-card"><h2>先选一条活动</h2><p class="product-muted">查看时间、执行者、动作和结果。</p></section>` : `<section class="product-card product-cause-aside" aria-labelledby="activity-cause-heading"><h2 id="activity-cause-heading">为什么会这样</h2><div class="product-cause-highlight"><strong>${escapeHtml(selected.title)}</strong><p>${escapeHtml(selectedActor === undefined ? "家里发生的变化" : `由${selectedActor}完成`)}</p></div>${selected.cause === undefined || selected.cause.length === 0 ? `<p class="product-muted">原因还在确认中。</p>` : `<h3>为什么会这样</h3><ol class="product-cause-chain">${selected.cause.map((cause, index) => `<li class="${index === 0 ? "product-cause-trigger" : ""}">${escapeHtml(cause)}</li>`).join("")}</ol>`}${selected.verification === undefined ? "" : `<p class="product-muted">证据：${escapeHtml(selected.verification)}</p>`}</section>`;
-  return `<header class="product-page-header"><div><p class="product-kicker">活动</p><h1>家里发生了什么</h1><p class="product-muted">查看家里的变化，了解原因和结果。</p></div></header><div class="product-activity"><div class="product-activity-main">${grouped || `<section class="product-card product-review-empty">今天暂时安静，新的家庭活动会显示在这里。</section>`}</div><aside class="product-cause-aside">${side}</aside></div>`;
+  const filters: readonly { readonly key: string; readonly label: string }[] = [
+    { key: "all", label: "全部" },
+    { key: "member", label: "你" },
+    { key: "hob", label: agentName },
+    { key: "external-rule", label: "外部规则" },
+    { key: "physical", label: "物理" },
+  ];
+  const filterStrip = `<div class="product-activity-filters" data-activity-filters role="group" aria-label="按来源筛选">${filters.map((filter, index) => `<button type="button" data-activity-filter="${filter.key}"${index === 0 ? ` aria-pressed="true"` : ` aria-pressed="false"`}>${escapeHtml(filter.label)}</button>`).join("")}</div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">活动</p><h1>家里发生了什么</h1><p class="product-muted">查看家里的变化，了解原因和结果。</p></div></header>${filterStrip}<div class="product-activity"><div class="product-activity-main">${grouped || `<section class="product-card product-review-empty">今天暂时安静，新的家庭活动会显示在这里。</section>`}</div><aside class="product-cause-aside">${side}</aside></div>`;
 }
 
-function attributionLabel(attribution: ProductActivityAttribution, agentName: string): string {
-  switch (attribution) {
-    case "physical": return "手动";
-    case "member": return "家人";
+function attributionLabel(record: Pick<ProductActivityRecord, "attribution" | "actor">, agentName: string, memberName: string | undefined): string {
+  switch (record.attribution) {
+    case "physical": return "物理";
+    case "member": return record.actor !== undefined && record.actor === memberName ? "你" : record.actor ?? "家人";
     case "hob": return agentName;
     case "external-rule": return "外部规则";
-    case "system": return "家庭服务";
+    case "system": return "系统";
     case "unknown": return "来源待确认";
   }
 }
 
-function renderActivityItem(record: ProductActivityRecord, agentName: string): string {
+function renderActivityItem(record: ProductActivityRecord, agentName: string, memberName: string | undefined): string {
   const cause = record.cause?.length ? `<details><summary>为什么会这样</summary><ol class="product-cause-chain">${record.cause.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol></details>` : "";
-  return `<li class="product-activity-item" data-activity-id="${escapeHtml(record.id)}"><time class="product-activity-time">${escapeHtml(record.time)}</time><div class="product-activity-copy"><strong>${escapeHtml(record.title)}</strong>${record.space === undefined ? "" : `<span class="product-subtle">${escapeHtml(record.space)}</span>`}${cause}</div><span class="product-attribution" data-attribution="${escapeHtml(record.attribution)}">${escapeHtml(attributionLabel(record.attribution, agentName))}</span></li>`;
+  const verification = record.verification === undefined ? "" : `<p class="product-activity-verification">${escapeHtml(record.verification)}</p>`;
+  return `<li class="product-activity-item" data-activity-id="${escapeHtml(record.id)}" data-activity-attribution="${escapeHtml(record.attribution)}"><time class="product-activity-time">${escapeHtml(record.time)}</time><div class="product-activity-copy"><strong>${escapeHtml(record.title)}</strong>${record.space === undefined ? "" : `<span class="product-subtle">${escapeHtml(record.space)}</span>`}${verification}${cause}</div><span class="product-attribution" data-attribution="${escapeHtml(record.attribution)}">${escapeHtml(attributionLabel(record, agentName, memberName))}</span></li>`;
 }
 
 function renderBatchControl(batch: ProductBatchControl): string {
@@ -1102,6 +1138,13 @@ const CONTROL_CONNECTION_PRESENTATION = {
   readonly summary: string;
 }>>;
 
+function renderWallApprovals(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
+  const confirmations = model.runtimeConfirmations;
+  if (confirmations.length === 0) return "";
+  const rows = confirmations.slice(0, 3).map((item) => `<li><strong>${escapeHtml(item.title)}</strong>${item.expiresIn === undefined ? "" : `<span>${escapeHtml(item.expiresIn)}后自动取消</span>`}</li>`).join("");
+  return `<section class="product-card product-wall-approvals" aria-labelledby="wall-approvals-heading"><h2 id="wall-approvals-heading">等待放行 · ${model.runtimeConfirmationCount} 条</h2><ul>${rows}</ul><p class="product-muted">共享屏不替人点头 —— 已推送到管理员的手机，任一人批准即可；这里只看，不能放行。</p><a class="product-secondary-action" href="${routeHref("reviews", options)}">查看全部 ${model.runtimeConfirmationCount} 条 →</a></section>`;
+}
+
 function renderDenseControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const spaces = model.controlSpaces ?? [];
   const controlCount = spaces.reduce((total, space) => total + (space.controls?.length ?? 0), 0);
@@ -1128,7 +1171,7 @@ function renderDenseControl(model: NormalizedProductShellModel, options: Product
     const metrics = space.metrics?.map((metric) => `<span class="product-control-metric"><small>${escapeHtml(metric.label)}</small><strong>${escapeHtml(metric.value)}</strong></span>`).join("") ?? "";
     return `<section class="product-control-space" data-control-space="${escapeHtml(space.id)}" aria-labelledby="control-${escapeHtml(space.id)}"><header><div><h2 id="control-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-control-state">${escapeHtml(space.state ?? `${space.deviceCount ?? 0} 个设备`)}</span></div>${metrics === "" ? "" : `<div class="product-control-metrics">${metrics}</div>`}</header><div class="product-control-rows">${controls || `<p class="product-control-empty">这个空间的动作仍在准备，当前状态会继续更新。</p>`}</div></section>`;
   }).join("");
-  return `<header class="product-page-header"><div><p class="product-kicker">控制视图</p><h1>家里的状态</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<section class="product-control-workspace" data-control-density="dense" data-control-row-density="${rowDensity}" data-control-availability="${connectionPresentation.availability}" aria-label="家庭控制概览"><div class="product-control-summary"><span><strong>${spaces.length}</strong><small>个空间</small></span><span><strong>${controlCount}</strong><small>${connectionPresentation.countLabel}</small></span><p>${connectionPresentation.summary}</p></div><div class="product-control-spaces">${rows || `<section class="product-control-space"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>`}</div></section>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">控制视图</p><h1>家里的状态</h1><p class="product-connection" data-connection-state="${escapeHtml(model.connection.state)}">${escapeHtml(connectionLabel(model.connection))}</p></div>${standaloneViewShortcut}</header>${feedback}${batch}<section class="product-control-workspace" data-control-density="dense" data-control-row-density="${rowDensity}" data-control-availability="${connectionPresentation.availability}" aria-label="家庭控制概览"><div class="product-control-summary"><span><strong>${spaces.length}</strong><small>个空间</small></span><span><strong>${controlCount}</strong><small>${connectionPresentation.countLabel}</small></span><p>${connectionPresentation.summary}</p></div><div class="product-control-spaces">${rows || `<section class="product-control-space"><h2>家里状态正在准备</h2><p class="product-muted">连接恢复后，这里会显示房间和设备。</p></section>`}</div></section>${renderWallApprovals(model, options)}`;
 }
 
 function renderControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -1363,14 +1406,20 @@ function renderOnboardingItems(items: readonly ProductOnboardingItem[] | undefin
   return `<ul class="product-onboarding-items">${items.map((item, index) => `<li class="product-onboarding-item" data-tone="${escapeHtml(item.tone ?? "neutral")}"><span class="product-onboarding-item-index" aria-hidden="true">${index + 1}</span><span class="product-onboarding-item-copy"><strong>${escapeHtml(item.label)}</strong>${item.detail === undefined ? "" : `<span>${escapeHtml(item.detail)}</span>`}</span>${item.status === undefined ? "" : `<span class="product-onboarding-item-status">${escapeHtml(item.status)}</span>`}</li>`).join("")}</ul>`;
 }
 
+function personalizeOnboardingCopy(text: string | undefined, agentName: string | undefined, step: number): string | undefined {
+  if (text === undefined || agentName === undefined || agentName.length === 0 || step < 2) return text;
+  return text.replace(/\s*\bhob\b\s*/g, agentName);
+}
+
 function renderOnboarding(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const rawStep = model.onboarding?.step ?? 1;
   const step = Math.min(8, Math.max(1, rawStep));
   const steps = onboardingSteps(model);
   const current = steps[step - 1] ?? steps[0]!;
   const state = model.onboarding;
-  const title = state?.title ?? current.title;
-  const body = state?.body ?? current.body ?? "每一步都由你确认。";
+  const agentName = state?.household?.agentName ?? model.household.agentName;
+  const title = personalizeOnboardingCopy(state?.title ?? current.title, agentName, step)!;
+  const body = personalizeOnboardingCopy(state?.body ?? current.body ?? "每一步都由你确认。", agentName, step)!;
   const fields = state?.fields ?? current.fields ?? [];
   const items = state?.items ?? current.items;
   const action = localHref(state?.action ?? current.action, "/onboarding/continue");

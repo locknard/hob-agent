@@ -154,6 +154,22 @@ if (runtimeCountdowns.length > 0) {
   window.addEventListener("beforeunload", () => window.clearInterval(runtimeCountdownTimer), { once: true });
 }
 
+const activityFilters = document.querySelector("[data-activity-filters]");
+if (activityFilters instanceof HTMLElement) {
+  activityFilters.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-activity-filter]") : null;
+    if (!(button instanceof HTMLElement)) return;
+    const filter = button.getAttribute("data-activity-filter") || "all";
+    for (const other of activityFilters.querySelectorAll("[data-activity-filter]")) {
+      other.setAttribute("aria-pressed", other === button ? "true" : "false");
+    }
+    for (const item of document.querySelectorAll("[data-activity-attribution]")) {
+      if (!(item instanceof HTMLElement)) continue;
+      item.hidden = filter !== "all" && item.getAttribute("data-activity-attribution") !== filter;
+    }
+  });
+}
+
 const turn = document.querySelector("[data-advice-stream=\"sse\"]");
 if (turn instanceof HTMLElement) {
   const eventsUrl = turn.getAttribute("data-advice-events");
