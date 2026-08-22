@@ -137,14 +137,14 @@ const updateRuntimeCountdowns = () => {
     if (!Number.isFinite(expiry)) continue;
     const seconds = Math.max(0, Math.ceil((expiry - now) / 1000));
     if (seconds === 0) {
-      node.textContent = "已到期";
+      node.textContent = "已到期 · 未执行";
       const card = node.closest("[data-review-kind=\"runtime\"]");
       for (const button of card?.querySelectorAll("button") || []) button.disabled = true;
       continue;
     }
-    if (seconds < 60) node.textContent = seconds + " 秒";
-    else if (seconds < 3600) node.textContent = Math.ceil(seconds / 60) + " 分钟";
-    else node.textContent = Math.ceil(seconds / 3600) + " 小时";
+    if (seconds < 60) node.textContent = seconds + " 秒后自动取消";
+    else if (seconds < 3600) node.textContent = Math.ceil(seconds / 60) + " 分钟后自动取消";
+    else node.textContent = Math.ceil(seconds / 3600) + " 小时后自动取消";
   }
 };
 if (runtimeCountdowns.length > 0) {

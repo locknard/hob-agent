@@ -719,7 +719,7 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
-  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer()}`;
+  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer(model.connection.state === "disconnected")}`;
 }
 
 function renderOverviewHeader(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -732,14 +732,20 @@ function renderOverviewHeader(model: NormalizedProductShellModel, options: Produ
 
 function renderOverviewStatus(model: NormalizedProductShellModel): string {
   const status = overviewConnectionStatus(model.connection);
-  return `<section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`)}</p></section>`;
+  const disconnected = model.connection.state === "disconnected";
+  const detail = disconnected
+    ? `${model.connection.lastContact === undefined ? "" : `最后联系 ${model.connection.lastContact} · `}连接中断期间不执行任何设备动作，也不把旧数据当作现在`
+    : model.connection.lastChanged === undefined ? status.detail : `最近变化：${model.connection.lastChanged}`;
+  const recovery = disconnected ? `<a class="product-secondary-action" href="/settings">查看连接</a>` : "";
+  return `<section class="product-status-card" data-status="${status.tone}" aria-label="家庭状态"><div class="product-status-copy"><p class="product-status-main">${escapeHtml(status.title)}</p><p class="product-subtle">${escapeHtml(detail)}</p></div>${recovery}</section>`;
 }
 
 function renderOverviewSpaces(model: NormalizedProductShellModel): string {
   const status = overviewConnectionStatus(model.connection);
+  const stale = model.connection.state === "disconnected";
   return model.spaces.length === 0
     ? `<section class="product-card product-review-empty"><h2>家庭空间会在连接完成后显示</h2><p class="product-muted">${escapeHtml(status.emptySpaceDetail)}</p></section>`
-    : model.spaces.map(renderSpaceCard).join("");
+    : model.spaces.map((space) => renderSpaceCard(space, stale)).join("");
 }
 
 function renderOverviewReviewSummary(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -758,8 +764,10 @@ function renderOverviewEnergy(model: NormalizedProductShellModel): string {
   return energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`;
 }
 
-function renderOverviewComposer(): string {
-  return `<form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="问问家，或说出你想做的事…" /><button type="submit">发送</button></form><p class="product-helper-copy">小范围动作会直接完成；影响较大的动作会先请你确认。</p>`;
+function renderOverviewComposer(disconnected = false): string {
+  const placeholder = disconnected ? "可以提问；涉及设备的动作会等连接恢复" : "问问家，或说出你想做的事…";
+  const helper = disconnected ? "设备动作会在连接恢复后回到这里。" : "小范围动作会直接完成；影响较大的动作会先请你确认。";
+  return `<form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="${placeholder}" /><button type="submit">发送</button></form><p class="product-helper-copy">${helper}</p>`;
 }
 
 function overviewConnectionStatus(connection: ProductShellConnection): {
@@ -787,11 +795,12 @@ function renderActiveTurnSummary(turn: ProductTurn | undefined): string {
   return `<section class="product-card product-active-turn" aria-live="polite"><div><p class="product-kicker">正在处理</p><h2>${escapeHtml(turn.question)}</h2><p class="product-muted">${escapeHtml(turn.statusMessage ?? "正在查看家里的信息")}</p></div><a class="product-primary-action" href="/conversation/${encodedPathSegment(turn.id)}">查看进度</a></section>`;
 }
 
-function renderSpaceCard(space: ProductSpace): string {
+function renderSpaceCard(space: ProductSpace, stale = false): string {
   const meta = [space.deviceCount === undefined ? "" : `${space.deviceCount} 个设备`, space.peopleCount === undefined ? "" : `${space.peopleCount} 人`].filter(Boolean).join(" · ");
+  const metaText = `${meta || space.state || "家庭空间"}${stale ? " · 最后已知" : ""}`;
   const metricItems = space.metrics?.map((metric) => `<span class="product-metric"><span class="product-metric-label">${escapeHtml(metric.label)}</span><strong class="product-metric-value">${escapeHtml(metric.value)}</strong></span>`).join("") ?? "";
   const chips = space.devices?.map((device, index) => `<span class="product-chip${index < 2 ? " product-chip--active" : ""}">${escapeHtml(device)}</span>`).join("") ?? "";
-  return `<section class="product-card product-space-card" aria-labelledby="space-${escapeHtml(space.id)}"><div class="product-space-heading"><h2 id="space-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-space-meta">${escapeHtml(meta || space.state || "家庭空间")}</span></div>${metricItems === "" ? "" : `<div class="product-metric-row">${metricItems}</div>`}${chips === "" ? `<p class="product-muted">空间状态持续更新</p>` : `<div class="product-chip-row">${chips}</div>`}</section>`;
+  return `<section class="product-card product-space-card" aria-labelledby="space-${escapeHtml(space.id)}"><div class="product-space-heading"><h2 id="space-${escapeHtml(space.id)}">${escapeHtml(space.name)}</h2><span class="product-space-meta">${escapeHtml(metaText)}</span></div>${metricItems === "" ? "" : `<div class="product-metric-row">${metricItems}</div>`}${chips === "" ? `<p class="product-muted">空间状态持续更新</p>` : `<div class="product-chip-row">${chips}</div>`}</section>`;
 }
 
 function renderConversation(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -809,8 +818,8 @@ function renderTurn(turn: ProductTurn, agentName: string): string {
   const stageLabels: Readonly<Record<ProductTurnStage, string>> = { received: "已收到", checking_home: "查看家里的当前状态", reading_inventory: "查看房间和设备", checking_rules: "确认家里已有安排", composing: "整理回答" };
   const stage = turn.stage ?? "received";
   const currentIndex = stageOrder.indexOf(stage);
-  const progress = active ? `<section class="product-progress" aria-label="${escapeHtml(agentName)}正在处理"><div class="product-progress-heading"><h2>${escapeHtml(active ? (turn.statusMessage ?? stageLabels[stage]) : "")}</h2><span class="product-progress-status" role="status" aria-live="polite">${turn.status === "background" ? "稍后告诉你" : turn.elapsedSeconds !== undefined && turn.elapsedSeconds > 10 ? "仍在处理" : "正在处理"}</span></div><ol class="product-stage-list">${stageOrder.map((item, index) => `<li data-state="${index < currentIndex ? "complete" : index === currentIndex ? "current" : "pending"}"><span class="product-stage-marker" aria-hidden="true">${index + 1}</span>${stageLabels[item]}</li>`).join("")}</ol>${turn.streamText === undefined ? "" : `<p class="product-stream-text">${escapeHtml(turn.streamText)}</p>`}<div class="product-conversation-actions">${turn.canStop === false ? "" : `<form class="product-action-form product-action-form--stop" method="post" action="/conversation/${encodedPathSegment(turn.id)}/stop"><button type="submit">停止</button></form>`}${turn.status !== "background" && (turn.canBackground === true || (turn.elapsedSeconds ?? 0) > 10) ? `<form class="product-action-form" method="post" action="/conversation/${encodedPathSegment(turn.id)}/background"><button type="submit">稍后处理</button></form>` : ""}</div>${turn.status === "background" ? `<p class="product-muted">完成后我会通知你，结果会回到这条对话。</p>` : ""}</section>` : "";
-  if (turn.status === "failed") return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><div class="product-turn-error" role="alert"><p>${escapeHtml(turn.error ?? "家里的连接正在恢复，我会保留你的问题，恢复后可以继续。")}</p></div><div class="product-conversation-actions"><form class="product-action-form" method="post" action="/conversation/${encodedPathSegment(turn.id)}/retry"><button type="submit">重新开始</button></form></div></div></div>`;
+  const progress = active ? `<section class="product-progress" aria-label="${escapeHtml(agentName)}正在处理"><div class="product-progress-heading"><h2>${escapeHtml(active ? (turn.statusMessage ?? stageLabels[stage]) : "")}</h2><span class="product-progress-status" role="status" aria-live="polite">${turn.status === "background" ? "稍后告诉你" : turn.elapsedSeconds !== undefined && turn.elapsedSeconds > 10 ? "仍在处理" : "正在处理"}</span></div><ol class="product-stage-list">${stageOrder.map((item, index) => `<li data-state="${index < currentIndex ? "complete" : index === currentIndex ? "current" : "pending"}"><span class="product-stage-marker" aria-hidden="true">${index + 1}</span>${stageLabels[item]}</li>`).join("")}</ol>${turn.streamText === undefined ? "" : `<p class="product-stream-text">${escapeHtml(turn.streamText)}</p>`}<div class="product-conversation-actions">${turn.canStop === false ? "" : `<form class="product-action-form product-action-form--stop" method="post" action="/conversation/${encodedPathSegment(turn.id)}/stop"><button class="product-quiet-action" type="submit">停止</button></form>`}${turn.status !== "background" && (turn.canBackground === true || (turn.elapsedSeconds ?? 0) > 10) ? `<form class="product-action-form" method="post" action="/conversation/${encodedPathSegment(turn.id)}/background"><button class="product-quiet-action" type="submit">稍后处理</button></form>` : ""}</div>${turn.status === "background" ? `<p class="product-muted">完成后我会通知你，结果会回到这条对话。</p>` : ""}</section>` : "";
+  if (turn.status === "failed") return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><div class="product-turn-error" role="alert"><p>${escapeHtml(turn.error ?? "家里的连接正在恢复，我会保留你的问题，恢复后可以继续。")}</p></div><div class="product-conversation-actions"><form class="product-action-form" method="post" action="/conversation/${encodedPathSegment(turn.id)}/retry"><button class="product-quiet-action" type="submit">重新开始</button></form></div></div></div>`;
   if (turn.status === "cancelled") return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><p>已停止这次请求，家里的状态保持原样。</p></div></div>`;
   if (active) return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble">${progress}</div></div>`;
   if (turn.status === "idle") return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><p>等待你继续提问。</p></div></div>`;
@@ -843,17 +852,21 @@ function renderReviews(model: NormalizedProductShellModel, options: ProductShell
 function renderRuntimeCard(item: ProductRuntimeConfirmation): string {
   const status = item.status ?? "pending";
   const canApprove = item.canApprove !== false && status === "pending";
-  const tags = `${item.eligibleActor === undefined ? "" : `<span class="product-tag product-tag--red">${escapeHtml(item.eligibleActor)}</span>`}${item.source === undefined ? "" : `<span class="product-tag product-tag--amber">来自：${escapeHtml(item.source)}</span>`}`;
-  const actions = status !== "pending" ? `<p class="product-muted">${status === "expired" ? "已过期 · 已记录到活动" : "这项动作已经结束"}</p>` : canApprove ? `<div class="product-card-actions"><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (item.policyClass === "administrator" || item.policyClass === "admin" ? "放行（管理员）" : "放行"))}</button></form><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form></div>` : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "请在可批准的设备上完成放行")} · 已推送到管理员手机</p>`;
-  return `<article class="product-card product-card--amber product-review-card" data-review-kind="runtime" data-review-id="${escapeHtml(item.id)}"><div class="product-card-tags">${tags}</div><h3>${escapeHtml(item.title)}</h3>${item.effect === undefined ? "" : `<p>${escapeHtml(item.effect)}</p>`}<dl class="product-side-list"><div><dt>剩余时间</dt>${renderRuntimeCountdown(item)}</div>${item.expiresAt === undefined ? "" : `<div><dt>截止</dt><dd>${escapeHtml(item.expiresLabel ?? item.expiresAt)}</dd></div>`}</dl>${actions}</article>`;
+  const administrator = item.policyClass === "administrator" || item.policyClass === "admin";
+  const tags = `${item.eligibleActor === undefined ? "" : `<span class="product-tag ${administrator ? "product-tag--red" : "product-tag--neutral"}">${escapeHtml(item.eligibleActor)}</span>`}${item.source === undefined ? "" : `<span class="product-tag product-tag--amber">来自：${escapeHtml(item.source)}</span>`}`;
+  const actions = status !== "pending" ? `<p class="product-muted">${status === "expired" ? "已过期 · 已记录到活动" : "这项动作已经结束"}</p>` : canApprove ? `<div class="product-card-actions"><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (administrator ? "放行（管理员）" : "放行"))}</button></form></div>` : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "请在可批准的设备上完成放行")} · 已推送到管理员手机</p>`;
+  return `<article class="product-card product-card--amber product-review-card" data-review-kind="runtime" data-review-id="${escapeHtml(item.id)}"><div class="product-card-tags">${tags}</div><h3>${escapeHtml(item.title)}</h3>${item.effect === undefined ? "" : `<p>${escapeHtml(item.effect)}</p>`}${renderRuntimeWindow(item)}${actions}</article>`;
 }
 
-function renderRuntimeCountdown(item: ProductRuntimeConfirmation): string {
-  const label = escapeHtml(item.expiresIn ?? "等待时限确认");
-  if (item.expiresAt === undefined || !Number.isFinite(Date.parse(item.expiresAt))) {
-    return `<dd>${label}</dd>`;
-  }
-  return `<dd data-runtime-countdown data-expires-at="${escapeHtml(item.expiresAt)}">${label}</dd>`;
+function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
+  const deadline = item.expiresLabel ?? item.expiresAt;
+  const consequence = `<span class="product-subtle">没人点头就不做${deadline === undefined ? "" : ` · 截止 ${escapeHtml(deadline)}`}</span>`;
+  const label = item.expiresIn === undefined ? "等待时限确认" : item.expiresIn === "已到期" ? "已到期 · 未执行" : `${item.expiresIn}后自动取消`;
+  const timed = item.expiresAt !== undefined && Number.isFinite(Date.parse(item.expiresAt));
+  const countdown = timed
+    ? `<strong class="product-runtime-countdown" data-runtime-countdown data-expires-at="${escapeHtml(item.expiresAt)}">${escapeHtml(label)}</strong>`
+    : `<strong class="product-runtime-countdown">${escapeHtml(label)}</strong>`;
+  return `<p class="product-runtime-window">${countdown}${consequence}</p>`;
 }
 
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
@@ -1290,7 +1303,7 @@ function renderProductViewRecipeSlot(
     case "overview.review-summary": return renderOverviewReviewSummary(model, options);
     case "overview.agent-note": return renderOverviewAgentNote(model);
     case "overview.energy": return renderOverviewEnergy(model);
-    case "overview.composer": return renderOverviewComposer();
+    case "overview.composer": return renderOverviewComposer(model.connection.state === "disconnected");
     case "conversation.workspace": return renderConversation(model, options);
     case "reviews.workspace": return renderReviews(model, options);
     case "activity.workspace": return renderActivity(model);

@@ -1056,3 +1056,46 @@ test("uses one canonical ProductShell projection and ignores legacy aliases", ()
   }));
   assert.match(canonicalHtml, /canonical-runtime|canonical-space|canonical-safety/);
 });
+
+test("runtime cards keep gate colors, natural countdown, and reject before approve", () => {
+  const future = new Date(Date.now() + 3 * 60_000).toISOString();
+  const html = renderProductShell(model({
+    route: "reviews",
+    runtimeConfirmations: [
+      { id: "water-valve", title: "关闭厨房总水阀", eligibleActor: "需要管理员", source: "安全警报处置", expiresIn: "3 分钟", expiresAt: future, expiresLabel: "今天 21:03", policyClass: "administrator", canApprove: true },
+      { id: "mijia-update", title: "今晚 03:00 更新米家桥接程序", eligibleActor: "任一成员可放行", source: "系统维护", expiresIn: "40 分钟", expiresAt: future, policyClass: "confirmation", canApprove: true },
+    ],
+  }));
+  const adminCard = html.slice(html.indexOf('data-review-id="water-valve"'), html.indexOf('data-review-id="mijia-update"'));
+  assert.match(adminCard, /product-tag product-tag--red">需要管理员/);
+  assert.match(adminCard, /3 分钟后自动取消/);
+  assert.match(adminCard, /没人点头就不做 · 截止 今天 21:03/);
+  assert.ok(adminCard.indexOf(">拒绝<") < adminCard.indexOf("放行（管理员）"));
+  const memberCard = html.slice(html.indexOf('data-review-id="mijia-update"'), html.lastIndexOf("</article>"));
+  assert.match(memberCard, /product-tag product-tag--neutral">任一成员可放行/);
+  assert.doesNotMatch(memberCard, /product-tag--red/);
+});
+
+test("disconnected overview marks last-known data and keeps one recovery entry", () => {
+  const html = renderProductShell(model({
+    connection: { state: "disconnected", lastContact: "3 小时前" },
+  }));
+  assert.match(html, /最后已知/);
+  assert.match(html, /查看连接/);
+  assert.match(html, /不执行任何设备动作/);
+  assert.match(html, /placeholder="可以提问；涉及设备的动作会等连接恢复"/);
+
+  const connected = renderProductShell(model());
+  assert.doesNotMatch(connected, /最后已知|查看连接/);
+});
+
+test("action buttons keep their decision hierarchy inside action forms", () => {
+  assert.equal(PRODUCT_SHELL_CSS.includes(".product-action-form button {"), false);
+  assert.equal(PRODUCT_SHELL_CSS.includes(".product-action-form button:hover"), false);
+  assert.ok(PRODUCT_SHELL_CSS.includes(".product-quiet-action"));
+  const streaming = renderProductShell(model({
+    route: "conversation",
+    activeTurn: { id: "turn-1", question: "窗帘为什么开得晚？", status: "streaming", canStop: true, canBackground: true },
+  }));
+  assert.match(streaming, /class="product-quiet-action" type="submit">停止/);
+});
