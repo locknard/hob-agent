@@ -50,7 +50,15 @@ export interface ArtifactPreparationJobFailure extends ArtifactPreparationJobTra
 
 export interface ArtifactPreparationJobPort {
   readonly claimPreparationJob: (input: ArtifactPreparationJobTransition) => ArtifactPreparationJob;
-  readonly completePreparationJob: (input: ArtifactPreparationJobTransition) => ArtifactPreparationJob;
+  readonly completePreparationJob: (input: ArtifactPreparationJobTransition & {
+    readonly preparedArtifact?: {
+      readonly artifactId: string;
+      readonly revision: number;
+      readonly contentHash: string;
+      readonly compileResultId: string;
+      readonly dryRunResultId: string;
+    };
+  }) => ArtifactPreparationJob;
   readonly failPreparationJob: (input: ArtifactPreparationJobFailure) => ArtifactPreparationJob;
   /**
    * Promotes the prepared proposal into the household inbox. Optional so
@@ -62,12 +70,5 @@ export interface ArtifactPreparationJobPort {
     readonly proposalId: string;
     readonly expectedRevision?: number;
     readonly actor?: string;
-    readonly preparedArtifact?: {
-      readonly artifactId: string;
-      readonly revision: number;
-      readonly contentHash: string;
-      readonly compileResultId: string;
-      readonly dryRunResultId: string;
-    };
   }) => unknown;
 }

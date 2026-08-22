@@ -58,21 +58,24 @@ export class ArtifactPreparationJobRunner {
         proposalId: claimed.proposalId,
         proposalRevision: claimed.proposalRevision,
       });
-      this.jobs.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+      this.jobs.completePreparationJob({
+        jobId: claimed.jobId,
+        expectedVersion: claimed.version,
+        ...(receipt === undefined ? {} : {
+          preparedArtifact: {
+            artifactId: receipt.compilation.artifact.artifactId,
+            revision: receipt.compilation.artifact.revision,
+            contentHash: receipt.compilation.artifact.contentHash,
+            compileResultId: receipt.compilation.compile.resultId,
+            dryRunResultId: receipt.compilation.dryRun.resultId,
+          },
+        }),
+      });
       try {
         this.jobs.markProposalReady?.({
           proposalId: claimed.proposalId,
           expectedRevision: claimed.proposalRevision,
           actor: "system",
-          ...(receipt === undefined ? {} : {
-            preparedArtifact: {
-              artifactId: receipt.compilation.artifact.artifactId,
-              revision: receipt.compilation.artifact.revision,
-              contentHash: receipt.compilation.artifact.contentHash,
-              compileResultId: receipt.compilation.compile.resultId,
-              dryRunResultId: receipt.compilation.dryRun.resultId,
-            },
-          }),
         });
       } catch {
         // The preparation itself is durable; a full inbox or a superseded

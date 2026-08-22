@@ -20,7 +20,17 @@ function completePreparation(store: SqliteProposalStore, proposalId: string): vo
     candidate.proposalId === proposalId && candidate.status === "queued");
   if (job === undefined) return;
   const claimed = store.claimPreparationJob({ jobId: job.jobId, expectedVersion: job.version });
-  store.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+  store.completePreparationJob({
+    jobId: claimed.jobId,
+    expectedVersion: claimed.version,
+    preparedArtifact: {
+      artifactId: `artifact-${proposalId}`,
+      revision: 1,
+      contentHash: "sha256:prepared-content",
+      compileResultId: "sha256:compile-result",
+      dryRunResultId: "sha256:dry-run-result",
+    },
+  });
 }
 
 function prepareToReady(store: SqliteProposalStore, proposalId: string) {
@@ -1173,6 +1183,96 @@ test("recovers the crash window between external deployment and the local record
     statuses.set("hob_crashed", "missing");
     await ctx.homeProposals.reconcileAutomations();
     assert.equal(store.get(enabling.id)?.lifecycle, "closed", "a natively deleted automation closes locally");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+
+test("drift survives persistence and the fingerprint baseline reaches the record", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T02:00:00.000Z" });
+  const statuses = new Map<string, { status: "running" | "paused" | "missing" | "unknown"; configFingerprint?: string }>();
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        deploy: async () => ({
+          status: "verified" as const,
+          deploymentId: "hob_drift",
+          target: "ha-main",
+          configFingerprint: "sha256:approved-behavior",
+        }),
+        status: async (request: { deploymentId: string }) => statuses.get(request.deploymentId) ?? { status: "unknown" as const },
+      },
+    } as never);
+
+    const created = ctx.homeProposals.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "drift:roundtrip:v1",
+      dedupKey: "drift:roundtrip",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+    const active = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(active.lifecycle, "active");
+    assert.equal(active.deployment?.configFingerprint, "sha256:approved-behavior", "the deployed fingerprint is the drift baseline");
+
+    statuses.set("hob_drift", { status: "running", configFingerprint: "sha256:natively-edited" });
+    await ctx.homeProposals.reconcileAutomations();
+    const drifted = store.get(active.id);
+    assert.equal(drifted?.deployment?.drifted, true, "a native edit surfaces as drift");
+    assert.equal(drifted?.audit.at(-1)?.action, "drift_detected");
+    assert.equal(store.get(active.id)?.deployment?.drifted, true, "the drifted record reads back without corruption");
+
+    statuses.set("hob_drift", { status: "running", configFingerprint: "sha256:approved-behavior" });
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(active.id)?.deployment?.drifted, false, "restoring the behavior clears the drift");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("a changed world demotes a prepared plan instead of spending the decision", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => ({ revalidationReason: "方案里有设备已改为管理员档，需要重新准备。" }),
+        deploy: async () => { throw new Error("deploy must not run under stale consent"); },
+      },
+    } as never);
+
+    const created = ctx.homeProposals.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "revalidate:demote:v1",
+      dedupKey: "revalidate:demote",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+
+    const demoted = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(demoted.lifecycle, "preparing", "the plan re-verifies before it can be decided");
+    assert.equal(demoted.status, "pending_review", "the household decision was not spent");
+    assert.equal(demoted.preparedArtifact, undefined, "stale preparation refs are cleared");
+    assert.equal(demoted.audit.at(-1)?.action, "revalidation_required");
+    assert.equal(store.listPreparationJobs().some((job) =>
+      job.proposalId === demoted.id && job.proposalRevision === demoted.revision && job.status === "queued"), true,
+      "a fresh preparation is queued for the new revision");
   } finally {
     await fiber?.dispose();
     await ctx.fiber.dispose();

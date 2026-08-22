@@ -299,6 +299,8 @@ export function apply(ctx: Context): void {
               type: "object",
               additionalProperties: false,
               properties: {
+                proposalId: { type: "string", required: true },
+                revision: { type: "number", required: true },
                 title: { type: "string", required: true },
                 summary: { type: "string", required: true },
                 dedupKey: { type: "string", required: true },
@@ -315,6 +317,8 @@ export function apply(ctx: Context): void {
       const proposals = (ctx as ProposalContext).homeProposals.list({ status: "pending_review", limit: 20 });
       return {
         proposals: proposals.map((proposal) => ({
+          proposalId: proposal.id,
+          revision: proposal.revision,
           title: proposal.title,
           summary: proposal.summary,
           dedupKey: proposal.dedupKey,

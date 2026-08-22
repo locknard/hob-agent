@@ -18,7 +18,17 @@ function completePreparation(store: SqliteProposalStore, proposalId: string): vo
     candidate.proposalId === proposalId && candidate.status === "queued");
   if (job === undefined) return;
   const claimed = store.claimPreparationJob({ jobId: job.jobId, expectedVersion: job.version });
-  store.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+  store.completePreparationJob({
+    jobId: claimed.jobId,
+    expectedVersion: claimed.version,
+    preparedArtifact: {
+      artifactId: `artifact-${proposalId}`,
+      revision: 1,
+      contentHash: "sha256:prepared-content",
+      compileResultId: "sha256:compile-result",
+      dryRunResultId: "sha256:dry-run-result",
+    },
+  });
 }
 
 function prepareToReady(store: SqliteProposalStore, proposalId: string) {
@@ -542,7 +552,7 @@ test("merges new evidence for an unresolved behavior without creating a second p
     const merged = store.create(input({
       dedupKey: "evidence-behavior",
       idempotencyKey: "evidence-2",
-      title: "A refreshed wording must not replace the reviewed card",
+      title: "A revised wording replaces the household card",
       evidence: {
         ...input().evidence,
         references: [{
@@ -556,7 +566,8 @@ test("merges new evidence for an unresolved behavior without creating a second p
     }));
     assert.equal(merged.id, first.id);
     assert.equal(merged.revision, first.revision + 1);
-    assert.equal(merged.title, first.title);
+    assert.equal(merged.title, "A revised wording replaces the household card",
+      "a change to the household-visible snapshot is a plan revision, never silently dropped");
     assert.equal(merged.newEvidence, true);
     assert.equal(merged.evidence.references.length, 2);
     assert.equal(merged.audit.at(-1)?.action, "evidence_merged");
@@ -1460,7 +1471,17 @@ test("a succeeded preparation promotes the proposal into the inbox, deferring wh
     const job = store.listPreparationJobs().find((candidate) => candidate.proposalId === preparing.id);
     assert.ok(job);
     const claimed = store.claimPreparationJob({ jobId: job.jobId, expectedVersion: job.version });
-    store.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+    store.completePreparationJob({
+      jobId: claimed.jobId,
+      expectedVersion: claimed.version,
+      preparedArtifact: {
+        artifactId: "artifact-deferred",
+        revision: 1,
+        contentHash: "sha256:deferred-content",
+        compileResultId: "sha256:deferred-compile",
+        dryRunResultId: "sha256:deferred-dry-run",
+      },
+    });
 
     assert.throws(() => store.markProposalReady({ proposalId: preparing.id, expectedRevision: preparing.revision, actor: "system" }),
       (error: unknown) => error instanceof ProposalStoreError && error.code === "capacity_full");
@@ -1476,6 +1497,8 @@ test("a succeeded preparation promotes the proposal into the inbox, deferring wh
     });
     assert.equal(store.get(preparing.id)?.lifecycle, "ready", "a freed slot promotes the prepared plan");
     assert.equal(store.get(preparing.id)?.audit.at(-1)?.action, "prepared");
+    assert.equal(store.get(preparing.id)?.preparedArtifact?.artifactId, "artifact-deferred",
+      "deferred promotion carries the same immutable preparation refs");
   } finally {
     store.close();
   }

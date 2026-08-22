@@ -45,7 +45,8 @@ export interface ProposalDeploymentPort {
     readonly proposalId: string;
     readonly kind: CreateProposalInput["kind"];
     readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
-  }): ProposalDeploymentIntent | { readonly reason: string };
+    readonly actionPolicyClasses?: readonly string[];
+  }): ProposalDeploymentIntent | { readonly reason: string } | { readonly revalidationReason: string };
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
@@ -386,7 +387,9 @@ export class HomeProposalService extends Service {
       : undefined;
     const enabling = this.store.beginDeploymentRetry({
       ...input,
-      ...(backfill !== undefined && !("reason" in backfill) ? { deploymentIntent: backfill } : {}),
+      ...(backfill !== undefined && !("reason" in backfill) && !("revalidationReason" in backfill)
+        ? { deploymentIntent: backfill }
+        : {}),
     });
     const outcome = await this.deploy(enabling);
     return this.store.recordProposalDeployment({
@@ -411,8 +414,20 @@ export class HomeProposalService extends Service {
           proposalId: current.id,
           kind: current.kind,
           ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
+          ...(current.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: current.actionPolicyClasses }),
         });
-    const intent = resolved !== undefined && !("reason" in resolved) ? resolved : undefined;
+    if (resolved !== undefined && "revalidationReason" in resolved) {
+      // The world changed under the prepared plan; it re-verifies before it can
+      // be decided, and the household's decision is never spent on stale facts.
+      const demoted = this.store.returnToPreparation({
+        proposalId: input.proposalId,
+        ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
+        actor: "system",
+        note: resolved.revalidationReason,
+      });
+      return this.wakePreparation(demoted);
+    }
+    const intent = resolved !== undefined && !("reason" in resolved) && !("revalidationReason" in resolved) ? resolved : undefined;
     const enabling = this.store.decideProposal({
       proposalId: input.proposalId,
       ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
@@ -421,7 +436,7 @@ export class HomeProposalService extends Service {
       ...(input.note === undefined ? {} : { note: input.note }),
       ...(intent === undefined ? {} : { deploymentIntent: intent }),
     });
-    if (resolved !== undefined && "reason" in resolved) {
+    if (resolved !== undefined && "reason" in resolved && !("revalidationReason" in resolved)) {
       return this.store.recordProposalDeployment({
         proposalId: enabling.id,
         expectedRevision: enabling.revision,
@@ -565,7 +580,12 @@ export class HomeProposalService extends Service {
               proposalId: proposal.id,
               expectedRevision: proposal.revision,
               actor: "system",
-              outcome: { status: "verified", deploymentId: deployment.deploymentId, target: deployment.target },
+              outcome: {
+                status: "verified",
+                deploymentId: deployment.deploymentId,
+                target: deployment.target,
+                ...(observedResult.configFingerprint === undefined ? {} : { configFingerprint: observedResult.configFingerprint }),
+              },
             });
           } else if (observed === "missing") {
             this.store.recordProposalDeployment({
