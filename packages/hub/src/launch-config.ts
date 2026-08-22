@@ -558,5 +558,3 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
-
-export { REQUIRED_HOME_ENV };

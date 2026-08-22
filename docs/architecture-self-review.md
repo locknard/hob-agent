@@ -90,6 +90,9 @@ The follow-up now establishes a directed production graph through narrow ports:
    records through the authority-owned contract, authority has no production
    dependency on world implementation, and the unused identity-authority re-export
    has been removed.
+7. Runtime implementations expose one canonical class name. Unused aliases for
+   bridge ingest, ingest journal and the Home Assistant adapter have been removed;
+   launch configuration keeps its required-environment list private.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and

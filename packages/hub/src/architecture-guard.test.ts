@@ -201,6 +201,15 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     [],
     "Hub production and test source must consume the bridge contract through its package entry point",
   );
+  assert.deepEqual(
+    violations(
+      hubFiles,
+      /export\s+(?:\{\s*(?:SqliteIngestJournal\s+as\s+IngestJournalStore|BridgeIngest\s+as\s+HomeWorldIngest|HomeAssistantBridgeAdapter\s+as\s+HomeAssistantAdapter|REQUIRED_HOME_ENV)\s*\}|const\s+IngestJournal\s*=)/,
+      false,
+    ),
+    [],
+    "Hub production source exports one canonical name for each runtime implementation",
+  );
 
   const contractIndex = readFileSync(join(repositoryRoot, "contracts", "index.ts"), "utf8");
   for (const moduleName of [

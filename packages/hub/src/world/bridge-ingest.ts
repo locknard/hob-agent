@@ -820,8 +820,6 @@ export class BridgeIngest {
   }
 }
 
-export { BridgeIngest as HomeWorldIngest };
-
 function validateHeader(envelope: Envelope): { ok: true } | { ok: false } {
   if (!envelope || typeof envelope !== "object") return { ok: false };
   if (typeof envelope.epochId !== "string" || envelope.epochId.length === 0) return { ok: false };

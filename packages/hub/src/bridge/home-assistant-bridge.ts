@@ -926,9 +926,6 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
   return { complete, rules: rules.sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)) };
 }
 
-/** Short alias for callers that use the contract's adapter terminology. */
-export { HomeAssistantBridgeAdapter as HomeAssistantAdapter };
-
 interface EntityBinding {
   readonly nativeInstanceId: string;
   readonly entityId: string;

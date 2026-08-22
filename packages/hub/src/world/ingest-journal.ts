@@ -850,10 +850,6 @@ function validateLiveStateActivityQuery(query: JournalLiveStateActivityQuery): v
   }
 }
 
-export { SqliteIngestJournal as IngestJournalStore };
-// Runtime alias for callers that use the frozen concept name directly.
-export const IngestJournal = SqliteIngestJournal;
-
 function validateRetentionPolicy(policy: IngestJournalRetentionPolicy): {
   readonly evidenceWindowMs: number;
   readonly proposalEvidence: readonly IngestJournalRetentionEvidenceReference[];
