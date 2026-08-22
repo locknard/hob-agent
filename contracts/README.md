@@ -13,10 +13,13 @@ projected into these shapes before they reach hub or agent-layer code.
 ## Entry points
 
 - `bridge-contract.ts` is the canonical implementation.
-- `index.ts` is the sole package entry point and exports the canonical core,
+- `index.ts` is the production package entry point and exports the canonical core,
   adapter conformance helper, actions, foreign-rules and organization-hints
   surfaces. Consumers use `@hob/bridge-contract` so the workspace dependency
   graph preserves the future process boundary.
+- `bridge-testing.ts` is the dedicated `@hob/bridge-contract/testing` entry. It
+  supplies a deterministic v6.3 synthetic adapter for Hub and third-party bridge
+  tests while keeping test fixtures outside runtime implementations.
 - `bridge-adapter-conformance.ts` is an opt-in test helper exported from the
   package entry point. It is not a second runtime or ingest implementation.
 
@@ -68,6 +71,10 @@ payloads remain `unknown` by design: the core only validates their envelope and
 canonical extension key; an enabled extension owns its payload schema.
 
 ## Adapter conformance helper
+
+Adapter suites can combine `SyntheticBridge` from
+`@hob/bridge-contract/testing` with the conformance helper, or provide their own
+deterministic registration fixture.
 
 Third-party adapter tests can call `runBridgeAdapterConformance()` with one
 deterministic registration fixture. The report covers:

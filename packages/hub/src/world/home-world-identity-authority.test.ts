@@ -16,7 +16,7 @@ import {
   HomeWorldService,
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
-import { SyntheticBridge } from "../bridge/synthetic-bridge.js";
+import { SyntheticBridge } from "@hob/bridge-contract/testing";
 import { WorldIdentityManager } from "./world-identity.js";
 import type { JournalWatermark } from "./bridge-ingest-types.js";
 

@@ -19,7 +19,7 @@ import {
 } from "../bridge/bridge-catalog.js";
 import { BridgeRegistry, BridgeRegistryError } from "../bridge/bridge-registry.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
-import { SyntheticBridge } from "../bridge/synthetic-bridge.js";
+import { SyntheticBridge } from "@hob/bridge-contract/testing";
 
 const bridgeId = "synthetic-matrix";
 

@@ -17,7 +17,7 @@ remain stable through each move.
 ## Phased organization
 
 1. `bridge/` owns adapter catalog and bundle composition, bridge credentials,
-   registration and concrete HA, Xiaomi and synthetic adapters. Adapters emit the
+   registration and concrete HA and Xiaomi adapters. Adapters emit the
    neutral contract event stream and capability declarations.
 2. `artifact/` owns neutral artifact schemas, evidence, risk, conflict, compilation,
    preparation, registry, mutation coordination, capability compatibility policy

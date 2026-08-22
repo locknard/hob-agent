@@ -4,7 +4,7 @@ import type {
   BridgeInfo,
   ControlResult,
   Envelope,
-} from "@hob/bridge-contract";
+} from "./bridge-contract.js";
 
 export interface SyntheticBridgeOptions {
   bridgeId: string;
@@ -16,7 +16,7 @@ export interface SyntheticBridgeOptions {
   pauseResult?: ControlResult;
 }
 
-/** Small deterministic adapter used by ingest tests and local protocol demos. */
+/** Deterministic neutral adapter for protocol, ingestion, and runtime tests. */
 export class SyntheticBridge implements BridgeAdapter {
   readonly info: BridgeInfo;
   readonly control: BridgeControl;
@@ -45,7 +45,7 @@ export class SyntheticBridge implements BridgeAdapter {
   }
 
   enqueue(envelope: Envelope): void {
-    if (!this.open) throw new Error("synthetic bridge is disposed");
+    if (!this.open) throw new Error("Synthetic bridge is disposed");
     this.queue.push(envelope);
   }
 
@@ -54,7 +54,7 @@ export class SyntheticBridge implements BridgeAdapter {
   }
 
   async *events(signal: AbortSignal): AsyncIterable<Envelope> {
-    if (this.subscribed) throw new Error("synthetic bridge events() may only be subscribed once");
+    if (this.subscribed) throw new Error("Synthetic bridge events support one subscriber");
     this.subscribed = true;
     while (!signal.aborted && this.queue.length > 0) yield this.queue.shift()!;
   }

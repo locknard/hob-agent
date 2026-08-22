@@ -19,7 +19,7 @@ import { BridgeCatalog, type AdapterRegistration } from "../bridge/bridge-catalo
 import { BridgeRegistry, MemoryBridgeRegistryStore, type BridgeConfigEntry } from "../bridge/bridge-registry.js";
 import { AuthorityCoordinator } from "../authority/authority-coordinator.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
-import { SyntheticBridge } from "../bridge/synthetic-bridge.js";
+import { SyntheticBridge } from "@hob/bridge-contract/testing";
 import { WorldIdentityManager } from "./world-identity.js";
 import {
   HomeWorldService,

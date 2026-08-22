@@ -259,6 +259,7 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     join(repositoryRoot, "contracts", "bridge-contract-v0.ts"),
     join(repositoryRoot, "contracts", "bridge-contract-v6.ts"),
     join(agentSourceRoot, "dsh-compatibility-set.ts"),
+    join(hubSourceRoot, "bridge", "synthetic-bridge.ts"),
     join(hubSourceRoot, "home-assistant-service.ts"),
     join(hubSourceRoot, "home-assistant-service.test.ts"),
     join(hubSourceRoot, "home-inbox.ts"),

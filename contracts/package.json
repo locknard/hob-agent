@@ -4,7 +4,8 @@
   "version": "6.5.0",
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": "./index.ts",
+    "./testing": "./bridge-testing.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"

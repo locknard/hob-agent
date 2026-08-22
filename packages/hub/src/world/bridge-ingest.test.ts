@@ -13,7 +13,7 @@ import {
 } from "./bridge-ingest.js";
 import { HOME_ASSISTANT_ADAPTER_REGISTRATION } from "../bridge/home-assistant-bridge.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
-import { SyntheticBridge } from "../bridge/synthetic-bridge.js";
+import { SyntheticBridge } from "@hob/bridge-contract/testing";
 
 const descriptor = (nativeId: string, schema = "hob.light"): DeviceDescriptor => ({
   nativeId,
