@@ -22,7 +22,9 @@ pnpm check
 The repository is in Phase 0. The Cordis-hosted DSH Home Agent, Home Assistant
 bridge, provider credential/profile foundations, governed snapshot/proposal
 tools, durable proposal store, and local Inbox review facade have executable
-tests. Proposal application and device control remain deliberately unavailable.
+tests. Persistent behavior changes remain proposal-governed. One-shot device and
+media actions use typed Hub policy, confirmation, verification, audit, and a
+bounded undo window.
 
 ## Development workflow
 
@@ -40,11 +42,13 @@ pnpm check
 See `CLAUDE.md` for the Phase 0 scope, architecture boundaries, security rules,
 and test/commit discipline.
 
-## Phase 0: local read-only bridge
+## Phase 0: local governed home runtime
 
 The initial implementation connects to Home Assistant's WebSocket API, reads a
 state and registry bootstrap snapshot, and subscribes to `state_changed`
-events. Configure a neutral bridge catalog locally; never commit a token.
+events. Read-only observation and governed actions share the neutral bridge
+boundary; bridge transport never grants action authority. Configure a neutral
+bridge catalog locally; never commit a token.
 `HOB_BRIDGES` contains only bridge identity, adapter type, non-secret config, and
 explicit credential locators. On macOS, prefer an exact bridge-scoped Keychain
 locator:
