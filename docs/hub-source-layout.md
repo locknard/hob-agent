@@ -23,7 +23,7 @@ remain stable through each move.
    preparation, registry, mutation coordination, capability compatibility policy
    and the read-only adapter from a neutral world cut into artifact authority
    assessment.
-3. `authority/` owns principals, governance records, state/action authority,
+3. `authority/` owns actor policy, governance records, state/action authority,
    candidate authority and one-shot action policy/store.
 4. `media/` owns neutral media catalog, player discovery, play intent and Music
    Assistant integration.

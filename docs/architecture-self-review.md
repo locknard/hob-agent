@@ -47,7 +47,7 @@ Adapter catalog/bundle composition, credential scoping, registry and concrete
 adapters live together in `bridge/`. Neutral artifact schemas, capability
 compatibility policy, assessments, compilation, evidence, conflict analysis,
 preparation, registry and mutation coordination live together in `artifact/`.
-Principal resolution, governance records, state/action authority, durable authority
+Actor policy, governance records, state/action authority, durable authority
 candidates and the governed one-shot action plane live together in `authority/`.
 Their tests follow the owning implementation. Neutral discovery, player inventory, intent
 preparation, conversation orchestration and the Music Assistant adapter live in
@@ -93,6 +93,9 @@ The follow-up now establishes a directed production graph through narrow ports:
 7. Runtime implementations expose one canonical class name. Unused aliases for
    bridge ingest, ingest journal and the Home Assistant adapter have been removed;
    launch configuration keeps its required-environment list private.
+8. The isolated principal registry prototype and retired Inbox stylesheet have
+   been removed. Authenticated product actors continue through the existing bound
+   principal and device policy path, and Product Shell owns the active stylesheet.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and
