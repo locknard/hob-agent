@@ -21,10 +21,10 @@ import {
 } from "@hob-agent/inbox-web/http";
 import type { InboxReviewActor } from "@hob-agent/inbox-web/service";
 
-import type { BridgeAwareCredentialSource } from "./bridge-credentials.js";
-import { createBuiltinBridgeCatalog } from "./bridge-bundle.js";
-import type { BridgeCatalog } from "./bridge-catalog.js";
-import type { BridgeConfigEntry } from "./bridge-registry.js";
+import type { BridgeAwareCredentialSource } from "./bridge/bridge-credentials.js";
+import { createBuiltinBridgeCatalog } from "./bridge/bridge-bundle.js";
+import type { BridgeCatalog } from "./bridge/bridge-catalog.js";
+import type { BridgeConfigEntry } from "./bridge/bridge-registry.js";
 import type { SelectedModelCredential } from "./model-credential-profile.js";
 import {
   parseMusicAssistantCredentialRef,

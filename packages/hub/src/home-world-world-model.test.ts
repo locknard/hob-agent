@@ -7,14 +7,14 @@ import { Context } from "@deepseek-ai/cordis";
 import { z } from "zod";
 
 import type { BridgeEvent, Envelope } from "@hob/bridge-contract";
-import { BridgeCatalog } from "./bridge-catalog.js";
-import { BridgeRegistry, type BridgeConfigEntry } from "./bridge-registry.js";
+import { BridgeCatalog } from "./bridge/bridge-catalog.js";
+import { BridgeRegistry, type BridgeConfigEntry } from "./bridge/bridge-registry.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 import {
   HomeWorldService,
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
-import { SyntheticBridge } from "./synthetic-bridge.js";
+import { SyntheticBridge } from "./bridge/synthetic-bridge.js";
 import { WorldModelIndex } from "./world-model-index.js";
 
 const schema = {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { createLaunchEnvironmentSnapshot } from "@deepseek-ai/dsh-launch-environment";
 
-import { BridgeCatalog } from "./bridge-catalog.js";
+import { BridgeCatalog } from "./bridge/bridge-catalog.js";
 import { createHomeAgentRuntime } from "./home-agent-runtime.js";
 
 test("mounts the durable correction owner in the production HomeAgentRuntime composition", async () => {

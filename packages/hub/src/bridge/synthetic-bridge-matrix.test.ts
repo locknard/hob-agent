@@ -18,7 +18,7 @@ import {
   type BridgeAdapter,
 } from "./bridge-catalog.js";
 import { BridgeRegistry, BridgeRegistryError } from "./bridge-registry.js";
-import { SqliteIngestJournal } from "./ingest-journal.js";
+import { SqliteIngestJournal } from "../ingest-journal.js";
 import { SyntheticBridge } from "./synthetic-bridge.js";
 
 const bridgeId = "synthetic-matrix";

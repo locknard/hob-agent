@@ -36,6 +36,12 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   const hubFiles = sourceFiles(hubSourceRoot);
   const hubFilesWithTests = sourceFiles(hubSourceRoot, true);
 
+  const misplacedBridgeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => /^(?:bridge-(?!credential-setup)|home-assistant-(?:adapter|bridge)|xiaomi-home-bridge|synthetic-bridge|capability-semantics)/.test(name));
+  assert.deepEqual(misplacedBridgeFiles, [], "bridge domain modules and their tests belong under src/bridge");
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],
@@ -43,7 +49,7 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   );
 
   const adapterImport = /\b(?:from|import)\s*(?:\(\s*)?["'][^"']*(?:home-assistant|homeassistant|xiaomi-home)[^"']*["']/i;
-  const allowedProductBundle = join(hubSourceRoot, "bridge-bundle.ts");
+  const allowedProductBundle = join(hubSourceRoot, "bridge", "bridge-bundle.ts");
   const hubCoreFiles = hubFiles.filter((file) => file !== allowedProductBundle
     && !file.endsWith("home-assistant-bridge.ts")
     && !file.endsWith("xiaomi-home-bridge.ts"));
@@ -92,6 +98,8 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
 
   const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
   assert.equal(rootPackage.scripts?.["inbox:home"], undefined, "the product exposes one runtime entry");
+  assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\.test\.ts/, "the test command must include package-root tests");
+  assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\*\/\*\.test\.ts/, "the test command must include nested domain tests");
 
   const hubPackage = JSON.parse(readFileSync(join(repositoryRoot, "packages", "hub", "package.json"), "utf8")) as {
     dependencies?: Record<string, string>;

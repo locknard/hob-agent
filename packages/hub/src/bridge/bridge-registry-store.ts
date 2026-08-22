@@ -4,7 +4,7 @@ import type {
   BridgeBindingRecord,
   BridgeRegistryStore,
 } from "./bridge-registry.js";
-import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
+import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 
 type SqlRow = Record<string, unknown>;
 

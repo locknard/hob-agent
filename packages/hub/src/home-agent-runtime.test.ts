@@ -10,13 +10,13 @@ import {
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from "@deepseek-ai/dsh-launch-environment";
 
-import { BridgeCatalog } from "./bridge-catalog.js";
+import { BridgeCatalog } from "./bridge/bridge-catalog.js";
 import { createHomeAgentRuntime } from "./home-agent-runtime.js";
 import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home-onboarding-store.js";
 import { SyntheticMediaCatalogProvider } from "./home-media-services.js";
 import { SqliteProposalStore } from "./proposal-store.js";
 import { SqliteProductViewRecipeDraftStore } from "./product-view-recipe-draft-store.js";
-import { SyntheticBridge } from "./synthetic-bridge.js";
+import { SyntheticBridge } from "./bridge/synthetic-bridge.js";
 import { WorldIdentityManager } from "./world-identity.js";
 import type { BridgeAdapter } from "@hob/bridge-contract";
 import type { ActionsExtension } from "@hob/bridge-contract";

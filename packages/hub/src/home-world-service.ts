@@ -34,21 +34,21 @@ import {
 import {
   BridgeCatalog,
   type BridgeAdapter as CatalogBridgeAdapter,
-} from "./bridge-catalog.js";
+} from "./bridge/bridge-catalog.js";
 import {
   BridgeRegistry,
   SqliteBridgeRegistryStore,
   type BridgeRegistryStore,
   type BridgeConfigEntry,
-} from "./bridge-registry.js";
-import type { ScopedCredentialSource } from "./bridge-credentials.js";
+} from "./bridge/bridge-registry.js";
+import type { ScopedCredentialSource } from "./bridge/bridge-credentials.js";
 import {
   BridgeIngest,
   type DeviceHealthStatus,
   type HubBridgeDiagnostics,
   type ResourceBudget,
-} from "./bridge-ingest.js";
-import type { JournalWatermark } from "./bridge-ingest-types.js";
+} from "./bridge/bridge-ingest.js";
+import type { JournalWatermark } from "./bridge/bridge-ingest-types.js";
 import {
   SqliteIngestJournal,
   type IngestJournal,

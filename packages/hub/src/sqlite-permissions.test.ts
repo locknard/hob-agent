@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { IngestRecord } from "@hob/bridge-contract";
-import { SqliteBridgeRegistryStore } from "./bridge-registry-store.js";
+import { SqliteBridgeRegistryStore } from "./bridge/bridge-registry-store.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 import { WorldModelIndex } from "./world-model-index.js";
 

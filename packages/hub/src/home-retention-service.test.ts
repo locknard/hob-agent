@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 
-import type { Envelope } from "./bridge-ingest-types.js";
+import type { Envelope } from "./bridge/bridge-ingest-types.js";
 import type {
   IngestJournal,
   IngestJournalRetentionPolicy,

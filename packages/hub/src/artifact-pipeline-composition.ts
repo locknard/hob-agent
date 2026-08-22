@@ -32,7 +32,7 @@ import {
   checkCapabilityAction,
   checkCapabilityPredicate,
   resolveCapabilityRead,
-} from "./capability-semantics.js";
+} from "./bridge/capability-semantics.js";
 import {
   HomeArtifactService,
   type HomeArtifactRegistryReader,
