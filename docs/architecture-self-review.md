@@ -103,6 +103,11 @@ The follow-up now establishes a directed production graph through narrow ports:
 9. Product Shell owns one browser stream client for household conversation turns.
    The standalone advice client duplicate has been retired, and the architecture
    guard preserves the single product path.
+10. Production reachability is now a repository invariant. Every Hub module is
+    reachable from the process or a declared CLI entry; every Inbox and Contracts
+    module is reachable from a published package entry. The synthetic bridge test
+    adapter belongs to `@hob/bridge-contract/testing`, where Hub and third-party
+    bridge suites share the same deterministic fixture.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and

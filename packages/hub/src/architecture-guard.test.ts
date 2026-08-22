@@ -61,6 +61,33 @@ function exportedSubpath(manifest: WorkspacePackageManifest, specifier: string):
     : manifest.exports !== undefined && Object.hasOwn(manifest.exports, subpath);
 }
 
+function packageExportRoots(boundary: WorkspacePackageBoundary): string[] {
+  const entries = typeof boundary.manifest.exports === "string"
+    ? [boundary.manifest.exports]
+    : Object.values(boundary.manifest.exports ?? {}).filter((value): value is string => typeof value === "string");
+  return entries.map((entry) => resolve(boundary.directory, entry));
+}
+
+function unreachableProductionFiles(directory: string, roots: readonly string[]): string[] {
+  const productionFiles = new Set(sourceFiles(directory));
+  const reached = new Set<string>();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (file === undefined || reached.has(file) || !productionFiles.has(file)) continue;
+    reached.add(file);
+    for (const specifier of importSpecifiers(readFileSync(file, "utf8"))) {
+      if (!specifier.startsWith(".")) continue;
+      const target = resolve(dirname(file), specifier.replace(/\.js$/u, ".ts"));
+      if (productionFiles.has(target)) pending.push(target);
+    }
+  }
+  return [...productionFiles]
+    .filter((file) => !reached.has(file))
+    .map((file) => relative(repositoryRoot, file))
+    .sort();
+}
+
 test("workspace boundary parser recognizes every TypeScript import form", () => {
   const source = `
     import "@hob/bridge-contract";
@@ -121,6 +148,32 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     workspaceImportViolations,
     [],
     "workspace imports use declared dependencies and published package entry points",
+  );
+
+  const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")) as {
+    scripts?: Readonly<Record<string, string>>;
+  };
+  const hubEntryRoots = [join(hubSourceRoot, "main.ts")];
+  for (const command of Object.values(rootPackage.scripts ?? {})) {
+    const match = /^tsx (packages\/hub\/src\/\S+\.ts)$/u.exec(command);
+    if (match !== null) hubEntryRoots.push(join(repositoryRoot, match[1]));
+  }
+  const contractsPackage = workspacePackages.find((item) => item.manifest.name === "@hob/bridge-contract")!;
+  const inboxPackage = workspacePackages.find((item) => item.manifest.name === "@hob-agent/inbox-web")!;
+  assert.deepEqual(
+    unreachableProductionFiles(hubSourceRoot, hubEntryRoots),
+    [],
+    "every Hub production module is reachable from the process or a declared CLI entry",
+  );
+  assert.deepEqual(
+    unreachableProductionFiles(contractsPackage.directory, packageExportRoots(contractsPackage)),
+    [],
+    "every bridge-contract production module is reachable from a published package entry",
+  );
+  assert.deepEqual(
+    unreachableProductionFiles(inboxPackage.directory, packageExportRoots(inboxPackage)),
+    [],
+    "every Inbox production module is reachable from a published package entry",
   );
 
   const misplacedBridgeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
@@ -273,7 +326,6 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   ].filter(existsSync).map((path) => relative(repositoryRoot, path));
   assert.deepEqual(removedEntries, [], "superseded contracts, re-export shims, ecosystem services, and the second runtime entry stay deleted");
 
-  const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
   assert.equal(rootPackage.scripts?.["inbox:home"], undefined, "the product exposes one runtime entry");
   assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\.test\.ts/, "the test command must include package-root tests");
   assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\*\/\*\.test\.ts/, "the test command must include nested domain tests");
