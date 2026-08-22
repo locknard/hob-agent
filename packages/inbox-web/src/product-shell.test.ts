@@ -380,6 +380,7 @@ test("separates proposal snooze from the one-decision detail and explains activi
   assert.match(review, />启用</);
   assert.match(review, /<ul class="product-readiness" aria-label="方案已备好">|方案已备好/);
   assert.match(review, /这是唯一一次点头/);
+  assert.match(review, /href="\/automations"/);
   assert.match(review, /action="\/review-center\/proposals\/media-power\/reject"[^>]*>/);
   assert.match(review, /action="\/review-center\/proposals\/media-power\/reject-latch"[^>]*>/);
   assert.match(review, /需要「插座」授权/);
