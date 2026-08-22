@@ -14,7 +14,7 @@ import type {
 } from "../authority/one-shot-action-plane.js";
 import type {
   RuntimeDecisionProjection,
-} from "../household-review-center-service.js";
+} from "../home/household-review-center-service.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {

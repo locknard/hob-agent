@@ -12,10 +12,10 @@ import {
 
 import { BridgeCatalog } from "./bridge/bridge-catalog.js";
 import { createHomeAgentRuntime } from "./home-agent-runtime.js";
-import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home-onboarding-store.js";
+import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home/home-onboarding-store.js";
 import { SyntheticMediaCatalogProvider } from "./media/home-media-services.js";
-import { SqliteProposalStore } from "./proposal-store.js";
-import { SqliteProductViewRecipeDraftStore } from "./product-view-recipe-draft-store.js";
+import { SqliteProposalStore } from "./home/proposal-store.js";
+import { SqliteProductViewRecipeDraftStore } from "./home/product-view-recipe-draft-store.js";
 import { SyntheticBridge } from "./bridge/synthetic-bridge.js";
 import { WorldIdentityManager } from "./world/world-identity.js";
 import type { BridgeAdapter } from "@hob/bridge-contract";

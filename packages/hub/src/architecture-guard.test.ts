@@ -66,6 +66,12 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     .filter((name) => /^(?:world-|home-world-|ingest-journal|ingest-properties)/.test(name));
   assert.deepEqual(misplacedWorldFiles, [], "world domain modules and their tests belong under src/world");
 
+  const misplacedHomeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => /^(?:home-(?!agent-runtime)|household-review-center-service|observation-audit-store|proposal-store|product-view-recipe-draft-store)/.test(name));
+  assert.deepEqual(misplacedHomeFiles, [], "household product modules and their tests belong under src/home");
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],

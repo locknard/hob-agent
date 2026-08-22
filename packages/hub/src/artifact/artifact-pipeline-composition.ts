@@ -36,11 +36,11 @@ import {
 import {
   HomeArtifactService,
   type HomeArtifactRegistryReader,
-} from "../home-artifact-service.js";
+} from "../home/home-artifact-service.js";
 import { HomeWorldAuthorityBindingSource } from "../world/home-world-authority-binding-source.js";
 import type { ArtifactMutationProposalCommand } from "./artifact-mutation-coordinator.js";
 import type { ArtifactRef } from "./neutral-artifact.js";
-import type { SqliteProposalStore } from "../proposal-store.js";
+import type { SqliteProposalStore } from "../home/proposal-store.js";
 import type {
   HomeWorldEvidenceQuery,
   HomeWorldEvidenceResult,

@@ -8,7 +8,7 @@ import {
   HomeWorldService,
   type HomeWorldServiceOptions,
 } from "./world/home-world-service.js";
-import { HomeProposalService } from "./home-proposal-service.js";
+import { HomeProposalService } from "./home/home-proposal-service.js";
 import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {
   AuthorityCandidateRegistry,
@@ -19,24 +19,24 @@ import {
   createArtifactPipelineComposition,
   type ArtifactPipelineComposition,
 } from "./artifact/artifact-pipeline-composition.js";
-import { HomeRetentionService } from "./home-retention-service.js";
+import { HomeRetentionService } from "./home/home-retention-service.js";
 import {
   HomeObservationAuditService,
   type HomeObservationAuditServiceOptions,
-} from "./home-observation-audit-service.js";
+} from "./home/home-observation-audit-service.js";
 import {
   HomeObservationSchedulerService,
   type HomeObservationSchedulerOptions,
-} from "./home-observation-scheduler.js";
+} from "./home/home-observation-scheduler.js";
 import {
   ProposalStoreError,
   SqliteProposalStore,
   type SqliteProposalStoreOptions,
-} from "./proposal-store.js";
+} from "./home/proposal-store.js";
 import {
   HomeAdviceService,
   type HomeAdviceServiceOptions,
-} from "./home-advice-service.js";
+} from "./home/home-advice-service.js";
 import { ProposalInboxService } from "@hob-agent/inbox-web/service";
 import {
   ProposalInboxHttpService,
@@ -61,27 +61,27 @@ import {
 import {
   HouseholdReviewCenterService,
   type HouseholdReviewCenterServiceOptions,
-} from "./household-review-center-service.js";
+} from "./home/household-review-center-service.js";
 import {
   HomeOnboardingCoordinatorService,
   type HomeOnboardingCoordinatorOptions,
-} from "./home-onboarding-coordinator.js";
+} from "./home/home-onboarding-coordinator.js";
 import {
   HomeSafetyService,
   type HomeSafetyServiceOptions,
-} from "./home-safety-service.js";
+} from "./home/home-safety-service.js";
 import {
   HomeCorrectionService,
   type HomeCorrectionServiceOptions,
-} from "./home-correction-service.js";
+} from "./home/home-correction-service.js";
 import {
   HomeBatchActionService,
   type HomeBatchActionServiceOptions,
-} from "./home-batch-action-service.js";
+} from "./home/home-batch-action-service.js";
 import {
   SqliteProductViewRecipeDraftStore,
   type SqliteProductViewRecipeDraftStoreOptions,
-} from "./product-view-recipe-draft-store.js";
+} from "./home/product-view-recipe-draft-store.js";
 
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;

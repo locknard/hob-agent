@@ -8,7 +8,7 @@ import { ArtifactRegistry, type ArtifactRegistryEntry } from "./artifact-registr
 import {
   SqliteProposalStore,
   type HubVerifiedProposalSource,
-} from "../proposal-store.js";
+} from "../home/proposal-store.js";
 import {
   ArtifactProducer,
   type ApprovedProposalSource,

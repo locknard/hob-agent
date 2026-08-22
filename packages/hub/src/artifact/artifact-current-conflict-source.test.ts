@@ -32,7 +32,7 @@ import type {
   HomeWorldSnapshot,
   HomeWorldWatermark,
 } from "../world/home-world-service.js";
-import type { HubVerifiedProposalSource } from "../proposal-store.js";
+import type { HubVerifiedProposalSource } from "../home/proposal-store.js";
 import type {
   ArtifactRiskConflictArtifactRegistry,
 } from "./artifact-conflict-source.js";

@@ -9,7 +9,7 @@ import {
 import {
   SqliteProposalStore,
   type ArtifactPreparationJob,
-} from "../proposal-store.js";
+} from "../home/proposal-store.js";
 import { ArtifactPreparationJobRunner } from "./artifact-preparation-job-runner.js";
 
 const createdAt = "2026-08-21T01:00:00.000Z";

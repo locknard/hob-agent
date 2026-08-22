@@ -7,7 +7,7 @@ import type {
   ArtifactPreparationJobErrorCode,
   ArtifactPreparationJobStage,
   SqliteProposalStore,
-} from "../proposal-store.js";
+} from "../home/proposal-store.js";
 
 type PreparationJobPort = Pick<SqliteProposalStore,
   "claimPreparationJob" | "completePreparationJob" | "failPreparationJob"

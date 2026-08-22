@@ -9,7 +9,7 @@ import { createArtifactPipelineComposition } from "./artifact-pipeline-compositi
 import {
   SqliteProposalStore,
   type CreateProposalInput,
-} from "../proposal-store.js";
+} from "../home/proposal-store.js";
 import type {
   HomeWorldBridgeSnapshot,
   HomeWorldEvidenceResult,

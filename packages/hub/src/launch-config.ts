@@ -30,7 +30,7 @@ import {
   parseMusicAssistantCredentialRef,
 } from "./music-assistant-credential-setup.js";
 import { toMusicAssistantWebSocketUrl } from "./media/music-assistant-websocket-client.js";
-import { parseHomeSafetyBindings, type HomeSafetyBinding } from "./home-safety-service.js";
+import { parseHomeSafetyBindings, type HomeSafetyBinding } from "./home/home-safety-service.js";
 
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const SECRET_CONFIG_KEY_PATTERN = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
