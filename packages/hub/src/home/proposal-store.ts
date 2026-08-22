@@ -604,6 +604,7 @@ export type ProposalStoreErrorCode =
   | "snooze_limit_reached"
   | "snooze_target_invalid"
   | "lifecycle_invalid"
+  | "enable_temporarily_unavailable"
   | "rollout_state_invalid"
   | "job_transition_conflict"
   | "source_unavailable"

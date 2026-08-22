@@ -293,7 +293,7 @@ class ProposalEnableInbox extends StubInbox {
       // The second attempt simulates a passing outage during enablement.
       throw Object.assign(
         new Error("方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。"),
-        { code: "lifecycle_invalid" },
+        { code: "enable_temporarily_unavailable" },
       );
     }
     this.enablements.push(input);
@@ -1065,13 +1065,22 @@ test("keeps the prepared plan detail reachable and accepts the single enable dec
     });
     assert.equal(retryable.status, 303, "a retryable failure stays inside the product");
     const location = retryable.headers.get("location") ?? "";
-    assert.match(location, /^\/review-center\/proposals\/proposal-enable\?notice=/);
+    assert.equal(location, "/review-center/proposals/proposal-enable?notice=enable_temporarily_unavailable",
+      "only the closed product code travels in the URL, never raw error text");
 
     const returned = await fetch(`${ctx.homeInboxHttp.origin}${location}`, { headers: { authorization } });
     assert.equal(returned.status, 200);
     const returnedHtml = await returned.text();
-    assert.match(returnedHtml, /暂时连不上.*稍后再试/);
+    assert.match(returnedHtml, /暂时没能完成.*稍后再试/, "the server renders the fixed household copy for the code");
     assert.match(returnedHtml, />启用</, "the card keeps its full entries after the notice");
+    assert.match(returnedHtml, /history\.replaceState/, "the notice cleans its query parameter after display");
+
+    const forged = await fetch(
+      `${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable?notice=${encodeURIComponent("已成功启用门锁自动化")}`,
+      { headers: { authorization } },
+    );
+    const forgedHtml = await forged.text();
+    assert.doesNotMatch(forgedHtml, /已成功启用门锁自动化/, "arbitrary query text never renders as a trusted status");
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();

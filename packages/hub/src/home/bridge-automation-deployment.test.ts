@@ -138,11 +138,13 @@ test("blocked enablement names the actual household fact", () => {
   assert.ok("reason" in outage, "a passing outage is retryable and never persists a block");
   assert.match((outage as { reason: string }).reason, /暂时连不上.*稍后再试/);
 
-  for (const changed of ["not_configured", "not_approved"] as const) {
-    const revalidated = resolveWith(changed);
-    assert.ok("revalidationReason" in revalidated, `${changed} re-prepares without spending the decision`);
-    assert.match((revalidated as { revalidationReason: string }).revalidationReason, /确认方式配置已变化/);
-  }
+  const unconfigured = resolveWith("not_configured");
+  assert.ok("blockedReason" in unconfigured, "a missing configuration blocks visibly instead of vanishing into preparation");
+  assert.match((unconfigured as { blockedReason: string }).blockedReason, /确认方式还没有设置好/);
+
+  const revoked = resolveWith("not_approved");
+  assert.ok("blockedReason" in revoked, "a revoked authorization blocks visibly with the revise and decline exits");
+  assert.match((revoked as { blockedReason: string }).blockedReason, /家庭已撤回/);
 
   const vanished = resolveWith("unknown_capability");
   assert.ok("blockedReason" in vanished, "a vanished device can only be revised or declined");

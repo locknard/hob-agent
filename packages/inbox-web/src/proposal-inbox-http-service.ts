@@ -1354,11 +1354,11 @@ export class ProposalInboxHttpService extends Service {
         try {
           await this.inbox.enableProposal({ proposalId, expectedRevision, reviewer: this.reviewer });
         } catch (error) {
-          // A retryable failure stays inside the product: the card returns with
-          // a one-shot notice and every entry intact, instead of an error page.
-          if (errorCode(error) === "lifecycle_invalid") {
-            const notice = proposalEnableNotice(error);
-            return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}?notice=${encodeURIComponent(notice)}`);
+          // A retryable failure stays inside the product: the URL carries only
+          // a closed product code, never raw error text, and the card returns
+          // with every entry intact instead of an error page.
+          if (errorCode(error) === "enable_temporarily_unavailable") {
+            return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}?notice=enable_temporarily_unavailable`);
           }
           return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
         }
@@ -1386,7 +1386,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && detail) {
         const proposalId = safeDecode(detail[1]!);
         if (proposalId === undefined) return send(response, 404, "Proposal not found");
-        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference, undefined, false, undefined, boundedNotice(url.searchParams.get("notice")));
+        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference, undefined, false, undefined, productNoticeCopy(url.searchParams.get("notice")));
       }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
@@ -1885,16 +1885,14 @@ function productRouteForPath(path: string): ProductRoute | undefined {
   return undefined;
 }
 
-function proposalEnableNotice(error: unknown): string {
-  const message = error instanceof Error ? error.message.trim() : "";
-  return message.length > 0 && message.length <= 300 ? message : "这次启用没有完成，家里的设置保持原样；稍后再试一次。";
-}
-
-function boundedNotice(value: string | null): string | undefined {
-  if (value === null) return undefined;
-  const text = value.trim();
-  if (text.length === 0 || text.length > 300) return undefined;
-  return /[\u0000-\u001F\u007F]/u.test(text) ? undefined : text;
+/**
+ * The notice query parameter is a closed set of product codes. The household
+ * copy renders server-side; arbitrary query text never reaches the page.
+ */
+function productNoticeCopy(code: string | null): string | undefined {
+  return code === "enable_temporarily_unavailable"
+    ? "这次启用暂时没能完成，家里的设置保持原样；稍后再试一次。"
+    : undefined;
 }
 
 function selectedProposalId(value: string | null): string | undefined {
@@ -2443,7 +2441,9 @@ function proposalMutationErrorStatus(error: unknown): number {
   const code = errorCode(error);
   return code === "unauthorized" ? 403 : code === "not_found" || code === "proposal_snooze_unavailable" || code === "proposal_reject_unavailable" || code === "proposal_latch_unavailable" || code === "proposal_enable_unavailable"
     ? 404
-    : code === "revision_conflict" || code === "terminal_status" || code === "conflict" || code === "trial_not_complete" || code === "rollout_state_invalid" ? 409 : 500;
+    : code === "enable_temporarily_unavailable"
+      ? 503
+      : code === "revision_conflict" || code === "terminal_status" || code === "conflict" || code === "trial_not_complete" || code === "rollout_state_invalid" ? 409 : 500;
 }
 
 function proposalMutationErrorText(error: unknown): string {

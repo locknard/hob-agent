@@ -460,7 +460,9 @@ export class HomeProposalService extends Service {
       return this.wakePreparation(demoted);
     }
     if (resolved !== undefined && "reason" in resolved) {
-      throw new ProposalStoreError("lifecycle_invalid", resolved.reason);
+      // A passing failure gets its own code so callers can offer a retry
+      // without parsing message text.
+      throw new ProposalStoreError("enable_temporarily_unavailable", resolved.reason);
     }
     const enabling = this.store.decideProposal({
       proposalId: input.proposalId,

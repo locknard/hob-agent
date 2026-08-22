@@ -21,11 +21,9 @@ import type { ProposalDeploymentOutcome } from "./proposal-store.js";
  * neutral: no bridge-native payload or endpoint detail reaches the caller.
  */
 export interface AutomationBridgeSource {
-  resolveActionAuthority(hwCapabilityId: string): {
-    readonly status: string;
-    readonly policyClass?: string;
-    readonly reason?: "not_configured" | "not_approved" | "configured_binding_unavailable" | "unknown_capability" | string;
-  };
+  resolveActionAuthority(hwCapabilityId: string):
+    | { readonly status: "available"; readonly bridgeId?: string; readonly policyClass: "direct" | "confirmation" | "administrator" }
+    | { readonly status: "unavailable"; readonly reason: "not_configured" | "not_approved" | "configured_binding_unavailable" | "unknown_capability" };
   capabilityDeviceName(hwCapabilityId: string): string | undefined;
   automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
     readonly bridgeId: string;
@@ -86,20 +84,22 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
       if (action.kind === "notify_local") continue;
       const authority = this.world.resolveActionAuthority(action.target.hwCapabilityId);
       if (authority.status !== "available") {
-        // The authority names why. Each cause routes to the one state that can
-        // actually recover from it — a blanket "try again later" would loop
-        // forever on the causes that retrying never fixes.
-        if (authority.reason === "unknown_capability") {
-          // The device left the home map: the plan can only be revised or declined.
-          return { blockedReason: "方案里的设备已经不在家庭地图里，不能再交给自动化。可以在对话里改方案，或不用了。" };
+        // The authority names why. Each cause routes to a VISIBLE state that
+        // can recover from it: retrying never fixes a configuration gap, and
+        // a silent re-preparation would make the card vanish from the list.
+        switch (authority.reason) {
+          case "unknown_capability":
+            return { blockedReason: "方案里的设备已经不在家庭地图里，不能再交给自动化。可以在对话里改方案，或不用了。" };
+          case "not_configured":
+            return { blockedReason: "方案里设备的确认方式还没有设置好，先在设置里为它选择确认方式；也可以在对话里改方案，或不用了。" };
+          case "not_approved":
+            return { blockedReason: "家庭已撤回这个设备动作的授权，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
+          case "configured_binding_unavailable":
+            return { reason: "方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。" };
+          default:
+            // Out-of-contract adapters land here at runtime: commit to nothing.
+            return { reason: "方案里设备的执行权限暂时无法确认，家里的设置保持原样；稍后再试一次。" };
         }
-        if (authority.reason === "not_configured" || authority.reason === "not_approved") {
-          // The household's action configuration changed: re-prepare against the
-          // current truth without spending the decision.
-          return { revalidationReason: "方案里设备的确认方式配置已变化，需要重新准备并更新说明。" };
-        }
-        // A binding outage is a passing state: retryable, never persisted.
-        return { reason: "方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。" };
       }
       if (authority.policyClass === "administrator") {
         // Protected escalation is a standing household fact: the plan blocks

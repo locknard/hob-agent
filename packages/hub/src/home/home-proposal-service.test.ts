@@ -1235,6 +1235,67 @@ test("drift survives persistence and the fingerprint baseline reaches the record
   }
 });
 
+test("a configuration gap blocks visibly and a revision under restored config enables", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  let configured = false;
+  const intent = {
+    deploymentId: "hob_config_gap",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } }],
+  };
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => configured
+          ? intent
+          : { blockedReason: "方案里设备的确认方式还没有设置好，先在设置里为它选择确认方式；也可以在对话里改方案，或不用了。" },
+        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_config_gap", target: "ha-main" }),
+      },
+    } as never);
+
+    const created = ctx.homeProposals.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "config-gap:v1",
+      dedupKey: "config-gap",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+
+    const blocked = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(blocked.lifecycle, "ready", "the card stays in the visible ready list");
+    assert.equal(blocked.status, "pending_review", "the household decision was not spent");
+    assert.match(blocked.enableBlockedReason ?? "", /确认方式还没有设置好/, "the card states the configuration gap");
+
+    configured = true;
+    const revised = ctx.homeProposals.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "config-gap:v2",
+      dedupKey: "config-gap",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      summary: "修订后的方案说明。",
+      artifactCandidate: automationCandidate,
+    });
+    assert.equal(revised.id, blocked.id, "the revision lands on the same card");
+    assert.equal(revised.enableBlockedReason, undefined, "the revision clears the stale block");
+    completePreparation(store, revised.id);
+    const readyAgain = ctx.homeProposals.markProposalReady({ proposalId: revised.id });
+
+    const enabled = await ctx.homeProposals.enableProposal({ proposalId: readyAgain.id, reviewer: "household-owner" });
+    assert.equal(enabled.lifecycle, "active", "the same card enables once the configuration recovers");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
 test("a passing outage keeps the plan enableable and recovery enables it", async () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
   const ctx = new Context();

@@ -405,14 +405,7 @@ export class OneShotActionPlane {
     if (!isEligible(actor)) {
       return { status: "denied", reason: "unauthorized", ticket: this.cloneTicket(ticket) };
     }
-    const approved = this.updateTicket(ticket.id, (current) => ({
-      ...current,
-      status: "approved",
-      approvedAt: this.timestamp(),
-      approvedBy: actor.principalId,
-      decidedVia: actor.device.kind,
-    }));
-    this.appendActivity(ticket.id, "confirmation_approved", actor.principalId, undefined, undefined, actor.device.kind);
+    const approved = this.decideTicket(ticket.id, actor, "approved");
     return this.executeTicket(approved.id, input.signal ?? new AbortController().signal);
   }
 
@@ -447,15 +440,7 @@ export class OneShotActionPlane {
     if (!canRejectFrom(actor)) {
       return { status: "denied", reason: "unauthorized", ticket: this.cloneTicket(ticket) };
     }
-    const rejected = this.updateTicket(ticket.id, (current) => ({
-      ...current,
-      status: "rejected",
-      resultReason: "rejected_by_actor",
-      rejectedAt: this.timestamp(),
-      rejectedBy: actor.principalId,
-      decidedVia: actor.device.kind,
-    }));
-    this.appendActivity(rejected.id, "confirmation_rejected", actor.principalId, "rejected_by_actor", undefined, actor.device.kind);
+    const rejected = this.decideTicket(ticket.id, actor, "rejected");
     return this.resultFor(rejected, "rejected_by_actor");
   }
 
@@ -729,6 +714,39 @@ export class OneShotActionPlane {
     mutator(draft);
     this.persist(draft);
     this.state = draft;
+  }
+
+  /**
+   * A decision and its activity are one fact: they commit in the same
+   * persistence write and share one timestamp, so a crash can never leave a
+   * decided ticket whose timeline is missing the decision.
+   */
+  private decideTicket(id: string, actor: OneShotActionActor, decision: "approved" | "rejected"): OneShotActionTicket {
+    const current = this.state.tickets.find((ticket) => ticket.id === id);
+    if (current === undefined) throw new Error("one-shot action ticket not found");
+    const at = this.timestamp();
+    const next: OneShotActionTicket = decision === "approved"
+      ? { ...this.cloneTicket(current), status: "approved", approvedAt: at, approvedBy: actor.principalId, decidedVia: actor.device.kind }
+      : { ...this.cloneTicket(current), status: "rejected", resultReason: "rejected_by_actor", rejectedAt: at, rejectedBy: actor.principalId, decidedVia: actor.device.kind };
+    const activity: OneShotActionActivity = {
+      id: this.nextId("action activity"),
+      kind: decision === "approved" ? "confirmation_approved" : "confirmation_rejected",
+      at,
+      ticketId: next.id,
+      requestId: next.requestId,
+      capabilityId: next.capabilityId,
+      outcome: next.status,
+      actorId: actor.principalId,
+      via: actor.device.kind,
+      ...(decision === "rejected" ? { reason: "rejected_by_actor" } : {}),
+    };
+    this.commit((draft) => {
+      const index = draft.tickets.findIndex((ticket) => ticket.id === id);
+      if (index < 0) throw new Error("one-shot action ticket not found");
+      draft.tickets[index] = next;
+      draft.activities.push(activity);
+    });
+    return this.cloneTicket(next);
   }
 
   private updateTicket(id: string, update: (ticket: OneShotActionTicket) => OneShotActionTicket): OneShotActionTicket {
