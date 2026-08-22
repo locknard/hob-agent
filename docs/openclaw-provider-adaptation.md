@@ -36,10 +36,10 @@
 | profile health observation | 成功清除 cooldown/连续失败计数并记录 last-success；只持久化 credential-scoped auth/billing/rate-limit，provider-wide overload/timeout/format/unknown 不污染 profile | state store、coordinator、runner 测试 |
 | safe failover error boundary | 最终只返回 provider/profile/reason 的稳定错误，绝不透传供应商原文 | `profile-failover-runner.ts`、测试 |
 | DSH credential seam | 选定 profile 通过 SecretVault 按操作解析为 DSH `CredentialProvider`；`describe` 会解析凭据以准确报告当前可用性。被动的 profile 状态查询仍走独立 availability seam，不读取 secret | `dsh-profile-credential-provider.ts`、`auth-profile-secret-availability.ts`、`secret-vault.ts`、测试 |
-| provider runtime credential injection | 官方 adapter 从 `ctx.credentials` 解析 env-shaped alias；产品代码不接触 provider SDK credential store | `dsh-home-agent-composition.ts`、测试 |
-| official DSH pi-ai adapter | 使用 DSH 官方 rc.7 adapter 处理 tools/reasoning/images/replay/usage/attribution/cancellation；hob 只保留产品名映射与组合生命周期，不维护第二套转换器 | `dsh-home-agent-composition.ts`、兼容集与组合测试 |
+| provider runtime credential injection | 官方 adapter 从 `ctx.credentials` 解析 env-shaped alias；产品代码不接触 provider SDK credential store | `home/home-agent-composition.ts`、测试 |
+| official DSH pi-ai adapter | 使用 DSH 官方 rc.7 adapter 处理 tools/reasoning/images/replay/usage/attribution/cancellation；hob 只保留产品名映射与组合生命周期，不维护第二套转换器 | `home/home-agent-composition.ts`、兼容集与组合测试 |
 | profile → DSH credential seam | 选中的 API-key profile 通过只读 alias→SecretRef provider 按请求解析；不缓存、不枚举、不向未映射 provider 泄露 | `dsh-profile-credential-provider.ts`、组合测试 |
-| selected profile → provider runtime | 选中的 API-key profile 仅映射到其对应的 DSH route，不可越权供给其他 provider | `dsh-home-agent-composition.ts`、`dsh-profile-credential-provider.ts`、测试 |
+| selected profile → provider runtime | 选中的 API-key profile 仅映射到其对应的 DSH route，不可越权供给其他 provider | `home/home-agent-composition.ts`、`dsh-profile-credential-provider.ts`、测试 |
 | OS Keychain SecretVault | macOS `keychain:service/account` 精确读写；写入经 stdin 而非子进程参数，不枚举钥匙串且 SQLite 不存 secret | `macos-keychain-secret-vault.ts`、测试 |
 | API-key profile provisioning | 先写 secret 再写元数据；元数据失败时恢复旧 secret 或删除新项，避免遗留或丢失凭据 | `api-key-profile-provisioner.ts`、测试 |
 | turn-local fallback | 显式模型候选链，成功 fallback 不改 session 的 selected model | `model-fallback.ts`、测试 |

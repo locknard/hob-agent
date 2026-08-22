@@ -1,0 +1,59 @@
+import type { ProfileMetadataWriter } from "../profiles/api-key-profile-provisioner.js";
+import type { AuthProfile } from "../profiles/auth-profiles.js";
+import type { DshOAuthInteraction, DshOAuthProvider } from "./dsh-oauth-seam.js";
+import type { WritableSecretVault } from "../secrets/macos-keychain-secret-vault.js";
+import type { OAuthProfileCredentialStoreOptions } from "./oauth-profile-credential-store.js";
+import { loginOAuthProfile } from "./oauth-profile-login.js";
+import { logoutOAuthProfile } from "./oauth-profile-logout.js";
+
+/** Persist OAuth lifecycle metadata around provider-owned login/logout flows. */
+export async function loginAndRecordOAuthProfile(
+  profile: AuthProfile,
+  vault: WritableSecretVault,
+  metadata: ProfileMetadataWriter,
+  interaction: DshOAuthInteraction,
+  provider?: DshOAuthProvider,
+): Promise<AuthProfile> {
+  const pending = withoutExpiry(profile);
+  await metadata.upsert(pending);
+  const credential = await loginOAuthProfile(profile, vault, interaction, provider);
+  if (credential.type !== "oauth") throw new Error("OAuth login did not return an OAuth credential");
+  const active = { ...pending, expiresAt: credential.expires };
+  await metadata.upsert(active);
+  return active;
+}
+
+/** Mark the profile unavailable before deleting its local OAuth credential. */
+export async function logoutAndRecordOAuthProfile(
+  profile: AuthProfile,
+  vault: WritableSecretVault,
+  metadata: ProfileMetadataWriter,
+  provider?: DshOAuthProvider,
+): Promise<AuthProfile> {
+  const pending = withoutExpiry(profile);
+  await metadata.upsert(pending);
+  await logoutOAuthProfile(profile, vault, provider);
+  return pending;
+}
+
+/**
+ * Turns a non-secret DSH credential-store mutation into persisted profile
+ * availability metadata. OAuth token values never leave the SecretVault.
+ */
+export function createOAuthProfileMetadataSync(
+  profile: AuthProfile,
+  metadata: ProfileMetadataWriter,
+): OAuthProfileCredentialStoreOptions {
+  return {
+    onChanged: async ({ expiresAt }) => {
+      await metadata.upsert(expiresAt === undefined
+        ? withoutExpiry(profile)
+        : { ...profile, expiresAt });
+    },
+  };
+}
+
+function withoutExpiry(profile: AuthProfile): AuthProfile {
+  const { expiresAt: _expiresAt, ...pending } = profile;
+  return pending;
+}

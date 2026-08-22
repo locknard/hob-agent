@@ -18,7 +18,7 @@ contract 后再接入具体 provider。
 
 ## Seam 设计
 
-[`dsh-oauth-seam.ts`](../packages/agent-layer/src/dsh-oauth-seam.ts) 定义：
+[`dsh-oauth-seam.ts`](../packages/agent-layer/src/auth/oauth/dsh-oauth-seam.ts) 定义：
 
 - `DshOAuthInteraction`：text/secret/select/manual-code prompt，以及 info/auth-url/
   device-code/progress event；

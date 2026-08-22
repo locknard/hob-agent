@@ -327,8 +327,16 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   assert.deepEqual(removedEntries, [], "superseded contracts, re-export shims, ecosystem services, and the second runtime entry stay deleted");
 
   assert.equal(rootPackage.scripts?.["inbox:home"], undefined, "the product exposes one runtime entry");
-  assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\.test\.ts/, "the test command must include package-root tests");
-  assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\*\/\*\.test\.ts/, "the test command must include nested domain tests");
+  assert.match(
+    String(rootPackage.scripts?.test),
+    /sh tests\/typescript-test-discovery\.test\.sh/,
+    "the test command verifies recursive TypeScript test discovery",
+  );
+  assert.match(
+    String(rootPackage.scripts?.test),
+    /sh tests\/run-typescript-tests\.sh/,
+    "the test command runs every recursively discovered TypeScript test",
+  );
   for (const [scriptName, command] of Object.entries(rootPackage.scripts ?? {})) {
     const match = /^tsx (packages\/hub\/src\/\S+\.ts)$/u.exec(String(command));
     if (match) assert.equal(existsSync(join(repositoryRoot, match[1])), true, `${scriptName} points to a tracked Hub command`);

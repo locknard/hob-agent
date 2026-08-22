@@ -19,7 +19,7 @@
     "check:instructions": "sh scripts/sync-agent-instructions.sh --check",
     "prepare": "sh scripts/install-git-hooks.sh",
     "sync:agents": "sh scripts/sync-agent-instructions.sh",
-    "test": "sh tests/agent-instructions.test.sh && NODE_NO_WARNINGS=1 tsx --test contracts/*.test.ts packages/*/src/*.test.ts packages/*/src/**/*.test.ts"
+    "test": "sh tests/agent-instructions.test.sh && sh tests/typescript-test-discovery.test.sh && sh tests/run-typescript-tests.sh"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
