@@ -39,6 +39,10 @@ production or test import enters through that package root. The public entry exp
 the core, adapter conformance, actions, foreign-rules and organization-hints
 surfaces. Architecture guards keep cross-package relative imports and superseded
 version shims out of the repository.
+A workspace-wide package guard now resolves static, type-only, side-effect and
+dynamic imports. Each cross-package edge must name a declared dependency and a
+published export, so the same boundary applies to contracts, Agent Layer and the
+Product Shell.
 
 Hub source organization has explicit `src/bridge/`, `src/artifact/`,
 `src/authority/`, `src/media/`, `src/world/`, `src/home/`, `src/cli/`, and
@@ -96,6 +100,9 @@ The follow-up now establishes a directed production graph through narrow ports:
 8. The isolated principal registry prototype and retired Inbox stylesheet have
    been removed. Authenticated product actors continue through the existing bound
    principal and device policy path, and Product Shell owns the active stylesheet.
+9. Product Shell owns one browser stream client for household conversation turns.
+   The standalone advice client duplicate has been retired, and the architecture
+   guard preserves the single product path.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and

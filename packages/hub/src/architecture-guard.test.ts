@@ -4,6 +4,18 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+interface WorkspacePackageManifest {
+  readonly dependencies?: Readonly<Record<string, string>>;
+  readonly devDependencies?: Readonly<Record<string, string>>;
+  readonly exports?: string | Readonly<Record<string, unknown>>;
+  readonly name: string;
+}
+
+interface WorkspacePackageBoundary {
+  readonly directory: string;
+  readonly manifest: WorkspacePackageManifest;
+}
+
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const agentSourceRoot = join(repositoryRoot, "packages", "agent-layer", "src");
 const inboxSourceRoot = join(repositoryRoot, "packages", "inbox-web", "src");
@@ -30,6 +42,40 @@ function violations(files: readonly string[], pattern: RegExp, stripComments = t
   });
 }
 
+function importSpecifiers(source: string): string[] {
+  return [...withoutComments(source).matchAll(/(?:\bfrom\s+|\bimport\s*(?:\(\s*)?)["']([^"']+)["']/gu)]
+    .map((match) => match[1]);
+}
+
+function workspacePackage(directory: string): WorkspacePackageBoundary {
+  return {
+    directory,
+    manifest: JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) as WorkspacePackageManifest,
+  };
+}
+
+function exportedSubpath(manifest: WorkspacePackageManifest, specifier: string): boolean {
+  const subpath = specifier === manifest.name ? "." : `.${specifier.slice(manifest.name.length)}`;
+  return typeof manifest.exports === "string"
+    ? subpath === "."
+    : manifest.exports !== undefined && Object.hasOwn(manifest.exports, subpath);
+}
+
+test("workspace boundary parser recognizes every TypeScript import form", () => {
+  const source = `
+    import "@hob/bridge-contract";
+    import type { AgentLoopTrace } from "@hob-agent/agent-layer/agent-loop-trace";
+    export { ProposalInboxService } from "@hob-agent/inbox-web/service";
+    const module = await import("@hob-agent/inbox-web/http");
+  `;
+  assert.deepEqual(importSpecifiers(source), [
+    "@hob/bridge-contract",
+    "@hob-agent/agent-layer/agent-loop-trace",
+    "@hob-agent/inbox-web/service",
+    "@hob-agent/inbox-web/http",
+  ]);
+});
+
 test("architecture guards keep the agent and neutral hub boundaries closed", () => {
   const agentFiles = sourceFiles(agentSourceRoot);
   const inboxFiles = sourceFiles(inboxSourceRoot);
@@ -39,6 +85,43 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   const authorityFiles = sourceFiles(join(hubSourceRoot, "authority"));
   const bridgeFiles = sourceFiles(join(hubSourceRoot, "bridge"));
   const worldFiles = sourceFiles(join(hubSourceRoot, "world"));
+  const workspacePackages = [
+    workspacePackage(join(repositoryRoot, "contracts")),
+    workspacePackage(join(repositoryRoot, "packages", "agent-layer")),
+    workspacePackage(join(repositoryRoot, "packages", "hub")),
+    workspacePackage(join(repositoryRoot, "packages", "inbox-web")),
+  ];
+  const workspaceImportViolations: string[] = [];
+  for (const owner of workspacePackages) {
+    for (const file of sourceFiles(owner.directory, true)) {
+      for (const specifier of importSpecifiers(readFileSync(file, "utf8"))) {
+        if (specifier.startsWith(".")) {
+          const resolvedImport = resolve(dirname(file), specifier);
+          const target = workspacePackages.find((candidate) => candidate !== owner
+            && (resolvedImport === candidate.directory || resolvedImport.startsWith(`${candidate.directory}/`)));
+          if (target !== undefined) {
+            workspaceImportViolations.push(`${relative(repositoryRoot, file)} reaches ${target.manifest.name} by relative path`);
+          }
+          continue;
+        }
+        const target = workspacePackages.find((candidate) => specifier === candidate.manifest.name
+          || specifier.startsWith(`${candidate.manifest.name}/`));
+        if (target === undefined || target === owner) continue;
+        const declared = owner.manifest.dependencies?.[target.manifest.name]
+          ?? owner.manifest.devDependencies?.[target.manifest.name];
+        if (declared === undefined) {
+          workspaceImportViolations.push(`${relative(repositoryRoot, file)} requires undeclared ${target.manifest.name}`);
+        } else if (!exportedSubpath(target.manifest, specifier)) {
+          workspaceImportViolations.push(`${relative(repositoryRoot, file)} reaches private ${specifier}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    workspaceImportViolations,
+    [],
+    "workspace imports use declared dependencies and published package entry points",
+  );
 
   const misplacedBridgeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isFile())
