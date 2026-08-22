@@ -1,8 +1,39 @@
 # Proposal Store architecture review
 
-Status: **Proposed — implementation requires review approval**  
-Scope: Hub proposal governance and approved-proposal preparation queue  
+Status: **Proposed — implementation requires review approval**
+
+Scope: Hub proposal governance and direction-approved proposal preparation queue
+
 Out of scope: runtime confirmations, Artifact Registry internals, automation execution
+
+Business prerequisite: read
+[`proposal-governance-business-context.md`](./proposal-governance-business-context.md)
+first. It defines the household problem, current product reality, target journey,
+and the difference between direction approval, preparation, trial, and deployment.
+
+## Business correction carried into this design
+
+The current implementation marks a proposal `trial_active` immediately after the
+household approves its direction and advances it after seven calendar days. The
+product currently prepares an Artifact and a no-write dry-run; it has no temporary
+rule installation, trial execution, trial event collection, trial report, or
+persistent deployment path.
+
+This architecture therefore replaces speculative trial and enablement state with
+the states the product can prove:
+
+- accepting an automation direction closes the proposal review decision and
+  atomically queues preparation when it contains an eligible artifact candidate;
+- accepting a household insight records useful feedback without creating an
+  automation preparation job;
+- preparation status comes from the durable preparation job and Artifact owners;
+- a prepared proposal can show its exact simulation and the honest product status
+  “trial unavailable”;
+- trial and long-term deployment enter the contract through a later reviewed
+  feature that supplies execution, observation, stop, report, and rollback together.
+
+The structural extraction and this semantic correction land as separate commits,
+both before the first release.
 
 ## Decision summary
 
@@ -17,7 +48,7 @@ The design makes four commitments:
 2. **One facade owns every atomic boundary.** `SqliteProposalStore` opens and closes
    the database, starts and commits transactions, and coordinates proposal, latch,
    audit, and preparation-job writes.
-3. **Policies are pure and exhaustive.** Proposal, snooze, trial, latch, and job
+3. **Policies are pure and exhaustive.** Proposal, snooze, latch, and job
    transitions are calculated without SQLite, hidden clocks, or generated IDs.
 4. **Consumers depend on narrow ports.** Agent producers, review UI, artifact
    preparation, and retention each receive only the operations they need.
@@ -55,7 +86,7 @@ Proposal governance and runtime confirmation remain separate domains.
 | Lifetime | Up to 14 days; snooze remains in capacity | Short visible TTL; expiry fails closed |
 | Rejection | `reject_once` or durable `do_not_suggest` latch | Reject this action attempt |
 | Capacity | At most five unresolved proposals, including snoozed cards | Independent safety queue and limits |
-| Approval result | Starts a governed evaluation path | Authorizes the exact bounded action |
+| Approval result | Starts governed proposal preparation | Authorizes the exact bounded action |
 | Expiry | Closes an unattended suggestion | Cancels execution and leaves an audit event |
 
 The Proposal Store never accepts a confirmation ID, confirmation TTL, device action,
@@ -66,18 +97,21 @@ or execution authority. Runtime rejection can never create a proposal dedup latc
 ### Hub-owned invariants
 
 - Every proposal starts as `pending_review`.
-- A pending proposal reaches exactly one terminal review decision: `approved`,
+- A pending proposal reaches exactly one terminal review status: `accepted`,
   `rejected`, or `expired`.
+- An accepted proposal carries exactly one kind-matched acceptance record:
+  `automation_direction_approved` or `insight_accepted`.
 - Snoozing keeps `pending_review` and occupies one of the five proposal slots.
 - `reject_once` leaves the behavior identity available for future evidence.
 - `do_not_suggest` creates one durable latch and one latch audit event atomically
   with proposal rejection.
 - Clearing a latch is explicit, actor-attributed, and audited.
-- Approval does not apply an automation or grant device execution authority.
-- Approval of an eligible automation draft and creation of its preparation job
+- Automation-direction acceptance does not apply an automation or grant device
+  execution authority.
+- Acceptance of an eligible automation direction and creation of its preparation job
   commit in the same transaction.
 - Proposal revision checks guard every user-visible mutation.
-- Expiry, trial progress, and preparation retries use an explicit injected time or
+- Expiry and preparation retries use an explicit injected time or
   expected version; no state transition depends on a hidden timer callback.
 - Corrupt persisted combinations fail closed with `corrupt_store`.
 
@@ -93,14 +127,17 @@ Agent and plugin producers may contribute:
 They do not receive:
 
 - SQLite, repository, transaction, latch, or preparation-job handles;
-- permission to define new review decisions or rollout states;
+- permission to define new review decisions or preparation states;
 - permission to enlarge proposal capacity or expiry;
 - permission to treat proposal approval as execution approval;
 - ecosystem-native payload access across the neutral Hub boundary.
 
-`ProposalKind` remains a closed neutral vocabulary because each kind changes review,
-preparation, and UI semantics. Adding a kind is a versioned Hub contract decision,
-not plugin metadata.
+Proposal v2 contains two closed household kinds: `automation-draft` and
+`household-insight`. Identity linking, capability binding, and action-authority
+binding remain in their existing Hub governance owners and administrator surfaces;
+they are system configuration decisions, not household suggestions. Adding a new
+household kind is a versioned Hub contract decision because each kind changes review,
+preparation, and UI semantics.
 
 ## Target modules
 
@@ -123,17 +160,18 @@ payload or future adapter process contract.
 | `proposal-preparation-repository.ts` | Preparation-job SQL and compare-and-set persistence over a borrowed database | Job policy, transactions, artifact production |
 | `proposal-store.ts` | Public facade, database/file lifecycle, transaction orchestration, clocks/IDs, privileged synchronous projections | Inline Zod object definitions and row decoding |
 
-The existing Artifact-owned files keep their authority:
+The existing Artifact-owned contracts keep their authority:
 
-- `artifact/proposal-source-port.ts` owns the exact approved-source projection
-  consumed by artifact production.
+- the current `artifact/proposal-source-port.ts` owns the exact proposal-source
+  projection consumed by artifact production. Contract cleanup renames it and its
+  exported type to “direction-approved proposal source”.
 - `artifact/preparation-job-port.ts` owns the worker-facing job contract.
 - Artifact Registry owns artifact revisions, evidence, compilation, dry-run results,
   risk, authority, and artifact audit.
 
-The preparation-job table stays in the proposal database because direction approval
-and durable queue insertion form one atomic operation. Co-location does not transfer
-artifact ownership to the Proposal Store.
+The preparation-job table stays in the proposal database because
+automation-direction acceptance and durable queue insertion form one atomic
+operation. Co-location does not transfer artifact ownership to the Proposal Store.
 
 ### Dependency direction
 
@@ -174,6 +212,15 @@ The concrete store remains available only to runtime composition and focused sto
 tests. Services receive capability-specific interfaces:
 
 ```ts
+type ProposalAcceptance =
+  | { readonly kind: "automation_direction_approved" }
+  | { readonly kind: "insight_accepted" };
+
+type ProposalDecisionInput =
+  | { readonly decision: "accept"; readonly acceptance: ProposalAcceptance }
+  | { readonly decision: "reject_once" }
+  | { readonly decision: "do_not_suggest" };
+
 interface ProposalSubmissionPort {
   submit(input: CreateProposalInput): ProposalAdmissionResult;
 }
@@ -184,8 +231,6 @@ interface ProposalReviewPort {
   capacity(): ProposalCapacity;
   snooze(input: ProposalSnoozeInput): ProposalEnvelope;
   decide(input: ProposalDecisionInput): ProposalEnvelope;
-  advanceTrial(input: ProposalTrialAdvanceInput): ProposalEnvelope;
-  approveLongTerm(input: ProposalLongTermApprovalInput): ProposalEnvelope;
 }
 
 interface ProposalGovernanceAdminPort {
@@ -199,6 +244,11 @@ interface ProposalInsightPort {
   calibrationHistory(limit?: number): readonly ProposalCalibrationItem[];
 }
 ```
+
+The policy validates the acceptance discriminator against the persisted proposal
+kind before any write. The service derives reviewer identity from the authenticated
+actor; producers and forms cannot supply a different actor or acceptance kind for
+the stored proposal.
 
 Artifact preparation and retention continue through their narrower existing ports.
 The Inbox and Agent layers do not depend on the concrete SQLite class.
@@ -236,35 +286,44 @@ latched behavior suppressed.
 stateDiagram-v2
   [*] --> PendingReview
   PendingReview --> PendingReview: snooze / snooze elapsed / evidence merged
-  PendingReview --> Approved: approve direction
+  PendingReview --> Accepted: accept with kind-matched outcome
   PendingReview --> Rejected: reject once
   PendingReview --> Rejected: do not suggest + create latch
   PendingReview --> Expired: natural expiry
-  Approved --> [*]
+  Accepted --> [*]
   Rejected --> [*]
   Expired --> [*]
 ```
 
-`Approved`, `Rejected`, and `Expired` are terminal review states. Trial and long-term
-consent are a second machine attached only to an approved proposal.
+`Accepted`, `Rejected`, and `Expired` are terminal review states. For an automation
+draft, `Accepted` contains `automation_direction_approved`; for a household insight,
+it contains `insight_accepted`. A later Artifact preparation result changes what the
+UI can show, while the household review decision remains immutable.
 
-### Evaluation and long-term consent
+### Composite product journey after direction approval
 
 ```mermaid
-stateDiagram-v2
-  [*] --> DirectionPending
-  DirectionPending --> TrialActive: direction approved
-  TrialActive --> LongTermApprovalPending: seven days elapsed + explicit advance
-  LongTermApprovalPending --> LongTermApproved: household approves persistent behavior
-  LongTermApproved --> [*]
+flowchart LR
+  DirectionAccepted[Automation proposal: direction accepted] --> Job[Preparation job]
+  Job -->|queued / running| Preparing[UI: preparing]
+  Job -->|failed| Failed[UI: preparation failed + explicit retry]
+  Job -->|succeeded| Artifact[Artifact review projection]
+  Artifact --> Ready[UI: simulation ready; trial unavailable]
+  Ready -. future reviewed feature .-> Trial[Real trial object]
+  Trial -. evidence report .-> Deployment[Long-term deployment decision]
 ```
 
-The current value `rolloutState: "enabled"` is renamed to
-`"long_term_approved"`. The current envelope simultaneously records
-`applicationStatus: "not_available"`; the word “enabled” therefore implies an
-application or execution capability that does not exist. The new name records
-consent while preserving the rule that only Artifact and authority owners can make
-behavior executable.
+The product projection composes three existing truths without copying their states:
+
+- Proposal Store owns the immutable, kind-matched household acceptance decision.
+- Preparation job owns queue and retry progress.
+- Artifact Registry owns the prepared artifact, assessment, compile, and dry-run.
+
+The v2 proposal envelope removes `rolloutState`, `trial`, and `enablement` because
+the current product cannot produce the real-world evidence those names promise.
+Future trial work introduces a separate reviewed object bound to an exact Proposal
+revision and Artifact revision. It enters `trial_active` only after explicit trial
+start, executable preparation, authority checks, and a stop path all succeed.
 
 ### Dedup latch
 
@@ -283,7 +342,7 @@ enter this state machine.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Queued: eligible proposal approved
+  [*] --> Queued: automation direction accepted
   Queued --> Running: claim(expectedVersion)
   Running --> Succeeded: complete(expectedVersion)
   Running --> Failed: fail(stage, code, expectedVersion)
@@ -312,16 +371,18 @@ The schema and decoder reject these combinations:
 | --- | --- |
 | `pending_review` with `review` or `decision` | `corrupt_store` |
 | terminal proposal without a matching review and audit event | `corrupt_store` |
-| rejected/expired proposal with trial or long-term approval data | `corrupt_store` |
-| approved proposal without an active or completed evaluation stage | `corrupt_store` |
+| v2 proposal carrying `rolloutState`, `trial`, or `enablement` | schema rejection |
+| `accepted` without a kind-matched acceptance and audit event | `corrupt_store` |
+| `household-insight` with `automation_direction_approved` | schema rejection |
+| `automation-draft` with `insight_accepted` | schema rejection |
 | snooze metadata on a terminal proposal | `corrupt_store` |
 | snooze target at or after natural expiry | command rejection / corrupt row |
 | `reject_once` with a newly created latch | transaction test failure |
 | runtime rejection with a proposal latch write | architecture test failure |
-| long-term approval with `applicationStatus` implying execution | schema rejection |
+| Proposal payload or UI projection claiming trial or execution state | architecture test failure |
 | failed preparation job without stage and bounded error code | SQLite/schema rejection |
 | succeeded job carrying failure fields | SQLite/schema rejection |
-| artifact preparation job without the exact approved proposal revision | transaction failure |
+| artifact preparation job without an exact `automation_direction_approved` revision | transaction failure |
 | interrupted-job recovery by the same `claimOwner` | transition conflict |
 
 ## Transaction matrix
@@ -332,27 +393,27 @@ Repository operations in this table run inside the facade's borrowed transaction
 | --- | --- | --- |
 | `submit` | expire due; replay alias; latch; unresolved dedup match; capacity; proposal; alias | exactly one admission result |
 | `snooze` | proposal revision; snooze metadata; proposal audit | pending card still consumes capacity |
-| `decide(approve)` | proposal revision; review/decision/audit; optional preparation job | approval and eligible job both exist |
+| `decide(accept automation)` | proposal revision; acceptance/audit; preparation job | direction acceptance and eligible job both exist |
+| `decide(accept insight)` | proposal revision; acceptance/audit | accepted insight, no preparation job |
 | `decide(reject_once)` | proposal revision; review/decision/audit | rejected proposal, no latch |
 | `decide(do_not_suggest)` | proposal revision; review/decision/audit; latch; latch audit | rejected proposal and active latch |
 | `expireDue` | due snoozes; due pending proposals; audit | every changed proposal has one new revision |
 | `clearDedupLatch` | active latch; delete; latch audit | latch absent with durable clear event |
-| `advanceTrial` | exact revision; elapsed trial; proposal audit | long-term approval becomes available |
-| `approveLongTerm` | exact revision; evaluation stage; long-term approval record; audit | consent recorded, execution authority unchanged |
 | `claim/complete/fail/retry job` | exact job version; legal transition; attempt and error fields | one compare-and-set transition |
 | `recover interrupted job` | exact version; previous boot owner; remaining attempt | queued next attempt with owner cleared |
-| approved-source projection | exact current proposal revision and audit chain | frozen synchronous source or fail closed |
+| automation-source projection | exact accepted automation revision and audit chain | frozen synchronous source or fail closed |
 | retention projection | bounded exact event references | frozen synchronous references or fail closed |
 
 Every command uses the same transaction helper. The helper guarantees rollback,
 private SQLite file permissions after completion, and conversion of recognized
 SQLite conflicts into stable domain errors. Repository methods never commit.
 
-The Home service emits the preparation-worker wake only after the approval and job
+The Home service emits the preparation-worker wake only after the direction decision and job
 transaction commits. The wake remains best-effort because the durable queued job is
-the source of truth; every canonical approval path uses the same post-commit hook.
+the source of truth; every canonical automation-acceptance path uses the same
+post-commit hook.
 
-Callbacks used by approved-source and retention projections remain synchronous. A
+Callbacks used by automation-source and retention projections remain synchronous. A
 Promise-like return is rejected before the write lock can escape the call.
 
 ## Contract cleanup before release
@@ -366,14 +427,24 @@ contract change then removes ambiguity already visible in the public API:
    `review` command. Natural expiry remains a system transition, not a human review
    decision.
 3. Keep one required `reviewer` field; remove the `reviewerId` alias.
-4. Rename `enableProposal` to `approveLongTerm`, `ProposalEnablement` to
-   `ProposalLongTermApproval`, `enablement` to `longTermApproval`, and persisted
-   `enabled` to `long_term_approved`.
-5. Add `claimOwner` to preparation jobs and a root-private explicit interrupted-job
+4. Replace terminal review value `approved` with `accepted` plus the closed
+   kind-matched acceptance record `automation_direction_approved` or
+   `insight_accepted`. Replace the generic UI/API approve action with the proposal
+   kind's household wording.
+5. Limit Proposal v2 kinds to `automation-draft` and `household-insight`. Identity,
+   capability, and authority proposals continue through their existing governance
+   owners and ports.
+6. Remove `rolloutState`, `trial`, `enablement`, `advanceProposalTrial`, and
+   `enableProposal`; current product projections derive preparation from the job
+   and Artifact owners.
+7. Rename the proposal source port/type and preparation job kind/table from generic
+   “approved proposal” vocabulary to “direction-approved proposal” vocabulary.
+   Existing job IDs and idempotency keys remain stable through migration.
+8. Add `claimOwner` to preparation jobs and a root-private explicit interrupted-job
    recovery command; no Inbox input accepts a claim owner or job ID.
-6. Replace the broad concrete-store types in `HomeProposalService` and job tests
+9. Replace the broad concrete-store types in `HomeProposalService` and job tests
    with the narrow ports above.
-7. Stop re-exporting Artifact job/source types from `proposal-store.ts`; import
+10. Stop re-exporting Artifact job/source types from `proposal-store.ts`; import
    each contract from its authority owner.
 
 Because the application is pre-release, the public API changes land as direct
@@ -386,20 +457,34 @@ The structural split does not change tables or payloads. The semantic cleanup us
 an explicit proposal-database schema version and one transaction:
 
 1. validate all existing rows with the current decoder;
-2. translate `rolloutState: "enabled"` to `"long_term_approved"`, `enablement` to
-   `longTermApproval`, and the matching audit action to `"long_term_approved"`;
+2. translate terminal status, review, and audit action `approved` to `accepted`;
+   automation drafts receive `automation_direction_approved`, while household
+   insights receive `insight_accepted` in the acceptance and audit record;
 3. add nullable preparation-job claim-owner storage; existing non-running jobs
    begin with no owner, and an existing running job receives a legacy owner marker
    that only the explicit recovery command can replace;
-4. preserve proposal IDs, revisions, timestamps, reviewer records, job keys, and
+4. rename the preparation table and job kind while preserving every job ID,
+   proposal revision, attempt, version, error, and idempotency key;
+5. remove active `rolloutState`, `trial`, and `enablement` fields; translate existing
+   `trial_completed` and `enabled` audit actions to
+   `legacy_trial_timer_elapsed` and `legacy_long_term_intent_recorded`. These events
+   preserve actor, time, note, revision, and audit identity without projecting a
+   real trial or deployment;
+6. stop migration with a bounded diagnostic if a proposal database contains an
+   identity-link, capability-binding, or action-authority-binding row. Those rows
+   require an explicit owner-specific migration and cannot silently become a
+   household suggestion;
+7. preserve proposal IDs, revisions, timestamps, reviewer records, job keys, and
    audit event IDs;
-5. validate the translated envelope with the new exhaustive schema;
-6. update payload JSON and advance the database schema version;
-7. roll back the complete migration when any row is invalid.
+8. validate the translated envelope with the new exhaustive schema;
+9. update payload JSON and advance the database schema version;
+10. roll back the complete migration when any row is invalid.
 
-The migration changes vocabulary, not the household decision. It does not create
-proposal revisions or artifact jobs. A fixture database containing every lifecycle
-state proves restart compatibility.
+The migration corrects product vocabulary while preserving the household's real
+direction decision and the historical fact that the earlier software recorded
+timer/intent markers. It does not claim those markers were a real trial, create
+proposal revisions, or create artifact jobs. A fixture database containing every
+lifecycle state proves restart compatibility.
 
 ## Implementation sequence after approval
 
@@ -408,7 +493,7 @@ Each step is a narrow commit with fresh focused tests and repository checks.
 ### 1. Characterize the current boundary
 
 - Add table-driven tests for every legal and illegal transition.
-- Add failure-injection tests for proposal approval plus job insertion and
+- Add failure-injection tests for automation-direction acceptance plus job insertion and
   do-not-suggest plus latch audit.
 - Add two-connection SQLite tests for replay, merge, capacity, decision, and job
   compare-and-set behavior.
@@ -438,12 +523,14 @@ Each step is a narrow commit with fresh focused tests and repository checks.
 
 - Compose policy and repository writes within one transaction helper.
 - Bind narrow ports in runtime composition.
-- Keep best-effort worker wakeup after the durable approval/job commit.
+- Keep best-effort worker wakeup after the durable direction-decision/job commit.
 
 ### 6. Apply the approved contract cleanup
 
 - Replace duplicate methods and aliases in one repository-wide migration.
 - Run the persisted vocabulary migration.
+- Replace the UI's trial step with preparation progress and an honest unavailable
+  boundary until the separately reviewed trial feature exists.
 - Delete obsolete compatibility exports and tests that only preserve duplicate APIs.
 
 ## Acceptance gates
@@ -451,8 +538,10 @@ Each step is a narrow commit with fresh focused tests and repository checks.
 Implementation is complete only when all gates pass:
 
 - every legal transition and every impossible combination above has a focused test;
-- approval plus job insertion and do-not-suggest plus latch audit survive injected
-  failures without partial state;
+- automation direction acceptance plus job insertion and do-not-suggest plus latch
+  audit survive injected failures without partial state;
+- insight acceptance creates no preparation job, and a mismatched acceptance kind
+  fails before any proposal or audit write;
 - five snoozed proposals still block a sixth proposal;
 - `reject_once` and runtime rejection produce zero latch rows;
 - exact idempotency replay wins even when capacity is full;
@@ -463,6 +552,8 @@ Implementation is complete only when all gates pass:
   five-attempt limit;
 - a migrated database reopens with identical decisions, revisions, jobs, and audit
   identity;
+- automation direction acceptance renders preparation state, never `trial_active`; elapsed wall
+  time cannot create an enablement or deployment decision;
 - Agent, Inbox, and Artifact code depend on narrow ports rather than
   `SqliteProposalStore`;
 - architecture tests reject SQLite imports from policy/contract modules and reject
@@ -477,7 +568,8 @@ Implementation is complete only when all gates pass:
 - `product-view-recipe-draft-store.ts` remains intact until package metadata or
   signature work introduces its documented extraction trigger.
 - A generic durable-job framework remains outside Phase 0. The preparation queue is
-  one domain-specific bridge between approved proposals and artifact production.
+  one domain-specific bridge between direction-approved proposals and artifact
+  production.
 - New proposal kinds remain a core contract revision. Plugins extend producers and
   neutral intent, not governance vocabulary.
 
@@ -489,21 +581,27 @@ The implementation should begin only after reviewers accept or amend these point
    its database and transaction.
 2. **Stable extension surface:** producers and consumers depend on narrow ports;
    plugins cannot extend governance states.
-3. **Job co-location:** preparation jobs stay in the proposal database to preserve
-   atomic approval and enqueue.
-4. **Canonical commands:** `submit`, `decide`, and `approveLongTerm` replace the
-   duplicate and ambiguous current methods.
-5. **Consent vocabulary:** persisted `enabled` becomes `long_term_approved` because
-   proposal approval never grants execution authority.
-6. **Pre-release migration:** existing local rows are migrated transactionally;
+3. **Household scope:** Proposal v2 contains automation drafts and household
+   insights; identity, capability, and authority governance stay with their Hub
+   owners.
+4. **Job co-location:** preparation jobs stay in the proposal database to preserve
+   atomic automation-direction acceptance and enqueue.
+5. **Canonical commands:** `submit` and `decide` replace the duplicate current
+   proposal commands; speculative trial and enablement commands leave Proposal v2.
+6. **Typed acceptance:** automation direction and household insight use distinct
+   acceptance records; only automation acceptance queues preparation.
+7. **Truthful lifecycle:** accepted automation direction queues preparation. Real
+   trial and long-term deployment states arrive with their execution and evidence
+   owners.
+8. **Pre-release migration:** existing local rows are migrated transactionally;
    the source exposes one current API without a long-lived compatibility layer.
-7. **Interrupted job recovery:** a boot-owned claim plus explicit old-owner recovery
+9. **Interrupted job recovery:** a boot-owned claim plus explicit old-owner recovery
    replaces the currently documented but unimplemented “bounded claim/lease check.”
 
 ## Expected outcome
 
 The refactor leaves proposal governance easier to change and harder to bypass. A
 new household producer can submit through one stable port; a new frontend layout can
-review through another; Artifact preparation keeps exact approved-source guarantees;
-and Hub retains the complete authority to enforce capacity, deduplication, consent,
-audit, and transactional integrity.
+review through another; Artifact preparation keeps exact direction-approved-source
+guarantees; and Hub retains the complete authority to enforce capacity,
+deduplication, consent, audit, and transactional integrity.

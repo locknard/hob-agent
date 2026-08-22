@@ -317,11 +317,15 @@ adding package metadata or signature state. This extraction preserves the curren
 public contracts and Hub authority owner.
 
 `proposal-store.ts` remains the single transaction owner for proposal admission,
-review governance, dedup latches, audit, and approved-proposal preparation jobs.
-Its reviewed extraction plan is recorded in
+review governance, dedup latches, audit, and automation-direction preparation jobs.
+The review begins with
+[`proposal-governance-business-context.md`](./proposal-governance-business-context.md),
+which defines the household problem, current product reality and truthful Phase 0
+boundary. Its technical extraction plan is recorded in
 [`proposal-store-architecture.md`](./proposal-store-architecture.md): pure policy,
 typed contracts, codecs, and borrowed repositories are separated while one facade
-retains every atomic boundary. Implementation starts after architecture review.
+retains every atomic boundary. The same review corrects the current speculative
+trial timer before implementation starts.
 
 `artifact-registry.ts` still keeps artifact revisions, evidence, authority, risk,
 compiler results, assessments, and artifact audit in one owner. A later extraction
