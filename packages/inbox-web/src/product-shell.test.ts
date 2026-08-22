@@ -589,7 +589,7 @@ test("renders Host-owned device view defaults with an explicit permission bounda
   }));
   assert.doesNotMatch(readOnlyView, /action="\/settings\/view-default"/);
   assert.doesNotMatch(readOnlyView, /action="\/settings\/view-presentation"/);
-  assert.match(readOnlyView, /管理员可以设置这台共享设备的默认视图/);
+  assert.match(readOnlyView, /在绑定到本人的私人手机上可以设置这台共享设备的默认视图/);
 });
 
 test("renders neutral control forms and explicit action feedback with a ten-second undo", () => {
@@ -841,7 +841,7 @@ test("renders all eight onboarding steps with clear server-postable fields", () 
     [1, /认识与起名|给家起个名字/, /name="agentName"/],
     [2, /只读接桥|接入已有的家|只读/, /name="bridgeId"/],
     [3, /家庭地图|确认现在的家/, /name="mapConfirmed"/],
-    [4, /成员与管理员|家里都有谁/, /name="memberName"/],
+    [4, /家人与手机|家里都有谁/, /name="memberName"/],
     [5, /分档操作权限|设置操作权限/, /家庭能力列表正在准备|name="capability:/],
     [6, /安全预演|红色的规矩/, /name="safetyAcknowledged"/],
     [7, /第一周期待|第一周/, /name="observationInterval"/],
@@ -918,7 +918,7 @@ test("renders only projected bridge and capability ids, with a blocked read-only
 
 test("uses affirmative copy that matches the adult binding and observation schedule commands", () => {
   const member = renderProductShell(model({ route: "onboarding", onboarding: { step: 4 } }));
-  assert.match(member, /在场的成年成员/);
+  assert.match(member, /绑定到本人的私人手机/);
   assert.doesNotMatch(member, /默认都是管理员|不用建账号|不会拿到审批权/);
 
   const schedule = renderProductShell(model({ route: "onboarding", onboarding: { step: 7 } }));
@@ -1040,7 +1040,7 @@ test("runtime cards keep gate colors, natural countdown, and reject before appro
   assert.match(adminCard, /product-tag product-tag--red">需要管理员/);
   assert.match(adminCard, /3 分钟后自动取消/);
   assert.match(adminCard, /没人点头就不做 · 截止 今天 21:03/);
-  assert.ok(adminCard.indexOf(">拒绝<") < adminCard.indexOf("放行（管理员）"));
+  assert.ok(adminCard.indexOf(">拒绝<") < adminCard.indexOf("放行（手机确认）"));
   const memberCard = html.slice(html.indexOf('data-review-id="mijia-update"'), html.lastIndexOf("</article>"));
   assert.match(memberCard, /product-tag product-tag--neutral">任一成员可放行/);
   assert.doesNotMatch(memberCard, /product-tag--red/);
@@ -1340,7 +1340,7 @@ test("the wall control view shows approvals read-only and points to a private de
   assert.match(html, /等待放行/);
   assert.match(html, /共享屏不替人点头/);
   assert.match(html, /查看全部/);
-  assert.doesNotMatch(html.slice(html.indexOf("等待放行")), /放行（管理员）/);
+  assert.doesNotMatch(html.slice(html.indexOf("等待放行")), /放行（手机确认）/);
 });
 
 test("summarizes the home's status from real safety facts only", () => {

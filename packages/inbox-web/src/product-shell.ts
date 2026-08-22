@@ -454,7 +454,7 @@ const MOBILE_ROUTE_LABELS: Readonly<Record<ProductShellRoute, string>> = {
   onboarding: "首次设置",
 };
 
-const STEP_LABELS = ["认识与起名", "只读接桥", "家庭地图", "成员与管理员", "分档操作权限", "安全预演", "第一周期待", "第一问"] as const;
+const STEP_LABELS = ["认识与起名", "只读接桥", "家庭地图", "家人与手机", "分档操作权限", "安全预演", "第一周期待", "第一问"] as const;
 
 const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
   {
@@ -512,7 +512,7 @@ const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
     key: "members",
     label: STEP_LABELS[3],
     title: "家里都有谁",
-    body: "请让一位在场的成年成员使用已绑定的私人设备完成设置，这个身份负责家庭级确认。",
+    body: "用一台绑定到本人的私人手机完成设置，需要确认的动作以后都会推送到这台手机。",
     fields: [
       { name: "memberName", type: "text", label: "这位成员怎么称呼", placeholder: "比如：小雨", required: true },
       {
@@ -520,11 +520,11 @@ const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
         type: "select",
         label: "成员身份",
         required: true,
-        options: [{ value: "adult_admin", label: "成年成员 · 家庭确认" }],
+        options: [{ value: "adult_admin", label: "本人手机 · 家庭确认" }],
       },
     ],
     submitLabel: "继续",
-    note: "先绑定一位成年成员，其他成员随后在设置中加入。",
+    note: "先绑定一位家人的手机，其他家人随后在设置中加入。",
   },
   {
     step: 5,
@@ -545,7 +545,7 @@ const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
     items: [
       { id: "surface", label: "穿透一切", detail: "不管你在哪个页面，危险提醒都在最顶上。", tone: "danger" },
       { id: "ack", label: "看到 ≠ 解除", detail: "知道了只停止提示，横幅要等传感器确认恢复才撤下。", tone: "danger" },
-      { id: "admin", label: "紧急不等于无政府", detail: "处置动作会到你手边，但照样要管理员在手机上点头。", tone: "danger" },
+      { id: "admin", label: "紧急不等于无政府", detail: "处置动作会到你手边，但高影响的动作照样要在手机上点头。", tone: "danger" },
     ],
     fields: [
       {
@@ -606,7 +606,7 @@ const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
       { name: "firstQuestion", type: "textarea", label: "问问家里的情况", placeholder: "比如：现在家里怎么样？", required: true },
     ],
     submitLabel: "进入家庭对话",
-    note: "影响面大的动作会先问一句，门锁和水阀永远要管理员在手机上点头。",
+    note: "影响面大的动作会先问一句，门锁和水阀永远要在家人的手机上确认。",
   },
 ];
 
@@ -918,7 +918,7 @@ function renderRuntimeCard(item: ProductRuntimeConfirmation): string {
   const canApprove = item.canApprove !== false && status === "pending";
   const administrator = item.policyClass === "administrator" || item.policyClass === "admin";
   const tags = `${item.eligibleActor === undefined ? "" : `<span class="product-tag ${administrator ? "product-tag--red" : "product-tag--neutral"}">${escapeHtml(item.eligibleActor)}</span>`}${item.source === undefined ? "" : `<span class="product-tag product-tag--amber">来自：${escapeHtml(item.source)}</span>`}`;
-  const actions = status !== "pending" ? renderRuntimeOutcome(item, status) : canApprove ? `<div class="product-card-actions"><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (administrator ? "放行（管理员）" : "放行"))}</button></form></div>` : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "请在可批准的设备上完成放行")} · 已推送到管理员手机</p>`;
+  const actions = status !== "pending" ? renderRuntimeOutcome(item, status) : canApprove ? `<div class="product-card-actions"><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (administrator ? "放行（手机确认）" : "放行"))}</button></form></div>` : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "请在可批准的设备上完成放行")} · 已推送到家人的手机</p>`;
   return `<article class="product-card product-card--amber product-review-card" data-review-kind="runtime" data-review-id="${escapeHtml(item.id)}"><div class="product-card-tags">${tags}</div><h3>${escapeHtml(item.title)}</h3>${item.effect === undefined ? "" : `<p>${escapeHtml(item.effect)}</p>`}${renderRuntimeWindow(item)}${actions}</article>`;
 }
 
@@ -1098,7 +1098,7 @@ function renderBatchControl(batch: ProductBatchControl): string {
   const policyLabels: Readonly<Record<ProductBatchPolicyClass, string>> = {
     direct: "直接完成",
     confirmation: "需要确认",
-    administrator: "管理员确认",
+    administrator: "高影响 · 手机确认",
   };
   const statusLabels: Readonly<Record<ProductBatchActionStatus, string>> = {
     verified: "已完成",
@@ -1107,13 +1107,13 @@ function renderBatchControl(batch: ProductBatchControl): string {
     unknown: "结果待确认",
   };
   const items = batch.preview.items.map((item) => `<label class="product-batch-item"><input type="checkbox" name="capabilityId" value="${escapeHtml(item.capabilityId)}" data-batch-policy-class="${escapeHtml(item.policyClass)}"><span class="product-batch-item-copy"><strong>${escapeHtml(item.actionLabel ?? item.label)}</strong><small>${escapeHtml(item.label)} · ${policyLabels[item.policyClass]}</small></span></label>`).join("");
-  const counts = `<div class="product-batch-summary" aria-label="选中动作的处理方式"><span class="product-batch-count"><strong data-batch-count="total">${batch.preview.total}</strong><small>项动作</small></span><span class="product-batch-count"><strong data-batch-count="direct">${batch.preview.direct}</strong><small>直接完成</small></span><span class="product-batch-count"><strong data-batch-count="confirmation">${batch.preview.confirmation}</strong><small>需要确认</small></span><span class="product-batch-count"><strong data-batch-count="administrator">${batch.preview.administrator}</strong><small>管理员确认</small></span></div>`;
+  const counts = `<div class="product-batch-summary" aria-label="选中动作的处理方式"><span class="product-batch-count"><strong data-batch-count="total">${batch.preview.total}</strong><small>项动作</small></span><span class="product-batch-count"><strong data-batch-count="direct">${batch.preview.direct}</strong><small>直接完成</small></span><span class="product-batch-count"><strong data-batch-count="confirmation">${batch.preview.confirmation}</strong><small>需要确认</small></span><span class="product-batch-count"><strong data-batch-count="administrator">${batch.preview.administrator}</strong><small>高影响确认</small></span></div>`;
   const result = batch.result === undefined ? "" : `<section class="product-batch-results" aria-labelledby="batch-results-heading"><h3 id="batch-results-heading">每项动作分别处理</h3><ul>${batch.result.items.map((item) => `<li class="product-batch-result product-batch-result--${escapeHtml(item.status)}" data-batch-result-status="${escapeHtml(item.status)}"${item.ticketId === undefined ? "" : ` data-ticket-id="${escapeHtml(item.ticketId)}"`}><div><strong>${escapeHtml(item.label ?? item.capabilityId)}</strong><span>${escapeHtml(statusLabels[item.status])}</span></div>${item.ticketId === undefined ? "" : `<small>票据 ${escapeHtml(item.ticketId)}</small>`}<p>${escapeHtml(item.reason)}</p></li>`).join("")}</ul></section>`;
   return `<section class="product-card product-batch-control" data-batch-control aria-labelledby="batch-control-heading"><div class="product-batch-header"><div><p class="product-kicker">批量控制</p><h2 id="batch-control-heading">一次选择多项动作</h2><p class="product-muted">先查看每项动作的处理方式，再提交选择。每项动作分别处理。</p></div></div>${counts}<form class="product-batch-form" method="post" action="/control/batch"><fieldset><legend class="product-sr-only">选择要处理的动作</legend><div class="product-batch-items">${items}</div></fieldset><button class="product-primary-action" type="submit" data-batch-submit disabled>执行选中的动作</button></form>${result}</section>`;
 }
 
 function controlPolicyLabel(policyClass: ProductControlItem["policyClass"]): string {
-  if (policyClass === "administrator") return "管理员确认";
+  if (policyClass === "administrator") return "高影响 · 手机确认";
   if (policyClass === "confirmation") return "需要确认";
   return "直接完成";
 }
@@ -1154,7 +1154,7 @@ function renderWallApprovals(model: NormalizedProductShellModel, options: Produc
   const confirmations = model.runtimeConfirmations;
   if (confirmations.length === 0) return "";
   const rows = confirmations.slice(0, 3).map((item) => `<li><strong>${escapeHtml(item.title)}</strong>${item.expiresIn === undefined ? "" : `<span>${escapeHtml(item.expiresIn)}后自动取消</span>`}</li>`).join("");
-  return `<section class="product-card product-wall-approvals" aria-labelledby="wall-approvals-heading"><h2 id="wall-approvals-heading">等待放行 · ${model.runtimeConfirmationCount} 条</h2><ul>${rows}</ul><p class="product-muted">共享屏不替人点头 —— 已推送到管理员的手机，任一人批准即可；这里只看，不能放行。</p><a class="product-secondary-action" href="${routeHref("reviews", options)}">查看全部 ${model.runtimeConfirmationCount} 条 →</a></section>`;
+  return `<section class="product-card product-wall-approvals" aria-labelledby="wall-approvals-heading"><h2 id="wall-approvals-heading">等待放行 · ${model.runtimeConfirmationCount} 条</h2><ul>${rows}</ul><p class="product-muted">共享屏不替人点头 —— 已推送到家人的手机，任一人批准即可；这里只看，不能放行。</p><a class="product-secondary-action" href="${routeHref("reviews", options)}">查看全部 ${model.runtimeConfirmationCount} 条 →</a></section>`;
 }
 
 function renderDenseControl(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -1236,7 +1236,7 @@ function renderDeviceViewPreference(view: ProductViewState): string {
   }).join("");
   const management = view.canSetDeviceDefault === true
     ? `<form class="product-view-default-reset" method="post" action="/settings/view-default"><button class="product-secondary-action" type="submit" name="mode" value="reset">恢复产品默认</button></form>`
-    : `<p class="product-muted">管理员可以设置这台共享设备的默认视图。</p>`;
+    : `<p class="product-muted">在绑定到本人的私人手机上可以设置这台共享设备的默认视图。</p>`;
   return `<section class="product-settings-section" aria-labelledby="device-view-heading"><div><h2 id="device-view-heading">这台设备的默认视图</h2><p class="product-muted">顶部切换只影响当前浏览会话；这里保存下一次打开时使用的视图。</p></div><ul class="product-view-default-list">${choices}</ul>${management}</section>`;
 }
 
@@ -1256,7 +1256,7 @@ function renderViewPresentationPreferences(view: ProductViewState): string {
   }).join("");
   const reset = view.canSetDeviceDefault === true
     ? `<form class="product-presentation-reset" method="post" action="/settings/view-presentation"><input type="hidden" name="providerId" value="${escapeHtml(view.activeId)}"><button class="product-secondary-action" type="submit" name="mode" value="reset">恢复${escapeHtml(providerLabel)}默认</button></form>`
-    : `<p class="product-muted">管理员可以设置这台共享设备的显示方式。</p>`;
+    : `<p class="product-muted">在绑定到本人的私人手机上可以设置这台共享设备的显示方式。</p>`;
   return `<section class="product-settings-section" aria-labelledby="view-presentation-heading"><div><h2 id="view-presentation-heading">${escapeHtml(providerLabel)}的显示方式</h2><p class="product-muted">这些选择只调整这台设备上的排版。</p></div><div class="product-presentation-preferences">${fields}${reset}</div></section>`;
 }
 
@@ -1344,7 +1344,7 @@ function onboardingSteps(model: NormalizedProductShellModel): readonly ProductOn
                     { value: capability.id, label: capability.label, disabled: true },
                     { value: "direct", label: "直接动作", checked: capability.suggestedPolicyClass === "direct" },
                     { value: "confirmation", label: "每次先确认", checked: capability.suggestedPolicyClass === "confirmation" },
-                    { value: "administrator", label: "管理员确认", checked: capability.suggestedPolicyClass === "administrator" },
+                    { value: "administrator", label: "高影响 · 手机确认", checked: capability.suggestedPolicyClass === "administrator" },
                   ],
                   help: `${capability.bridgeLabel} · 建议权限：${policySuggestionLabel(capability.suggestedPolicyClass)}（由你确认）`,
                 })),
@@ -1374,7 +1374,7 @@ function policySuggestionLabel(value: ProductOnboardingPolicySuggestion): string
   switch (value) {
     case "direct": return "直接动作";
     case "confirmation": return "每次先确认";
-    case "administrator": return "管理员确认";
+    case "administrator": return "高影响 · 手机确认";
   }
 }
 

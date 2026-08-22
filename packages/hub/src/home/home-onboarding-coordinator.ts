@@ -185,8 +185,8 @@ const STEP_BODIES = [
   "你好，我会帮这个家看着点儿。开始时我只会看；每项动作都按你设定的权限执行。",
   "我先以只读方式查看已有家庭，再请你确认发现的内容。",
   "请确认房间和设备地图；待确认的地方会清楚标出。",
-  "请绑定成年管理员的私人设备；孩子和访客保留适合各自身份的家庭权限。",
-  "请分别设置直接动作、需要确认的动作和管理员动作。",
+  "请绑定一位家人的私人手机；需要确认的动作以后都会推送到这台手机。",
+  "请分别设置直接动作、需要确认的动作和高影响保护动作。",
   "请确认三条安全规矩；安全级动作始终执行最高确认要求。",
   "请设定第一周的观察频率、安静时段和期待结果。",
   "请带着一个真实问题进入家庭对话。",
@@ -354,8 +354,8 @@ export class HomeOnboardingCoordinatorService extends Service {
         });
       }
       case "bind_private_device": {
-        if (!actor || !actor.present || !isAdult(actor.role) || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
-          throw new HomeOnboardingCoordinatorError("permission_denied", "成员绑定需要在场的成年成员和已绑定私人设备");
+        if (!actor || !actor.present || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
+          throw new HomeOnboardingCoordinatorError("permission_denied", "成员绑定需要在场，并使用绑定到本人的私人设备");
         }
         return this.completeStep(command, now, {
           member: { principalId: actor.principalId, memberName: command.memberName, role: "adult_admin", deviceKind: "private", boundAt: now },
@@ -627,7 +627,6 @@ function isAcceptedAdvice(value: OnboardingAdviceStart | undefined): value is On
     && (value.status === "running" || value.status === "background" || value.status === "completed");
 }
 function isStep(value: unknown): value is HomeOnboardingStep { return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 8; }
-function isAdult(role: OnboardingActorRole): boolean { return role === "admin" || role === "adult_member"; }
 function boundedText(value: unknown, max = 200): value is string { return typeof value === "string" && value.trim() === value && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value); }
 function boundedId(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value); }
 function boundedIdArray(value: unknown): value is readonly string[] { return Array.isArray(value) && value.length <= 256 && value.every((item) => boundedId(item)); }

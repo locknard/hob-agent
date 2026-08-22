@@ -1202,7 +1202,7 @@ function projectRuntimeConfirmation(
     id: confirmation.id,
     title: confirmation.actionSummary,
     effect: confirmation.actionSummary,
-    eligibleActor: confirmation.approvalLevel === "admin" ? "绑定管理员私人设备" : "在场的成年成员",
+    eligibleActor: confirmation.approvalLevel === "admin" ? "在本人手机上确认" : "任一在场的家人",
     expiresAt: confirmation.expiresAt,
     expiresLabel: formatRuntimeExpiryLabel(confirmation.expiresAt, now),
     expiresIn: formatRuntimeRemaining(confirmation.expiresAt, now),

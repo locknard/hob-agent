@@ -2228,11 +2228,13 @@ function productHouseholdFromIdentity(
 }
 
 function principalRoleLabel(role: InboxReviewActor["role"]): string {
+  // Product language knows the household owner (product administration) and
+  // members; the finer wire roles are accepted but never shown as ranks.
   switch (role) {
-    case "admin": return "管理员";
-    case "adult_member": return "成年成员";
-    case "member": return "成员";
-    case "child": return "孩子";
+    case "admin": return "屋主";
+    case "adult_member":
+    case "member":
+    case "child": return "成员";
     case "guest": return "访客";
   }
 }
@@ -2369,9 +2371,10 @@ function canUsePresentHouseholdPrincipal(actor: InboxReviewActor): boolean {
 }
 
 function canUsePrivateProposalReviewPrincipal(actor: InboxReviewActor): boolean {
-  if (!canUsePresentHouseholdPrincipal(actor)
-    || (actor.role !== "admin" && actor.role !== "adult_member")
-    || actor.device.kind !== "private") return false;
+  // The household shares one trust domain: any present member decides from a
+  // private device bound to themselves. Safety lives on the action's
+  // consequence class, not on a member rank.
+  if (!canUsePresentHouseholdPrincipal(actor) || actor.device.kind !== "private") return false;
   return actor.device.boundPrincipalId === actor.principalId;
 }
 
@@ -2694,7 +2697,6 @@ function isCorrectionType(value: unknown): value is InboxConversationCorrectionT
 
 function canUsePrivateCorrectionPrincipal(actor: InboxReviewActor): boolean {
   return actor.present === true
-    && (actor.role === "admin" || actor.role === "adult_member")
     && actor.device.kind === "private"
     && actor.device.boundPrincipalId === actor.principalId;
 }

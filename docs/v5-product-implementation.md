@@ -32,8 +32,9 @@ projection, while the Host Shell owns authentication, safety alerts, review
 counts, provider recovery, and write-command dispatch.
 
 The top Host switcher changes the current browser session. Settings owns the
-persistent device default and its permission check: a member manages a bound
-private device, while an administrator manages a shared device. The Control
+persistent device default and its permission check: any member manages it from
+a private device bound to themselves; the household owner may also manage it
+directly on the shared device. The Control
 provider presents spaces, current values, policy labels and governed actions in
 one continuous dense surface; it uses the same Hub intent handlers as Life.
 
@@ -55,13 +56,16 @@ variants. Providers inherit these semantics through the shared presentation laye
    confirmation instead. Actions inside a deployed native automation are a
    different object: their consent is the enable decision on the named plan
    (DR-015), and the plan card disclosed the concrete devices.
-3. **Administrator** — locks, water valves, security, or irreversible effects.
-   Approval must come from an authenticated private device belonging to any adult
-   administrator. Voice and shared displays are not identity.
+3. **Protected** — locks, water valves, security, or irreversible effects.
+   Approval must come from a private device bound to the approving member.
+   Voice and shared displays are not identity. The gate follows the action's
+   consequence, not a member rank: the household is one trust domain, and any
+   present member approves from their own phone. (The wire and storage spelling
+   of this class remains `administrator` for compatibility.)
 
 The reviewed action-authority binding stores one explicit policy class for each
 Hub capability. Neutral semantic kinds provide onboarding suggestions; the
-stored class governs execution. This preserves administrator handling for water,
+stored class governs execution. This preserves protected handling for water,
 security, and other high-impact devices whose ecosystem presents them as a
 generic switch.
 
@@ -117,7 +121,7 @@ once in its owning store.
   explicit failure, and close with the original configuration restored.
 - A confirmation-class action may live inside an enabled automation; the plan
   card discloses it and the enable decision is the household's consent
-  (administrator-class actions never deploy). The deployment target follows the
+  (protected-class actions never deploy). The deployment target follows the
   plan's own capability bindings, and the target execution domain's read-back
   is the truth about whether the automation runs.
 
@@ -191,9 +195,10 @@ The eight V4 steps are resumable checkpoints:
 1. Meet and name the household instance.
 2. Add an existing home read-only and show what was discovered.
 3. Confirm the neutral household map.
-4. Bind adult administrators to private devices; children and guests remain
-   present-person contexts without approval identity.
-5. Decide direct, confirmation and administrator device scopes independently.
+4. Bind members to their own private devices; approval identity is the bound
+   phone, not a member rank. Guests remain present-person contexts without
+   approval identity.
+5. Decide direct, confirmation and protected device scopes independently.
 6. Rehearse the three non-overridable safety rules.
 7. Set first-week expectations without promising autonomous behavior.
 8. Enter the real conversation surface with the first question.
