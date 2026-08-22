@@ -12,3 +12,10 @@ test("classifies probe failure without retaining raw error details", async () =>
   const result = await probeProvider("gpt/gpt-5.4", async () => { throw new Error("401 invalid api key: secret"); }, (() => { let time = 0; return () => (time += 10); })());
   assert.deepEqual(result, { model: "gpt/gpt-5.4", status: "auth", latencyMs: 10 });
 });
+
+test("classifies endpoint transport failure without retaining network details", async () => {
+  const result = await probeProvider("custom/home-model", async () => {
+    throw new Error("fetch failed: SSL_ERROR_SYSCALL at private endpoint");
+  }, (() => { let time = 0; return () => (time += 10); })());
+  assert.deepEqual(result, { model: "custom/home-model", status: "network", latencyMs: 10 });
+});

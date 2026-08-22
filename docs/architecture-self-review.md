@@ -300,7 +300,7 @@ corresponding binding; the Phase 0 server itself stays loopback-only.
   `main` landmark, zero horizontal overflow and zero console warnings/errors. The
   layout publication workspace additionally covers exact actor-attributed history,
   hidden generation identifiers and complete wrapping at 390 px.
-- Fresh release commands: `pnpm test` (1,235 passing tests), `pnpm check`,
+- Fresh release commands: `pnpm test` (1,236 passing tests), `pnpm check`,
   `git diff --check`, and a repository secret scan.
 
 ## Reviewed structural constraint

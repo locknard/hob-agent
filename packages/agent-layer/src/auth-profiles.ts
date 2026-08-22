@@ -1,5 +1,5 @@
 export type AuthKind = "api_key" | "oauth" | "external_cli" | "token";
-export type FailureReason = "auth" | "rate_limit" | "billing" | "timeout" | "format" | "overloaded" | "unknown";
+export type FailureReason = "auth" | "rate_limit" | "billing" | "timeout" | "network" | "format" | "overloaded" | "unknown";
 export type ProfileSecretAvailability = "available" | "missing" | "blocked" | "unknown";
 
 export interface AuthProfile {

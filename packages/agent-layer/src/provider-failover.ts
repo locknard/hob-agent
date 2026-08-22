@@ -7,6 +7,7 @@ export function classifyProviderFailure(error: unknown): FailureReason {
   if (/401|403|invalid.*(key|token)|unauthori[sz]ed|forbidden/.test(message)) return "auth";
   if (/billing|payment|required|insufficient (balance|credit|funds)/.test(message)) return "billing";
   if (/timeout|timed out|etimedout/.test(message)) return "timeout";
+  if (/ssl[_ ]|tls|certificate|econn(?:refused|reset)|enotfound|eai_again|socket hang up|network|fetch failed|connection (?:refused|reset)/.test(message)) return "network";
   if (/overloaded|capacity|unavailable/.test(message)) return "overloaded";
   if (/invalid request|malformed|schema|unsupported/.test(message)) return "format";
   return "unknown";

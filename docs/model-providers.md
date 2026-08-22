@@ -76,7 +76,9 @@ allowlist 的 `env:NAME`，但正式持久化选择只接受 macOS
 
 `pnpm credentials:test` 通过相同的 profile-scoped DSH runtime 发起一次最小付费请求，
 立即销毁临时 Cordis fiber，只输出 model、归类后的 status 与 latency；不保存 prompt、
-response 或 secret。
+response 或 secret。TLS 握手、DNS、拒绝连接和连接重置归为 `network`，产品设置层将其
+呈现为 `endpoint_unreachable`；认证、限流、计费、超时、过载和格式问题继续保持各自的
+稳定分类。
 
 Claude OAuth 的 provider-neutral login/logout seam、Keychain token store 和生命周期元数据
 已有代码路径。OAuth adapter 与 probe 必须注入 `PersistedAuthProfileCoordinator`（或
