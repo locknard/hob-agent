@@ -1149,3 +1149,25 @@ test("offers a household insight without an enable path", () => {
   assert.match(card, /不需要/);
   assert.doesNotMatch(card.slice(0, card.indexOf("</article>")), /启用/);
 });
+
+
+test("renders the concern card with fact, unknown and suggestion layers from a real finding", () => {
+  const html = renderProductShell(model({
+    concern: {
+      adviceId: "advice-1",
+      title: "窗帘今天开得比平时晚",
+      facts: ["今天 09:42 才打开，平时约 07:15", "窗外光照从 09:00 起充足"],
+      unknowns: ["周末作息是否不同"],
+      suggestion: "可以先做一周的可逆调整试试，不改永久规则，随时撤回。",
+    },
+  }));
+  assert.match(html, /当前关注/);
+  assert.match(html, /窗帘今天开得比平时晚/);
+  assert.match(html, /已验证的家庭事实/);
+  assert.match(html, /仍然不知道/);
+  assert.match(html, /href="\/conversation\/advice-1"/);
+  assert.match(html, /看看怎么调整/);
+
+  const quiet = renderProductShell(model());
+  assert.doesNotMatch(quiet, /当前关注/);
+});

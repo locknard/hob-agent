@@ -30,6 +30,7 @@ import type {
   ProductShellConnection,
   ProductSpace,
   ProductEnergySummary,
+  ProductConcern,
   ProductControlSpace,
   ProductControlFeedback,
   ProductActivityRecord,
@@ -335,6 +336,7 @@ export interface InboxProductShellProjection {
   readonly connection: ProductShellConnection;
   readonly spaces: readonly ProductSpace[];
   readonly energy?: ProductEnergySummary;
+  readonly concern?: ProductConcern;
   readonly controlSpaces: readonly ProductControlSpace[];
   readonly activity: readonly ProductActivityRecord[];
   readonly safetyAlerts?: readonly ProductSafetyAlert[];
@@ -512,13 +514,43 @@ export class ProposalInboxService extends Service {
     const projection = projectProductWorld(world, now, actionDescriptorFor);
     const batchControl = this.batchControlProjection(projection, batchRequestId);
     const energy = projectEnergyToday(world, this.world, now, this.timezone);
+    const concern = this.projectConcern(now);
     return {
       ...projection,
       ...(energy === undefined ? {} : { energy }),
+      ...(concern === undefined ? {} : { concern }),
       activity: projectRuntimeActivity(this.runtime?.activities?.() ?? [], now),
       ...(safetyAlerts === undefined ? {} : { safetyAlerts }),
       ...(completionNotification === undefined ? {} : { completionNotification }),
       ...(batchControl === undefined ? {} : { batchControl }),
+    };
+  }
+
+  /** Relays only a fresh, completed finding; the product never invents a concern. */
+  private projectConcern(now: Date): ProductConcern | undefined {
+    let records: readonly InboxHomeAdviceRecord[];
+    try {
+      records = this.advice?.list({ limit: 20 }) ?? [];
+    } catch {
+      return undefined;
+    }
+    const freshMs = 7 * 24 * 3_600_000;
+    const candidates = records
+      .filter((record): record is Extract<InboxHomeAdviceRecord, { status: "completed" }> => record.status === "completed")
+      .filter((record) => record.report.findings.length > 0)
+      .filter((record) => {
+        const completed = Date.parse(record.completedAt);
+        return Number.isFinite(completed) && now.getTime() - completed <= freshMs;
+      })
+      .sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt));
+    const latest = candidates[0];
+    if (latest === undefined) return undefined;
+    return {
+      adviceId: latest.id,
+      title: latest.question,
+      facts: latest.report.findings.slice(0, 4),
+      ...(latest.report.unknowns.length === 0 ? {} : { unknowns: latest.report.unknowns.slice(0, 3) }),
+      ...(latest.report.summary.length === 0 ? {} : { suggestion: latest.report.summary }),
     };
   }
 

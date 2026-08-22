@@ -1517,3 +1517,68 @@ test("omits the energy summary when coverage has gaps", async () => {
   await centerFiber.dispose();
   await ctx.fiber.dispose();
 });
+
+
+test("relays the latest fresh finding as the overview concern and never a stale one", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", { snapshot: () => climateWorldFixture() });
+  const record = (id: string, completedAt: string, findings: string[]) => ({
+    id,
+    question: "窗帘为什么开得晚？",
+    createdAt: completedAt,
+    status: "completed" as const,
+    completedAt,
+    report: {
+      summary: "可以先做一周的可逆调整试试。",
+      confidence: "partial" as const,
+      findings,
+      unknowns: ["周末作息是否不同"],
+      hardwareSuggestions: [],
+      validationSteps: [],
+    },
+  });
+  ctx.provide("homeAdvice", {
+    canAsk: () => true,
+    ask: async () => { throw new Error("unused"); },
+    list: () => [
+      record("advice-fresh", "2026-08-20T08:00:00.000Z", ["今天 09:42 才打开，平时约 07:15"]),
+      record("advice-stale", "2026-08-01T08:00:00.000Z", ["旧发现"]),
+    ],
+    get: () => undefined,
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z") });
+
+  const concern = ctx.homeInbox.getProductShellProjection().concern;
+  assert.ok(concern);
+  assert.equal(concern!.adviceId, "advice-fresh");
+  assert.equal(concern!.title, "窗帘为什么开得晚？");
+  assert.deepEqual(concern!.facts, ["今天 09:42 才打开，平时约 07:15"]);
+  assert.deepEqual(concern!.unknowns, ["周末作息是否不同"]);
+  assert.equal(concern!.suggestion, "可以先做一周的可逆调整试试。");
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("shows no concern card without a completed finding", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", { snapshot: () => climateWorldFixture() });
+  ctx.provide("homeAdvice", {
+    canAsk: () => true,
+    ask: async () => { throw new Error("unused"); },
+    list: () => [{ id: "advice-running", question: "q", createdAt: "2026-08-20T09:00:00.000Z", status: "running" as const }],
+    get: () => undefined,
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z") });
+
+  assert.equal(ctx.homeInbox.getProductShellProjection().concern, undefined);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});

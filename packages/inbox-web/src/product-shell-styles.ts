@@ -234,6 +234,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-tag--verified { background: var(--shell-green-soft); color: var(--shell-green); }
 .product-tag--pending { background: var(--shell-amber-soft); color: var(--shell-amber); }
 .product-tag--failed { background: var(--shell-red-soft); color: var(--shell-red); }
+.product-concern { display: grid; gap: .6rem; margin-block-end: 1.15rem; }
+.product-concern .product-tag { justify-self: start; }
+.product-concern h2 { margin: 0; }
+.product-concern-suggestion { margin: 0; padding: .7rem .85rem; border-radius: .8rem; background: var(--shell-blue-soft); color: var(--shell-text); font-size: .9rem; }
 .product-readiness { display: flex; flex-wrap: wrap; gap: .4rem .9rem; margin: .1rem 0 .9rem; padding: 0; list-style: none; color: var(--shell-green); font-size: .84rem; font-weight: 650; }
 .product-readiness li::before { content: "✓ "; }
 .product-detail-risk, .product-detail-after { margin: .2rem 0 0; color: var(--shell-muted); font-size: .88rem; }

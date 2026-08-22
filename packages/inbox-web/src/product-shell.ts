@@ -123,6 +123,15 @@ export interface ProductSpace {
   readonly devices?: readonly string[];
 }
 
+/** A real finding relayed from a completed household conversation. */
+export interface ProductConcern {
+  readonly adviceId: string;
+  readonly title: string;
+  readonly facts: readonly string[];
+  readonly unknowns?: readonly string[];
+  readonly suggestion?: string;
+}
+
 export interface ProductEnergySummary {
   readonly value?: string;
   readonly change?: string;
@@ -379,6 +388,7 @@ export interface ProductShellModel {
   readonly expiredSummary?: string;
   readonly spaces?: readonly ProductSpace[];
   readonly energy?: ProductEnergySummary;
+  readonly concern?: ProductConcern;
   readonly agentNote?: string;
   readonly activeTurn?: ProductTurn;
   readonly completionNotification?: ProductAdviceCompletionNotification;
@@ -746,7 +756,7 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
-  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer(model.connection.state === "disconnected")}`;
+  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderOverviewConcern(model.concern)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer(model.connection.state === "disconnected")}`;
 }
 
 function renderOverviewHeader(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -773,6 +783,15 @@ function renderOverviewSpaces(model: NormalizedProductShellModel): string {
   return model.spaces.length === 0
     ? `<section class="product-card product-review-empty"><h2>家庭空间会在连接完成后显示</h2><p class="product-muted">${escapeHtml(status.emptySpaceDetail)}</p></section>`
     : model.spaces.map((space) => renderSpaceCard(space, stale)).join("");
+}
+
+/** The card only relays a completed finding; without one it does not exist. */
+function renderOverviewConcern(concern: ProductConcern | undefined): string {
+  if (concern === undefined) return "";
+  const facts = concern.facts.length === 0 ? "" : `<section class="product-answer-layer product-answer-layer--verified"><h3>已验证的家庭事实</h3>${list(concern.facts)}</section>`;
+  const unknowns = concern.unknowns?.length ? `<section class="product-answer-layer product-answer-layer--unknown"><h3>仍然不知道</h3>${list(concern.unknowns)}</section>` : "";
+  const suggestion = concern.suggestion === undefined ? "" : `<p class="product-concern-suggestion">${escapeHtml(concern.suggestion)}</p>`;
+  return `<section class="product-card product-concern" aria-labelledby="concern-heading"><span class="product-tag product-tag--pending">当前关注</span><h2 id="concern-heading">${escapeHtml(concern.title)}</h2>${facts}${unknowns}${suggestion}<div class="product-card-actions"><a class="product-primary-action" href="/conversation/${encodedPathSegment(concern.adviceId)}">看看怎么调整</a></div></section>`;
 }
 
 function renderOverviewReviewSummary(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
