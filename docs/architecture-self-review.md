@@ -324,8 +324,9 @@ which defines the household problem, current product reality and truthful Phase 
 boundary. Its technical extraction plan is recorded in
 [`proposal-store-architecture.md`](./proposal-store-architecture.md): pure policy,
 typed contracts, codecs, and borrowed repositories are separated while one facade
-retains every atomic boundary. The same review corrects the current speculative
-trial timer before implementation starts.
+retains every atomic boundary. Technical review is paused while the business review
+evaluates a prepare-first, single enable decision and removes the speculative trial
+timer. The architecture will be regenerated from the accepted business lifecycle.
 
 `artifact-registry.ts` still keeps artifact revisions, evidence, authority, risk,
 compiler results, assessments, and artifact audit in one owner. A later extraction

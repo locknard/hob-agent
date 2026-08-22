@@ -1,6 +1,6 @@
 # Proposal Store architecture review
 
-Status: **Proposed — implementation requires review approval**
+Status: **Paused — business lifecycle is under review; do not implement this draft**
 
 Scope: Hub proposal governance and direction-approved proposal preparation queue
 
@@ -10,6 +10,11 @@ Business prerequisite: read
 [`proposal-governance-business-context.md`](./proposal-governance-business-context.md)
 first. It defines the household problem, current product reality, target journey,
 and the difference between direction approval, preparation, trial, and deployment.
+
+The business review now proposes prepare-first, one exact enable decision, and no
+universal trial state. The technical sections below are retained only as the prior
+draft. Their commands, states, transaction placement, and migration decisions will
+be rewritten after the business review is accepted.
 
 ## Business correction carried into this design
 
