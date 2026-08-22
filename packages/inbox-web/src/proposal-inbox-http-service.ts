@@ -404,6 +404,16 @@ export interface ProductViewRecipePublication {
   readonly publishedAt: string;
 }
 
+export interface ProductViewRecipePublicationEvent {
+  readonly eventId: string;
+  readonly kind: "published" | "rolled_back" | "deactivated";
+  readonly recipeId: string;
+  readonly generationId: string;
+  readonly previousGenerationId?: string;
+  readonly actorPrincipalId: string;
+  readonly occurredAt: string;
+}
+
 export interface ProductViewRecipeDraftPort {
   create(input: {
     readonly ownerPrincipalId: string;
@@ -443,6 +453,7 @@ export interface ProductViewRecipeDraftPort {
   }): void;
   listActivePublications?(): readonly ProductViewRecipePublication[];
   canRollbackPublication?(recipeId: string, generationId: string): boolean;
+  listPublicationEvents?(): readonly ProductViewRecipePublicationEvent[];
 }
 
 /**
@@ -1647,6 +1658,7 @@ export class ProposalInboxHttpService extends Service {
         ? undefined
         : this.viewRecipeDrafts.read(selectedDraftId, ownerPrincipalId);
       const publications = this.viewRecipeDrafts.listActivePublications?.() ?? [];
+      const publicationEvents = (this.viewRecipeDrafts.listPublicationEvents?.() ?? []).slice(-8).reverse();
       const list = summaries.length === 0
         ? `<p class="product-muted">还没有布局草稿。先为常用场景准备一个名称和布局描述。</p>`
         : `<ul class="product-layout-draft-list">${summaries.map((draft) => `<li><a href="/settings?layout=${encodeURIComponent(draft.draftId)}"><span><strong>${escapeTransportHtml(draft.label)}</strong><small>草稿版本 ${draft.revision} · ${escapeTransportHtml(layoutDraftUpdatedLabel(draft.updatedAt))}</small></span><span aria-hidden="true">›</span></a></li>`).join("")}</ul>`;
@@ -1677,10 +1689,13 @@ export class ProposalInboxHttpService extends Service {
             const canRollback = this.viewRecipeDrafts?.canRollbackPublication?.(item.recipeId, item.generationId) ?? false;
             return `<li><div><strong>${escapeTransportHtml(item.title)}</strong><small>${escapeTransportHtml(item.recipeId)} · 草稿版本 ${item.draftRevision}</small></div><div class="product-layout-publication-actions"><a class="product-secondary-action" href="/settings?view=${encodeURIComponent(item.recipeId)}">查看视图</a>${canRollback ? `<form method="post" action="/settings/layout-publications/${encodeURIComponent(item.recipeId)}/rollback"><input type="hidden" name="expectedGenerationId" value="${escapeTransportHtml(item.generationId)}"><button class="product-secondary-action" type="submit">恢复上一版</button></form>` : ""}<details><summary>撤下</summary><form method="post" action="/settings/layout-publications/${encodeURIComponent(item.recipeId)}/deactivate"><input type="hidden" name="expectedGenerationId" value="${escapeTransportHtml(item.generationId)}"><button class="product-danger-action" type="submit">确认撤下视图</button></form></details></div></li>`;
           }).join("")}</ul>`;
+      const publicationHistory = publicationEvents.length === 0
+        ? `<p class="product-muted">首次发布后，这里会保留最近的发布动作。</p>`
+        : `<ol class="product-layout-publication-history-list">${publicationEvents.map((event) => `<li><span class="product-layout-publication-history-mark" aria-hidden="true"></span><div><strong>${escapeTransportHtml(publicationEventLabel(event.kind))} ${escapeTransportHtml(event.recipeId)}</strong><small>${escapeTransportHtml(event.actorPrincipalId)} · ${escapeTransportHtml(layoutDraftUpdatedLabel(event.occurredAt))}</small></div></li>`).join("")}</ol>`;
       const noticeHtml = notice === undefined
         ? ""
         : `<div class="product-layout-notice" data-layout-notice="${notice}" role="status"><strong>${escapeTransportHtml(layoutDraftNoticeTitle(notice))}</strong><p>${escapeTransportHtml(layoutDraftNoticeMessage(notice))}</p></div>`;
-      return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><header><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿保存在本机。预览只展示当前保存的版本，发布流程独立管理可用视图。</p></div><span class="product-layout-capacity">${summaries.length}/32</span></header>${noticeHtml}<div class="product-layout-workspace-grid"><div><h3>我的草稿</h3>${list}</div><div><h3>${selected === undefined ? "建立布局草稿" : `编辑 · ${escapeTransportHtml(selected.label)}`}</h3>${editor}${publicationControl}</div></div>${previewHtml}<div class="product-layout-publications"><header><div><h3>已发布视图</h3><p class="product-muted">发布版本与设备选择相互独立。</p></div><span>${publications.length}/16</span></header>${publicationList}</div></section>`;
+      return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><header><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿保存在本机。预览只展示当前保存的版本，发布流程独立管理可用视图。</p></div><span class="product-layout-capacity">${summaries.length}/32</span></header>${noticeHtml}<div class="product-layout-workspace-grid"><div><h3>我的草稿</h3>${list}</div><div><h3>${selected === undefined ? "建立布局草稿" : `编辑 · ${escapeTransportHtml(selected.label)}`}</h3>${editor}${publicationControl}</div></div>${previewHtml}<div class="product-layout-publications"><header><div><h3>已发布视图</h3><p class="product-muted">发布版本与设备选择相互独立。</p></div><span>${publications.length}/16</span></header>${publicationList}</div><div class="product-layout-publication-history"><header><div><h3>发布记录</h3><p class="product-muted">最近的发布动作按时间排列，便于确认由谁完成。</p></div></header>${publicationHistory}</div></section>`;
     } catch {
       return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿存储正在恢复。连接恢复后可继续编辑。</p></div></section>`;
     }
@@ -2202,6 +2217,14 @@ function layoutDraftNoticeMessage(notice: LayoutDraftNotice): string {
 
 function layoutDraftUpdatedLabel(value: string): string {
   return `${value.slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function publicationEventLabel(kind: ProductViewRecipePublicationEvent["kind"]): string {
+  switch (kind) {
+    case "published": return "发布了";
+    case "rolled_back": return "恢复了上一版";
+    case "deactivated": return "撤下了";
+  }
 }
 
 function publicationCandidateFromDraft(draft: ProductViewRecipeDraft): {

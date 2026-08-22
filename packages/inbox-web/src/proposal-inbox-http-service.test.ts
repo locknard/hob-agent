@@ -2505,8 +2505,18 @@ test("keeps durable layout authoring private while previewing one exact inert re
     publishedBy: string;
     publishedAt: string;
   };
+  type FakePublicationEvent = {
+    eventId: string;
+    kind: "published" | "rolled_back" | "deactivated";
+    recipeId: string;
+    generationId: string;
+    previousGenerationId?: string;
+    actorPrincipalId: string;
+    occurredAt: string;
+  };
   const publicationHistory = new Map<string, FakePublication[]>();
   const activePublications = new Map<string, FakePublication>();
+  const publicationEvents: FakePublicationEvent[] = [];
   let nextGeneration = 0;
   const drafts = {
     create(input: { ownerPrincipalId: string; label: string; source: string }) {
@@ -2564,21 +2574,46 @@ test("keeps durable layout authoring private while previewing one exact inert re
       history.push(value);
       publicationHistory.set(value.recipeId, history);
       activePublications.set(value.recipeId, value);
+      publicationEvents.push({
+        eventId: `event-${publicationEvents.length + 1}`,
+        kind: "published",
+        recipeId: value.recipeId,
+        generationId: value.generationId,
+        actorPrincipalId: input.actorPrincipalId,
+        occurredAt: value.publishedAt,
+      });
       return value;
     },
-    rollbackPublication(input: { recipeId: string; expectedGenerationId: string }) {
+    rollbackPublication(input: { recipeId: string; expectedGenerationId: string; actorPrincipalId: string }) {
       const current = activePublications.get(input.recipeId);
       const history = publicationHistory.get(input.recipeId) ?? [];
       if (current?.generationId !== input.expectedGenerationId) throw Object.assign(new Error("hidden"), { code: "publication_conflict" });
       const previous = history.at(-2);
       if (previous === undefined) throw Object.assign(new Error("hidden"), { code: "publication_conflict" });
       activePublications.set(input.recipeId, previous);
+      publicationEvents.push({
+        eventId: `event-${publicationEvents.length + 1}`,
+        kind: "rolled_back",
+        recipeId: input.recipeId,
+        generationId: previous.generationId,
+        previousGenerationId: current.generationId,
+        actorPrincipalId: input.actorPrincipalId,
+        occurredAt: "2026-08-22T02:01:00.000Z",
+      });
       return previous;
     },
-    deactivatePublication(input: { recipeId: string; expectedGenerationId: string }) {
+    deactivatePublication(input: { recipeId: string; expectedGenerationId: string; actorPrincipalId: string }) {
       const current = activePublications.get(input.recipeId);
       if (current?.generationId !== input.expectedGenerationId) throw Object.assign(new Error("hidden"), { code: "publication_conflict" });
       activePublications.delete(input.recipeId);
+      publicationEvents.push({
+        eventId: `event-${publicationEvents.length + 1}`,
+        kind: "deactivated",
+        recipeId: input.recipeId,
+        generationId: current.generationId,
+        actorPrincipalId: input.actorPrincipalId,
+        occurredAt: "2026-08-22T02:02:00.000Z",
+      });
     },
     listActivePublications() {
       return [...activePublications.values()];
@@ -2586,6 +2621,9 @@ test("keeps durable layout authoring private while previewing one exact inert re
     canRollbackPublication(recipeId: string, generationId: string) {
       const history = publicationHistory.get(recipeId) ?? [];
       return activePublications.get(recipeId)?.generationId === generationId && history.length > 1;
+    },
+    listPublicationEvents() {
+      return publicationEvents;
     },
   };
   const source = JSON.stringify({
@@ -2725,6 +2763,14 @@ test("keeps durable layout authoring private while previewing one exact inert re
     assert.equal(deactivated.status, 303);
     assert.equal(deactivated.headers.get("location"), "/settings?layoutNotice=deactivated");
     assert.equal(activePublications.size, 0);
+    const auditPage = await fetch(`${ctx.homeInboxHttp.origin}/settings?layout=draft-1`, { headers: { authorization } });
+    const auditHtml = await auditPage.text();
+    assert.match(auditHtml, /发布记录/);
+    assert.match(auditHtml, /发布了 community\.calm/);
+    assert.match(auditHtml, /恢复了上一版 community\.calm/);
+    assert.match(auditHtml, /撤下了 community\.calm/);
+    assert.match(auditHtml, /admin-1/);
+    assert.doesNotMatch(auditHtml, /generation-[12]/);
     const recovered = await fetch(`${ctx.homeInboxHttp.origin}/settings?view=community.calm`, { headers: { authorization } });
     assert.match(await recovered.text(), /已恢复生活视图/);
 

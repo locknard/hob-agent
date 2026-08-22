@@ -461,6 +461,11 @@ test("hydrates exact published layout generations before the Inbox listener open
     assert.equal(response.status, 200);
     assert.match(html, /data-view-provider="household\.persistent"/);
     assert.match(html, /data-recipe-provider="household\.persistent"/);
+    const settings = await fetch(`${runtime.context.homeInboxHttp.origin}/settings?layout=${encodeURIComponent(draft.draftId)}`);
+    const settingsHtml = await settings.text();
+    assert.match(settingsHtml, /发布记录/);
+    assert.match(settingsHtml, /发布了.*household\.persistent/s);
+    assert.match(settingsHtml, /household-member/);
   } finally {
     await runtime.stop();
     rmSync(directory, { recursive: true, force: true });
