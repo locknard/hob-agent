@@ -36,6 +36,8 @@ export interface RuntimeConfirmationProjection {
     readonly kind: "approved" | "rejected" | "expired";
     readonly at: string;
     readonly actorId?: string;
+    /** The kind of device the decision came from. */
+    readonly via?: "private" | "shared";
   };
 }
 
@@ -449,7 +451,14 @@ function projectConfirmation(ticket: OneShotActionTicket): RuntimeConfirmationPr
   const status = ticket.status === "pending_confirmation"
     ? "pending"
     : ticket.status === "expired" ? "expired" : ticket.status === "rejected" ? "rejected" : "approved";
-  const decidedAt = ticket.approvedAt ?? (status === "expired" || status === "rejected" ? ticket.expiresAt ?? ticket.requestedAt : undefined);
+  // Each decision kind reads its own record: an early rejection reports the
+  // moment someone said no, never the expiry that no longer happened.
+  const decidedAt = status === "approved"
+    ? ticket.approvedAt
+    : status === "rejected"
+      ? ticket.rejectedAt ?? ticket.requestedAt
+      : status === "expired" ? ticket.expiresAt ?? ticket.requestedAt : undefined;
+  const decidedBy = status === "approved" ? ticket.approvedBy : status === "rejected" ? ticket.rejectedBy : undefined;
   return {
     id: ticket.id,
     dedupKey: ticket.requestId,
@@ -462,7 +471,8 @@ function projectConfirmation(ticket: OneShotActionTicket): RuntimeConfirmationPr
       decision: {
         kind: status === "expired" ? "expired" : status === "rejected" ? "rejected" : "approved",
         at: decidedAt,
-        ...(ticket.approvedBy === undefined ? {} : { actorId: ticket.approvedBy }),
+        ...(decidedBy === undefined ? {} : { actorId: decidedBy }),
+        ...(ticket.decidedVia === undefined ? {} : { via: ticket.decidedVia }),
       },
     }),
   };

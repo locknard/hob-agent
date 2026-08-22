@@ -132,6 +132,7 @@ export interface OneShotActionTicket {
   readonly approvedBy?: string;
   /** The kind of device the deciding member used, for the audit trail. */
   readonly decidedVia?: "private" | "shared";
+  readonly rejectedAt?: string;
   readonly rejectedBy?: string;
   readonly undoExpiresAt?: string;
   readonly undoStatus?: OneShotActionUndoStatus;
@@ -185,6 +186,8 @@ export interface OneShotActionActivity {
   readonly outcome?: OneShotActionTicketStatus;
   readonly reason?: string;
   readonly actorId?: string;
+  /** The kind of device the decision came from, when the activity is a decision. */
+  readonly via?: "private" | "shared";
   readonly relatedTicketId?: string;
 }
 
@@ -409,7 +412,7 @@ export class OneShotActionPlane {
       approvedBy: actor.principalId,
       decidedVia: actor.device.kind,
     }));
-    this.appendActivity(ticket.id, "confirmation_approved", actor.principalId);
+    this.appendActivity(ticket.id, "confirmation_approved", actor.principalId, undefined, undefined, actor.device.kind);
     return this.executeTicket(approved.id, input.signal ?? new AbortController().signal);
   }
 
@@ -448,10 +451,11 @@ export class OneShotActionPlane {
       ...current,
       status: "rejected",
       resultReason: "rejected_by_actor",
+      rejectedAt: this.timestamp(),
       rejectedBy: actor.principalId,
       decidedVia: actor.device.kind,
     }));
-    this.appendActivity(rejected.id, "confirmation_rejected", actor.principalId, "rejected_by_actor");
+    this.appendActivity(rejected.id, "confirmation_rejected", actor.principalId, "rejected_by_actor", undefined, actor.device.kind);
     return this.resultFor(rejected, "rejected_by_actor");
   }
 
@@ -745,6 +749,7 @@ export class OneShotActionPlane {
     actorId?: string,
     reason?: string,
     relatedTicketId?: string,
+    via?: "private" | "shared",
   ): OneShotActionActivity {
     const ticket = this.state.tickets.find((item) => item.id === ticketId);
     if (ticket === undefined) throw new Error("one-shot action ticket not found");
@@ -757,6 +762,7 @@ export class OneShotActionPlane {
       capabilityId: ticket.capabilityId,
       ...(ticket.status === "pending_confirmation" ? {} : { outcome: ticket.status }),
       ...(actorId === undefined ? {} : { actorId }),
+      ...(via === undefined ? {} : { via }),
       ...(reason === undefined ? {} : { reason }),
       ...(relatedTicketId === undefined ? {} : { relatedTicketId }),
     };

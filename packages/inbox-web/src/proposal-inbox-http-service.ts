@@ -102,6 +102,8 @@ export interface ProductRouteRenderContext {
   readonly shellProjection?: InboxProductShellProjection;
   readonly controlFeedback?: ProductControlFeedback;
   readonly onboarding?: ProductOnboardingState;
+  /** One-shot household feedback shown inside the selected proposal detail. */
+  readonly proposalNotice?: string;
   readonly household?: ProductShellModel["household"];
   readonly view?: ProductShellModel["view"];
 }
@@ -748,7 +750,7 @@ export class ProposalInboxHttpService extends Service {
       }
       if (method === "POST" && url.pathname === "/settings/layout-drafts") {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
-          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+          return send(response, 403, "Layout authoring requires the household owner's bound private phone");
         }
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
           return send(response, 415, "Unsupported layout draft content type");
@@ -771,7 +773,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutDraftUpdate = /^\/settings\/layout-drafts\/([^/]+)$/.exec(url.pathname);
       if (method === "POST" && layoutDraftUpdate) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
-          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+          return send(response, 403, "Layout authoring requires the household owner's bound private phone");
         }
         const draftId = boundedLayoutDraftId(safeDecode(layoutDraftUpdate[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout draft");
@@ -800,7 +802,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutDraftDelete = /^\/settings\/layout-drafts\/([^/]+)\/delete$/.exec(url.pathname);
       if (method === "POST" && layoutDraftDelete) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
-          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+          return send(response, 403, "Layout authoring requires the household owner's bound private phone");
         }
         const draftId = boundedLayoutDraftId(safeDecode(layoutDraftDelete[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout draft deletion");
@@ -825,7 +827,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutDraftPublish = /^\/settings\/layout-drafts\/([^/]+)\/publish$/.exec(url.pathname);
       if (method === "POST" && layoutDraftPublish) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.publish === undefined) {
-          return send(response, 403, "Layout publication requires an administrator on a bound private device");
+          return send(response, 403, "Layout publication requires the household owner's bound private phone");
         }
         const draftId = boundedLayoutDraftId(safeDecode(layoutDraftPublish[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout publication");
@@ -863,7 +865,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutPublicationRollback = /^\/settings\/layout-publications\/([^/]+)\/rollback$/.exec(url.pathname);
       if (method === "POST" && layoutPublicationRollback) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.rollbackPublication === undefined) {
-          return send(response, 403, "Layout rollback requires an administrator on a bound private device");
+          return send(response, 403, "Layout rollback requires the household owner's bound private phone");
         }
         const recipeId = boundedLayoutDraftId(safeDecode(layoutPublicationRollback[1]!) ?? null);
         if (recipeId === undefined) return send(response, 400, "Invalid layout rollback");
@@ -893,7 +895,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutPublicationDeactivate = /^\/settings\/layout-publications\/([^/]+)\/deactivate$/.exec(url.pathname);
       if (method === "POST" && layoutPublicationDeactivate) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.deactivatePublication === undefined) {
-          return send(response, 403, "Layout deactivation requires an administrator on a bound private device");
+          return send(response, 403, "Layout deactivation requires the household owner's bound private phone");
         }
         const recipeId = boundedLayoutDraftId(safeDecode(layoutPublicationDeactivate[1]!) ?? null);
         if (recipeId === undefined) return send(response, 400, "Invalid layout deactivation");
@@ -1352,6 +1354,12 @@ export class ProposalInboxHttpService extends Service {
         try {
           await this.inbox.enableProposal({ proposalId, expectedRevision, reviewer: this.reviewer });
         } catch (error) {
+          // A retryable failure stays inside the product: the card returns with
+          // a one-shot notice and every entry intact, instead of an error page.
+          if (errorCode(error) === "lifecycle_invalid") {
+            const notice = proposalEnableNotice(error);
+            return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}?notice=${encodeURIComponent(notice)}`);
+          }
           return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
         }
         return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}`);
@@ -1378,7 +1386,7 @@ export class ProposalInboxHttpService extends Service {
       if ((method === "GET" || method === "HEAD") && detail) {
         const proposalId = safeDecode(detail[1]!);
         if (proposalId === undefined) return send(response, 404, "Proposal not found");
-        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference);
+        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference, undefined, false, undefined, boundedNotice(url.searchParams.get("notice")));
       }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
@@ -1509,6 +1517,7 @@ export class ProposalInboxHttpService extends Service {
     selectedLayoutDraftId?: string,
     previewLayoutDraft = false,
     layoutDraftNotice?: LayoutDraftNotice,
+    proposalNotice?: string,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
     const reviewProjection = showsReviewSummary ? await this.productReviewProjection(proposalId) : undefined;
@@ -1538,6 +1547,7 @@ export class ProposalInboxHttpService extends Service {
       ...(shellProjection === undefined ? {} : { shellProjection }),
       ...(controlFeedback === undefined ? {} : { controlFeedback }),
       ...(onboarding === undefined ? {} : { onboarding }),
+      ...(proposalNotice === undefined ? {} : { proposalNotice }),
       household: hostProjection.household,
     };
     const viewCurrentPath = productViewCurrentPath(path, route, proposalId, actionTicketId, batchRequestId);
@@ -1873,6 +1883,18 @@ function productRouteForPath(path: string): ProductRoute | undefined {
   if (path === "/settings") return "settings";
   if (path === "/onboarding") return "onboarding";
   return undefined;
+}
+
+function proposalEnableNotice(error: unknown): string {
+  const message = error instanceof Error ? error.message.trim() : "";
+  return message.length > 0 && message.length <= 300 ? message : "这次启用没有完成，家里的设置保持原样；稍后再试一次。";
+}
+
+function boundedNotice(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const text = value.trim();
+  if (text.length === 0 || text.length > 300) return undefined;
+  return /[\u0000-\u001F\u007F]/u.test(text) ? undefined : text;
 }
 
 function selectedProposalId(value: string | null): string | undefined {
@@ -2252,6 +2274,7 @@ function productShellModel(route: ProductRoute, context: ProductRouteRenderConte
       : { expiredSummary: context.reviewProjection.expiredSummary }),
     ...(context.activeTurn === undefined ? {} : { activeTurn: context.activeTurn }),
     ...(context.controlFeedback === undefined ? {} : { controlFeedback: context.controlFeedback }),
+    ...(context.proposalNotice === undefined ? {} : { proposalNotice: context.proposalNotice }),
     ...(context.onboarding === undefined ? {} : { onboarding: context.onboarding }),
   };
 }
@@ -2983,7 +3006,7 @@ function onboardingErrorText(error: unknown): string {
     case "invalid_step": return "Invalid onboarding continuation";
     case "stale_step": return "Onboarding step is no longer current";
     case "already_complete": return "Onboarding is already complete";
-    case "permission_denied": return "This onboarding step requires an adult member on a bound private device";
+    case "permission_denied": return "This onboarding step requires a present member on their own bound private phone";
     case "unavailable": return "家庭设置正在准备，连接完成后从这里继续。";
     case "onboarding_unavailable": return "家庭设置正在准备，连接完成后从这里继续。";
     default: return "Onboarding continuation failed";

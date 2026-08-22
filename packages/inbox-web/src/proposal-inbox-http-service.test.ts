@@ -289,6 +289,13 @@ class ProposalEnableInbox extends StubInbox {
   canEnableProposal() { return true; }
 
   enableProposal(input: unknown) {
+    if (this.enablements.length >= 1) {
+      // The second attempt simulates a passing outage during enablement.
+      throw Object.assign(
+        new Error("方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。"),
+        { code: "lifecycle_invalid" },
+      );
+    }
     this.enablements.push(input);
   }
 
@@ -1049,6 +1056,22 @@ test("keeps the prepared plan detail reachable and accepts the single enable dec
       expectedRevision: 9,
       reviewer: "adult-2",
     }]);
+
+    const retryable = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable/enable`, {
+      method: "POST",
+      headers,
+      body: "expectedRevision=9",
+      redirect: "manual",
+    });
+    assert.equal(retryable.status, 303, "a retryable failure stays inside the product");
+    const location = retryable.headers.get("location") ?? "";
+    assert.match(location, /^\/review-center\/proposals\/proposal-enable\?notice=/);
+
+    const returned = await fetch(`${ctx.homeInboxHttp.origin}${location}`, { headers: { authorization } });
+    assert.equal(returned.status, 200);
+    const returnedHtml = await returned.text();
+    assert.match(returnedHtml, /暂时连不上.*稍后再试/);
+    assert.match(returnedHtml, />启用</, "the card keeps its full entries after the notice");
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();

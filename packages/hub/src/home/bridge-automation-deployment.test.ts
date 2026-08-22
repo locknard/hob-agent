@@ -27,7 +27,7 @@ const content = {
 function bridgeStub(overrides: {
   readonly deployResult?: unknown;
   readonly resolvable?: boolean;
-  readonly authority?: { status: string; policyClass?: string };
+  readonly authority?: { status: string; policyClass?: string; reason?: string };
   readonly deviceName?: string;
 } = {}) {
   const calls: { deploys: BridgeAutomationSpec[]; toggles: unknown[]; withdrawals: unknown[] } = {
@@ -130,10 +130,23 @@ test("blocked enablement names the actual household fact", () => {
     artifactCandidate: { schemaVersion: "1" as const, content },
     actionPolicyClasses: ["direct"],
   };
-  const unavailable = new BridgeAutomationDeployment(bridgeStub({ authority: { status: "unavailable" } }).world)
-    .resolveIntent(request);
-  assert.ok("reason" in unavailable, "a passing outage is retryable and never persists a block");
-  assert.match((unavailable as { reason: string }).reason, /暂时连不上.*稍后再试/);
+  const resolveWith = (reason: string) => new BridgeAutomationDeployment(
+    bridgeStub({ authority: { status: "unavailable", reason } }).world,
+  ).resolveIntent(request);
+
+  const outage = resolveWith("configured_binding_unavailable");
+  assert.ok("reason" in outage, "a passing outage is retryable and never persists a block");
+  assert.match((outage as { reason: string }).reason, /暂时连不上.*稍后再试/);
+
+  for (const changed of ["not_configured", "not_approved"] as const) {
+    const revalidated = resolveWith(changed);
+    assert.ok("revalidationReason" in revalidated, `${changed} re-prepares without spending the decision`);
+    assert.match((revalidated as { revalidationReason: string }).revalidationReason, /确认方式配置已变化/);
+  }
+
+  const vanished = resolveWith("unknown_capability");
+  assert.ok("blockedReason" in vanished, "a vanished device can only be revised or declined");
+  assert.match((vanished as { blockedReason: string }).blockedReason, /不在家庭地图里/);
 
   const protectedNow = new BridgeAutomationDeployment(
     bridgeStub({ authority: { status: "available", policyClass: "administrator" } }).world,

@@ -21,7 +21,11 @@ import type { ProposalDeploymentOutcome } from "./proposal-store.js";
  * neutral: no bridge-native payload or endpoint detail reaches the caller.
  */
 export interface AutomationBridgeSource {
-  resolveActionAuthority(hwCapabilityId: string): { readonly status: string; readonly policyClass?: string };
+  resolveActionAuthority(hwCapabilityId: string): {
+    readonly status: string;
+    readonly policyClass?: string;
+    readonly reason?: "not_configured" | "not_approved" | "configured_binding_unavailable" | "unknown_capability" | string;
+  };
   capabilityDeviceName(hwCapabilityId: string): string | undefined;
   automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
     readonly bridgeId: string;
@@ -50,7 +54,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     readonly confirmationDeviceNames?: readonly string[];
   }): ProposalDeploymentIntent
     | { readonly reason: string }
-    | { readonly revalidationReason: string; readonly updatedGateDisclosure: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
+    | { readonly revalidationReason: string; readonly updatedGateDisclosure?: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
     | { readonly blockedReason: string } {
     if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
       return { reason: "这条建议不包含可部署的自动化方案。" };
@@ -82,8 +86,19 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
       if (action.kind === "notify_local") continue;
       const authority = this.world.resolveActionAuthority(action.target.hwCapabilityId);
       if (authority.status !== "available") {
-        // A bridge outage or an unsettled binding is a passing state: report it
-        // as a retryable failure and never persist it as a blocked plan.
+        // The authority names why. Each cause routes to the one state that can
+        // actually recover from it — a blanket "try again later" would loop
+        // forever on the causes that retrying never fixes.
+        if (authority.reason === "unknown_capability") {
+          // The device left the home map: the plan can only be revised or declined.
+          return { blockedReason: "方案里的设备已经不在家庭地图里，不能再交给自动化。可以在对话里改方案，或不用了。" };
+        }
+        if (authority.reason === "not_configured" || authority.reason === "not_approved") {
+          // The household's action configuration changed: re-prepare against the
+          // current truth without spending the decision.
+          return { revalidationReason: "方案里设备的确认方式配置已变化，需要重新准备并更新说明。" };
+        }
+        // A binding outage is a passing state: retryable, never persisted.
         return { reason: "方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。" };
       }
       if (authority.policyClass === "administrator") {
