@@ -63,6 +63,32 @@ domain dependency explicitly. The phased organization and stable composition-roo
 rule are recorded in
 [`hub-source-layout.md`](./hub-source-layout.md).
 
+### Post-organization dependency audit
+
+The directory pass makes the Hub's existing bidirectional implementation
+dependencies visible. It establishes ownership and review locality; the next
+architecture milestone establishes a directed dependency graph through narrow
+ports:
+
+1. `bridge` and `world` currently meet through concrete ingest, journal and state
+   modules. A Hub-owned ingestion port can place lifecycle orchestration in one
+   owner while adapters continue to emit only neutral contract events.
+2. `artifact` currently reads the concrete household proposal store, while home
+   review services read concrete artifact modules. Moving the verified-proposal
+   source interface to the artifact boundary and injecting its home-owned
+   implementation gives artifact production one direction of dependency.
+3. `authority` currently reuses artifact assessment canonicalization, and artifact
+   production reads the concrete authority candidate registry. A small Hub-internal
+   canonical identity utility plus an injected authority-candidate port separates
+   shared identity mechanics from either domain.
+4. The artifact-specific world authority binding source can move behind the
+   artifact composition boundary, leaving `world` focused on neutral observations,
+   freshness and control routing.
+
+This follow-up should change one seam at a time with contract tests. The neutral
+bridge package remains the ecosystem/process boundary; Hub-internal ports stay in
+Hub and do not enlarge the published bridge contract.
+
 ## Action and safety closure
 
 Every one-shot action is prepared from an exact `actions@1` descriptor. Before
