@@ -12,10 +12,10 @@ import {
   requestGovernedHomeObservation,
   type HomeObservationOutcome,
   type ObservationPorts,
-} from "./home-observation-scheduler.js";
+} from "../home/home-observation-scheduler.js";
 import type { LaunchEnvironment } from "../launch-config.js";
-import type { ObservationAuditStore } from "./observation-audit-store.js";
-import type { ObservationRunMetrics } from "./observation-audit-store.js";
+import type { ObservationAuditStore } from "../home/observation-audit-store.js";
+import type { ObservationRunMetrics } from "../home/observation-audit-store.js";
 import type { HomeObservationDisposition } from "@hob-agent/agent-layer/home-observation-report";
 import type { SecretVault } from "@hob-agent/agent-layer/model-credentials";
 

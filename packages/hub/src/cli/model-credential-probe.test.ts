@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   probeConfiguredModelCredential,
 } from "./model-credential-probe.js";
-import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
+import { provisionPrimaryModelApiKey } from "../model-credential-profile.js";
 
 test("probes the explicitly selected profile and returns metadata only", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-model-probe-"));

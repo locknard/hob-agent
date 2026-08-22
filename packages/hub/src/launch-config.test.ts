@@ -8,7 +8,7 @@ import {
 import {
   MUSIC_ASSISTANT_ENV_CREDENTIAL_REF,
   MUSIC_ASSISTANT_KEYCHAIN_CREDENTIAL_REF,
-} from "./music-assistant-credential-setup.js";
+} from "./cli/music-assistant-credential-setup.js";
 
 const BRIDGES = JSON.stringify([{
   bridgeId: "ha-main",

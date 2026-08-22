@@ -41,7 +41,8 @@ surfaces. Architecture guards keep cross-package relative imports and superseded
 version shims out of the repository.
 
 Hub source organization has explicit `src/bridge/`, `src/artifact/`,
-`src/authority/`, `src/media/`, `src/world/`, and `src/home/` domains.
+`src/authority/`, `src/media/`, `src/world/`, `src/home/`, and `src/cli/`
+domains.
 Adapter catalog/bundle composition, credential scoping, registry, ingestion,
 capability semantics and concrete adapters live together in `bridge/`. Neutral
 artifact schemas, assessments, compilation, evidence, conflict analysis,
@@ -50,7 +51,9 @@ Principal resolution, state/action authority, durable authority candidates and t
 governed one-shot action plane live together in `authority/`. Their tests follow
 the owning implementation. Neutral discovery, player inventory, intent
 preparation, conversation orchestration and the Music Assistant adapter live in
-`media/`; credential setup remains an operational command until the `cli/` phase.
+`media/`. Credential setup, validation, one-time observation, retention, model
+probing and home-map drafting live in `cli/`, with every package command bound to
+its checked source entry.
 Durable ingest evidence, stable identities, current state, indexed history and the
 neutral HomeWorld aggregation service live in `world/`. Advice, onboarding,
 observation, correction, proposals, safety, retention and household review state

@@ -18,8 +18,7 @@ remain stable through each move.
 
 1. `bridge/` owns adapter catalog and bundle composition, bridge credentials,
    registration, ingestion, capability semantics and concrete HA, Xiaomi and
-   synthetic adapters. The executable `bridge-credential-setup.ts` stays at the
-   source root until all setup and operational commands move together into `cli/`.
+   synthetic adapters.
 2. `artifact/` owns neutral artifact schemas, evidence, risk, conflict, compilation,
    preparation, registry and mutation coordination.
 3. `authority/` owns principals, identity authority, action authority, candidate
@@ -32,8 +31,8 @@ remain stable through each move.
    observation, retention, review and batch services.
 7. `cli/` owns executable setup, validation and one-shot operational commands.
 
-Each phase moves one complete dependency cluster, updates all repository consumers,
-runs the full test/type suite and lands as one reviewable commit. Composition roots
+Each phase moved one complete dependency cluster, updated all repository consumers,
+ran the full test/type suite and landed as one reviewable commit. Composition roots
 (`main.ts`, `process-entry.ts`, `home-agent-runtime.ts`, `launch-config.ts`) remain at
 the source root and make domain dependencies visible.
 

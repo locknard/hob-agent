@@ -3,7 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
 
-import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
+import { provisionPrimaryModelApiKey } from "../model-credential-profile.js";
 
 const MAX_SECRET_BYTES = 16_384;
 

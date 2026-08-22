@@ -28,7 +28,7 @@ import type { BridgeConfigEntry } from "./bridge/bridge-registry.js";
 import type { SelectedModelCredential } from "./model-credential-profile.js";
 import {
   parseMusicAssistantCredentialRef,
-} from "./music-assistant-credential-setup.js";
+} from "./cli/music-assistant-credential-setup.js";
 import { toMusicAssistantWebSocketUrl } from "./media/music-assistant-websocket-client.js";
 import { parseHomeSafetyBindings, type HomeSafetyBinding } from "./home/home-safety-service.js";
 

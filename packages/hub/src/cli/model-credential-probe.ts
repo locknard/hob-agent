@@ -13,7 +13,7 @@ import {
 import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
 import { providerSetup } from "@hob-agent/agent-layer/model-providers";
 
-import { loadSelectedModelCredential } from "./model-credential-profile.js";
+import { loadSelectedModelCredential } from "../model-credential-profile.js";
 
 type Probe = (options: {
   profile: AuthProfile;

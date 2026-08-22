@@ -79,6 +79,21 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   assert.ok(ignoreRules.includes("/home/"), "the runtime household workspace ignore is anchored to the repository root");
   assert.equal(ignoreRules.includes("home/"), false, "the Hub home source domain remains trackable");
 
+  const cliModuleNames = [
+    "bridge-credential-setup",
+    "home-map-draft",
+    "home-observe-once",
+    "home-retention-operation",
+    "home-validation",
+    "model-credential-probe",
+    "model-credential-setup",
+    "music-assistant-credential-setup",
+  ];
+  for (const moduleName of cliModuleNames) {
+    assert.equal(existsSync(join(hubSourceRoot, "cli", `${moduleName}.ts`)), true, `${moduleName} belongs to the CLI domain`);
+    assert.equal(existsSync(join(hubSourceRoot, "cli", `${moduleName}.test.ts`)), true, `${moduleName} CLI tests stay with their command`);
+  }
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],
@@ -136,6 +151,10 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   assert.equal(rootPackage.scripts?.["inbox:home"], undefined, "the product exposes one runtime entry");
   assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\.test\.ts/, "the test command must include package-root tests");
   assert.match(String(rootPackage.scripts?.test), /packages\/\*\/src\/\*\*\/\*\.test\.ts/, "the test command must include nested domain tests");
+  for (const [scriptName, command] of Object.entries(rootPackage.scripts ?? {})) {
+    const match = /^tsx (packages\/hub\/src\/\S+\.ts)$/u.exec(String(command));
+    if (match) assert.equal(existsSync(join(repositoryRoot, match[1])), true, `${scriptName} points to a tracked Hub command`);
+  }
 
   const hubPackage = JSON.parse(readFileSync(join(repositoryRoot, "packages", "hub", "package.json"), "utf8")) as {
     dependencies?: Record<string, string>;

@@ -2,10 +2,10 @@ import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { RetentionCoordinator } from "./home-retention-service.js";
+import { RetentionCoordinator } from "../home/home-retention-service.js";
 import { SqliteIngestJournal, type IngestJournalRetentionResult } from "../world/ingest-journal.js";
 import { readHomeWorldLaunchConfig, type LaunchEnvironment } from "../launch-config.js";
-import { SqliteProposalStore } from "./proposal-store.js";
+import { SqliteProposalStore } from "../home/proposal-store.js";
 
 export interface HomeRetentionOperationResult {
   readonly mode: "preview";
