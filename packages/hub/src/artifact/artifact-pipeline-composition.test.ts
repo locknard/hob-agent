@@ -4,7 +4,7 @@ import test from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 
 import { ArtifactRegistry } from "./artifact-registry.js";
-import { AuthorityCandidateRegistry } from "../authority-candidate-registry.js";
+import { AuthorityCandidateRegistry } from "../authority/authority-candidate-registry.js";
 import { createArtifactPipelineComposition } from "./artifact-pipeline-composition.js";
 import {
   SqliteProposalStore,

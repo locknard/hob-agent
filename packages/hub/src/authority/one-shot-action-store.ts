@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
+import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 
 /** The durable state owned by the one-shot action plane. */
 export interface OneShotActionStoreState {

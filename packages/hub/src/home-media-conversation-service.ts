@@ -11,7 +11,7 @@ import type {
   OneShotActionActor,
   OneShotActionResult,
   OneShotActionTicket,
-} from "./one-shot-action-plane.js";
+} from "./authority/one-shot-action-plane.js";
 import type {
   RuntimeDecisionProjection,
 } from "./household-review-center-service.js";

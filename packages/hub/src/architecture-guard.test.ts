@@ -48,6 +48,12 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     .filter((name) => /^(?:artifact-|neutral-artifact)/.test(name));
   assert.deepEqual(misplacedArtifactFiles, [], "artifact domain modules and their tests belong under src/artifact");
 
+  const misplacedAuthorityFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => /^(?:action-authority-config|authority-|identity-authority|one-shot-action-|principal-registry)/.test(name));
+  assert.deepEqual(misplacedAuthorityFiles, [], "authority domain modules and their tests belong under src/authority");
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],

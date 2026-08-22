@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 
-import type { ActionAuthorityPolicyClass } from "./authority-coordinator.js";
+import type { ActionAuthorityPolicyClass } from "./authority/authority-coordinator.js";
 import type {
   HouseholdActionDescriptor,
   RequestHouseholdActionInput,
@@ -14,7 +14,7 @@ import type {
   OneShotAction,
   OneShotActionActor,
   OneShotActionResult,
-} from "./one-shot-action-plane.js";
+} from "./authority/one-shot-action-plane.js";
 import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
 
 const MAX_REQUEST_ID_LENGTH = 200;

@@ -23,7 +23,7 @@ import {
   type AuthorityCandidateResolveInput,
   type AuthorityCandidateRegistry,
   AuthorityCandidateRegistryError,
-} from "../authority-candidate-registry.js";
+} from "../authority/authority-candidate-registry.js";
 
 export type AuthorityWorldWatermark = ArtifactAuthorityInput["checkedWatermarks"][number];
 

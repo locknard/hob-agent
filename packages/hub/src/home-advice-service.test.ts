@@ -7,7 +7,7 @@ import test from "node:test";
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HomeAdviceService } from "./home-advice-service.js";
-import type { OneShotActionActor } from "./one-shot-action-plane.js";
+import type { OneShotActionActor } from "./authority/one-shot-action-plane.js";
 
 const report = {
   summary: "Try a bounded schedule.",

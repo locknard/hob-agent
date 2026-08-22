@@ -15,7 +15,7 @@ import {
 import {
   AuthorityCandidateRegistry,
   type AuthorityCandidateResolveInput,
-} from "../authority-candidate-registry.js";
+} from "../authority/authority-candidate-registry.js";
 import {
   ArtifactAuthorityProducer,
   ArtifactAuthorityProducerError,

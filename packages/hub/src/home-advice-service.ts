@@ -14,7 +14,7 @@ import {
   type SqliteHomeAdviceStoreOptions,
 } from "./home-advice-store.js";
 import { isHomeWorldReady } from "./home-observation-scheduler.js";
-import type { OneShotActionActor } from "./one-shot-action-plane.js";
+import type { OneShotActionActor } from "./authority/one-shot-action-plane.js";
 
 export type {
   HomeAdviceCompletionNotification,

@@ -27,7 +27,7 @@ import { ArtifactWorldCutSource } from "./artifact-world-cut-source.js";
 import type {
   AuthorityCandidateRegistry,
   AuthorityCandidateResolveInput,
-} from "../authority-candidate-registry.js";
+} from "../authority/authority-candidate-registry.js";
 import {
   checkCapabilityAction,
   checkCapabilityPredicate,

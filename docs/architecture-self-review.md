@@ -40,14 +40,17 @@ the core, adapter conformance, actions, foreign-rules and organization-hints
 surfaces. Architecture guards keep cross-package relative imports and superseded
 version shims out of the repository.
 
-Hub source organization has explicit `src/bridge/` and `src/artifact/` domains.
+Hub source organization has explicit `src/bridge/`, `src/artifact/`, and
+`src/authority/` domains.
 Adapter catalog/bundle composition, credential scoping, registry, ingestion,
 capability semantics and concrete adapters live together in `bridge/`. Neutral
 artifact schemas, assessments, compilation, evidence, conflict analysis,
 preparation, registry and mutation coordination live together in `artifact/`.
-Their tests follow the owning implementation, while root composition modules name
-each domain dependency explicitly. The phased organization and stable
-composition-root rule are recorded in
+Principal resolution, state/action authority, durable authority candidates and the
+governed one-shot action plane live together in `authority/`. Their tests follow
+the owning implementation, while root composition modules name each domain
+dependency explicitly. The phased organization and stable composition-root rule
+are recorded in
 [`hub-source-layout.md`](./hub-source-layout.md).
 
 ## Action and safety closure

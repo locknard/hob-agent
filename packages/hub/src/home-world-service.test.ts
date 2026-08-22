@@ -17,7 +17,7 @@ import {
 import type { ActionsExtension, BridgeActionRequest } from "@hob/bridge-contract";
 import { BridgeCatalog, type AdapterRegistration } from "./bridge/bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore, type BridgeConfigEntry } from "./bridge/bridge-registry.js";
-import { AuthorityCoordinator } from "./authority-coordinator.js";
+import { AuthorityCoordinator } from "./authority/authority-coordinator.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 import { SyntheticBridge } from "./bridge/synthetic-bridge.js";
 import { WorldIdentityManager } from "./world-identity.js";

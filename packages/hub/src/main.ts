@@ -17,8 +17,8 @@ import {
   readHomeHubLaunchConfig,
   type LaunchEnvironment,
 } from "./launch-config.js";
-import { loadActionAuthorityConfiguration } from "./action-authority-config.js";
-import type { ActionAuthorityConfiguration } from "./authority-coordinator.js";
+import { loadActionAuthorityConfiguration } from "./authority/action-authority-config.js";
+import type { ActionAuthorityConfiguration } from "./authority/authority-coordinator.js";
 import {
   loadSelectedModelCredential,
   type SelectedModelCredential,

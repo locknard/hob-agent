@@ -4,7 +4,7 @@ import test from "node:test";
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HouseholdReviewCenterService } from "./household-review-center-service.js";
-import type { OneShotActionGateway, OneShotActionPolicy } from "./one-shot-action-plane.js";
+import type { OneShotActionGateway, OneShotActionPolicy } from "./authority/one-shot-action-plane.js";
 
 const NOW = "2026-08-21T00:00:00.000Z";
 

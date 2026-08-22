@@ -15,7 +15,7 @@ import {
 import type {
   OneShotActionActor,
   OneShotActionResult,
-} from "./one-shot-action-plane.js";
+} from "./authority/one-shot-action-plane.js";
 
 const actor: OneShotActionActor = {
   principalId: "member-1",

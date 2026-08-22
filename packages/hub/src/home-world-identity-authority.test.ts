@@ -8,7 +8,7 @@ import {
   type AuthorityAvailability,
   type AuthorityResyncSnapshot,
   type StateAuthorityChoice,
-} from "./authority-coordinator.js";
+} from "./authority/authority-coordinator.js";
 import { BridgeCatalog, type AdapterRegistration } from "./bridge/bridge-catalog.js";
 import { BridgeRegistry, type BridgeConfigEntry } from "./bridge/bridge-registry.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";

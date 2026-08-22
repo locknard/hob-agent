@@ -13,7 +13,7 @@ import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artif
 import {
   AuthorityCandidateRegistry,
   type AuthorityCandidateRegistryOptions,
-} from "./authority-candidate-registry.js";
+} from "./authority/authority-candidate-registry.js";
 import { ArtifactPreparationJobRunner } from "./artifact/artifact-preparation-job-runner.js";
 import {
   createArtifactPipelineComposition,

@@ -73,13 +73,13 @@ import {
   type AuthorityAvailability,
   type AuthorityResyncPort,
   type StateAuthorityResolution,
-} from "./authority-coordinator.js";
+} from "./authority/authority-coordinator.js";
 import {
   actionAuthorityConfigurationPath,
   writeActionAuthorityConfiguration,
   type ActionAuthorityBindingWriteInput,
-} from "./action-authority-config.js";
-import type { AuthorityCandidateResolveInput } from "./authority-candidate-registry.js";
+} from "./authority/action-authority-config.js";
+import type { AuthorityCandidateResolveInput } from "./authority/authority-candidate-registry.js";
 import {
   WorldIdentityManager,
   type IdentityObservation,
