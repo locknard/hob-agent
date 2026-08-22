@@ -206,19 +206,21 @@ corresponding binding; the Phase 0 server itself stays loopback-only.
   `main` landmark, zero horizontal overflow and zero console warnings/errors. The
   layout publication workspace additionally covers exact actor-attributed history,
   hidden generation identifiers and complete wrapping at 390 px.
-- Fresh release commands: `pnpm test` (1,225 passing tests), `pnpm check`,
+- Fresh release commands: `pnpm test` (1,227 passing tests), `pnpm check`,
   `git diff --check`, and a repository secret scan.
 
 ## Reviewed structural constraint
 
 `proposal-inbox-http-service.ts` remains the single authenticated HTTP composition
-owner, while its current 3,268 lines raise the review cost of further layout work.
-Before package discovery or installable layout contributions enter scope, extract
-the layout-workspace presenter into an internal `inbox-web` module with the same
-typed port and Host registry inputs. `product-view-recipe-draft-store.ts` similarly
-keeps draft and publication invariants together in 874 lines; separate internal
-SQLite record codecs from command rules before adding package metadata or signature
-state. Both extractions preserve the current public contracts and authority owners.
+owner. The layout-workspace presenter now lives in the internal
+`product-layout-authoring.ts` module with the same typed port and Host registry
+inputs, reducing the HTTP owner from 3,268 to 3,067 lines. Authentication, request
+validation, command dispatch and registry mutation stay in the HTTP owner.
+
+`product-view-recipe-draft-store.ts` keeps draft and publication invariants together
+in 874 lines. Separate internal SQLite record codecs from command rules before
+adding package metadata or signature state. This extraction preserves the current
+public contracts and Hub authority owner.
 
 ## Current architectural direction
 
