@@ -8,8 +8,8 @@ import {
 } from "./artifact-preparation-service.js";
 import {
   SqliteProposalStore,
-  type ArtifactPreparationJob,
 } from "../home/proposal-store.js";
+import type { ArtifactPreparationJob } from "./preparation-job-port.js";
 import { ArtifactPreparationJobRunner } from "./artifact-preparation-job-runner.js";
 
 const createdAt = "2026-08-21T01:00:00.000Z";

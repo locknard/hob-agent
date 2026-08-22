@@ -20,6 +20,7 @@ import {
   type ArtifactPipelineComposition,
 } from "./artifact/artifact-pipeline-composition.js";
 import { HomeRetentionService } from "./home/home-retention-service.js";
+import { HomeArtifactService } from "./home/home-artifact-service.js";
 import {
   HomeObservationAuditService,
   type HomeObservationAuditServiceOptions,
@@ -168,6 +169,7 @@ export class HomeAgentRuntime {
           if (runner !== undefined) void runner.run(job.jobId, job.version).catch(() => undefined);
         },
       });
+      await this.context.plugin(HomeArtifactService, { registry: this.artifactRegistry });
       this.artifactPipeline = await createArtifactPipelineComposition({
         context: this.context,
         proposals: this.proposalStore,

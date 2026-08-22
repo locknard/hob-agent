@@ -7,8 +7,8 @@ import test from "node:test";
 import { ArtifactRegistry, type ArtifactRegistryEntry } from "./artifact-registry.js";
 import {
   SqliteProposalStore,
-  type HubVerifiedProposalSource,
 } from "../home/proposal-store.js";
+import type { HubVerifiedProposalSource } from "./proposal-source-port.js";
 import {
   ArtifactProducer,
   type ApprovedProposalSource,

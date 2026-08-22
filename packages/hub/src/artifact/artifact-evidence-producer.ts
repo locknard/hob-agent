@@ -24,7 +24,7 @@ import {
 import type {
   ApprovedProposalSource,
 } from "./artifact-producer.js";
-import type { HubVerifiedProposalSource } from "../home/proposal-store.js";
+import type { HubVerifiedProposalSource } from "./proposal-source-port.js";
 
 /** The exact approved Proposal source port used by ArtifactProducer. */
 export type ApprovedArtifactProposalSource = ApprovedProposalSource;

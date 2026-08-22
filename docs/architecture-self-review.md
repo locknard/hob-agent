@@ -73,10 +73,10 @@ ports:
 1. `bridge` and `world` currently meet through concrete ingest, journal and state
    modules. A Hub-owned ingestion port can place lifecycle orchestration in one
    owner while adapters continue to emit only neutral contract events.
-2. `artifact` currently reads the concrete household proposal store, while home
-   review services read concrete artifact modules. Moving the verified-proposal
-   source interface to the artifact boundary and injecting its home-owned
-   implementation gives artifact production one direction of dependency.
+2. `artifact` now owns verified-proposal and preparation-job ports. The home-owned
+   SQLite proposal store implements those ports structurally, and the root mounts
+   `HomeArtifactService` over the shared read-only registry. Artifact production
+   source has no import back into `home`.
 3. `authority` currently reuses artifact assessment canonicalization, and artifact
    production reads the concrete authority candidate registry. A small Hub-internal
    canonical identity utility plus an injected authority-candidate port separates

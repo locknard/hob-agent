@@ -7,6 +7,31 @@ import { z } from "zod";
 
 import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 import { artifactContentSchema } from "../artifact/neutral-artifact.js";
+import type { HubVerifiedProposalSource } from "../artifact/proposal-source-port.js";
+import {
+  ARTIFACT_PREPARATION_JOB_ERROR_CODES,
+  ARTIFACT_PREPARATION_JOB_STAGES,
+  type ArtifactPreparationJob,
+  type ArtifactPreparationJobErrorCode,
+  type ArtifactPreparationJobFailure,
+  type ArtifactPreparationJobStage,
+  type ArtifactPreparationJobStatus,
+  type ArtifactPreparationJobTransition,
+} from "../artifact/preparation-job-port.js";
+
+export type { HubVerifiedProposalSource } from "../artifact/proposal-source-port.js";
+export {
+  ARTIFACT_PREPARATION_JOB_ERROR_CODES,
+  ARTIFACT_PREPARATION_JOB_STAGES,
+} from "../artifact/preparation-job-port.js";
+export type {
+  ArtifactPreparationJob,
+  ArtifactPreparationJobErrorCode,
+  ArtifactPreparationJobFailure,
+  ArtifactPreparationJobStage,
+  ArtifactPreparationJobStatus,
+  ArtifactPreparationJobTransition,
+} from "../artifact/preparation-job-port.js";
 
 const boundedId = z.string().trim().min(1).max(200);
 const boundedText = z.string().trim().min(1).max(1_000);
@@ -298,33 +323,6 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly audit: readonly ProposalAuditEvent[];
 }
 
-type DeepReadonly<T> = T extends (...args: never[]) => unknown
-  ? T
-  : T extends readonly (infer Item)[]
-    ? readonly DeepReadonly<Item>[]
-    : T extends object
-      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
-      : T;
-
-/**
- * Hub-verified source input for a future artifact producer. It is deliberately
- * a projection rather than a caller-supplied proposal/evidence object.
- */
-export type HubVerifiedProposalSource = DeepReadonly<{
-  readonly proposalId: string;
-  readonly revision: number;
-  readonly kind: "automation-draft";
-  readonly status: "approved";
-  readonly applicationStatus: "not_available";
-  readonly title: string;
-  readonly summary: string;
-  readonly intent: CreateProposalInput["intent"];
-  readonly evidence: CreateProposalInput["evidence"];
-  readonly conflictCheck: CreateProposalInput["conflictCheck"];
-  readonly risk: CreateProposalInput["risk"];
-  readonly artifactCandidate: NonNullable<CreateProposalInput["artifactCandidate"]>;
-}>;
-
 const proposalAuditEventSchema = z.object({
   id: boundedId,
   at: isoTimestamp,
@@ -463,56 +461,6 @@ export type ProposalCreationResult =
   | { readonly kind: "created" | "merged" | "replayed"; readonly proposal: ProposalEnvelope; readonly mergedEvidenceCount?: number }
   | { readonly kind: "capacity_full" }
   | { readonly kind: "suppressed"; readonly reason: "dedup_latched"; readonly dedupKey: string };
-
-export const ARTIFACT_PREPARATION_JOB_STAGES = [
-  "artifact",
-  "evidence",
-  "authority",
-  "risk",
-  "compile",
-  "dry-run",
-] as const;
-export type ArtifactPreparationJobStage = typeof ARTIFACT_PREPARATION_JOB_STAGES[number];
-
-export const ARTIFACT_PREPARATION_JOB_ERROR_CODES = [
-  "not_found",
-  "unavailable",
-  "malformed_dependency",
-  "policy_blocked",
-  "persistence_failed",
-  "attempt_exhausted",
-] as const;
-export type ArtifactPreparationJobErrorCode = typeof ARTIFACT_PREPARATION_JOB_ERROR_CODES[number];
-export type ArtifactPreparationJobStatus = "queued" | "running" | "succeeded" | "failed";
-
-export interface ArtifactPreparationJob {
-  readonly schemaVersion: "1";
-  readonly kind: "approved-proposal-preparation";
-  readonly jobId: string;
-  readonly proposalId: string;
-  readonly proposalRevision: number;
-  readonly idempotencyKey: string;
-  readonly status: ArtifactPreparationJobStatus;
-  readonly attempt: number;
-  readonly version: number;
-  readonly stage?: ArtifactPreparationJobStage;
-  readonly error?: {
-    readonly stage: ArtifactPreparationJobStage;
-    readonly code: ArtifactPreparationJobErrorCode;
-  };
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export interface ArtifactPreparationJobTransition {
-  readonly jobId: string;
-  readonly expectedVersion: number;
-}
-
-export interface ArtifactPreparationJobFailure extends ArtifactPreparationJobTransition {
-  readonly stage: ArtifactPreparationJobStage;
-  readonly code: ArtifactPreparationJobErrorCode;
-}
 
 export type ProposalStoreErrorCode =
   | "invalid_proposal"

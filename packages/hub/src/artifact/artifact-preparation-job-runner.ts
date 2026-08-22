@@ -5,22 +5,18 @@ import {
 import type {
   ArtifactPreparationJob,
   ArtifactPreparationJobErrorCode,
+  ArtifactPreparationJobPort,
   ArtifactPreparationJobStage,
-  SqliteProposalStore,
-} from "../home/proposal-store.js";
-
-type PreparationJobPort = Pick<SqliteProposalStore,
-  "claimPreparationJob" | "completePreparationJob" | "failPreparationJob"
->;
+} from "./preparation-job-port.js";
 
 export interface ArtifactPreparationJobRunnerOptions {
-  readonly jobs: PreparationJobPort;
+  readonly jobs: ArtifactPreparationJobPort;
   readonly preparation: Pick<ArtifactPreparationService, "prepare">;
 }
 
 /** Root-private durable-job executor. Construction and start never replay jobs. */
 export class ArtifactPreparationJobRunner {
-  private readonly jobs: PreparationJobPort;
+  private readonly jobs: ArtifactPreparationJobPort;
   private readonly preparation: ArtifactPreparationJobRunnerOptions["preparation"];
   private readonly inFlight = new Map<string, Promise<void>>();
   private stopping = false;

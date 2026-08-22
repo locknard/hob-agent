@@ -4,6 +4,7 @@ import { ArtifactAuthorityProducer } from "./artifact-authority-producer.js";
 import {
   ArtifactCompilationCoordinator,
   ArtifactCompilationCoordinatorError,
+  type ArtifactCompilationProposalPort,
 } from "./artifact-compilation-coordinator.js";
 import {
   parseArtifactAuthorityAssessment,
@@ -33,14 +34,10 @@ import {
   checkCapabilityPredicate,
   resolveCapabilityRead,
 } from "../bridge/capability-semantics.js";
-import {
-  HomeArtifactService,
-  type HomeArtifactRegistryReader,
-} from "../home/home-artifact-service.js";
 import { HomeWorldAuthorityBindingSource } from "../world/home-world-authority-binding-source.js";
 import type { ArtifactMutationProposalCommand } from "./artifact-mutation-coordinator.js";
 import type { ArtifactRef } from "./neutral-artifact.js";
-import type { SqliteProposalStore } from "../home/proposal-store.js";
+import type { ApprovedProposalSource } from "./proposal-source-port.js";
 import type {
   HomeWorldEvidenceQuery,
   HomeWorldEvidenceResult,
@@ -48,10 +45,7 @@ import type {
   HomeWorldSnapshot,
 } from "../world/home-world-service.js";
 
-interface PipelineProposalPort {
-  readonly get: SqliteProposalStore["get"];
-  readonly withApprovedProposalAtRevision: SqliteProposalStore["withApprovedProposalAtRevision"];
-}
+interface PipelineProposalPort extends ApprovedProposalSource, ArtifactCompilationProposalPort {}
 
 interface PipelineHomeWorldPort {
   readonly snapshot: () => HomeWorldSnapshot;
@@ -77,8 +71,7 @@ export interface ArtifactPipelineComposition {
 }
 
 /**
- * Builds the non-applying Artifact pipeline around root-owned stores. Only the
- * bounded HomeArtifactService reader is mounted into Cordis.
+ * Builds the non-applying Artifact pipeline around injected root-owned ports.
  */
 export async function createArtifactPipelineComposition(
   options: ArtifactPipelineCompositionOptions,
@@ -99,8 +92,6 @@ export async function createArtifactPipelineComposition(
     resolveActionAuthority: options.homeWorld.resolveActionAuthority?.bind(options.homeWorld)
       ?? (() => ({ status: "unavailable" as const })),
   };
-
-  await options.context.plugin(HomeArtifactService, { registry: registry.reader });
 
   const existingConflict = new ArtifactRiskConflictSource({ proposals, registry: registry.conflict });
   const artifactProducer = new ArtifactProducer({
@@ -239,15 +230,6 @@ function registryPorts(registry: ArtifactRegistry) {
   const getRevision = registry.getRevision.bind(registry);
   const latestAttestation = registry.latestAttestation.bind(registry);
   return {
-    reader: {
-      getRevision,
-      list: registry.list.bind(registry),
-      audit: registry.audit.bind(registry),
-      listAttestations: registry.listAttestations.bind(registry),
-      latestAttestation,
-      currentBySourceProposal: registry.currentBySourceProposal.bind(registry),
-      latestResult: registry.latestResult.bind(registry),
-    } satisfies HomeArtifactRegistryReader,
     draft: { createDraft: registry.createDraft.bind(registry) },
     evidence: {
       getRevision,

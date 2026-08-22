@@ -35,6 +35,7 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   const inboxFiles = sourceFiles(inboxSourceRoot);
   const hubFiles = sourceFiles(hubSourceRoot);
   const hubFilesWithTests = sourceFiles(hubSourceRoot, true);
+  const artifactFiles = sourceFiles(join(hubSourceRoot, "artifact"));
 
   const misplacedBridgeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isFile())
@@ -78,6 +79,12 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     .filter((line) => line.length > 0 && !line.startsWith("#"));
   assert.ok(ignoreRules.includes("/home/"), "the runtime household workspace ignore is anchored to the repository root");
   assert.equal(ignoreRules.includes("home/"), false, "the Hub home source domain remains trackable");
+
+  assert.deepEqual(
+    violations(artifactFiles, /from ["']\.\.\/home\//, false),
+    [],
+    "artifact production source depends on injected proposal and review ports",
+  );
 
   const cliModuleNames = [
     "bridge-credential-setup",

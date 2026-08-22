@@ -5,6 +5,7 @@ import { Context } from "@deepseek-ai/cordis";
 
 import { ArtifactRegistry } from "./artifact-registry.js";
 import { AuthorityCandidateRegistry } from "../authority/authority-candidate-registry.js";
+import { HomeArtifactService } from "../home/home-artifact-service.js";
 import { createArtifactPipelineComposition } from "./artifact-pipeline-composition.js";
 import {
   SqliteProposalStore,
@@ -162,16 +163,15 @@ function homeWorldFixture() {
   return { homeWorld, calls };
 }
 
-test("keeps the preparation writer private while its shared Registry is readable after notify-only approval", async () => {
+test("keeps the preparation writer private while the root-mounted Registry reader stays available", async () => {
   const proposal = approvedProposal();
   const artifacts = new ArtifactRegistry({ path: ":memory:", now: () => capturedAt });
   const authorityCandidates = new AuthorityCandidateRegistry({ path: ":memory:", now: () => capturedAt });
   const context = new Context();
   const world = homeWorldFixture();
 
-  // This is the RED contract for the future root-private composition. The
-  // factory is intentionally not present yet; production wiring must compose
-  // the real Artifact producers/coordinators around these narrow seams.
+  await context.plugin(HomeArtifactService, { registry: artifacts });
+
   const composition = await createArtifactPipelineComposition({
     context,
     proposals: proposal.proposals,

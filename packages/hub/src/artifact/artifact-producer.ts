@@ -6,20 +6,17 @@ import {
   type CreateArtifactRevisionInput,
 } from "./neutral-artifact.js";
 import type { ArtifactRegistryEntry } from "./artifact-registry.js";
-import type { HubVerifiedProposalSource } from "../home/proposal-store.js";
+import type {
+  ApprovedProposalSource,
+  HubVerifiedProposalSource,
+} from "./proposal-source-port.js";
+
+export type { ApprovedProposalSource } from "./proposal-source-port.js";
 
 /**
  * The only proposal read seam an Artifact producer may use. The concrete
  * HomeProposalService implements this shape and owns the approval/audit gate.
  */
-export interface ApprovedProposalSource {
-  withApprovedProposalAtRevision<T>(
-    proposalId: string,
-    revision: number,
-    operation: (source: HubVerifiedProposalSource) => T,
-  ): T;
-}
-
 /**
  * The producer can only create a draft. It has no update, route, credential,
  * bridge, or remote-write capability.
