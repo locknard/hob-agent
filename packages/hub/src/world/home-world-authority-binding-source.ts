@@ -1,5 +1,5 @@
 import { artifactRefSchema, type ArtifactRef } from "../artifact/neutral-artifact.js";
-import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-registry.js";
+import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-port.js";
 import type {
   AuthorityBindingInputPort,
   AuthorityFreshWorldCut,

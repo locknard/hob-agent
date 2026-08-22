@@ -26,9 +26,9 @@ import { ArtifactRiskProducer } from "./artifact-risk-producer.js";
 import type { ArtifactRegistry } from "./artifact-registry.js";
 import { ArtifactWorldCutSource } from "./artifact-world-cut-source.js";
 import type {
-  AuthorityCandidateRegistry,
+  AuthorityCandidateResolutionPort,
   AuthorityCandidateResolveInput,
-} from "../authority/authority-candidate-registry.js";
+} from "../authority/authority-candidate-port.js";
 import {
   checkCapabilityAction,
   checkCapabilityPredicate,
@@ -61,7 +61,7 @@ export interface ArtifactPipelineCompositionOptions {
   readonly proposals: PipelineProposalPort;
   readonly homeWorld: PipelineHomeWorldPort;
   readonly artifacts: ArtifactRegistry;
-  readonly authorityCandidates: Pick<AuthorityCandidateRegistry, "resolve">;
+  readonly authorityCandidates: AuthorityCandidateResolutionPort;
   readonly now?: () => string;
 }
 

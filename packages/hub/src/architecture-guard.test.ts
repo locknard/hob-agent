@@ -36,6 +36,7 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   const hubFiles = sourceFiles(hubSourceRoot);
   const hubFilesWithTests = sourceFiles(hubSourceRoot, true);
   const artifactFiles = sourceFiles(join(hubSourceRoot, "artifact"));
+  const authorityFiles = sourceFiles(join(hubSourceRoot, "authority"));
 
   const misplacedBridgeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isFile())
@@ -84,6 +85,16 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     violations(artifactFiles, /from ["']\.\.\/home\//, false),
     [],
     "artifact production source depends on injected proposal and review ports",
+  );
+  assert.deepEqual(
+    violations(authorityFiles, /from ["']\.\.\/artifact\//, false),
+    [],
+    "authority production source uses Hub foundation identity utilities",
+  );
+  assert.deepEqual(
+    violations(artifactFiles, /from ["']\.\.\/authority\/(?!authority-candidate-port\.js)/, false),
+    [],
+    "artifact production source reaches authority through the candidate port",
   );
 
   const cliModuleNames = [

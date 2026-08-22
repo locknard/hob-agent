@@ -8,23 +8,35 @@ import {
   type ArtifactRef,
 } from "./neutral-artifact.js";
 import type { HomeWorldEvidenceCoverageReason } from "../world/home-world-service.js";
+import {
+  CanonicalJsonError,
+  MAX_CANONICAL_ARRAY_LENGTH,
+  MAX_CANONICAL_DEPTH,
+  MAX_CANONICAL_INPUT_BYTES,
+  MAX_CANONICAL_OBJECT_FIELDS,
+  MAX_CANONICAL_STRING_BYTES,
+  MAX_CANONICAL_TOTAL_ARRAY_ITEMS,
+  MAX_CANONICAL_TOTAL_OBJECT_FIELDS,
+  MAX_CANONICAL_TOTAL_STRING_BYTES,
+  canonicalHubJson,
+} from "../foundation/canonical-json.js";
 
 export type { ArtifactRef };
 
 /** The contract-wide maximum for canonical assessment input bytes. */
-export const MAX_ASSESSMENT_INPUT_BYTES = 64 * 1024;
+export const MAX_ASSESSMENT_INPUT_BYTES = MAX_CANONICAL_INPUT_BYTES;
 export const MAX_ASSESSMENT_ID_LENGTH = 200;
 export const MAX_ASSESSMENT_REASON_LENGTH = 1_000;
 export const MAX_ASSESSMENT_REASONS = 10;
 export const MAX_ASSESSMENT_WATERMARKS = 16;
 export const MAX_AUTHORITY_CANDIDATES = 16;
-export const MAX_ASSESSMENT_DEPTH = 16;
-export const MAX_ASSESSMENT_ARRAY_LENGTH = 64;
-export const MAX_ASSESSMENT_TOTAL_ARRAY_ITEMS = 256;
-export const MAX_ASSESSMENT_OBJECT_FIELDS = 128;
-export const MAX_ASSESSMENT_TOTAL_OBJECT_FIELDS = 512;
-export const MAX_ASSESSMENT_STRING_BYTES = 16 * 1024;
-export const MAX_ASSESSMENT_TOTAL_STRING_BYTES = 64 * 1024;
+export const MAX_ASSESSMENT_DEPTH = MAX_CANONICAL_DEPTH;
+export const MAX_ASSESSMENT_ARRAY_LENGTH = MAX_CANONICAL_ARRAY_LENGTH;
+export const MAX_ASSESSMENT_TOTAL_ARRAY_ITEMS = MAX_CANONICAL_TOTAL_ARRAY_ITEMS;
+export const MAX_ASSESSMENT_OBJECT_FIELDS = MAX_CANONICAL_OBJECT_FIELDS;
+export const MAX_ASSESSMENT_TOTAL_OBJECT_FIELDS = MAX_CANONICAL_TOTAL_OBJECT_FIELDS;
+export const MAX_ASSESSMENT_STRING_BYTES = MAX_CANONICAL_STRING_BYTES;
+export const MAX_ASSESSMENT_TOTAL_STRING_BYTES = MAX_CANONICAL_TOTAL_STRING_BYTES;
 
 const boundedId = z.string()
   .min(1)
@@ -40,37 +52,6 @@ const boundedReason = z.string()
 const isoTimestamp = z.iso.datetime({ offset: true });
 const sha256Digest = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const positiveSafeInteger = z.number().int().positive().safe();
-const forbiddenCanonicalKeys = new Set([
-  "accessToken",
-  "adapterType",
-  "apiKey",
-  "bridgeRoute",
-  "certificatePem",
-  "credential",
-  "entityId",
-  "installationId",
-  "nativeRoute",
-  "nativeId",
-  "nativeInstanceId",
-  "password",
-  "piid",
-  "privateKey",
-  "provider",
-  "providerPayload",
-  "refreshToken",
-  "remoteInstanceId",
-  "remoteRoute",
-  "route",
-  "ruleId",
-  "secret",
-  "secretText",
-  "service",
-  "siid",
-  "token",
-  "url",
-  "vendor",
-]);
-
 /** Keep this list in lockstep with HomeWorldService's closed neutral vocabulary. */
 export const HOME_WORLD_EVIDENCE_COVERAGE_REASONS = [
   "bridge_not_ready",
@@ -305,15 +286,17 @@ export class ArtifactAssessmentError extends Error {
  * Objects are sorted by Unicode code point; arrays retain semantic order.
  */
 export function canonicalAssessmentInput(input: unknown): string {
-  const canonical = canonicalizeValue(input, new WeakSet<object>(), 0, newAssessmentBudget());
-  const encoded = JSON.stringify(canonical);
-  if (encoded === undefined) {
-    throw new ArtifactAssessmentError("invalid_assessment", "Assessment input is not JSON-canonicalizable");
+  try {
+    return canonicalHubJson(input);
+  } catch (error) {
+    if (error instanceof CanonicalJsonError) {
+      throw new ArtifactAssessmentError(
+        error.code === "resource_exhausted" ? "resource_exhausted" : "invalid_assessment",
+        error.message,
+      );
+    }
+    throw new ArtifactAssessmentError("invalid_assessment", "Assessment input is not canonicalizable");
   }
-  if (Buffer.byteLength(encoded, "utf8") > MAX_ASSESSMENT_INPUT_BYTES) {
-    throw new ArtifactAssessmentError("resource_exhausted", "Assessment input exceeds the canonical byte budget");
-  }
-  return encoded;
 }
 
 /** Computes the Hub-owned digest for the exact approved Proposal evidence envelope. */
@@ -636,14 +619,7 @@ function parseInput<T extends z.ZodType>(schema: T, input: unknown): z.output<T>
  * value intentionally: unknown fields are never stripped or normalized.
  */
 export function preflightAssessmentInput(input: unknown): unknown {
-  const canonical = canonicalizeValue(input, new WeakSet<object>(), 0, newAssessmentBudget());
-  const encoded = JSON.stringify(canonical);
-  if (encoded === undefined) {
-    throw new ArtifactAssessmentError("invalid_assessment", "Assessment input is not JSON-canonicalizable");
-  }
-  if (Buffer.byteLength(encoded, "utf8") > MAX_ASSESSMENT_INPUT_BYTES) {
-    throw new ArtifactAssessmentError("resource_exhausted", "Assessment input exceeds the canonical byte budget");
-  }
+  canonicalAssessmentInput(input);
   return input;
 }
 
@@ -657,93 +633,6 @@ function preflightForSchema(input: unknown, ctx: RefinementCtx): unknown {
     });
     return z.NEVER;
   }
-}
-
-interface AssessmentBudget {
-  arrayItems: number;
-  objectFields: number;
-  stringBytes: number;
-}
-
-function newAssessmentBudget(): AssessmentBudget {
-  return { arrayItems: 0, objectFields: 0, stringBytes: 0 };
-}
-
-function canonicalizeValue(
-  value: unknown,
-  seen: WeakSet<object>,
-  depth: number,
-  budget: AssessmentBudget,
-): unknown {
-  if (depth > MAX_ASSESSMENT_DEPTH) {
-    throw new ArtifactAssessmentError("resource_exhausted", "Assessment input nesting exceeds the budget");
-  }
-  if (value === null || typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const bytes = Buffer.byteLength(value, "utf8");
-    if (bytes > MAX_ASSESSMENT_STRING_BYTES) {
-      throw new ArtifactAssessmentError("resource_exhausted", "Assessment input string exceeds the byte budget");
-    }
-    budget.stringBytes += bytes;
-    if (budget.stringBytes > MAX_ASSESSMENT_TOTAL_STRING_BYTES) {
-      throw new ArtifactAssessmentError("resource_exhausted", "Assessment input strings exceed the total byte budget");
-    }
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new ArtifactAssessmentError("invalid_assessment", "Assessment input contains a non-finite number");
-    }
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new ArtifactAssessmentError("invalid_assessment", "Assessment input contains an unsafe integer");
-    }
-    return value;
-  }
-  if (typeof value !== "object") {
-    throw new ArtifactAssessmentError("invalid_assessment", "Assessment input contains an unsupported value");
-  }
-  if (seen.has(value)) {
-    throw new ArtifactAssessmentError("invalid_assessment", "Assessment input contains a cycle");
-  }
-  seen.add(value);
-  try {
-    if (Array.isArray(value)) {
-      if (value.length > MAX_ASSESSMENT_ARRAY_LENGTH) {
-        throw new ArtifactAssessmentError("resource_exhausted", "Assessment input array exceeds the item budget");
-      }
-      budget.arrayItems += value.length;
-      if (budget.arrayItems > MAX_ASSESSMENT_TOTAL_ARRAY_ITEMS) {
-        throw new ArtifactAssessmentError("resource_exhausted", "Assessment input arrays exceed the total item budget");
-      }
-      return value.map((item) => canonicalizeValue(item, seen, depth + 1, budget));
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new ArtifactAssessmentError("invalid_assessment", "Assessment input must contain plain objects");
-    }
-    const keys = Object.keys(value);
-    if (keys.length > MAX_ASSESSMENT_OBJECT_FIELDS) {
-      throw new ArtifactAssessmentError("resource_exhausted", "Assessment input object exceeds the field budget");
-    }
-    budget.objectFields += keys.length;
-    if (budget.objectFields > MAX_ASSESSMENT_TOTAL_OBJECT_FIELDS) {
-      throw new ArtifactAssessmentError("resource_exhausted", "Assessment input objects exceed the total field budget");
-    }
-    const entries = keys.sort(compareUnicodeCodePoints).map((key) => {
-      assertSafeCanonicalKey(key);
-      return [key, canonicalizeValue((value as Record<string, unknown>)[key], seen, depth + 1, budget)] as const;
-    });
-    return Object.fromEntries(entries);
-  } finally {
-    seen.delete(value);
-  }
-}
-
-function assertSafeCanonicalKey(key: string): true {
-  if (forbiddenCanonicalKeys.has(key)) {
-    throw new ArtifactAssessmentError("invalid_assessment", `Assessment input contains forbidden field "${key}"`);
-  }
-  return true;
 }
 
 function compareUnicodeCodePoints(left: string, right: string): number {

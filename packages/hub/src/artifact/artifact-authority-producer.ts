@@ -20,10 +20,9 @@ import {
 } from "./artifact-registry.js";
 import {
   type AuthorityCandidateResolution,
+  type AuthorityCandidateResolutionPort,
   type AuthorityCandidateResolveInput,
-  type AuthorityCandidateRegistry,
-  AuthorityCandidateRegistryError,
-} from "../authority/authority-candidate-registry.js";
+} from "../authority/authority-candidate-port.js";
 
 export type AuthorityWorldWatermark = ArtifactAuthorityInput["checkedWatermarks"][number];
 
@@ -66,7 +65,7 @@ export interface ArtifactAuthorityRegistryPort {
 
 export interface ArtifactAuthorityProducerOptions {
   readonly artifacts: ArtifactAuthorityRegistryPort;
-  readonly authority: Pick<AuthorityCandidateRegistry, "resolve">;
+  readonly authority: AuthorityCandidateResolutionPort;
   readonly bindingInput: AuthorityBindingInputPort;
 }
 
@@ -331,10 +330,7 @@ function resolveTargets(
     let resolution: AuthorityCandidateResolution;
     try {
       resolution = authority.resolve(binding.resolveInput);
-    } catch (error) {
-      if (error instanceof AuthorityCandidateRegistryError) {
-        throw new ArtifactAuthorityProducerError("authority_unavailable", "Authority candidate is unavailable");
-      }
+    } catch {
       throw new ArtifactAuthorityProducerError("authority_unavailable", "Authority candidate is unavailable");
     }
     if (!isPlainObject(resolution)

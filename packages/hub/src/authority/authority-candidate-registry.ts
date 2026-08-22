@@ -3,40 +3,24 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { canonicalAssessmentInput } from "../artifact/artifact-assessments.js";
+import { canonicalHubJson } from "../foundation/canonical-json.js";
 import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 
+import type {
+  AuthorityCandidateResolution,
+  AuthorityCandidateResolveInput,
+  NeutralAuthorityCandidateStatus,
+} from "./authority-candidate-port.js";
+
+export type {
+  AuthorityCandidateResolution,
+  AuthorityCandidateResolutionPort,
+  AuthorityCandidateResolveInput,
+  NeutralAuthorityCandidate,
+  NeutralAuthorityCandidateStatus,
+} from "./authority-candidate-port.js";
+
 export type AuthorityCandidateLifecycle = "active" | "superseded" | "revoked";
-export type NeutralAuthorityCandidateStatus = "available" | "unavailable" | "not_approved";
-
-/** The only candidate shape allowed to cross the authority assessment seam. */
-export interface NeutralAuthorityCandidate {
-  readonly actionAuthorityCandidateId: string;
-  readonly hwCapabilityId: string;
-  readonly status: NeutralAuthorityCandidateStatus;
-}
-
-/**
- * Hub-owned inputs for one candidate resolution. Binding and configuration
- * identities are opaque Hub digests/labels; no route or native field is
- * accepted by this boundary.
- */
-export interface AuthorityCandidateResolveInput {
-  readonly hwCapabilityId: string;
-  readonly knownCapability: boolean;
-  readonly configured: boolean;
-  readonly approved: boolean;
-  readonly available: boolean;
-  readonly bindingIdentity?: string;
-  readonly configurationIdentity?: string;
-  readonly registrationGeneration?: number;
-}
-
-export interface AuthorityCandidateResolution {
-  readonly authorityRegistryIdentity: `sha256:${string}`;
-  readonly candidate: NeutralAuthorityCandidate;
-}
-
 export type AuthorityCandidateAuditAction = "created" | "superseded" | "revoked";
 
 /** Metadata-only audit projection; it contains no binding or route material. */
@@ -780,7 +764,7 @@ function toAudit(row: SqlRow): AuthorityCandidateAudit {
 }
 
 function digest(kind: string, input: unknown): `sha256:${string}` {
-  const canonical = canonicalAssessmentInput({ kind, input });
+  const canonical = canonicalHubJson({ kind, input });
   return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 

@@ -30,6 +30,8 @@ remain stable through each move.
 6. `home/` owns household-facing advice, correction, proposal, safety, onboarding,
    observation, retention, review and batch services.
 7. `cli/` owns executable setup, validation and one-shot operational commands.
+8. `foundation/` owns small bounded deterministic utilities shared by domains;
+   it contains no runtime service, persistence owner or external integration.
 
 Each phase moved one complete dependency cluster, updated all repository consumers,
 ran the full test/type suite and landed as one reviewable commit. Composition roots

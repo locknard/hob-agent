@@ -7,7 +7,7 @@ import type {
   ActionAuthorityConfiguration,
   ActionAuthorityPolicyClass,
 } from "./authority-coordinator.js";
-import { canonicalAssessmentInput } from "../artifact/artifact-assessments.js";
+import { canonicalHubJson } from "../foundation/canonical-json.js";
 
 export const ACTION_AUTHORITY_CONFIG_FILE = "action-authority.json";
 export const ACTION_AUTHORITY_CONFIG_VERSION = 2;
@@ -270,7 +270,7 @@ function parseBinding(value: Record<string, unknown>): ActionAuthorityBindingFil
 }
 
 function computeConfigurationIdentity(entry: ActionAuthorityBindingFileEntry): `sha256:${string}` {
-  const canonical = canonicalAssessmentInput({
+  const canonical = canonicalHubJson({
     kind: "action-authority-config-v2",
     input: {
       approved: entry.approved,

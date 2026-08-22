@@ -79,7 +79,7 @@ import {
   writeActionAuthorityConfiguration,
   type ActionAuthorityBindingWriteInput,
 } from "../authority/action-authority-config.js";
-import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-registry.js";
+import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-port.js";
 import {
   WorldIdentityManager,
   type IdentityObservation,

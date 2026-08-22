@@ -41,8 +41,8 @@ surfaces. Architecture guards keep cross-package relative imports and superseded
 version shims out of the repository.
 
 Hub source organization has explicit `src/bridge/`, `src/artifact/`,
-`src/authority/`, `src/media/`, `src/world/`, `src/home/`, and `src/cli/`
-domains.
+`src/authority/`, `src/media/`, `src/world/`, `src/home/`, `src/cli/`, and
+`src/foundation/` domains.
 Adapter catalog/bundle composition, credential scoping, registry, ingestion,
 capability semantics and concrete adapters live together in `bridge/`. Neutral
 artifact schemas, assessments, compilation, evidence, conflict analysis,
@@ -77,10 +77,9 @@ ports:
    SQLite proposal store implements those ports structurally, and the root mounts
    `HomeArtifactService` over the shared read-only registry. Artifact production
    source has no import back into `home`.
-3. `authority` currently reuses artifact assessment canonicalization, and artifact
-   production reads the concrete authority candidate registry. A small Hub-internal
-   canonical identity utility plus an injected authority-candidate port separates
-   shared identity mechanics from either domain.
+3. `foundation/canonical-json.ts` now owns bounded stable identity serialization.
+   Authority no longer imports artifact assessment implementation, while artifact
+   production reaches authority exclusively through `authority-candidate-port.ts`.
 4. The artifact-specific world authority binding source can move behind the
    artifact composition boundary, leaving `world` focused on neutral observations,
    freshness and control routing.
