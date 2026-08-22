@@ -907,7 +907,7 @@ function attributionLabel(attribution: ProductActivityAttribution, agentName: st
     case "physical": return "手动";
     case "member": return "家人";
     case "hob": return agentName;
-    case "external-rule": return "HA 外部规则";
+    case "external-rule": return "外部规则";
     case "system": return "家庭服务";
     case "unknown": return "来源待确认";
   }

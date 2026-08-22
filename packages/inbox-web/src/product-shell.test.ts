@@ -190,11 +190,22 @@ test("projects unknown household facts and connection states without inventing a
 });
 
 test("renders the bounded activity projection without inert filter controls", () => {
-  const html = renderProductShell(model({ route: "activity" }));
+  const html = renderProductShell(model({
+    route: "activity",
+    activity: [{
+      id: "external-rule-1",
+      dateGroup: "today",
+      time: "21:12",
+      title: "客厅灯已打开",
+      attribution: "external-rule",
+    }],
+  }));
 
   assert.doesNotMatch(html, /class="product-filters"/);
   assert.doesNotMatch(html, /<select[^>]+activity-/);
   assert.match(html, /家里发生了什么/);
+  assert.match(html, />外部规则<\/span>/);
+  assert.doesNotMatch(html, /HA 外部规则/);
 });
 
 test("renders streaming stop/background states and only offers a ten-second undo for verified work", () => {

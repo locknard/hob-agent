@@ -298,7 +298,7 @@ corresponding binding; the Phase 0 server itself stays loopback-only.
   `main` landmark, zero horizontal overflow and zero console warnings/errors. The
   layout publication workspace additionally covers exact actor-attributed history,
   hidden generation identifiers and complete wrapping at 390 px.
-- Fresh release commands: `pnpm test` (1,232 passing tests), `pnpm check`,
+- Fresh release commands: `pnpm test` (1,234 passing tests), `pnpm check`,
   `git diff --check`, and a repository secret scan.
 
 ## Reviewed structural constraint
@@ -313,6 +313,15 @@ validation, command dispatch and registry mutation stay in the HTTP owner.
 in 874 lines. Separate internal SQLite record codecs from command rules before
 adding package metadata or signature state. This extraction preserves the current
 public contracts and Hub authority owner.
+
+Capability compatibility is the next neutral bridge seam. The Artifact owner
+currently evaluates an exact trusted registry containing HA and MIOT schema/version
+pairs. This keeps native payloads and dispatch authority inside Hub, while adding a
+new ecosystem's predicates or actions still requires a core registry change. The
+next bridge-contract revision should carry a closed neutral semantic descriptor
+from each trusted product bundle, with Hub validation and policy retaining final
+authority. Third-party bundles can then add reviewed semantics through the catalog
+without adding adapter names to Artifact code.
 
 ## Current architectural direction
 
