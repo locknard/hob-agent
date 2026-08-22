@@ -6,7 +6,7 @@ import {
   type CapabilityReadResult,
   type CapabilitySemanticsState,
   resolveCapabilityRead,
-} from "../bridge/capability-semantics.js";
+} from "./capability-semantics.js";
 import {
   parseArtifactAuthorityAssessment,
   parseArtifactEvidenceAttestation,

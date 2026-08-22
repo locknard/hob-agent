@@ -43,13 +43,13 @@ version shims out of the repository.
 Hub source organization has explicit `src/bridge/`, `src/artifact/`,
 `src/authority/`, `src/media/`, `src/world/`, `src/home/`, `src/cli/`, and
 `src/foundation/` domains.
-Adapter catalog/bundle composition, credential scoping, registry, capability
-semantics and concrete adapters live together in `bridge/`. Neutral
-artifact schemas, assessments, compilation, evidence, conflict analysis,
+Adapter catalog/bundle composition, credential scoping, registry and concrete
+adapters live together in `bridge/`. Neutral artifact schemas, capability
+compatibility policy, assessments, compilation, evidence, conflict analysis,
 preparation, registry and mutation coordination live together in `artifact/`.
-Principal resolution, state/action authority, durable authority candidates and the
-governed one-shot action plane live together in `authority/`. Their tests follow
-the owning implementation. Neutral discovery, player inventory, intent
+Principal resolution, governance records, state/action authority, durable authority
+candidates and the governed one-shot action plane live together in `authority/`.
+Their tests follow the owning implementation. Neutral discovery, player inventory, intent
 preparation, conversation orchestration and the Music Assistant adapter live in
 `media/`. Credential setup, validation, one-time observation, retention, model
 probing and home-map drafting live in `cli/`, with every package command bound to
@@ -66,10 +66,8 @@ rule are recorded in
 
 ### Post-organization dependency audit
 
-The directory pass makes the Hub's existing bidirectional implementation
-dependencies visible. It establishes ownership and review locality; the next
-architecture milestone establishes a directed dependency graph through narrow
-ports:
+The directory pass exposed the Hub's bidirectional implementation dependencies.
+The follow-up now establishes a directed production graph through narrow ports:
 
 1. `world` now owns bridge ingestion, journal persistence and state projection.
    `bridge` emits neutral contract events and has no production dependency on
@@ -85,10 +83,17 @@ ports:
    artifact composition boundary. `world` has no production dependency on
    `artifact` and remains focused on neutral observations, freshness and control
    routing.
+5. Capability compatibility policy now lives in `artifact`, beside its consumers.
+   `bridge` publishes neutral schemas and events with no production dependency on
+   artifact policy or world projection.
+6. Authority owns the shared governance record types. World identity emits those
+   records through the authority-owned contract, authority has no production
+   dependency on world implementation, and the unused identity-authority re-export
+   has been removed.
 
-This follow-up should change one seam at a time with contract tests. The neutral
-bridge package remains the ecosystem/process boundary; Hub-internal ports stay in
-Hub and do not enlarge the published bridge contract.
+Each follow-up changed one seam at a time with contract tests. The neutral bridge
+package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and
+preserve the published bridge contract surface.
 
 ## Action and safety closure
 

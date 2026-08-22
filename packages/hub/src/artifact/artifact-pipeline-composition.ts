@@ -33,7 +33,7 @@ import {
   checkCapabilityAction,
   checkCapabilityPredicate,
   resolveCapabilityRead,
-} from "../bridge/capability-semantics.js";
+} from "./capability-semantics.js";
 import { HomeWorldAuthorityBindingSource } from "./home-world-authority-binding-source.js";
 import type { ArtifactMutationProposalCommand } from "./artifact-mutation-coordinator.js";
 import type { ArtifactRef } from "./neutral-artifact.js";

@@ -43,7 +43,7 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   const misplacedBridgeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isFile())
     .map((entry) => entry.name)
-    .filter((name) => /^(?:bridge-(?!credential-setup)|home-assistant-(?:adapter|bridge)|xiaomi-home-bridge|synthetic-bridge|capability-semantics)/.test(name));
+    .filter((name) => /^(?:bridge-(?!credential-setup)|home-assistant-(?:adapter|bridge)|xiaomi-home-bridge|synthetic-bridge)/.test(name));
   assert.deepEqual(misplacedBridgeFiles, [], "bridge domain modules and their tests belong under src/bridge");
 
   const misplacedArtifactFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
@@ -94,14 +94,19 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     "authority production source uses Hub foundation identity utilities",
   );
   assert.deepEqual(
+    violations(authorityFiles, /from ["']\.\.\/world\//, false),
+    [],
+    "authority production source owns governance policy without world implementation dependencies",
+  );
+  assert.deepEqual(
     violations(artifactFiles, /from ["']\.\.\/authority\/(?!authority-candidate-port\.js)/, false),
     [],
     "artifact production source reaches authority through the candidate port",
   );
   assert.deepEqual(
-    violations(bridgeFiles, /from ["']\.\.\/world\//, false),
+    violations(bridgeFiles, /from ["']\.\.\/(?:artifact|world)\//, false),
     [],
-    "bridge adapters emit neutral events while world owns ingestion and projection",
+    "bridge adapters expose neutral capabilities and events without policy or projection dependencies",
   );
   assert.deepEqual(
     violations(worldFiles, /from ["']\.\.\/artifact\//, false),
@@ -174,8 +179,9 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     join(hubSourceRoot, "home-assistant-service.test.ts"),
     join(hubSourceRoot, "home-inbox.ts"),
     join(hubSourceRoot, "home-inbox.test.ts"),
+    join(hubSourceRoot, "authority", "identity-authority.ts"),
   ].filter(existsSync).map((path) => relative(repositoryRoot, path));
-  assert.deepEqual(removedEntries, [], "superseded contracts, ecosystem services, and the second runtime entry must stay deleted");
+  assert.deepEqual(removedEntries, [], "superseded contracts, re-export shims, ecosystem services, and the second runtime entry stay deleted");
 
   const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
   assert.equal(rootPackage.scripts?.["inbox:home"], undefined, "the product exposes one runtime entry");

@@ -65,9 +65,10 @@ M3c uses a closed, Hub-private capability-semantics resolver. The resolver is
 keyed by the exact adapter schema and version, not by `semanticKind`:
 
 `ha.entity@1.0.0` and `miot.property@1.0.0` are the initial reviewed entries.
-The implementation belongs in `packages/hub/src/capability-semantics.ts` (or a
-same-purpose Hub-private module), not in `contracts`, an adapter, or the agent
-layer.
+The implementation lives in
+`packages/hub/src/artifact/capability-semantics.ts`, beside the artifact world-cut
+assessment that consumes it. The bridge contributes neutral schema declarations;
+the artifact domain owns compatibility policy.
 
 The bridge catalog admits registrations by major version, but that is not a
 semantic review. A future minor or patch version must be added to the resolver

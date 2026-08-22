@@ -1,5 +1,5 @@
 import type { JsonValue } from "@hob/bridge-contract";
-import type { ArtifactAction } from "../artifact/neutral-artifact.js";
+import type { ArtifactAction } from "./neutral-artifact.js";
 
 const MAX_SCHEMA_BYTES = 256;
 const MAX_VERSION_BYTES = 64;

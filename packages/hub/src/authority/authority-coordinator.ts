@@ -3,7 +3,7 @@ import type { ControlResult, WorldCapability } from "@hob/bridge-contract";
 import type {
   GovernanceAuditRecord,
   GovernanceProposal,
-} from "../world/world-identity.js";
+} from "./governance-records.js";
 
 export type AuthorityValidity = "valid" | "stale" | "invalid-source" | "present-but-invalid";
 

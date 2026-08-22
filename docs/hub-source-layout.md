@@ -17,13 +17,14 @@ remain stable through each move.
 ## Phased organization
 
 1. `bridge/` owns adapter catalog and bundle composition, bridge credentials,
-   registration, capability semantics and concrete HA, Xiaomi and synthetic
-   adapters. Adapters emit the neutral contract event stream.
+   registration and concrete HA, Xiaomi and synthetic adapters. Adapters emit the
+   neutral contract event stream and capability declarations.
 2. `artifact/` owns neutral artifact schemas, evidence, risk, conflict, compilation,
-   preparation, registry, mutation coordination and the read-only adapter from a
-   neutral world cut into artifact authority assessment.
-3. `authority/` owns principals, identity authority, action authority, candidate
-   authority and one-shot action policy/store.
+   preparation, registry, mutation coordination, capability compatibility policy
+   and the read-only adapter from a neutral world cut into artifact authority
+   assessment.
+3. `authority/` owns principals, governance records, state/action authority,
+   candidate authority and one-shot action policy/store.
 4. `media/` owns neutral media catalog, player discovery, play intent and Music
    Assistant integration.
 5. `world/` owns bridge event ingestion, ingest journals, world identity,
@@ -49,7 +50,10 @@ the source root and make domain dependencies visible.
   explicit export and dependency decision.
 - Architecture tests recurse through every domain directory and keep concrete
   adapter vocabulary inside `bridge/` plus the explicit product bundle.
-- Production source in `bridge/` has no dependency on `world/`; event flow crosses
-  that boundary in one direction when the world-owned ingest consumes an adapter.
+- Production source in `bridge/` has no dependency on `artifact/` or `world/`;
+  capability declarations flow into artifact assessment, and neutral events flow
+  into the world-owned ingest.
 - Production source in `world/` has no dependency on `artifact/`; artifact-owned
   adapters read the neutral HomeWorld port when an assessment needs evidence.
+- Production source in `authority/` has no dependency on `world/`; authority owns
+  shared governance records and world identity emits records through those types.

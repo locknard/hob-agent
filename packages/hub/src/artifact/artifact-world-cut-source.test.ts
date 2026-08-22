@@ -14,7 +14,7 @@ import {
   checkCapabilityAction,
   checkCapabilityPredicate,
   resolveCapabilityRead,
-} from "../bridge/capability-semantics.js";
+} from "./capability-semantics.js";
 import {
   ArtifactWorldCutSource,
   type ArtifactWorldCutCapabilityResolver,
