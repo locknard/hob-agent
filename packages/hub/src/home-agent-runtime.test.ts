@@ -15,6 +15,7 @@ import { createHomeAgentRuntime } from "./home-agent-runtime.js";
 import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home-onboarding-store.js";
 import { SyntheticMediaCatalogProvider } from "./home-media-services.js";
 import { SqliteProposalStore } from "./proposal-store.js";
+import { SqliteProductViewRecipeDraftStore } from "./product-view-recipe-draft-store.js";
 import { SyntheticBridge } from "./synthetic-bridge.js";
 import { WorldIdentityManager } from "./world-identity.js";
 import type { BridgeAdapter } from "../../../contracts/bridge-contract.js";
@@ -414,6 +415,56 @@ test("mounts authenticated Inbox HTTP only when explicitly configured", async ()
     rmSync(directory, { recursive: true, force: true });
   }
   assert.equal(runtime.context.homeInboxHttp, undefined);
+});
+
+test("hydrates exact published layout generations before the Inbox listener opens", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-layout-publication-runtime-"));
+  const publicationPath = join(directory, "layout-drafts.sqlite");
+  const seed = new SqliteProductViewRecipeDraftStore({ path: publicationPath });
+  const draft = seed.create({
+    ownerPrincipalId: "household-member",
+    label: "持久布局",
+    source: JSON.stringify({
+      apiVersion: "hob.view.recipe/v1",
+      id: "household.persistent",
+      title: "持久视图",
+      pages: [{
+        route: "overview",
+        layout: "stack",
+        slots: [{ slot: "overview.header", width: "full" }],
+      }],
+    }),
+    idempotencyKey: "seed-published-layout",
+  });
+  seed.publish({
+    draftId: draft.draftId,
+    ownerPrincipalId: "household-member",
+    expectedRevision: 1,
+    actorPrincipalId: "household-member",
+  });
+  seed.close();
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: { provider: "deepseek", model: "deepseek-v4-flash", sessionId: "published-layout-runtime" },
+    inboxHttp: {
+      port: 0,
+      authenticate: () => true,
+      principal: { ...fixtureReviewPrincipal, role: "admin" },
+    },
+    homeViewRecipeDrafts: { path: publicationPath },
+  });
+  try {
+    await runtime.start();
+    const response = await fetch(`${runtime.context.homeInboxHttp.origin}/home?view=household.persistent`);
+    const html = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(html, /data-view-provider="household\.persistent"/);
+    assert.match(html, /data-recipe-provider="household\.persistent"/);
+  } finally {
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("mounts the opt-in Hub observation scheduler after the DSH Home Agent", async () => {

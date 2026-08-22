@@ -205,3 +205,218 @@ test("classifies a held write lock and persisted corruption without exposing the
     await rm(corrupt.directory, { recursive: true, force: true });
   }
 });
+
+function recipeSource(title: string, statusWidth: "full" | "half" = "full"): string {
+  return JSON.stringify({
+    apiVersion: "hob.view.recipe/v1",
+    id: "household.calm",
+    title,
+    pages: [{
+      route: "overview",
+      layout: statusWidth === "full" ? "stack" : "split",
+      slots: [
+        { slot: "overview.header", width: "full" },
+        { slot: "overview.status", width: statusWidth },
+      ],
+    }],
+  });
+}
+
+function namedRecipeSource(id: string, title: string): string {
+  return JSON.stringify({
+    apiVersion: "hob.view.recipe/v1",
+    id,
+    title,
+    pages: [{ route: "overview", layout: "stack", slots: [{ slot: "overview.header", width: "full" }] }],
+  });
+}
+
+test("publishes exact immutable generations and rolls back the active pointer", async () => {
+  const item = await fixture("publication");
+  try {
+    const firstDraft = item.store.create({
+      ownerPrincipalId: "owner-a",
+      label: "安静布局",
+      source: recipeSource("安静视图"),
+      idempotencyKey: "publication-draft",
+    });
+    const first = item.store.publish({
+      draftId: firstDraft.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 1,
+      actorPrincipalId: "owner-a",
+    });
+    assert.equal(first.recipeId, "household.calm");
+    assert.equal(first.draftRevision, 1);
+    assert.match(first.recipeDigest, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(Object.isFrozen(first), true);
+    assert.deepEqual(item.store.listActivePublications(), [first]);
+    assert.equal(item.store.canRollbackPublication(first.recipeId, first.generationId), false);
+
+    const secondDraft = item.store.update({
+      draftId: firstDraft.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 1,
+      label: "安静布局 2",
+      source: recipeSource("安静视图 2", "half"),
+    });
+    const second = item.store.publish({
+      draftId: secondDraft.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 2,
+      actorPrincipalId: "owner-a",
+    });
+    assert.notEqual(second.generationId, first.generationId);
+    assert.equal(item.store.listActivePublications()[0]?.generationId, second.generationId);
+    assert.equal(item.store.canRollbackPublication(second.recipeId, second.generationId), true);
+    assert.throws(() => item.store.publish({
+      draftId: secondDraft.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 1,
+      actorPrincipalId: "owner-a",
+    }), (error) => error instanceof ProductViewRecipeDraftStoreError && error.code === "revision_conflict");
+
+    const restored = item.store.rollbackPublication({
+      recipeId: second.recipeId,
+      expectedGenerationId: second.generationId,
+      actorPrincipalId: "owner-a",
+    });
+    assert.equal(restored.generationId, first.generationId);
+    assert.equal(item.store.canRollbackPublication(restored.recipeId, restored.generationId), false);
+    assert.equal(item.store.listActivePublications()[0]?.title, "安静视图");
+    assert.deepEqual(item.store.listPublicationEvents().map(({ kind }) => kind), ["published", "published", "rolled_back"]);
+
+    item.store.deactivatePublication({
+      recipeId: first.recipeId,
+      expectedGenerationId: first.generationId,
+      actorPrincipalId: "owner-a",
+    });
+    assert.deepEqual(item.store.listActivePublications(), []);
+    assert.equal(item.store.listPublicationEvents().at(-1)?.kind, "deactivated");
+    item.store.close();
+  } finally {
+    await rm(item.directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps invalid or stale drafts outside publication history", async () => {
+  const item = await fixture("publication-invalid");
+  try {
+    const draft = item.store.create({
+      ownerPrincipalId: "owner-a",
+      label: "未完成布局",
+      source: '{"apiVersion":',
+      idempotencyKey: "invalid-publication",
+    });
+    assert.throws(() => item.store.publish({
+      draftId: draft.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 1,
+      actorPrincipalId: "owner-a",
+    }), (error) => error instanceof ProductViewRecipeDraftStoreError && error.code === "recipe_invalid");
+    assert.deepEqual(item.store.listActivePublications(), []);
+    assert.deepEqual(item.store.listPublicationEvents(), []);
+    const valid = item.store.update({
+      draftId: draft.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 1,
+      label: "完成布局",
+      source: recipeSource("完整视图"),
+    });
+    assert.throws(() => item.store.publish({
+      draftId: valid.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 2,
+      actorPrincipalId: "owner-b",
+    }), (error) => error instanceof ProductViewRecipeDraftStoreError && error.code === "invalid_input");
+    const published = item.store.publish({
+      draftId: valid.draftId,
+      ownerPrincipalId: "owner-a",
+      expectedRevision: 2,
+      actorPrincipalId: "owner-a",
+    });
+    item.store.close();
+    const raw = new DatabaseSync(item.path);
+    raw.prepare("UPDATE product_view_recipe_publication_generations SET recipe_digest = ? WHERE generation_id = ?")
+      .run(`sha256:${"0".repeat(64)}`, published.generationId);
+    raw.close();
+    const reopened = new SqliteProductViewRecipeDraftStore({ path: item.path });
+    assert.throws(() => reopened.listActivePublications(), (error) =>
+      error instanceof ProductViewRecipeDraftStoreError && error.code === "corrupt");
+    reopened.close();
+  } finally {
+    await rm(item.directory, { recursive: true, force: true });
+  }
+});
+
+test("bounds active publications, retained generations, and audit events", async () => {
+  const item = await fixture("publication-bounds");
+  try {
+    for (let index = 1; index <= 17; index += 1) {
+      const draft = item.store.create({
+        ownerPrincipalId: "owner-a",
+        label: `布局 ${index}`,
+        source: namedRecipeSource(`household.layout-${index}`, `布局 ${index}`),
+        idempotencyKey: `publication-capacity-${index}`,
+      });
+      if (index <= 16) {
+        item.store.publish({
+          draftId: draft.draftId,
+          ownerPrincipalId: "owner-a",
+          expectedRevision: 1,
+          actorPrincipalId: "owner-a",
+        });
+      } else {
+        assert.throws(() => item.store.publish({
+          draftId: draft.draftId,
+          ownerPrincipalId: "owner-a",
+          expectedRevision: 1,
+          actorPrincipalId: "owner-a",
+        }), (error) => error instanceof ProductViewRecipeDraftStoreError && error.code === "publication_capacity_full");
+      }
+    }
+    assert.equal(item.store.listActivePublications().length, 16);
+    item.store.close();
+    const raw = new DatabaseSync(item.path);
+    assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM product_view_recipe_publication_generations").get() as { count: number }).count, 16);
+    assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM product_view_recipe_publication_events").get() as { count: number }).count, 16);
+    raw.close();
+  } finally {
+    await rm(item.directory, { recursive: true, force: true });
+  }
+
+  const generations = await fixture("generation-bounds");
+  try {
+    let draft = generations.store.create({
+      ownerPrincipalId: "owner-a",
+      label: "世代布局",
+      source: namedRecipeSource("household.generations", "世代 1"),
+      idempotencyKey: "generation-bounds",
+    });
+    generations.store.publish({ draftId: draft.draftId, ownerPrincipalId: "owner-a", expectedRevision: 1, actorPrincipalId: "owner-a" });
+    for (let revision = 2; revision <= 270; revision += 1) {
+      draft = generations.store.update({
+        draftId: draft.draftId,
+        ownerPrincipalId: "owner-a",
+        expectedRevision: revision - 1,
+        label: "世代布局",
+        source: namedRecipeSource("household.generations", `世代 ${revision}`),
+      });
+      generations.store.publish({
+        draftId: draft.draftId,
+        ownerPrincipalId: "owner-a",
+        expectedRevision: revision,
+        actorPrincipalId: "owner-a",
+      });
+    }
+    assert.equal(generations.store.listActivePublications()[0]?.draftRevision, 270);
+    assert.equal(generations.store.listPublicationEvents().length, 256);
+    generations.store.close();
+    const raw = new DatabaseSync(generations.path);
+    assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM product_view_recipe_publication_generations").get() as { count: number }).count, 64);
+    assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM product_view_recipe_publication_events").get() as { count: number }).count, 256);
+    raw.close();
+  } finally {
+    await rm(generations.directory, { recursive: true, force: true });
+  }
+});

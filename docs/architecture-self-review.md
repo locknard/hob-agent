@@ -172,6 +172,16 @@ expected revision; deletion releases capacity. Preview parses and compiles one e
 revision, runs recipe conformance and uses a Host-owned interaction-disabled render;
 save and preview create no provider, grant, default change or device authority.
 
+Layout publication is a separate Hub command over an exact owner-scoped draft
+revision. The Hub recompiles and rechecks conformance, retains the immutable source
+and digest as a bounded publication generation, and moves an active recipe pointer
+only after registry ownership is available. Publication, rollback and deactivation
+are administrator actions with the latest 256 actor-attributed audit events retained.
+They change chooser
+availability only; current-session and device-default selection remain separate Host
+commands. Static provider ids keep their original owner and cannot be replaced by a
+published draft.
+
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
 and private/shared device class. A deployment that exposes the service beyond

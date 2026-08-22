@@ -28,17 +28,14 @@ const PREFERENCE_VALUE = /^[a-z][a-z0-9_-]{0,39}$/;
 /** Registry for trusted presentation providers. Authority remains in the Host and Hub. */
 export class ProductViewRegistry<Model, Context> {
   private readonly providers = new Map<string, RegisteredProductViewProvider<Model, Context>>();
+  private readonly dynamicIds = new Set<string>();
 
   constructor(
     providers: readonly RegisteredProductViewProvider<Model, Context>[],
     readonly fallbackId: string,
   ) {
     for (const provider of providers) {
-      if (!VIEW_ID.test(provider.id) || provider.id.length > 120) throw new TypeError("Product view provider id is invalid");
-      if (provider.label.trim() !== provider.label || provider.label.length === 0 || provider.label.length > 80) {
-        throw new TypeError("Product view provider label is invalid");
-      }
-      validatePreferences(provider.preferences ?? []);
+      validateProvider(provider);
       if (this.providers.has(provider.id)) throw new TypeError(`Duplicate product view provider: ${provider.id}`);
       this.providers.set(provider.id, snapshotProvider(provider));
     }
@@ -57,8 +54,38 @@ export class ProductViewRegistry<Model, Context> {
   }
 
   choices(): readonly { readonly id: string; readonly label: string }[] {
-    return [...this.providers.values()].map(({ id, label }) => ({ id, label }));
+    return Object.freeze([...this.providers.values()].map(({ id, label }) => Object.freeze({ id, label })));
   }
+
+  /** Adds or replaces a Host-rendered publication while preserving static ids. */
+  upsertDynamic(provider: RegisteredProductViewProvider<Model, Context>): void {
+    validateProvider(provider);
+    if (this.providers.has(provider.id) && !this.dynamicIds.has(provider.id)) {
+      throw new TypeError("Product view static provider ownership is reserved");
+    }
+    const snapshot = snapshotProvider(provider);
+    this.providers.set(provider.id, snapshot);
+    this.dynamicIds.add(provider.id);
+  }
+
+  /** Reports whether a publication id is free or already publication-owned. */
+  acceptsDynamic(id: string): boolean {
+    return VIEW_ID.test(id) && id.length <= 120 && (!this.providers.has(id) || this.dynamicIds.has(id));
+  }
+
+  /** Removes one published provider. Static and fallback providers remain registered. */
+  removeDynamic(id: string): boolean {
+    if (!this.dynamicIds.delete(id)) return false;
+    return this.providers.delete(id);
+  }
+}
+
+function validateProvider<Model, Context>(provider: RegisteredProductViewProvider<Model, Context>): void {
+  if (!VIEW_ID.test(provider.id) || provider.id.length > 120) throw new TypeError("Product view provider id is invalid");
+  if (provider.label.trim() !== provider.label || provider.label.length === 0 || provider.label.length > 80) {
+    throw new TypeError("Product view provider label is invalid");
+  }
+  validatePreferences(provider.preferences ?? []);
 }
 
 function snapshotProvider<Model, Context>(

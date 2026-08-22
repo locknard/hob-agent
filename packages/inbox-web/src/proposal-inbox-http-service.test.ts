@@ -10,6 +10,7 @@ import {
   type ProposalInboxHttpOptions,
 } from "./proposal-inbox-http-service.js";
 import type { ProductConnectionState } from "./product-shell.js";
+import { runProductViewRecipeConformance } from "./product-view-recipe-conformance.js";
 
 class StubInbox extends Service {
   readonly reviews: unknown[] = [];
@@ -2493,6 +2494,20 @@ test("keeps durable layout authoring private while previewing one exact inert re
     source: string;
     updatedAt: string;
   }>();
+  type FakePublication = {
+    generationId: string;
+    recipeId: string;
+    title: string;
+    draftId: string;
+    draftRevision: number;
+    recipeDigest: `sha256:${string}`;
+    source: string;
+    publishedBy: string;
+    publishedAt: string;
+  };
+  const publicationHistory = new Map<string, FakePublication[]>();
+  const activePublications = new Map<string, FakePublication>();
+  let nextGeneration = 0;
   const drafts = {
     create(input: { ownerPrincipalId: string; label: string; source: string }) {
       const value = Object.freeze({
@@ -2527,6 +2542,51 @@ test("keeps durable layout authoring private while previewing one exact inert re
     list(ownerPrincipalId: string) {
       return [...records.values()].filter((value) => value.ownerPrincipalId === ownerPrincipalId).map(({ source: _source, ownerPrincipalId: _owner, ...summary }) => summary);
     },
+    publish(input: { draftId: string; ownerPrincipalId: string; expectedRevision: number; actorPrincipalId: string }) {
+      const draft = records.get(input.draftId);
+      if (draft === undefined) throw Object.assign(new Error("hidden"), { code: "not_found" });
+      if (draft.revision !== input.expectedRevision) throw Object.assign(new Error("hidden"), { code: "revision_conflict" });
+      const parsed = JSON.parse(draft.source) as { id: string; title: string };
+      const report = runProductViewRecipeConformance(parsed);
+      if (!report.passed || report.recipeDigest === undefined) throw Object.assign(new Error("hidden"), { code: "recipe_invalid" });
+      const value = Object.freeze({
+        generationId: `generation-${++nextGeneration}`,
+        recipeId: parsed.id,
+        title: parsed.title,
+        draftId: draft.draftId,
+        draftRevision: draft.revision,
+        recipeDigest: report.recipeDigest,
+        source: draft.source,
+        publishedBy: input.actorPrincipalId,
+        publishedAt: "2026-08-22T02:00:00.000Z",
+      });
+      const history = publicationHistory.get(value.recipeId) ?? [];
+      history.push(value);
+      publicationHistory.set(value.recipeId, history);
+      activePublications.set(value.recipeId, value);
+      return value;
+    },
+    rollbackPublication(input: { recipeId: string; expectedGenerationId: string }) {
+      const current = activePublications.get(input.recipeId);
+      const history = publicationHistory.get(input.recipeId) ?? [];
+      if (current?.generationId !== input.expectedGenerationId) throw Object.assign(new Error("hidden"), { code: "publication_conflict" });
+      const previous = history.at(-2);
+      if (previous === undefined) throw Object.assign(new Error("hidden"), { code: "publication_conflict" });
+      activePublications.set(input.recipeId, previous);
+      return previous;
+    },
+    deactivatePublication(input: { recipeId: string; expectedGenerationId: string }) {
+      const current = activePublications.get(input.recipeId);
+      if (current?.generationId !== input.expectedGenerationId) throw Object.assign(new Error("hidden"), { code: "publication_conflict" });
+      activePublications.delete(input.recipeId);
+    },
+    listActivePublications() {
+      return [...activePublications.values()];
+    },
+    canRollbackPublication(recipeId: string, generationId: string) {
+      const history = publicationHistory.get(recipeId) ?? [];
+      return activePublications.get(recipeId)?.generationId === generationId && history.length > 1;
+    },
   };
   const source = JSON.stringify({
     apiVersion: "hob.view.recipe/v1",
@@ -2538,6 +2598,7 @@ test("keeps durable layout authoring private while previewing one exact inert re
       slots: [{ slot: "overview.header", width: "full" }],
     }],
   });
+  const sourceV2 = source.replace('"title":"安静视图"', '"title":"安静视图 2"');
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StubInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -2615,10 +2676,62 @@ test("keeps durable layout authoring private while previewing one exact inert re
     });
     assert.equal(restored.status, 303);
 
-    const deleted = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1/delete`, {
+    const published = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1/publish`, {
       method: "POST",
       headers,
       body: new URLSearchParams({ expectedRevision: "3" }),
+      redirect: "manual",
+    });
+    assert.equal(published.status, 303);
+    assert.equal(published.headers.get("location"), "/settings?layout=draft-1&layoutNotice=published");
+    const publishedPage = await fetch(`${ctx.homeInboxHttp.origin}${published.headers.get("location")}`, { headers: { authorization } });
+    const publishedHtml = await publishedPage.text();
+    assert.match(publishedHtml, /布局版本已发布/);
+    assert.match(publishedHtml, /href="\/settings\?view=community\.calm"/);
+    assert.match(publishedHtml, /当前草稿版本已发布/);
+
+    const fourth = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedRevision: "3", label: "第二个发布版", source: sourceV2 }),
+      redirect: "manual",
+    });
+    assert.equal(fourth.status, 303);
+    const republished = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1/publish`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedRevision: "4" }),
+      redirect: "manual",
+    });
+    assert.equal(republished.status, 303);
+    assert.equal(activePublications.get("community.calm")?.title, "安静视图 2");
+
+    const rolledBack = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-publications/community.calm/rollback`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedGenerationId: "generation-2" }),
+      redirect: "manual",
+    });
+    assert.equal(rolledBack.status, 303);
+    assert.equal(rolledBack.headers.get("location"), "/settings?layoutNotice=rolled_back");
+    assert.equal(activePublications.get("community.calm")?.title, "安静视图");
+
+    const deactivated = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-publications/community.calm/deactivate`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedGenerationId: "generation-1" }),
+      redirect: "manual",
+    });
+    assert.equal(deactivated.status, 303);
+    assert.equal(deactivated.headers.get("location"), "/settings?layoutNotice=deactivated");
+    assert.equal(activePublications.size, 0);
+    const recovered = await fetch(`${ctx.homeInboxHttp.origin}/settings?view=community.calm`, { headers: { authorization } });
+    assert.match(await recovered.text(), /已恢复生活视图/);
+
+    const deleted = await fetch(`${ctx.homeInboxHttp.origin}/settings/layout-drafts/draft-1/delete`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedRevision: "4" }),
       redirect: "manual",
     });
     assert.equal(deleted.status, 303);
@@ -2627,6 +2740,38 @@ test("keeps durable layout authoring private while previewing one exact inert re
     await fiber.dispose();
     await inboxFiber.dispose();
     await ctx.fiber.dispose();
+  }
+
+  drafts.create({ ownerPrincipalId: "admin-1", label: "冲突布局", source });
+  const reserved = new Context();
+  const reservedInbox = await reserved.plugin(StubInbox);
+  const reservedFiber = await reserved.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    viewRecipeDrafts: drafts,
+    viewProviders: [{ id: "community.calm", label: "部署视图", renderContent: () => "<h1>部署视图</h1>" }],
+  });
+  try {
+    const conflict = await fetch(`${reserved.homeInboxHttp.origin}/settings/layout-drafts/draft-1/publish`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: reserved.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ expectedRevision: "1" }),
+      redirect: "manual",
+    });
+    assert.equal(conflict.status, 303);
+    assert.equal(conflict.headers.get("location"), "/settings?layout=draft-1&layoutNotice=provider");
+    assert.equal(activePublications.size, 0);
+    assert.equal(nextGeneration, 2);
+  } finally {
+    await reservedFiber.dispose();
+    await reservedInbox.dispose();
+    await reserved.fiber.dispose();
+    records.clear();
   }
 
   const shared = new Context();

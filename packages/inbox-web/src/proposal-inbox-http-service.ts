@@ -253,6 +253,24 @@ function productViewProviderFromRecipe(recipe: ProductViewRecipeV1): ProductView
   };
 }
 
+function productViewProviderFromPublication(publication: ProductViewRecipePublication): ProductViewProvider {
+  try {
+    const input = JSON.parse(publication.source);
+    const recipe = compileProductViewRecipe(input);
+    const report = runProductViewRecipeConformance(input);
+    if (
+      !report.passed
+      || report.recipeId !== publication.recipeId
+      || report.recipeDigest !== publication.recipeDigest
+      || recipe.id !== publication.recipeId
+      || recipe.title !== publication.title
+    ) throw new TypeError();
+    return productViewProviderFromRecipe(recipe);
+  } catch {
+    throw new TypeError("Published product view is invalid");
+  }
+}
+
 function conformantRecipeProviders(inputs: readonly unknown[] | undefined): readonly ProductViewProvider[] {
   if (inputs === undefined) return [];
   let length: number;
@@ -374,6 +392,18 @@ export interface ProductViewRecipeDraft extends ProductViewRecipeDraftSummary {
   readonly source: string;
 }
 
+export interface ProductViewRecipePublication {
+  readonly generationId: string;
+  readonly recipeId: string;
+  readonly title: string;
+  readonly draftId: string;
+  readonly draftRevision: number;
+  readonly recipeDigest: `sha256:${string}`;
+  readonly source: string;
+  readonly publishedBy: string;
+  readonly publishedAt: string;
+}
+
 export interface ProductViewRecipeDraftPort {
   create(input: {
     readonly ownerPrincipalId: string;
@@ -395,6 +425,24 @@ export interface ProductViewRecipeDraftPort {
   }): void;
   read(draftId: string, ownerPrincipalId: string): ProductViewRecipeDraft | undefined;
   list(ownerPrincipalId: string): readonly ProductViewRecipeDraftSummary[];
+  publish?(input: {
+    readonly draftId: string;
+    readonly ownerPrincipalId: string;
+    readonly expectedRevision: number;
+    readonly actorPrincipalId: string;
+  }): ProductViewRecipePublication;
+  rollbackPublication?(input: {
+    readonly recipeId: string;
+    readonly expectedGenerationId: string;
+    readonly actorPrincipalId: string;
+  }): ProductViewRecipePublication;
+  deactivatePublication?(input: {
+    readonly recipeId: string;
+    readonly expectedGenerationId: string;
+    readonly actorPrincipalId: string;
+  }): void;
+  listActivePublications?(): readonly ProductViewRecipePublication[];
+  canRollbackPublication?(recipeId: string, generationId: string): boolean;
 }
 
 /**
@@ -553,9 +601,23 @@ export class ProposalInboxHttpService extends Service {
     if (this.views.resolve(this.defaultViewId).recoveredFrom !== undefined) {
       throw new TypeError("Default product view provider is not registered");
     }
-    this.onboarding = options.onboarding ?? new UnavailableOnboardingService();
     this.viewRecipeDrafts = options.viewRecipeDrafts;
+    this.hydratePublishedProductViews();
+    this.onboarding = options.onboarding ?? new UnavailableOnboardingService();
     this.server = createServer((request, response) => { void this.handle(request, response); });
+  }
+
+  private hydratePublishedProductViews(): void {
+    const publications = this.viewRecipeDrafts?.listActivePublications?.() ?? [];
+    try {
+      for (const publication of publications) {
+        const provider = productViewProviderFromPublication(publication);
+        if (!this.views.acceptsDynamic(provider.id)) throw new TypeError();
+        this.views.upsertDynamic(provider);
+      }
+    } catch {
+      throw new TypeError("Published product view registry conflict");
+    }
   }
 
   protected async [Service.init](): Promise<void> {
@@ -740,7 +802,7 @@ export class ProposalInboxHttpService extends Service {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
           return send(response, 403, "Layout authoring requires an administrator on a bound private device");
         }
-        const draftId = safeDecode(layoutDraftUpdate[1]!);
+        const draftId = boundedLayoutDraftId(safeDecode(layoutDraftUpdate[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout draft");
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
           return send(response, 415, "Unsupported layout draft content type");
@@ -769,7 +831,7 @@ export class ProposalInboxHttpService extends Service {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
           return send(response, 403, "Layout authoring requires an administrator on a bound private device");
         }
-        const draftId = safeDecode(layoutDraftDelete[1]!);
+        const draftId = boundedLayoutDraftId(safeDecode(layoutDraftDelete[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout draft deletion");
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
           return send(response, 415, "Unsupported layout draft deletion content type");
@@ -787,6 +849,104 @@ export class ProposalInboxHttpService extends Service {
           return redirect(response, "/settings");
         } catch (error) {
           return redirect(response, `/settings?layout=${encodeURIComponent(draftId)}&layoutNotice=${layoutDraftNoticeForError(error)}`);
+        }
+      }
+      const layoutDraftPublish = /^\/settings\/layout-drafts\/([^/]+)\/publish$/.exec(url.pathname);
+      if (method === "POST" && layoutDraftPublish) {
+        if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.publish === undefined) {
+          return send(response, 403, "Layout publication requires an administrator on a bound private device");
+        }
+        const draftId = boundedLayoutDraftId(safeDecode(layoutDraftPublish[1]!) ?? null);
+        if (draftId === undefined) return send(response, 400, "Invalid layout publication");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported layout publication content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid layout publication");
+        }
+        const expectedRevision = layoutDraftDeleteInput(body);
+        if (expectedRevision === undefined) return send(response, 400, "Invalid layout publication");
+        const draft = this.viewRecipeDrafts.read(draftId, this.principal.principalId);
+        const candidate = draft === undefined ? undefined : publicationCandidateFromDraft(draft);
+        if (draft === undefined) return redirect(response, "/settings?layoutNotice=missing");
+        if (candidate === undefined) return redirect(response, `/settings?layout=${encodeURIComponent(draftId)}&layoutNotice=input`);
+        if (!this.views.acceptsDynamic(candidate.provider.id)) {
+          return redirect(response, `/settings?layout=${encodeURIComponent(draftId)}&layoutNotice=provider`);
+        }
+        try {
+          const published = this.viewRecipeDrafts.publish({
+            draftId,
+            ownerPrincipalId: this.principal.principalId,
+            expectedRevision,
+            actorPrincipalId: this.principal.principalId,
+          });
+          this.views.upsertDynamic(productViewProviderFromPublication(published));
+          return redirect(response, `/settings?layout=${encodeURIComponent(draftId)}&layoutNotice=published`);
+        } catch (error) {
+          return redirect(response, `/settings?layout=${encodeURIComponent(draftId)}&layoutNotice=${layoutPublicationNoticeForError(error)}`);
+        }
+      }
+      const layoutPublicationRollback = /^\/settings\/layout-publications\/([^/]+)\/rollback$/.exec(url.pathname);
+      if (method === "POST" && layoutPublicationRollback) {
+        if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.rollbackPublication === undefined) {
+          return send(response, 403, "Layout rollback requires an administrator on a bound private device");
+        }
+        const recipeId = boundedLayoutDraftId(safeDecode(layoutPublicationRollback[1]!) ?? null);
+        if (recipeId === undefined) return send(response, 400, "Invalid layout rollback");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported layout rollback content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid layout rollback");
+        }
+        const expectedGenerationId = layoutPublicationGenerationInput(body);
+        if (expectedGenerationId === undefined) return send(response, 400, "Invalid layout rollback");
+        try {
+          const restored = this.viewRecipeDrafts.rollbackPublication({
+            recipeId,
+            expectedGenerationId,
+            actorPrincipalId: this.principal.principalId,
+          });
+          this.views.upsertDynamic(productViewProviderFromPublication(restored));
+          return redirect(response, "/settings?layoutNotice=rolled_back");
+        } catch (error) {
+          return redirect(response, `/settings?layoutNotice=${layoutPublicationNoticeForError(error)}`);
+        }
+      }
+      const layoutPublicationDeactivate = /^\/settings\/layout-publications\/([^/]+)\/deactivate$/.exec(url.pathname);
+      if (method === "POST" && layoutPublicationDeactivate) {
+        if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.deactivatePublication === undefined) {
+          return send(response, 403, "Layout deactivation requires an administrator on a bound private device");
+        }
+        const recipeId = boundedLayoutDraftId(safeDecode(layoutPublicationDeactivate[1]!) ?? null);
+        if (recipeId === undefined) return send(response, 400, "Invalid layout deactivation");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported layout deactivation content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid layout deactivation");
+        }
+        const expectedGenerationId = layoutPublicationGenerationInput(body);
+        if (expectedGenerationId === undefined) return send(response, 400, "Invalid layout deactivation");
+        try {
+          this.viewRecipeDrafts.deactivatePublication({
+            recipeId,
+            expectedGenerationId,
+            actorPrincipalId: this.principal.principalId,
+          });
+          this.views.removeDynamic(recipeId);
+          return redirect(response, "/settings?layoutNotice=deactivated");
+        } catch (error) {
+          return redirect(response, `/settings?layoutNotice=${layoutPublicationNoticeForError(error)}`);
         }
       }
       const safetyAcknowledge = /^\/safety\/([^/]+)\/acknowledge$/.exec(url.pathname);
@@ -1486,6 +1646,7 @@ export class ProposalInboxHttpService extends Service {
       const selected = selectedDraftId === undefined
         ? undefined
         : this.viewRecipeDrafts.read(selectedDraftId, ownerPrincipalId);
+      const publications = this.viewRecipeDrafts.listActivePublications?.() ?? [];
       const list = summaries.length === 0
         ? `<p class="product-muted">还没有布局草稿。先为常用场景准备一个名称和布局描述。</p>`
         : `<ul class="product-layout-draft-list">${summaries.map((draft) => `<li><a href="/settings?layout=${encodeURIComponent(draft.draftId)}"><span><strong>${escapeTransportHtml(draft.label)}</strong><small>草稿版本 ${draft.revision} · ${escapeTransportHtml(layoutDraftUpdatedLabel(draft.updatedAt))}</small></span><span aria-hidden="true">›</span></a></li>`).join("")}</ul>`;
@@ -1495,10 +1656,31 @@ export class ProposalInboxHttpService extends Service {
       const previewHtml = selected !== undefined && preview
         ? renderLayoutDraftPreview(selected, model)
         : "";
+      const candidate = selected === undefined ? undefined : publicationCandidateFromDraft(selected);
+      const activeCandidate = candidate === undefined
+        ? undefined
+        : publications.find((item) => item.recipeId === candidate.provider.id);
+      const publicationControl = selected === undefined
+        ? ""
+        : candidate === undefined
+          ? `<div class="product-layout-publication-status"><strong>发布准备</strong><p>完成预览检查后即可发布这个草稿。</p></div>`
+          : !this.views.acceptsDynamic(candidate.provider.id)
+            ? `<div class="product-layout-publication-status" data-publication-state="provider-conflict"><strong>请选择新的布局 id</strong><p>这个标识由内置视图或部署视图持有。</p></div>`
+          : activeCandidate?.draftId === selected.draftId
+            && activeCandidate.draftRevision === selected.revision
+            && activeCandidate.recipeDigest === candidate.recipeDigest
+            ? `<div class="product-layout-publication-status" data-publication-state="current"><strong>当前草稿版本已发布</strong><p>它已在家庭视图选择器中可用。</p></div>`
+            : `<form class="product-layout-publish" method="post" action="/settings/layout-drafts/${encodeURIComponent(selected.draftId)}/publish"><input type="hidden" name="expectedRevision" value="${selected.revision}"><div><strong>${activeCandidate === undefined ? "发布为可用视图" : "发布这个更新"}</strong><p>发布只增加或更新可用视图，当前会话和设备默认保持原样。</p></div><button class="product-primary-action" type="submit">发布版本 ${selected.revision}</button></form>`;
+      const publicationList = publications.length === 0
+        ? `<p class="product-muted">发布完成的布局会出现在这里。</p>`
+        : `<ul class="product-layout-publication-list">${publications.map((item) => {
+            const canRollback = this.viewRecipeDrafts?.canRollbackPublication?.(item.recipeId, item.generationId) ?? false;
+            return `<li><div><strong>${escapeTransportHtml(item.title)}</strong><small>${escapeTransportHtml(item.recipeId)} · 草稿版本 ${item.draftRevision}</small></div><div class="product-layout-publication-actions"><a class="product-secondary-action" href="/settings?view=${encodeURIComponent(item.recipeId)}">查看视图</a>${canRollback ? `<form method="post" action="/settings/layout-publications/${encodeURIComponent(item.recipeId)}/rollback"><input type="hidden" name="expectedGenerationId" value="${escapeTransportHtml(item.generationId)}"><button class="product-secondary-action" type="submit">恢复上一版</button></form>` : ""}<details><summary>撤下</summary><form method="post" action="/settings/layout-publications/${encodeURIComponent(item.recipeId)}/deactivate"><input type="hidden" name="expectedGenerationId" value="${escapeTransportHtml(item.generationId)}"><button class="product-danger-action" type="submit">确认撤下视图</button></form></details></div></li>`;
+          }).join("")}</ul>`;
       const noticeHtml = notice === undefined
         ? ""
         : `<div class="product-layout-notice" data-layout-notice="${notice}" role="status"><strong>${escapeTransportHtml(layoutDraftNoticeTitle(notice))}</strong><p>${escapeTransportHtml(layoutDraftNoticeMessage(notice))}</p></div>`;
-      return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><header><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿保存在本机。预览只展示当前保存的版本，启用布局会走独立的发布流程。</p></div><span class="product-layout-capacity">${summaries.length}/32</span></header>${noticeHtml}<div class="product-layout-workspace-grid"><div><h3>我的草稿</h3>${list}</div><div><h3>${selected === undefined ? "建立布局草稿" : `编辑 · ${escapeTransportHtml(selected.label)}`}</h3>${editor}</div></div>${previewHtml}</section>`;
+      return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><header><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿保存在本机。预览只展示当前保存的版本，发布流程独立管理可用视图。</p></div><span class="product-layout-capacity">${summaries.length}/32</span></header>${noticeHtml}<div class="product-layout-workspace-grid"><div><h3>我的草稿</h3>${list}</div><div><h3>${selected === undefined ? "建立布局草稿" : `编辑 · ${escapeTransportHtml(selected.label)}`}</h3>${editor}${publicationControl}</div></div>${previewHtml}<div class="product-layout-publications"><header><div><h3>已发布视图</h3><p class="product-muted">发布版本与设备选择相互独立。</p></div><span>${publications.length}/16</span></header>${publicationList}</div></section>`;
     } catch {
       return `<section class="product-settings-section product-layout-workspace" aria-labelledby="layout-workspace-heading"><div><p class="product-kicker">高级设置</p><h2 id="layout-workspace-heading">布局工作室</h2><p class="product-muted">草稿存储正在恢复。连接恢复后可继续编辑。</p></div></section>`;
     }
@@ -1920,6 +2102,12 @@ function layoutDraftDeleteInput(body: string): number | undefined {
   return positiveInteger(form.get("expectedRevision"));
 }
 
+function layoutPublicationGenerationInput(body: string): string | undefined {
+  const form = new URLSearchParams(body);
+  if ([...form.keys()].some((key) => key !== "expectedGenerationId") || form.getAll("expectedGenerationId").length !== 1) return undefined;
+  return boundedLayoutDraftId(form.get("expectedGenerationId"));
+}
+
 function boundedLayoutDraftLabel(value: string | null): string | undefined {
   return value !== null
     && value.length >= 1
@@ -1936,7 +2124,19 @@ function boundedLayoutDraftSource(value: string | null): string | undefined {
     : undefined;
 }
 
-type LayoutDraftNotice = "input" | "capacity" | "creation" | "revision" | "missing" | "storage";
+type LayoutDraftNotice =
+  | "input"
+  | "capacity"
+  | "creation"
+  | "revision"
+  | "missing"
+  | "storage"
+  | "publication_capacity"
+  | "publication_conflict"
+  | "provider"
+  | "published"
+  | "rolled_back"
+  | "deactivated";
 
 function layoutDraftNoticeForError(error: unknown): LayoutDraftNotice {
   const code = errorCode(error);
@@ -1950,8 +2150,20 @@ function layoutDraftNoticeForError(error: unknown): LayoutDraftNotice {
 
 function boundedLayoutDraftNotice(value: string | null): LayoutDraftNotice | undefined {
   return value === "input" || value === "capacity" || value === "creation" || value === "revision" || value === "missing" || value === "storage"
+    || value === "publication_capacity" || value === "publication_conflict" || value === "provider"
+    || value === "published" || value === "rolled_back" || value === "deactivated"
     ? value
     : undefined;
+}
+
+function layoutPublicationNoticeForError(error: unknown): LayoutDraftNotice {
+  const code = errorCode(error);
+  if (code === "recipe_invalid" || code === "invalid_input") return "input";
+  if (code === "revision_conflict") return "revision";
+  if (code === "publication_capacity_full") return "publication_capacity";
+  if (code === "publication_conflict") return "publication_conflict";
+  if (code === "not_found") return "missing";
+  return "storage";
 }
 
 function layoutDraftNoticeTitle(notice: LayoutDraftNotice): string {
@@ -1962,6 +2174,12 @@ function layoutDraftNoticeTitle(notice: LayoutDraftNotice): string {
     case "revision": return "已载入草稿的新版本";
     case "missing": return "这份草稿已离开当前列表";
     case "storage": return "草稿存储正在恢复";
+    case "publication_capacity": return "已发布视图位置已全部使用";
+    case "publication_conflict": return "发布状态已有更新";
+    case "provider": return "这个视图标识已有归属";
+    case "published": return "布局版本已发布";
+    case "rolled_back": return "已恢复上一版布局";
+    case "deactivated": return "布局已从可用视图中撤下";
   }
 }
 
@@ -1973,11 +2191,32 @@ function layoutDraftNoticeMessage(notice: LayoutDraftNotice): string {
     case "revision": return "页面展示当前版本，请确认内容后继续编辑。";
     case "missing": return "请从当前草稿列表选择下一份内容。";
     case "storage": return "连接恢复后即可继续编辑，家庭视图保持原样。";
+    case "publication_capacity": return "撤下一个已发布视图后即可发布新的视图。";
+    case "publication_conflict": return "页面会展示当前发布版本，请确认后继续。";
+    case "provider": return "请选择新的布局 id；内置视图和部署视图保持原有归属。";
+    case "published": return "它已出现在家庭视图选择器中；当前会话和设备默认保持原样。";
+    case "rolled_back": return "家庭视图选择器现在使用上一发布版本。";
+    case "deactivated": return "使用该视图的浏览器会安全恢复到生活视图。";
   }
 }
 
 function layoutDraftUpdatedLabel(value: string): string {
   return `${value.slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function publicationCandidateFromDraft(draft: ProductViewRecipeDraft): {
+  readonly provider: ProductViewProvider;
+  readonly recipeDigest: `sha256:${string}`;
+} | undefined {
+  try {
+    const input = JSON.parse(draft.source);
+    const recipe = compileProductViewRecipe(input);
+    const report = runProductViewRecipeConformance(input);
+    if (!report.passed || report.recipeDigest === undefined || report.recipeId !== recipe.id) return undefined;
+    return Object.freeze({ provider: productViewProviderFromRecipe(recipe), recipeDigest: report.recipeDigest });
+  } catch {
+    return undefined;
+  }
 }
 
 function renderLayoutDraftPreview(draft: ProductViewRecipeDraft, model: ProductShellModel): string {

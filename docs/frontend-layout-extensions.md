@@ -424,6 +424,31 @@ grant, provider registration, default change, approval or device action. Activat
 later binds an exact draft revision and digest through its own permission and audit
 path. Private-device administrator access is the Phase 0 authoring boundary.
 
+### F2g exact publication generations
+
+Publishing makes one conformant recipe available in the Host view chooser; it does
+not select that view for the current browser or set a device default. The command is
+available only to a present administrator on a bound private device. It names one
+draft id and expected revision. The Hub reads that exact owner-scoped record, parses
+and compiles it again, runs conformance again and stores the immutable compiled source
+with its recipe id and `sha256:` digest as a publication generation.
+
+The private publication store retains at most 16 active recipe ids and 64 immutable
+generations, plus the latest 256 actor-attributed publication events. Publishing a
+newer generation for the same recipe id moves only the
+active pointer; the previous generation remains available for an explicit rollback.
+Rollback, deactivation and republishing each require an expected active generation
+and append an actor-attributed audit event. Deactivation removes the provider from
+the chooser while retaining bounded generation history. A browser that still names
+that provider follows the existing Host fallback to `builtin.life`.
+
+The runtime registry admits and replaces only providers produced from the Hub's
+active publication projection. Static built-ins and deployment contributions keep
+reserved ownership of their ids. Publication conflicts therefore fail before the
+active pointer changes. Draft deletion leaves published generations intact; editing
+a draft never mutates an active generation. Device selection and device default stay
+in their existing Host-owned paths.
+
 ## Failure and recovery
 
 - Provider 加载超时、崩溃、版本不兼容或被撤销：继续显示当前安全视图；不可用 provider

@@ -77,3 +77,32 @@ test("snapshots provider declarations at the Host registration boundary", () => 
   assert.equal(Object.isFrozen(registered.preferences), true);
   assert.equal(Object.isFrozen(registered.preferences?.[0]?.choices), true);
 });
+
+test("replaces and removes dynamic providers while preserving static ownership", () => {
+  const registry = new ProductViewRegistry([life, control], life.id);
+  const published = { id: "household.calm", label: "安静视图", renderContent: () => "generation-1" };
+
+  assert.equal(registry.acceptsDynamic(published.id), true);
+  assert.equal(registry.acceptsDynamic(life.id), false);
+  registry.upsertDynamic(published);
+  assert.equal(registry.acceptsDynamic(published.id), true);
+  assert.equal(registry.resolve(published.id).provider.renderContent({}, {}), "generation-1");
+  assert.deepEqual(registry.choices(), [
+    { id: life.id, label: life.label },
+    { id: control.id, label: control.label },
+    { id: published.id, label: published.label },
+  ]);
+  assert.equal(Object.isFrozen(registry.choices()), true);
+  assert.equal(Object.isFrozen(registry.choices()[0]), true);
+
+  registry.upsertDynamic({ ...published, label: "安静视图 2", renderContent: () => "generation-2" });
+  assert.equal(registry.resolve(published.id).provider.label, "安静视图 2");
+  assert.equal(registry.resolve(published.id).provider.renderContent({}, {}), "generation-2");
+  assert.equal(registry.removeDynamic(published.id), true);
+  assert.equal(registry.removeDynamic(published.id), false);
+  assert.equal(registry.resolve(published.id).recoveredFrom, published.id);
+
+  assert.throws(() => registry.upsertDynamic({ ...life, label: "替换内置视图" }), /static provider ownership/i);
+  assert.equal(registry.removeDynamic(life.id), false);
+  assert.equal(registry.resolve(life.id).provider.label, life.label);
+});

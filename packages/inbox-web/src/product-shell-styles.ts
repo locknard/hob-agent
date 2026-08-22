@@ -452,6 +452,20 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-layout-delete summary { min-height: 2.5rem; display: flex; align-items: center; justify-content: end; cursor: pointer; font-weight: 700; }
 .product-layout-delete > div { display: grid; gap: .65rem; justify-items: end; padding: .75rem; border: 1px solid color-mix(in srgb, var(--shell-red) 30%, var(--shell-rule)); border-radius: .75rem; background: var(--shell-red-soft); }
 .product-layout-delete p { margin: 0; }
+.product-layout-publish, .product-layout-publication-status { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem; border: 1px solid color-mix(in srgb, var(--shell-blue) 28%, var(--shell-rule)); border-radius: .8rem; background: var(--shell-blue-soft); }
+.product-layout-publish p, .product-layout-publication-status p { margin: .1rem 0 0; color: var(--shell-muted); font-size: .84rem; }
+.product-layout-publications { display: grid; gap: .65rem; min-width: 0; padding: 1rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); background: var(--shell-surface); }
+.product-layout-publications > header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.product-layout-publications > header h3 { margin: 0; }
+.product-layout-publications > header > span { color: var(--shell-blue); font-size: .82rem; font-weight: 760; font-variant-numeric: tabular-nums; }
+.product-layout-publication-list { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+.product-layout-publication-list > li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-block: .65rem; border-block-start: 1px solid var(--shell-rule); }
+.product-layout-publication-list > li > div:first-child { display: grid; gap: .1rem; min-width: 0; }
+.product-layout-publication-list small { overflow: hidden; color: var(--shell-muted); font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+.product-layout-publication-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: end; gap: .45rem; }
+.product-layout-publication-actions form { margin: 0; }
+.product-layout-publication-actions details summary { min-height: 2.7rem; display: flex; align-items: center; padding-inline: .75rem; cursor: pointer; font-weight: 700; }
+.product-layout-publication-actions details[open] { display: grid; gap: .45rem; justify-items: end; }
 .product-layout-preview { display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; min-width: 0; max-width: 100%; padding: 1rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); background: var(--shell-bg); }
 .product-layout-preview > header { min-width: 0; }
 .product-layout-preview code { flex: 0 1 28rem; min-width: 0; max-width: 100%; overflow: hidden; color: var(--shell-muted); font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
@@ -573,6 +587,8 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-settings-section { grid-template-columns: minmax(0, 1fr); gap: .8rem; }
   .product-layout-workspace-grid { grid-template-columns: minmax(0, 1fr); }
   .product-layout-preview > header { flex-direction: column; }
+  .product-layout-publish, .product-layout-publication-list > li { align-items: stretch; flex-direction: column; }
+  .product-layout-publication-actions { justify-content: start; }
   .product-layout-preview-canvas { min-height: 28rem; }
   .product-view-default-reset { grid-column: 1; }
   .product-presentation-preference { grid-template-columns: minmax(0, 1fr); }
@@ -623,6 +639,8 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-view-default-list li { align-items: start; flex-direction: column; }
   .product-layout-workspace > header { flex-direction: column; }
   .product-layout-editor-actions > * { width: 100%; }
+  .product-layout-publish button, .product-layout-publication-actions > * { width: 100%; }
+  .product-layout-publication-actions a, .product-layout-publication-actions button, .product-layout-publication-actions details summary { width: 100%; justify-content: center; }
   .product-layout-preview-canvas { min-height: 24rem; }
 }
 
