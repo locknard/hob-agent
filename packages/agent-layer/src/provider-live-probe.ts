@@ -72,6 +72,9 @@ function dshFailureError(reason: Extract<StreamChunk, { type: "finish" }>['reaso
     if (code.includes("RATE") || code.includes("QUOTA")) return new Error("DSH provider rate limit exceeded");
     if (code.includes("TIMEOUT")) return new Error("DSH provider request timed out");
     if (code.includes("OVERLOAD") || code.includes("CAPACITY")) return new Error("DSH provider overloaded");
+    if (code === "TRANSPORT" || /ssl[_ ]|tls|certificate|econn(?:refused|reset)|enotfound|eai_again|socket hang up|network|fetch failed|connection (?:refused|reset)/i.test(reason.failure.message)) {
+      return new Error("DSH provider network failed");
+    }
     if (code.includes("INVALID") || code.includes("UNSUPPORTED") || code.includes("FORMAT")) {
       return new Error("DSH provider returned an invalid request");
     }

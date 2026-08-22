@@ -57,6 +57,19 @@ test("classifies a DSH terminal failure without retaining provider details", asy
   assert.deepEqual(result, { model: "claude/claude-sonnet-4-6", status: "auth", latencyMs: 0 });
 });
 
+test("classifies a DSH transport finish as network without retaining transport details", async () => {
+  const result = await probeLiveProvider("custom", "home-model", async () => ({
+    resolveModelInfo: async () => ({ provider: "hob-custom-openai", id: "home-model", name: "Home model" }),
+    stream: () => (async function* (): AsyncIterable<StreamChunk> {
+      yield {
+        type: "finish",
+        reason: { kind: "error", failure: { code: "PI_AI_ERROR", message: "LibreSSL SSL_connect: SSL_ERROR_SYSCALL at private endpoint" } },
+      };
+    })(),
+  }), () => 20, undefined, "https://models.example.test/v1");
+  assert.deepEqual(result, { model: "custom/home-model", status: "network", latencyMs: 0 });
+});
+
 test("accepts max-tokens as a successful provider connection", async () => {
   const result = await probeLiveProvider("deepseek", "deepseek-v4-flash", async () => ({
     resolveModelInfo: async () => ({ provider: "deepseek", id: "deepseek-v4-flash", name: "DeepSeek" }),
