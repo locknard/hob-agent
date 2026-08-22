@@ -27,7 +27,7 @@ export interface ProductBootstrapConfiguration extends ProductBootstrapConfigDra
   readonly activatedAt: string;
 }
 
-/** Durable non-secret product generation used by the single production launch path. */
+/** Durable non-secret generation owned by the single production composition root. */
 export class ProductBootstrapConfigStore {
   private readonly path: string;
   private readonly lockPath: string;

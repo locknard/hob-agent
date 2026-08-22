@@ -25,7 +25,7 @@ import {
 } from "./model-credential-profile.js";
 import { MusicAssistantMediaCatalogProvider } from "./media/music-assistant-media-provider.js";
 import { MusicAssistantWebSocketSearchClient } from "./media/music-assistant-websocket-client.js";
-import { ProductBootstrapConfigStore } from "./home/product-bootstrap-config-store.js";
+import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
 
 type ActionAuthorityConfig = Readonly<Record<string, ActionAuthorityConfiguration>>;
 

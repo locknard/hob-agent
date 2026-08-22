@@ -12,7 +12,7 @@ import {
   resolveHomeHubProcessOptions,
 } from "./main.js";
 import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
-import { ProductBootstrapConfigStore } from "./home/product-bootstrap-config-store.js";
+import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
 
 const ENV = {
   HOB_DATA_DIR: "/tmp/hob-agent-main-test",

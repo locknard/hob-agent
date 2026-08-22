@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
 
-test("commits and reloads one owner-only non-secret product configuration generation", async () => {
+test("commits and reloads one composition-root product configuration generation", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-product-config-"));
   try {
     const store = new ProductBootstrapConfigStore(directory);
