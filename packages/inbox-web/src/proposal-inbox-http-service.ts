@@ -2766,7 +2766,9 @@ function onboardingContinueInput(body: string): OnboardingCommand | undefined {
       return one("mapConfirmed") !== "confirmed" ? undefined : { step: 3, kind: "confirm_map", confirmed: true, ...(one("mapCorrection") === undefined ? {} : { correction: one("mapCorrection") }) };
     case 4: {
       const memberName = one("memberName");
-      return memberName === undefined || one("memberRole") !== "adult_admin" ? undefined : { step: 4, kind: "bind_private_device", memberName, role: "adult_admin" };
+      // The binding has exactly one shape, so the server supplies the
+      // compatibility command value instead of asking the household to pick it.
+      return memberName === undefined ? undefined : { step: 4, kind: "bind_private_device", memberName, role: "adult_admin" };
     }
     case 5: {
       const selections = Object.entries(fieldsByName)
@@ -2810,7 +2812,7 @@ const ONBOARDING_FIELDS_BY_STEP: Readonly<Record<number, readonly string[]>> = {
   1: ["agentName", "householdName"],
   2: ["bridgeId", "bridgeMode"],
   3: ["mapConfirmed", "mapCorrection"],
-  4: ["memberName", "memberRole"],
+  4: ["memberName"],
   5: [],
   6: ["safetyAcknowledged"],
   7: ["observationEnabled", "observationInterval", "quietHoursStart", "quietHoursEnd"],
@@ -2833,7 +2835,6 @@ const ONBOARDING_OPTIONAL_FIELDS = new Set([
 const ONBOARDING_FIELD_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   bridgeMode: ["read_only"],
   mapConfirmed: ["confirmed"],
-  memberRole: ["adult_admin"],
   safetyAcknowledged: ["understood"],
   observationEnabled: ["enabled"],
 };

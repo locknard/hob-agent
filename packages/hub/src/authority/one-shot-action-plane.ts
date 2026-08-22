@@ -396,7 +396,7 @@ export class OneShotActionPlane {
         ticket: this.cloneTicket(ticket),
       };
     }
-    if (!isEligible(actor, ticket.policyClass)) {
+    if (!isEligible(actor)) {
       return { status: "denied", reason: "unauthorized", ticket: this.cloneTicket(ticket) };
     }
     const approved = this.updateTicket(ticket.id, (current) => ({
@@ -415,7 +415,7 @@ export class OneShotActionPlane {
     const ticket = this.state.tickets.find((item) => item.id === normalizedTicketId);
     return ticket?.status === "pending_confirmation"
       && !this.isExpired(ticket)
-      && isEligible(normalizedActor, ticket.policyClass);
+      && isEligible(normalizedActor);
   }
 
   reject(input: {
@@ -437,7 +437,7 @@ export class OneShotActionPlane {
         ticket: this.cloneTicket(ticket),
       };
     }
-    if (!isEligible(actor, ticket.policyClass)) {
+    if (!isEligible(actor)) {
       return { status: "denied", reason: "unauthorized", ticket: this.cloneTicket(ticket) };
     }
     const rejected = this.updateTicket(ticket.id, (current) => ({
@@ -848,13 +848,17 @@ function validateActor(value: OneShotActionActor): OneShotActionActor {
   };
 }
 
-function isEligible(actor: OneShotActionActor, policyClass: "direct" | "confirmation" | "administrator"): boolean {
-  if (policyClass === "administrator") {
-    return (actor.role === "admin" || actor.role === "adult_member")
-      && actor.device.kind === "private"
-      && actor.device.boundPrincipalId === actor.principalId;
-  }
-  return actor.present && (actor.role === "admin" || actor.role === "adult_member");
+/**
+ * DR-017: the household is one trust domain. Every pending confirmation —
+ * confirmation class and the protected class (wire name `administrator`) —
+ * is approved by a present member on a private device bound to themselves.
+ * The policy class describes the action's consequence and disclosure; it
+ * never changes who may confirm.
+ */
+function isEligible(actor: OneShotActionActor): boolean {
+  return actor.present
+    && actor.device.kind === "private"
+    && actor.device.boundPrincipalId === actor.principalId;
 }
 
 function deriveInverse(action: OneShotAction, before: OneShotActionValue): OneShotAction | undefined {

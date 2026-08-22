@@ -46,6 +46,7 @@ export interface ProposalDeploymentPort {
     readonly kind: CreateProposalInput["kind"];
     readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
     readonly actionPolicyClasses?: readonly string[];
+    readonly confirmationDeviceNames?: readonly string[];
   }): ProposalDeploymentIntent
     | { readonly reason: string }
     | { readonly revalidationReason: string; readonly updatedGateDisclosure?: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
@@ -387,6 +388,7 @@ export class HomeProposalService extends Service {
           kind: current.kind,
           ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
           ...(current.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: current.actionPolicyClasses }),
+          ...(current.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: current.confirmationDeviceNames }),
         })
       : undefined;
     const enabling = this.store.beginDeploymentRetry({
@@ -423,6 +425,7 @@ export class HomeProposalService extends Service {
           kind: current.kind,
           ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
           ...(current.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: current.actionPolicyClasses }),
+          ...(current.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: current.confirmationDeviceNames }),
         })
       : undefined;
     if (resolved !== undefined && "blockedReason" in resolved) {

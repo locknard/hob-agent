@@ -2270,7 +2270,7 @@ test("resumes the persisted onboarding checkpoint and continues only valid steps
     const continued = await fetch(`${ctx.homeInboxHttp.origin}/onboarding/continue`, {
       method: "POST",
       headers,
-      body: "step=4&memberName=%E5%B0%8F%E9%9B%A8&memberRole=adult_admin",
+      body: "step=4&memberName=%E5%B0%8F%E9%9B%A8",
       redirect: "manual",
     });
     assert.equal(continued.status, 303);

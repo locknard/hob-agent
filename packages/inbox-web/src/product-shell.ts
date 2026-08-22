@@ -99,6 +99,8 @@ export interface ProductProposal {
   readonly gateClasses?: readonly ("direct" | "confirmation")[];
   /** Household names of the confirmation-class devices, for concrete disclosure. */
   readonly confirmationDeviceNames?: readonly string[];
+  /** The plan cannot enable right now; the card stops honestly and says why. */
+  readonly enableBlockedReason?: string;
   readonly risk?: string;
   readonly afterEnable?: string;
   readonly snoozeCount?: number;
@@ -454,7 +456,7 @@ const MOBILE_ROUTE_LABELS: Readonly<Record<ProductShellRoute, string>> = {
   onboarding: "首次设置",
 };
 
-const STEP_LABELS = ["认识与起名", "只读接桥", "家庭地图", "家人与手机", "分档操作权限", "安全预演", "第一周期待", "第一问"] as const;
+const STEP_LABELS = ["认识与起名", "只读接桥", "家庭地图", "家人与手机", "动作怎么确认", "安全预演", "第一周期待", "第一问"] as const;
 
 const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
   {
@@ -514,14 +516,7 @@ const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
     title: "家里都有谁",
     body: "用一台绑定到本人的私人手机完成设置，需要确认的动作以后都会推送到这台手机。",
     fields: [
-      { name: "memberName", type: "text", label: "这位成员怎么称呼", placeholder: "比如：小雨", required: true },
-      {
-        name: "memberRole",
-        type: "select",
-        label: "成员身份",
-        required: true,
-        options: [{ value: "adult_admin", label: "本人手机 · 家庭确认" }],
-      },
+      { name: "memberName", type: "text", label: "这位家人怎么称呼", placeholder: "比如：小雨", required: true },
     ],
     submitLabel: "继续",
     note: "先绑定一位家人的手机，其他家人随后在设置中加入。",
@@ -530,10 +525,10 @@ const DEFAULT_ONBOARDING_STEPS: readonly ProductOnboardingStepData[] = [
     step: 5,
     key: "permissions",
     label: STEP_LABELS[4],
-    title: "设置操作权限",
-    body: "逐项选择真实设备能力的权限级别；这里的建议只帮助你开始，最终权限以你的选择为准。",
+    title: "这些动作怎么确认",
+    body: "逐项决定每个动作要不要先问你；这里的建议只帮助你开始，最终以你的选择为准。",
     fields: [],
-    submitLabel: "保存操作权限",
+    submitLabel: "保存确认方式",
     note: "家庭能力列表会在只读同步完成后出现。",
   },
   {
@@ -947,8 +942,9 @@ function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
 }
 
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
-  const statusLabel = proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
-  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${renderLaterForm(proposal)}</div></article>`;
+  const blocked = proposal.kind !== "household-insight" && proposal.enableBlockedReason !== undefined;
+  const statusLabel = blocked ? "暂时无法启用" : proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
+  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${blocked ? "" : renderLaterForm(proposal)}</div></article>`;
 }
 
 function renderInsightCardActions(proposal: ProductProposal): string {
@@ -979,12 +975,15 @@ function renderProposalDetail(proposal: ProductProposal): string {
     ? ""
     : `<details class="product-agent-journey"><summary>这条建议怎么得来的</summary>${renderAgentLoopTimeline(proposal.trace)}</details>`;
   const preparing = proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info";
+  const blocked = !insight && !preparing && proposal.enableBlockedReason !== undefined;
   const decide = insight
     ? renderInsightActions(proposal)
     : preparing
       ? `<p class="product-muted">正在后台准备：核对证据、检查冲突、确认权限。备好后它会来找你，现在不用做任何决定。</p>`
-      : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停，或关闭并移除；它从不改动你原有的规则。</p>`;
-  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
+      : blocked
+        ? `<p class="product-blocked-reason">${escapeHtml(proposal.enableBlockedReason)}</p><div class="product-card-actions">${conversationEntry(proposal)}${declineDisclosure(proposal)}</div>`
+        : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停，或关闭并移除；它从不改动你原有的规则。</p>`;
+  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : blocked ? "暂时无法启用" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight || blocked ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
 }
 
 function enableForm(proposal: ProductProposal): string {

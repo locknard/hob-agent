@@ -27,6 +27,8 @@ const content = {
 function bridgeStub(overrides: {
   readonly deployResult?: unknown;
   readonly resolvable?: boolean;
+  readonly authority?: { status: string; policyClass?: string };
+  readonly deviceName?: string;
 } = {}) {
   const calls: { deploys: BridgeAutomationSpec[]; toggles: unknown[]; withdrawals: unknown[] } = {
     deploys: [], toggles: [], withdrawals: [],
@@ -57,8 +59,8 @@ function bridgeStub(overrides: {
       automationBridgeForTargets: (ids: readonly string[]) => (overrides.resolvable ?? true) && ids.length > 0 ? bridge : bridge,
       automationBridgeById: (bridgeId: string) => bridgeId === "ha-main" ? bridge : undefined,
       automationsHandleFor: (bridgeId: string) => bridgeId === "ha-main" ? bridge.automations : undefined,
-      resolveActionAuthority: () => ({ status: "available", policyClass: "direct" }),
-      capabilityDeviceName: () => undefined,
+      resolveActionAuthority: () => (overrides.authority ?? { status: "available", policyClass: "direct" }),
+      capabilityDeviceName: () => overrides.deviceName,
     },
   };
 }
@@ -89,6 +91,51 @@ test("compiles the neutral artifact with resolved bindings and reports a verifie
   assert.equal((spec.actions[0] as { target: { binding: { nativeId: string } } }).target.binding.nativeId, "dev-hwc-strip");
 });
 
+
+test("the approval binds the named confirmation devices, not only the class set", () => {
+  const confirming = new BridgeAutomationDeployment(
+    bridgeStub({ authority: { status: "available", policyClass: "confirmation" }, deviceName: "插座（多媒体室）" }).world,
+  );
+  const request = {
+    proposalId: "p-disclosure", kind: "automation-draft",
+    artifactCandidate: { schemaVersion: "1" as const, content },
+    actionPolicyClasses: ["confirmation"],
+  };
+
+  const swapped = confirming.resolveIntent({ ...request, confirmationDeviceNames: ["空调（客厅）"] });
+  assert.ok("revalidationReason" in swapped, "a changed confirmation device set re-prepares");
+  assert.match((swapped as { revalidationReason: string }).revalidationReason, /需要确认的设备已变化/);
+  assert.deepEqual(
+    (swapped as { updatedGateDisclosure?: { confirmationDeviceNames?: readonly string[] } }).updatedGateDisclosure?.confirmationDeviceNames,
+    ["插座（多媒体室）"],
+  );
+
+  const unchanged = confirming.resolveIntent({ ...request, confirmationDeviceNames: ["插座（多媒体室）"] });
+  assert.ok("deploymentId" in unchanged, "an unchanged disclosure converges to the intent");
+
+  const classShift = confirming.resolveIntent({ ...request, actionPolicyClasses: ["direct"], confirmationDeviceNames: [] });
+  assert.ok("revalidationReason" in classShift);
+  assert.match((classShift as { revalidationReason: string }).revalidationReason, /确认档位已变化/);
+});
+
+test("blocked enablement names the actual household fact", () => {
+  const request = {
+    proposalId: "p-blocked", kind: "automation-draft",
+    artifactCandidate: { schemaVersion: "1" as const, content },
+    actionPolicyClasses: ["direct"],
+  };
+  const unavailable = new BridgeAutomationDeployment(bridgeStub({ authority: { status: "unavailable" } }).world)
+    .resolveIntent(request);
+  assert.ok("blockedReason" in unavailable);
+  assert.match((unavailable as { blockedReason: string }).blockedReason, /暂时无法执行动作/);
+
+  const protectedNow = new BridgeAutomationDeployment(
+    bridgeStub({ authority: { status: "available", policyClass: "administrator" } }).world,
+  ).resolveIntent(request);
+  assert.ok("blockedReason" in protectedNow);
+  assert.match((protectedNow as { blockedReason: string }).blockedReason, /高影响保护/);
+});
+
 test("fails in household language when no bridge, no binding, or the adapter rejects", async () => {
   const noBridge = new BridgeAutomationDeployment({
     automationBridgeForTargets: () => undefined,
@@ -112,6 +159,7 @@ test("fails in household language when no bridge, no binding, or the adapter rej
     proposalId: "p2", revision: 1, kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
     intent: { deploymentId: "hob_p", target: "ha-main", targets: [
+      { hwCapabilityId: "hwc-presence", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-presence", nativeInstanceId: "ent-hwc-presence" } },
       { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
     ] },
   });
@@ -125,12 +173,26 @@ test("fails in household language when no bridge, no binding, or the adapter rej
     proposalId: "p3", revision: 1, kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
     intent: { deploymentId: "hob_p3", target: "ha-main", targets: [
+      { hwCapabilityId: "hwc-presence", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-presence", nativeInstanceId: "ent-hwc-presence" } },
       { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
     ] },
   });
   assert.equal(rejected.status, "failed");
   assert.match((rejected as { reason: string }).reason, /暂不支持/);
   assert.doesNotMatch((rejected as { reason: string }).reason, /entity|api|http/i);
+});
+
+test("deploy fails closed when the intent no longer covers the plan's capabilities", async () => {
+  const port = new BridgeAutomationDeployment(bridgeStub().world);
+  const partial = await port.deploy({
+    proposalId: "p-partial", revision: 1, kind: "automation-draft", title: "t",
+    artifactCandidate: { schemaVersion: "1", content },
+    intent: { deploymentId: "hob_p_partial", target: "ha-main", targets: [
+      { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
+    ] },
+  });
+  assert.equal(partial.status, "failed");
+  assert.match((partial as { reason: string }).reason, /方案内容与批准时的意图不一致/);
 });
 
 test("pause, resume and withdraw address only the hub deployment", async () => {

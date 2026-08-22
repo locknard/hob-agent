@@ -276,7 +276,8 @@ test("confirmation waits for an eligible present member and expires fail-closed"
   assert.equal(pending.status, "pending_confirmation");
   assert.equal(fixtureValue.executed.length, 0);
   assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, member), true);
-  assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, child), false);
+  assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, child), true, "a child on their own bound phone confirms");
+  assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, sharedAdult), false, "a shared screen never confirms");
 
   fixtureValue.advance(11);
   assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, member), false);
@@ -312,7 +313,7 @@ test("runtime rejection closes one request without creating a persistent latch",
   assert.equal(fixtureValue.plane.activities().some((item) => item.kind === "confirmation_rejected"), true);
 });
 
-test("administrator actions require a bound private admin device", async () => {
+test("protected actions require a bound private device from any present member", async () => {
   const fixtureValue = fixture({ policyClass: "administrator", ttlMs: 10_000 });
   const pending = await fixtureValue.plane.request({
     requestId: "request-admin",
@@ -331,7 +332,9 @@ test("administrator actions require a bound private admin device", async () => {
   assert.equal(approved.status, "verified");
   assert.equal(fixtureValue.executed.length, 1);
 
-  for (const [index, unauthorizedActor] of [sharedAdult, unboundAdult, child, guest].entries()) {
+  const notPresent: OneShotActionActor = { ...member, present: false };
+  const boundToOther: OneShotActionActor = { ...member, device: { kind: "private", boundPrincipalId: "someone-else" } };
+  for (const [index, unauthorizedActor] of [sharedAdult, unboundAdult, notPresent, boundToOther].entries()) {
     const next = fixture({ policyClass: "administrator", ttlMs: 10_000 });
     const nextPending = await next.plane.request({
       requestId: `request-admin-${index + 2}`,
@@ -356,6 +359,19 @@ test("administrator actions require a bound private admin device", async () => {
   assert.equal(adultPending.status, "pending_confirmation");
   const adultApproved = await adultBoundFixture.plane.approve({ ticketId: adultPending.ticket.id, actor: member });
   assert.equal(adultApproved.status, "verified");
+
+  for (const [index, eligibleActor] of [child, guest].entries()) {
+    const next = fixture({ policyClass: "administrator", ttlMs: 10_000 });
+    const nextPending = await next.plane.request({
+      requestId: `request-admin-eligible-${index + 1}`,
+      capabilityId: "cap-water",
+      action: action(true),
+      actor: member,
+    });
+    assert.equal(nextPending.status, "pending_confirmation");
+    const nextApproved = await next.plane.approve({ ticketId: nextPending.ticket.id, actor: eligibleActor });
+    assert.equal(nextApproved.status, "verified", "any present member on their own bound phone confirms a protected action");
+  }
 });
 
 test("failed and unknown outcomes never expose undo", async () => {

@@ -401,6 +401,78 @@ test("clears a do-not-suggest latch only through an explicit audited governance 
   }
 });
 
+test("the store refuses a malformed deployment intent at the door", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const ready = prepareToReady(store, store.create(input({ artifactCandidate, idempotencyKey: "intent-invariants" })).id);
+    const binding = { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" };
+    const decide = (targets: unknown) => store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_x", target: "ha-main", targets: targets as never },
+    });
+    assert.throws(() => decide([]), /targets are invalid/);
+    assert.throws(() => decide([
+      { hwCapabilityId: "hwc-4", binding },
+      { hwCapabilityId: "hwc-4", binding },
+    ]), /must be unique/);
+    assert.throws(() => decide([
+      { hwCapabilityId: "hwc-4", binding: { ...binding, bridgeId: "another-bridge" } },
+    ]), /intent target bridge/);
+    assert.throws(() => decide([
+      { hwCapabilityId: "", binding },
+    ]), /capability is invalid/);
+  } finally {
+    store.close();
+  }
+});
+
+test("demoted and enable-blocked proposals survive read-back and a store reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-revalidation-readback-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const demotedReady = prepareToReady(store, store.create(input({ artifactCandidate, idempotencyKey: "readback-demote" })).id);
+    const demoted = store.returnToPreparation({
+      proposalId: demotedReady.id,
+      expectedRevision: demotedReady.revision,
+      actor: "system",
+      note: "确认档位变化",
+      updatedGateDisclosure: { actionPolicyClasses: ["direct", "confirmation"], confirmationDeviceNames: ["空调（客厅）"] },
+    });
+    assert.equal(demoted.lifecycle, "preparing");
+    const demotedAgain = store.get(demoted.id);
+    assert.equal(demotedAgain?.lifecycle, "preparing");
+    assert.equal(demotedAgain?.revision, demoted.revision);
+    assert.deepEqual(demotedAgain?.confirmationDeviceNames, ["空调（客厅）"]);
+
+    const blockedReady = prepareToReady(store, store.create(input({ dedupKey: "readback-block", idempotencyKey: "readback-block", artifactCandidate })).id);
+    const blocked = store.markEnableBlocked({
+      proposalId: blockedReady.id,
+      expectedRevision: blockedReady.revision,
+      actor: "system",
+      reason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。",
+    });
+    assert.equal(blocked.lifecycle, "ready");
+    const blockedAgain = store.get(blocked.id);
+    assert.equal(blockedAgain?.enableBlockedReason, blocked.enableBlockedReason);
+    assert.equal(blockedAgain?.lifecycle, "ready");
+
+    store.close();
+    const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+    try {
+      assert.equal(reopened.get(demoted.id)?.lifecycle, "preparing");
+      assert.equal(reopened.get(blocked.id)?.enableBlockedReason, blocked.enableBlockedReason);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { store.close(); } catch { /* already closed on the happy path */ }
+  }
+});
+
 test("prepares before the inbox and turns one decision into a verified automation", () => {
   const now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
@@ -426,7 +498,7 @@ test("prepares before the inbox and turns one decision into a verified automatio
       expectedRevision: ready.revision,
       decision: "approve",
       reviewer: "household-owner",
-      deploymentIntent: { deploymentId: "hob_one_decision", target: "home-assistant", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
+      deploymentIntent: { deploymentId: "hob_one_decision", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
     });
     assert.equal(enabling.lifecycle, "enabling");
     assert.equal(enabling.status, "approved");
@@ -436,7 +508,7 @@ test("prepares before the inbox and turns one decision into a verified automatio
     const active = store.recordProposalDeployment({
       proposalId: enabling.id,
       expectedRevision: enabling.revision,
-      outcome: { status: "verified", deploymentId: "hob_one_decision", target: "home-assistant" },
+      outcome: { status: "verified", deploymentId: "hob_one_decision", target: "ha-main" },
     });
     assert.equal(active.lifecycle, "active");
     assert.equal(active.applicationStatus, "running");

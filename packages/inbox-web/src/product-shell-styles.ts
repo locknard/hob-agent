@@ -258,6 +258,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-readiness { display: flex; flex-wrap: wrap; gap: .4rem .9rem; margin: .1rem 0 .9rem; padding: 0; list-style: none; color: var(--shell-green); font-size: .84rem; font-weight: 650; }
 .product-readiness li::before { content: "✓ "; }
 .product-gate-disclosure { margin: .2rem 0 0; padding: .6rem .8rem; border-radius: .7rem; background: var(--shell-amber-soft); color: var(--shell-amber); font-size: .86rem; font-weight: 650; }
+.product-blocked-reason { margin: .2rem 0 0; padding: .6rem .8rem; border-radius: .7rem; background: var(--shell-amber-soft); color: var(--shell-amber); font-size: .88rem; font-weight: 650; }
 .product-detail-risk, .product-detail-after { margin: .2rem 0 0; color: var(--shell-muted); font-size: .88rem; }
 .product-automation-list { display: grid; gap: 1rem; }
 .product-automation-card h2 { margin: .35rem 0 .3rem; }

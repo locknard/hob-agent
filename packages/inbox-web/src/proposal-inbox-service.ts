@@ -1280,6 +1280,9 @@ function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDe
     ...(proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info" || proposal.lifecycle === "ready"
       ? { lifecycle: proposal.lifecycle }
       : {}),
+    ...(typeof proposal.enableBlockedReason === "string" && proposal.enableBlockedReason.length > 0
+      ? { enableBlockedReason: proposal.enableBlockedReason.slice(0, 1_000) }
+      : {}),
     snoozeCount: proposal.snoozeCount ?? 0,
     newEvidence: proposal.newEvidence ?? false,
     ...(trace === undefined ? {} : { trace }),

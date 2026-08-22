@@ -533,7 +533,7 @@ test("keeps control, settings, and onboarding as reachable server-rendered desti
   assert.match(settings, /家庭设置/);
   assert.match(settings, /继续首次设置/);
   assert.match(onboarding, /第 5 步，共 8 步/);
-  assert.match(onboarding, /设置操作权限/);
+  assert.match(onboarding, /这些动作怎么确认/);
   assert.match(onboarding, /action="\/onboarding\/continue"/);
 });
 
@@ -842,7 +842,7 @@ test("renders all eight onboarding steps with clear server-postable fields", () 
     [2, /只读接桥|接入已有的家|只读/, /name="bridgeId"/],
     [3, /家庭地图|确认现在的家/, /name="mapConfirmed"/],
     [4, /家人与手机|家里都有谁/, /name="memberName"/],
-    [5, /分档操作权限|设置操作权限/, /家庭能力列表正在准备|name="capability:/],
+    [5, /动作怎么确认|这些动作怎么确认/, /家庭能力列表正在准备|name="capability:/],
     [6, /安全预演|红色的规矩/, /name="safetyAcknowledged"/],
     [7, /第一周期待|第一周/, /name="observationInterval"/],
     [8, /第一问|跟阿灶说句话/, /name="firstQuestion"/],
@@ -1099,6 +1099,37 @@ test("presents a prepared plan as one decision with three honest choices", () =>
   assert.match(html, /在对话里改/);
   assert.match(html, /需要确认的设备（空调（客厅））：这次启用就是你的授权/);
   assert.doesNotMatch(html, /修改…|试运行|两次确认|同意方向|确认方向/);
+});
+
+test("a blocked plan stops honestly with only the revise and decline exits", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    proposals: [{
+      id: "media-power",
+      revision: 4,
+      title: "睡前自动关掉多媒体室电源",
+      lifecycle: "ready",
+      enableBlockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。",
+    }],
+    selectedProposalId: "media-power",
+    selectedProposal: {
+      id: "media-power",
+      revision: 4,
+      title: "睡前自动关掉多媒体室电源",
+      lifecycle: "ready",
+      why: ["连续 12 天，你在 23:00 后手动关多媒体室插线板"],
+      enableBlockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。",
+    },
+  }));
+
+  assert.match(html, /暂时无法启用/);
+  assert.match(html, /方案里有设备的动作已进入高影响保护/);
+  assert.match(html, /在对话里改/);
+  assert.match(html, /仅这次不要/);
+  assert.match(html, /不再提这件事/);
+  assert.doesNotMatch(html, />启用</);
+  assert.doesNotMatch(html, /以后再说/);
+  assert.doesNotMatch(html, /启用后：/, "a blocked plan makes no after-enable promise");
 });
 
 test("keeps a preparing plan out of decision reach", () => {

@@ -2468,7 +2468,7 @@ function requiresPreparation(input: Pick<CreateProposalInput, "kind" | "artifact
 const PREPARABLE_LIFECYCLES: readonly ProposalLifecycle[] = ["preparing", "needs_info", "ready"];
 const PENDING_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "created", "evidence_merged", "snoozed", "snooze_elapsed",
-  "prepared", "info_requested", "deployment_retried",
+  "prepared", "info_requested", "revalidation_required", "deployment_retried",
 ];
 const APPROVED_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "approved", "deployment_verified", "deployment_failed", "deployment_retried", "drift_detected", "drift_restored", "paused", "resumed", "closed",
@@ -2535,6 +2535,32 @@ function validateDecideInput(input: ProposalDecideInput): void {
   if (reviewer !== undefined) validateBoundedKey(reviewer, "proposal decision reviewer");
   if (input.note !== undefined && (typeof input.note !== "string" || input.note.trim().length === 0 || input.note.length > 1_000)) {
     throw new TypeError("proposal decision note is invalid");
+  }
+  if (input.deploymentIntent !== undefined) validateDeploymentIntent(input.deploymentIntent);
+}
+
+/**
+ * The persisted intent is the deployment's contract, so the store refuses a
+ * malformed one at the door: bounded identifiers, no duplicate capabilities,
+ * and every binding living on the intent's own target bridge.
+ */
+function validateDeploymentIntent(intent: ProposalDeploymentIntent): void {
+  validateBoundedKey(intent?.deploymentId, "deployment intent id");
+  validateBoundedKey(intent?.target, "deployment intent target");
+  if (!Array.isArray(intent.targets) || intent.targets.length === 0 || intent.targets.length > 64) {
+    throw new TypeError("deployment intent targets are invalid");
+  }
+  const seen = new Set<string>();
+  for (const target of intent.targets) {
+    validateBoundedKey(target?.hwCapabilityId, "deployment intent capability");
+    validateBoundedKey(target?.binding?.bridgeId, "deployment intent binding bridge");
+    validateBoundedKey(target?.binding?.nativeId, "deployment intent binding device");
+    validateBoundedKey(target?.binding?.nativeInstanceId, "deployment intent binding instance");
+    if (target.binding.bridgeId !== intent.target) {
+      throw new TypeError("deployment intent binding must live on the intent target bridge");
+    }
+    if (seen.has(target.hwCapabilityId)) throw new TypeError("deployment intent capabilities must be unique");
+    seen.add(target.hwCapabilityId);
   }
 }
 

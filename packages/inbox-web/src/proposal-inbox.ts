@@ -228,6 +228,8 @@ export interface InboxProposal {
   readonly lifecycle?: "preparing" | "needs_info" | "ready" | "enabling" | "active" | "paused" | "closed" | "enable_failed";
   readonly actionPolicyClasses?: readonly ("direct" | "confirmation")[];
   readonly confirmationDeviceNames?: readonly string[];
+  /** The world no longer allows this prepared plan to enable; the card says so. */
+  readonly enableBlockedReason?: string;
   readonly trial?: {
     readonly durationDays: 7;
     readonly startedAt: string;

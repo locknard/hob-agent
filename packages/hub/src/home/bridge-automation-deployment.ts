@@ -47,6 +47,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     readonly kind: string;
     readonly artifactCandidate?: { readonly schemaVersion: "1"; readonly content: unknown };
     readonly actionPolicyClasses?: readonly string[];
+    readonly confirmationDeviceNames?: readonly string[];
   }): ProposalDeploymentIntent
     | { readonly reason: string }
     | { readonly revalidationReason: string; readonly updatedGateDisclosure: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
@@ -80,7 +81,10 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     for (const action of parsed.actions) {
       if (action.kind === "notify_local") continue;
       const authority = this.world.resolveActionAuthority(action.target.hwCapabilityId);
-      if (authority.status !== "available" || authority.policyClass === "administrator") {
+      if (authority.status !== "available") {
+        return { blockedReason: "方案里有设备现在暂时无法执行动作，家里的设置保持原样。可以在对话里改方案，或不用了。" };
+      }
+      if (authority.policyClass === "administrator") {
         return { blockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
       }
       const gateClass = authority.policyClass === "confirmation" ? "confirmation" as const : "direct" as const;
@@ -90,11 +94,17 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
         if (name !== undefined) confirmationNames.add(name);
       }
     }
-    const recorded = [...(request.actionPolicyClasses ?? [])].sort().join(",");
-    const observed = [...recomputed].sort().join(",");
-    if (recorded !== observed) {
+    // The household approved a disclosure: the gate-class set AND the named
+    // devices that require confirmation. Either fact changing re-prepares.
+    const recordedClasses = [...new Set(request.actionPolicyClasses ?? [])].sort().join(",");
+    const observedClasses = [...recomputed].sort().join(",");
+    const recordedNames = [...new Set(request.confirmationDeviceNames ?? [])].sort().join("\u0000");
+    const observedNames = [...confirmationNames].sort().join("\u0000");
+    if (recordedClasses !== observedClasses || recordedNames !== observedNames) {
       return {
-        revalidationReason: "方案里设备的确认档位已变化，需要重新准备并更新说明。",
+        revalidationReason: recordedClasses !== observedClasses
+          ? "方案里设备的确认档位已变化，需要重新准备并更新说明。"
+          : "方案里需要确认的设备已变化，需要重新准备并更新说明。",
         updatedGateDisclosure: {
           actionPolicyClasses: [...recomputed].sort(),
           ...(confirmationNames.size === 0 ? {} : { confirmationDeviceNames: [...confirmationNames].sort() }),
@@ -119,6 +129,15 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     // persisted intent decides the target domain and the native id.
     const bridge = this.world.automationBridgeById(request.intent.target);
     if (bridge === undefined) return { status: "failed", reason: NO_BRIDGE_REASON };
+    // The intent's capability set and the compiled plan's capability set are
+    // one authorization: any mismatch means the plan changed after the
+    // decision, and the deployment fails closed.
+    const planCapabilityIds = deviceCapabilityIdsOf(request.artifactCandidate.content);
+    if (planCapabilityIds === undefined
+      || planCapabilityIds.length !== request.intent.targets.length
+      || !planCapabilityIds.every((id) => request.intent.targets.some((target) => target.hwCapabilityId === id))) {
+      return { status: "failed", reason: "方案内容与批准时的意图不一致，家里的设置保持原样。" };
+    }
     // The authorized binding vector is the deployment's contract: a device that
     // re-bound since the decision fails closed instead of being followed.
     for (const authorized of request.intent.targets) {
