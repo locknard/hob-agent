@@ -182,6 +182,8 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     join(hubSourceRoot, "authority", "identity-authority.ts"),
     join(hubSourceRoot, "authority", "principal-registry.ts"),
     join(hubSourceRoot, "authority", "principal-registry.test.ts"),
+    join(inboxSourceRoot, "advice-client.ts"),
+    join(inboxSourceRoot, "advice-client.test.ts"),
     join(inboxSourceRoot, "inbox-styles.ts"),
   ].filter(existsSync).map((path) => relative(repositoryRoot, path));
   assert.deepEqual(removedEntries, [], "superseded contracts, re-export shims, ecosystem services, and the second runtime entry stay deleted");
