@@ -7,7 +7,7 @@ import {
   type Envelope,
 } from "@hob/bridge-contract";
 import { runBridgeAdapterConformance } from "@hob/bridge-contract";
-import type { ActionsExtension, BridgeActionDescriptor } from "@hob/bridge-contract";
+import type { ActionsExtension, AutomationsExtension, BridgeActionDescriptor } from "@hob/bridge-contract";
 import type { ForeignRulesHandle } from "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
@@ -418,6 +418,7 @@ test("factory construction is synchronous and does not resolve credentials or to
       { id: "foreignRules", version: "2.0.0" },
       { id: "orgHints", version: "1.0.0" },
       { id: "actions", version: "1.0.0" },
+      { id: "automations", version: "1.0.0" },
     ],
   });
   void socket;
@@ -799,6 +800,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
       { key: "foreignRules@2", available: true },
       { key: "orgHints@1", available: false },
       { key: "actions@1", available: true },
+      { key: "automations@1", available: true },
     ],
   });
 
@@ -1099,4 +1101,119 @@ test("rejects oversized raw websocket messages before JSON parsing", async () =>
 
   await assert.rejects(first, (error: unknown) =>
     error instanceof BridgeStreamError && error.reason === "protocol_error");
+});
+
+
+function automationFetchFake() {
+  const requests: Array<{ method: string; url: string; headers: Record<string, string>; body?: unknown }> = [];
+  const stored = new Map<string, unknown>();
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const id = url.split("/").at(-1)!;
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+    requests.push({ method, url, headers: { ...(init?.headers as Record<string, string>) }, body });
+    if (method === "POST") {
+      stored.set(id, body);
+      return new Response(JSON.stringify({ result: "ok" }), { status: 200 });
+    }
+    if (method === "GET") {
+      const config = stored.get(id);
+      return config === undefined
+        ? new Response("{}", { status: 404 })
+        : new Response(JSON.stringify(config), { status: 200 });
+    }
+    const existed = stored.delete(id);
+    return new Response("{}", { status: existed ? 200 : 404 });
+  };
+  return { fetchImpl, requests, stored };
+}
+
+const automationTarget = {
+  hwCapabilityId: "cap-light",
+  binding: { bridgeId: "bridge-ha", nativeId: "device-1", nativeInstanceId: "entity-stable-1" },
+};
+
+test("deploys a hub automation through the config API and verifies by read-back", async () => {
+  const socket = new FakeSocket();
+  const fake = automationFetchFake();
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("automations@1") as AutomationsExtension | undefined;
+  assert.equal(typeof handle?.deploy, "function");
+  const result = await handle!.deploy({
+    automationId: "hob_media_power",
+    title: "睡前自动关掉多媒体室电源",
+    trigger: { kind: "schedule", timezone: "Asia/Shanghai", daysOfWeek: [1, 2, 3, 4, 5], at: "23:30" },
+    conditions: [{ kind: "capability_value", source: automationTarget, operator: "equals", value: false }],
+    actions: [{ kind: "set_boolean", target: automationTarget, value: false }],
+  }, { signal: new AbortController().signal });
+
+  assert.deepEqual(result, { status: "deployed", nativeAutomationId: "hob_media_power" });
+  const post = fake.requests.find((request) => request.method === "POST");
+  assert.ok(post);
+  assert.match(post.url, /\/api\/config\/automation\/config\/hob_media_power$/);
+  assert.equal(post.headers.authorization, "Bearer ha-secret");
+  assert.deepEqual(post.body, {
+    id: "hob_media_power",
+    alias: "hob_media_power",
+    description: "hob:睡前自动关掉多媒体室电源",
+    trigger: [{ platform: "time", at: "23:30:00" }],
+    condition: [
+      { condition: "time", weekday: ["mon", "tue", "wed", "thu", "fri"] },
+      { condition: "state", entity_id: "light.kitchen", state: "off" },
+    ],
+    action: [{ service: "homeassistant.turn_off", target: { entity_id: "light.kitchen" } }],
+    mode: "single",
+  });
+  assert.equal(fake.requests.filter((request) => request.method === "GET").length, 1);
+  await adapter.control.dispose();
+});
+
+test("rejects unbound targets and reports withdrawal of a missing automation as done", async () => {
+  const socket = new FakeSocket();
+  const fake = automationFetchFake();
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("automations@1") as AutomationsExtension | undefined;
+  const foreign = await handle!.deploy({
+    automationId: "hob_unbound",
+    title: "未知目标",
+    trigger: { kind: "schedule", timezone: "Asia/Shanghai", daysOfWeek: [0, 1, 2, 3, 4, 5, 6], at: "08:00" },
+    conditions: [],
+    actions: [{
+      kind: "set_boolean",
+      target: { hwCapabilityId: "cap-x", binding: { bridgeId: "bridge-ha", nativeId: "missing", nativeInstanceId: "missing" } },
+      value: true,
+    }],
+  }, { signal: new AbortController().signal });
+  assert.equal(foreign.status, "rejected");
+  assert.equal((foreign as { reason: string }).reason, "invalid_target");
+  assert.equal(fake.requests.length, 0, "an uncompilable automation never reaches Home Assistant");
+
+  const withdrawn = await handle!.withdraw({ nativeAutomationId: "hob_gone" }, { signal: new AbortController().signal });
+  assert.deepEqual(withdrawn, { status: "acknowledged" });
+
+  const toggle = handle!.setEnabled({ nativeAutomationId: "hob_media_power", enabled: false }, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.at(-1)!;
+  assert.equal(command.type, "call_service");
+  assert.equal(command.domain, "automation");
+  assert.equal(command.service, "turn_off");
+  assert.deepEqual(command.target, { entity_id: "automation.hob_media_power" });
+  socket.receive({ id: command.id, type: "result", success: true, result: null });
+  assert.deepEqual(await toggle, { status: "acknowledged" });
+  await adapter.control.dispose();
 });

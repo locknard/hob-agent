@@ -15,6 +15,8 @@ import {
   bridgeActionCurrentStateSchema,
   bridgeActionResultSchema,
   type ActionsExtension,
+  type AutomationsExtension,
+  type BridgeActionTarget,
   type BridgeActionCurrentState,
   type BridgeActionDescriptor,
   type BridgeActionResult,
@@ -923,6 +925,47 @@ export class HomeWorldService extends Service {
    * stale world row, unavailable bridge, or invalid adapter descriptor yields
    * a read-only result.
    */
+  /**
+   * Grants the automation deployment seam only while one bridge is ready with a
+   * live automations extension. Target resolution requires exactly one binding
+   * on that bridge; every ambiguity yields no deployment path, never a guess.
+   */
+  automationBridge(): {
+    readonly bridgeId: string;
+    readonly automations: AutomationsExtension;
+    resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
+  } | undefined {
+    for (const [bridgeId, runtime] of this.runtimesById) {
+      if (runtime.extensionAvailability["automations@1"] !== "available") continue;
+      if (runtime.ingest.diagnostics().connectionState !== "ready") continue;
+      let handle: AutomationsExtension | undefined;
+      try {
+        handle = runtime.adapter.extension("automations@1") as AutomationsExtension | undefined;
+      } catch {
+        continue;
+      }
+      if (handle === undefined || typeof handle.deploy !== "function") continue;
+      const resolveTarget = (hwCapabilityId: string): BridgeActionTarget | undefined => {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
+        const capability = this.authority.capability(hwCapabilityId);
+        const bindings = capability?.bindings.filter((binding) => binding.bridgeId === bridgeId) ?? [];
+        if (bindings.length !== 1) return undefined;
+        const [binding] = bindings;
+        if (binding === undefined) return undefined;
+        return {
+          hwCapabilityId,
+          binding: {
+            bridgeId: binding.bridgeId,
+            nativeId: binding.nativeId,
+            nativeInstanceId: binding.nativeInstanceId,
+          },
+        };
+      };
+      return { bridgeId, automations: handle, resolveTarget };
+    }
+    return undefined;
+  }
+
   actionDescriptorFor(hwCapabilityId: string): BridgeActionDescriptor | undefined {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
     this.refreshIdentity();
