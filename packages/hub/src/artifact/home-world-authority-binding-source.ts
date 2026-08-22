@@ -1,15 +1,15 @@
-import { artifactRefSchema, type ArtifactRef } from "../artifact/neutral-artifact.js";
+import { artifactRefSchema, type ArtifactRef } from "./neutral-artifact.js";
 import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-port.js";
 import type {
   AuthorityBindingInputPort,
   AuthorityFreshWorldCut,
   AuthorityWorldWatermark,
-} from "../artifact/artifact-authority-producer.js";
+} from "./artifact-authority-producer.js";
 import type {
   HomeWorldCapabilitySnapshot,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "./home-world-service.js";
+} from "../world/home-world-service.js";
 
 const MAX_CAPABILITIES = 16;
 const MAX_ID_BYTES = 200;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-registry.js";
+import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-port.js";
 import {
   HomeWorldAuthorityBindingSource,
   HomeWorldAuthorityBindingSourceError,
@@ -14,7 +14,7 @@ import type {
   HomeWorldDiagnostics,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "./home-world-service.js";
+} from "../world/home-world-service.js";
 
 const capturedAt = "2026-08-20T01:00:00.000Z";
 const artifact = {

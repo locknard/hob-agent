@@ -38,6 +38,7 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
   const artifactFiles = sourceFiles(join(hubSourceRoot, "artifact"));
   const authorityFiles = sourceFiles(join(hubSourceRoot, "authority"));
   const bridgeFiles = sourceFiles(join(hubSourceRoot, "bridge"));
+  const worldFiles = sourceFiles(join(hubSourceRoot, "world"));
 
   const misplacedBridgeFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isFile())
@@ -101,6 +102,11 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     violations(bridgeFiles, /from ["']\.\.\/world\//, false),
     [],
     "bridge adapters emit neutral events while world owns ingestion and projection",
+  );
+  assert.deepEqual(
+    violations(worldFiles, /from ["']\.\.\/artifact\//, false),
+    [],
+    "world production source exposes neutral observations without artifact dependencies",
   );
 
   const cliModuleNames = [

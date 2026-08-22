@@ -34,7 +34,7 @@ import {
   checkCapabilityPredicate,
   resolveCapabilityRead,
 } from "../bridge/capability-semantics.js";
-import { HomeWorldAuthorityBindingSource } from "../world/home-world-authority-binding-source.js";
+import { HomeWorldAuthorityBindingSource } from "./home-world-authority-binding-source.js";
 import type { ArtifactMutationProposalCommand } from "./artifact-mutation-coordinator.js";
 import type { ArtifactRef } from "./neutral-artifact.js";
 import type { ApprovedProposalSource } from "./proposal-source-port.js";

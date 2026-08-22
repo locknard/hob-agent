@@ -20,7 +20,8 @@ remain stable through each move.
    registration, capability semantics and concrete HA, Xiaomi and synthetic
    adapters. Adapters emit the neutral contract event stream.
 2. `artifact/` owns neutral artifact schemas, evidence, risk, conflict, compilation,
-   preparation, registry and mutation coordination.
+   preparation, registry, mutation coordination and the read-only adapter from a
+   neutral world cut into artifact authority assessment.
 3. `authority/` owns principals, identity authority, action authority, candidate
    authority and one-shot action policy/store.
 4. `media/` owns neutral media catalog, player discovery, play intent and Music
@@ -50,3 +51,5 @@ the source root and make domain dependencies visible.
   adapter vocabulary inside `bridge/` plus the explicit product bundle.
 - Production source in `bridge/` has no dependency on `world/`; event flow crosses
   that boundary in one direction when the world-owned ingest consumes an adapter.
+- Production source in `world/` has no dependency on `artifact/`; artifact-owned
+  adapters read the neutral HomeWorld port when an assessment needs evidence.

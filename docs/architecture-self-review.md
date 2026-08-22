@@ -81,9 +81,10 @@ ports:
 3. `foundation/canonical-json.ts` now owns bounded stable identity serialization.
    Authority no longer imports artifact assessment implementation, while artifact
    production reaches authority exclusively through `authority-candidate-port.ts`.
-4. The artifact-specific world authority binding source can move behind the
-   artifact composition boundary, leaving `world` focused on neutral observations,
-   freshness and control routing.
+4. The artifact-specific world authority binding source now lives behind the
+   artifact composition boundary. `world` has no production dependency on
+   `artifact` and remains focused on neutral observations, freshness and control
+   routing.
 
 This follow-up should change one seam at a time with contract tests. The neutral
 bridge package remains the ecosystem/process boundary; Hub-internal ports stay in
