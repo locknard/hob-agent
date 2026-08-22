@@ -558,14 +558,13 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   });
   assert.equal(stylesheet.status, 404);
 
-  const voicePreview = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview?state=awaiting_confirmation`, {
+  const retiredVoicePreview = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview`, {
     headers: { authorization },
     redirect: "manual",
   });
-  assert.equal(voicePreview.status, 303);
-  assert.equal(voicePreview.headers.get("location"), "/voice-preview");
+  assert.equal(retiredVoicePreview.status, 404);
 
-  const canonicalVoice = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview`, {
+  const canonicalVoice = await fetch(`${ctx.homeInboxHttp.origin}/voice`, {
     headers: { authorization },
     redirect: "manual",
   });
@@ -585,12 +584,12 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   assert.match(voiceScriptText, /requestSubmit/);
   assert.doesNotMatch(voiceScriptText, /getUserMedia|MediaRecorder|fetch\(|WebSocket|play_media|mediaRef/);
 
-  const invalidVoiceState = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview?state=%3Cscript%3E`, {
+  const invalidVoiceState = await fetch(`${ctx.homeInboxHttp.origin}/voice?state=%3Cscript%3E`, {
     headers: { authorization },
     redirect: "manual",
   });
   assert.equal(invalidVoiceState.status, 303);
-  assert.equal(invalidVoiceState.headers.get("location"), "/voice-preview");
+  assert.equal(invalidVoiceState.headers.get("location"), "/voice");
 
   const html = await fetch(`${ctx.homeInboxHttp.origin}/review-center`, {
     headers: { authorization },
@@ -1514,7 +1513,7 @@ test("keeps the Host Shell fixed while a registered view provider supplies ordin
     assert.equal(immutableInputs.every(Boolean), true);
     assert.equal(JSON.stringify(rendered[2]?.reviewCounts ?? {}).includes("total"), false);
 
-    const voice = await fetch(`${ctx.homeInboxHttp.origin}/voice-preview`, { headers: { authorization } });
+    const voice = await fetch(`${ctx.homeInboxHttp.origin}/voice`, { headers: { authorization } });
     assert.equal(voice.status, 200);
     const voiceHtml = await voice.text();
     assert.match(voiceHtml, /data-badge="runtime" data-count="2">2<\/span>/);
@@ -2322,7 +2321,7 @@ test("projects onboarding identity and real choices across every canonical produ
     onboarding,
   } as unknown) as never);
   try {
-    for (const path of ["/home", "/conversation", "/review-center", "/activity", "/control", "/settings", "/onboarding", "/voice-preview"] as const) {
+    for (const path of ["/home", "/conversation", "/review-center", "/activity", "/control", "/settings", "/onboarding", "/voice"] as const) {
       const response = await fetch(`${ctx.homeInboxHttp.origin}${path}`, { headers: { authorization } });
       assert.equal(response.status, 200, path);
       const html = await response.text();

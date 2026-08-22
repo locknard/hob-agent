@@ -189,7 +189,7 @@ explicitly blocked.
 ## Web product and layout boundary
 
 The Product Shell serves `/home`, `/conversation`, `/review-center`, `/activity`,
-`/control`, `/settings`, `/onboarding` and `/voice-preview`. Life and Control
+`/control`, `/settings`, `/onboarding` and `/voice`. Life and Control
 views consume the same projection and submit the same intents. The
 `ProductViewRegistry` selects registered providers, keeps a device-local
 preference and recovers to `builtin.life`. Authentication, safety, review badges

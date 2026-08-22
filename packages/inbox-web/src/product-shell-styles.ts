@@ -331,9 +331,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-side-list li { display: flex; justify-content: space-between; gap: .65rem; padding-block: .55rem; border-block-end: 1px dashed var(--shell-rule); font-size: .86rem; }
 .product-side-list li:last-child { border-block-end: 0; }
 .product-side-list span { color: var(--shell-muted); }
-.product-conversation-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; margin-block-start: 1rem; padding-block-start: .9rem; border-block-start: 1px solid var(--shell-rule); }
+.product-conversation-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .55rem; margin-block-start: 1rem; padding-block-start: .9rem; border-block-start: 1px solid var(--shell-rule); }
 .product-conversation-composer input { min-width: 0; min-height: 2.75rem; padding: .6rem .75rem; border: 1px solid var(--shell-rule); border-radius: .8rem; background: var(--shell-surface); color: var(--shell-ink); }
 .product-conversation-composer button { min-height: 2.75rem; padding-inline: 1rem; border: 0; border-radius: .8rem; background: var(--shell-blue); color: white; font-weight: 740; }
+.product-voice-entry { min-height: 2.75rem; display: inline-flex; align-items: center; padding-inline: .9rem; border: 1px solid var(--shell-rule); border-radius: .8rem; background: var(--shell-surface); color: var(--shell-blue); font-weight: 740; text-decoration: none; }
 .product-turn-error { padding: .8rem .9rem; border-inline-start: .25rem solid var(--shell-amber); background: var(--shell-amber-soft); }
 .product-turn-error p { margin: 0; }
 .product-undo { display: flex; align-items: center; justify-content: space-between; gap: .8rem; margin-block-start: 1rem; padding: .75rem .9rem; border: 1px solid color-mix(in srgb, var(--shell-green) 27%, var(--shell-rule)); border-radius: var(--shell-radius-md); background: var(--shell-green-soft); }

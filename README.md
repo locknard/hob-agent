@@ -208,7 +208,7 @@ media playback. Voice remains an input mode for the single DSH runtime. Media
 discovery is read-only; playback passes through Hub policy, action tickets,
 confirmation when required, verification and audit. See
 [`docs/voice-and-media-interaction.md`](docs/voice-and-media-interaction.md).
-When the local product is enabled, `/voice-preview` exposes the authenticated
+When the local product is enabled, `/voice` exposes the authenticated
 push-to-talk surface. A direct member gesture opens Web Speech, live and final
 captions remain visible, three bounded recognition failures lead to text input,
 and the final transcript enters the canonical `/conversation` route.

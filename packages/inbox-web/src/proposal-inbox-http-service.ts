@@ -927,8 +927,8 @@ export class ProposalInboxHttpService extends Service {
         }
         return redirect(response, "/home");
       }
-      if ((method === "GET" || method === "HEAD") && url.pathname === "/voice-preview") {
-        if (url.search.length > 0) return redirect(response, "/voice-preview");
+      if ((method === "GET" || method === "HEAD") && url.pathname === "/voice") {
+        if (url.search.length > 0) return redirect(response, "/voice");
         const content = renderVoiceSurface("idle");
         if (content === undefined) return send(response, 500, "Voice surface unavailable");
         return this.sendVoiceRoute(response, content, method === "HEAD", requestedViewId, storedDefaultViewId, request.headers.cookie);
@@ -1564,10 +1564,10 @@ export class ProposalInboxHttpService extends Service {
     const presentation = productViewPresentation(resolution.provider.id, resolution.provider.preferences ?? [], presentationCookie);
     const context: ProductRouteRenderContext = {
       route: "conversation",
-      path: "/voice-preview",
+      path: "/voice",
       reviewCounts: hostProjection.reviewCounts,
       household: hostProjection.household,
-      view: productViewState("/voice-preview", resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, resolution.recoveredFrom),
+      view: productViewState("/voice", resolution.provider.id, this.views.choices(), storedDefaultViewId, canManageProductViewDefault(this.principal), presentation, resolution.recoveredFrom),
       ...(shellProjection === undefined ? {} : { shellProjection }),
     };
     const model = productShellModel("conversation", context);

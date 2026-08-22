@@ -137,6 +137,7 @@ test("renders a real push-to-talk seam with a canonical conversation form", asyn
   const html = renderVoiceSurface("idle");
 
   assert.ok(html);
+  assert.equal(html.match(/data-voice-text-exit/g)?.length, 1);
   assert.match(html, /data-voice-surface/);
   assert.match(html, /data-voice-start/);
   assert.match(html, /data-voice-stop/);

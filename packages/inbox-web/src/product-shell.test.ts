@@ -180,6 +180,8 @@ test("projects unknown household facts and connection states without inventing a
     household: {},
   }));
   assert.match(conversation, /和家庭助手对话/);
+  assert.match(conversation, /href="\/voice"/);
+  assert.match(conversation, />语音<\/a>/);
   assert.match(conversation, /家庭名称待设置/);
   assert.doesNotMatch(conversation, /阿灶|小海的家/);
   assert.match(conversation, /处理进度和结果会显示在这里/);

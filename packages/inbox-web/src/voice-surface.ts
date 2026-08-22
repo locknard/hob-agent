@@ -33,7 +33,7 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> = Object.freeze
   requesting_permission: { eyebrow: "麦克风权限", heading: "允许这台设备听取本次请求", status: "等待浏览器授权", detail: "麦克风只服务当前对话，结束后立即停止采集。", recovery: { href: "/conversation", label: "改用文字" } },
   permission_denied: { eyebrow: "麦克风权限", heading: "在浏览器设置中打开麦克风权限", status: "语音等待授权", detail: "权限开启后可以回到这里继续；文字对话现在就能使用。", recovery: { href: "/conversation", label: "改用文字" } },
   listening: { eyebrow: "正在听", heading: "说出你想让家里做的事", status: "麦克风正在聆听", detail: "一句话说明房间、内容和动作即可。", recovery: { href: "/conversation", label: "改用文字" } },
-  no_input: { eyebrow: "这次很安静", heading: "刚才没有听到清楚的内容", status: "等待下一步", detail: "你可以再试一次，也可以直接输入文字。", recovery: { href: "/voice-preview", label: "再试一次" } },
+  no_input: { eyebrow: "这次很安静", heading: "刚才没有听到清楚的内容", status: "等待下一步", detail: "你可以再试一次，也可以直接输入文字。", recovery: { href: "/voice", label: "再试一次" } },
   partial_transcript: { eyebrow: "正在听", heading: "继续说就好", status: "继续说就好", detail: "已经听到一部分内容，正在等待完整请求。", recovery: { href: "/conversation", label: "改用文字" } },
   transcribing: { eyebrow: "整理语音", heading: "正在确认刚才听到的内容", status: "转成文字", detail: "完成后会先展示理解结果。", recovery: { href: "/conversation", label: "改用文字" } },
   thinking: { eyebrow: "理解请求", heading: "正在查看房间、音乐和现有安排", status: "整理下一步", detail: "结果会区分已确认事实、未知信息和建议。", recovery: { href: "/conversation", label: "改用文字" } },
@@ -126,7 +126,7 @@ for (const voiceRoot of document.querySelectorAll("[data-voice-surface]")) {
     permission_denied: ["/conversation", "改用文字"],
     listening: ["/conversation", "改用文字"],
     partial_transcript: ["/conversation", "改用文字"],
-    no_input: ["/voice-preview", "再试一次"],
+    no_input: ["/voice", "再试一次"],
     transcribing: ["/conversation", "改用文字"],
     thinking: ["/conversation", "查看对话"],
     cancelled: ["/conversation", "改用文字"],
@@ -278,7 +278,7 @@ export function renderVoiceSurface(requestedState = "idle", options: VoiceSurfac
     : "";
   return `<section class="product-voice" data-voice-surface data-voice-state="${requestedState}" data-voice-failure-limit="3" data-voice-submit-action="/conversation" data-voice-language="zh-CN" aria-labelledby="voice-heading">
     <header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation">改用文字</a></header>
-    <section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p><p class="product-voice-transcript" data-voice-transcript data-voice-transcript-kind="${initialTranscriptKind}" aria-live="polite" aria-atomic="true">${initialTranscript}</p><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止</button><button class="product-primary-action" type="button" data-voice-submit hidden>继续对话</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button><a class="product-secondary-action" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div><p class="product-voice-fallback" data-voice-fallback hidden>语音服务不可用或权限未打开。文字对话仍然可用。</p><div class="product-card-actions"><a class="product-secondary-action" data-voice-text-exit href="/conversation">改用文字</a></div></section>
+    <section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p><p class="product-voice-transcript" data-voice-transcript data-voice-transcript-kind="${initialTranscriptKind}" aria-live="polite" aria-atomic="true">${initialTranscript}</p><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止</button><button class="product-primary-action" type="button" data-voice-submit hidden>继续对话</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button><a class="product-secondary-action" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div><p class="product-voice-fallback" data-voice-fallback hidden>语音服务不可用或权限未打开。文字对话仍然可用。</p></section>
     ${guideMarkup}
     ${intentMarkup}
     <form class="product-voice-submit-form" data-voice-submit-form method="post" action="/conversation" hidden><input type="hidden" name="question" data-voice-transcript-input></form>

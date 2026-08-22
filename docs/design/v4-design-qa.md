@@ -23,7 +23,7 @@ instead of sample household facts.
 
 - All canonical destinations render through one authenticated Host Shell:
   `/home`, `/conversation`, `/review-center`, `/activity`, `/control`,
-  `/settings`, `/onboarding`, and `/voice-preview`.
+  `/settings`, `/onboarding`, and `/voice`.
 - Every checked mobile destination has one `main` landmark, the expected heading
   and zero horizontal overflow at 390 × 844.
 - Runtime confirmation TTL changed from 42 to 41 seconds during the live check.

@@ -420,8 +420,8 @@ the result is uncertain and does not retry automatically.
 
 ## Phase 0 Web voice seam
 
-The `/voice-preview` path now serves the bounded Web V1 interaction rather than
-a state-picker prototype. Its push-to-talk control constructs the browser's
+The `/voice` path serves the bounded Web V1 interaction. The conversation
+composer links directly to it. Its push-to-talk control constructs the browser's
 `SpeechRecognition`/`webkitSpeechRecognition` implementation only after the
 household member's direct click. It shows the live partial transcript, keeps a
 final transcript in a reviewable state, and exposes Stop while recognition is
@@ -497,10 +497,8 @@ ready, while the failed record and its terminal notification remain intact.
 
 ## Delivery sequence
 
-1. **V0 — contract and visual prototype (retired):** the former inert
-   `/voice-preview` state picker established the visual state vocabulary. It is
-   no longer the runtime interaction; a bounded initial-state query remains
-   only for deterministic rendering and does not provide an interaction path.
+1. **V0 — contract and visual foundation:** the state vocabulary established
+   the complete interaction model used by the product route.
 2. **V1 — read-only Web voice turn (implemented):** push-to-talk, explicit
    permission handling, partial/final captions, cancellation, three bounded
    failures with a text exit, and one canonical DSH advice turn. This remains
