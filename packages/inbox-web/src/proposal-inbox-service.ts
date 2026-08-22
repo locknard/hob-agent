@@ -29,6 +29,7 @@ import type {
   ProductRuntimeConfirmation,
   ProductShellConnection,
   ProductSpace,
+  ProductEnergySummary,
   ProductControlSpace,
   ProductControlFeedback,
   ProductActivityRecord,
@@ -333,6 +334,7 @@ export interface InboxProductReviewProjection {
 export interface InboxProductShellProjection {
   readonly connection: ProductShellConnection;
   readonly spaces: readonly ProductSpace[];
+  readonly energy?: ProductEnergySummary;
   readonly controlSpaces: readonly ProductControlSpace[];
   readonly activity: readonly ProductActivityRecord[];
   readonly safetyAlerts?: readonly ProductSafetyAlert[];
@@ -344,6 +346,8 @@ export interface ProposalInboxServiceOptions {
   readonly preparation?: ProposalInboxPreparationPort;
   readonly proposalGovernance?: ProposalInboxProposalGovernancePort;
   readonly now?: () => Date;
+  /** Household timezone for day-window aggregation; defaults to the host timezone. */
+  readonly timezone?: string;
 }
 
 /** Local review composition over hub proposal state and metadata-safe DSH traces. */
@@ -358,6 +362,7 @@ export class ProposalInboxService extends Service {
   private readonly correction?: ProposalInboxCorrectionPort;
   private readonly proposalGovernance?: ProposalInboxProposalGovernancePort;
   private readonly now: () => Date;
+  private readonly timezone: string | undefined;
   private controlRequestSequence = 0;
   private batchRequestSequence = 0;
   private readonly batchResults = new Map<string, ProposalInboxBatchActionResult>();
@@ -410,6 +415,7 @@ export class ProposalInboxService extends Service {
       ?? optionalGovernancePort(ctx.get("proposalGovernance") ?? ctx.get("proposal_governance"))
       ?? optionalGovernancePort(proposals);
     this.now = options.now ?? (() => new Date());
+    this.timezone = options.timezone;
     this.preparation = options.preparation ?? preparationPortFrom(proposals);
     this.preparationSource = hasPreparationReadSource(proposals) ? proposals : undefined;
     this.controller = new ProposalInboxController({
@@ -505,8 +511,10 @@ export class ProposalInboxService extends Service {
     );
     const projection = projectProductWorld(world, now, actionDescriptorFor);
     const batchControl = this.batchControlProjection(projection, batchRequestId);
+    const energy = projectEnergyToday(world, this.world, now, this.timezone);
     return {
       ...projection,
+      ...(energy === undefined ? {} : { energy }),
       activity: projectRuntimeActivity(this.runtime?.activities?.() ?? [], now),
       ...(safetyAlerts === undefined ? {} : { safetyAlerts }),
       ...(completionNotification === undefined ? {} : { completionNotification }),
@@ -1242,11 +1250,15 @@ function projectProductWorld(
         .map(productDeviceLabel)
         .filter((label): label is string => label !== undefined)
         .slice(0, 12);
+      const metrics = spaceClimateMetrics(spaceDevices);
+      const presence = spacePresenceState(spaceDevices);
       return [{
         id,
         name,
         deviceCount: spaceDevices.length,
         ...(labels.length === 0 ? {} : { devices: labels }),
+        ...(metrics.length === 0 ? {} : { metrics }),
+        ...(presence === undefined ? {} : { state: presence }),
       }];
     });
   return {
@@ -1527,6 +1539,161 @@ function projectProductConnection(world: Record<string, unknown>, now: Date): Pr
     state,
     ...(latestContact === undefined ? {} : { lastContact: productRelativeTime(latestContact, now) }),
   };
+}
+
+
+/** The latest raw state value for one capability, matched through its bindings. */
+function capabilityLatestValue(device: Record<string, unknown>, capability: Record<string, unknown>): string | undefined {
+  const bindings = Array.isArray(capability.bindings) ? capability.bindings : [];
+  const keys = new Set(bindings.flatMap((bindingValue) => {
+    const binding = productRecord(bindingValue);
+    const instance = productText(binding?.nativeInstanceId, 256);
+    return instance === undefined ? [] : [instance];
+  }));
+  const states = Array.isArray(device.states) ? device.states : [];
+  for (let index = states.length - 1; index >= 0; index -= 1) {
+    const state = productRecord(states[index]);
+    const instance = productText(state?.nativeInstanceId, 256);
+    if (instance === undefined || !keys.has(instance)) continue;
+    const value = productRecord(state?.attrs)?.state;
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    return undefined;
+  }
+  return undefined;
+}
+
+function semanticCapabilityValues(devices: readonly Record<string, unknown>[], kinds: readonly string[]): string[] {
+  const values: string[] = [];
+  for (const device of devices) {
+    if (!Array.isArray(device.capabilities)) continue;
+    for (const capabilityValue of device.capabilities) {
+      const capability = productRecord(capabilityValue);
+      const kind = productText(capability?.semanticKind, 64);
+      if (capability === undefined || kind === undefined || !kinds.includes(kind)) continue;
+      const value = capabilityLatestValue(device, capability);
+      if (value !== undefined) values.push(value);
+    }
+  }
+  return values;
+}
+
+/** Real sensor values only; a space without a sensor shows no number. */
+function spaceClimateMetrics(devices: readonly Record<string, unknown>[]): { readonly label: string; readonly value: string }[] {
+  const metrics: { readonly label: string; readonly value: string }[] = [];
+  const temperature = semanticCapabilityValues(devices, ["temperature"])
+    .map((value) => Number.parseFloat(value))
+    .find((value) => Number.isFinite(value));
+  if (temperature !== undefined) metrics.push({ label: "温度", value: `${Math.round(temperature * 10) / 10}°` });
+  const humidity = semanticCapabilityValues(devices, ["humidity"])
+    .map((value) => Number.parseFloat(value))
+    .find((value) => Number.isFinite(value));
+  if (humidity !== undefined) metrics.push({ label: "湿度", value: `${Math.round(humidity)}%` });
+  return metrics;
+}
+
+const PRESENCE_TRUE_STATES = new Set(["on", "home", "true", "detected", "occupied"]);
+
+function spacePresenceState(devices: readonly Record<string, unknown>[]): string | undefined {
+  const values = semanticCapabilityValues(devices, ["presence", "motion"]);
+  if (values.length === 0) return undefined;
+  return values.some((value) => PRESENCE_TRUE_STATES.has(value.toLowerCase())) ? "有人在" : "无人";
+}
+
+interface EnergyEvidencePort {
+  queryRecentEvidence?(query: {
+    readonly hwCapabilityIds: readonly string[];
+    readonly lookbackHours: number;
+    readonly limit?: number;
+  }): unknown;
+}
+
+/**
+ * Today's consumption from monotone energy counters, in the household's day
+ * window. Partial coverage or a non-monotone series yields no summary; sparse
+ * history never fabricates a day-over-day comparison.
+ */
+function projectEnergyToday(
+  worldSnapshot: unknown,
+  worldPort: unknown,
+  now: Date,
+  timezone: string | undefined,
+): ProductEnergySummary | undefined {
+  const port = worldPort as EnergyEvidencePort | undefined;
+  if (port?.queryRecentEvidence === undefined) return undefined;
+  const world = productRecord(worldSnapshot);
+  if (world === undefined || !Array.isArray(world.devices)) return undefined;
+  const capabilityIds: string[] = [];
+  for (const deviceValue of world.devices) {
+    const device = productRecord(deviceValue);
+    if (device === undefined || !Array.isArray(device.capabilities)) continue;
+    for (const capabilityValue of device.capabilities) {
+      const capability = productRecord(capabilityValue);
+      if (productText(capability?.semanticKind, 64) !== "energy") continue;
+      const id = productText(capability?.hwCapabilityId, 256);
+      if (id !== undefined) capabilityIds.push(id);
+    }
+  }
+  if (capabilityIds.length === 0 || capabilityIds.length > 32) return undefined;
+  const midnightMs = householdMidnightMs(now, timezone);
+  if (midnightMs === undefined) return undefined;
+  const lookbackHours = Math.ceil((now.getTime() - midnightMs) / 3_600_000) + 1;
+  let result: unknown;
+  try {
+    result = port.queryRecentEvidence({ hwCapabilityIds: capabilityIds, lookbackHours, limit: 500 });
+  } catch {
+    return undefined;
+  }
+  const record = productRecord(result);
+  if (record === undefined || !Array.isArray(record.events) || !Array.isArray(record.coverage)) return undefined;
+  const complete = record.coverage.every((entry) => productRecord(entry)?.status === "complete");
+  if (!complete) return undefined;
+  const series = new Map<string, { at: number; value: number }[]>();
+  for (const eventValue of record.events) {
+    const event = productRecord(eventValue);
+    const id = productText(event?.hwCapabilityId, 256);
+    const at = Date.parse(productText(event?.observedAt, 64) ?? "");
+    const value = typeof event?.value === "number" ? event.value : Number.NaN;
+    if (id === undefined || !Number.isFinite(at) || !Number.isFinite(value)) continue;
+    const list = series.get(id) ?? [];
+    list.push({ at, value });
+    series.set(id, list);
+  }
+  let total = 0;
+  let counted = 0;
+  for (const list of series.values()) {
+    list.sort((left, right) => left.at - right.at);
+    if (list.some((entry, index) => index > 0 && entry.value < list[index - 1]!.value)) continue;
+    const today = list.filter((entry) => entry.at >= midnightMs);
+    if (today.length === 0) continue;
+    const baseline = [...list].reverse().find((entry) => entry.at < midnightMs) ?? today[0]!;
+    const delta = today.at(-1)!.value - baseline.value;
+    if (delta <= 0) continue;
+    total += delta;
+    counted += 1;
+  }
+  if (counted === 0 || total < 0.05) return undefined;
+  return { value: `${Math.round(total * 10) / 10} 度` };
+}
+
+function householdMidnightMs(now: Date, timezone: string | undefined): number | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      ...(timezone === undefined ? {} : { timeZone: timezone }),
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const read = (type: string) => Number.parseInt(parts.find((part) => part.type === type)?.value ?? "", 10);
+    const hours = read("hour") % 24;
+    const minutes = read("minute");
+    const seconds = read("second");
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) return undefined;
+    return now.getTime() - ((hours * 3_600 + minutes * 60 + seconds) * 1_000) - now.getMilliseconds();
+  } catch {
+    return undefined;
+  }
 }
 
 function productDeviceSpaceIds(device: Record<string, unknown>): ReadonlySet<string> {

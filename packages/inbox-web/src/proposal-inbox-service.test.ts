@@ -1386,3 +1386,134 @@ test("delegates failed preparation retry through the optional direct port", asyn
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
+
+
+function climateWorldFixture() {
+  const binding = (nativeInstanceId: string) => [{ bridgeId: "bridge-main", nativeId: nativeInstanceId, nativeInstanceId, hwSpaceId: "space-living" }];
+  const sensor = (hwId: string, semanticKind: string, nativeInstanceId: string, state: string) => ({
+    hwId,
+    health: "reachable",
+    validity: "valid",
+    bindings: binding(nativeInstanceId),
+    capabilities: [{
+      hwCapabilityId: `cap-${hwId}`,
+      hwId,
+      schema: "ha-state",
+      schemaVersion: "1",
+      semanticKind,
+      bindings: binding(nativeInstanceId),
+    }],
+    states: [{
+      nativeId: nativeInstanceId,
+      nativeInstanceId,
+      attrs: { state },
+      time: { sourceTs: "2026-08-20T09:59:00.000Z", sourceTsQuality: "platform" },
+      origin: "observed",
+    }],
+  });
+  return {
+    generatedAt: "2026-08-20T10:00:00.000Z",
+    bridges: {
+      "bridge-main": {
+        adapterType: "home-assistant",
+        diagnostics: { connectionState: "ready", lastSuccessfulContactAt: "2026-08-20T09:59:58.000Z" },
+        watermark: { epochId: "epoch-main", lastSeq: 7 },
+        metrics: { consistency: "ready", connection: "up", eventActivity: "idle" },
+      },
+    },
+    bridgeWatermarks: [{ bridgeId: "bridge-main" }],
+    diagnostics: [{ bridgeId: "bridge-main", connectionState: "ready" }],
+    spaces: [{ hwSpaceId: "space-living", name: "客厅", bindings: [{ bridgeId: "bridge-main", nativeSpaceId: "living" }] }],
+    devices: [
+      sensor("temp", "temperature", "sensor.living_temp", "24.53"),
+      sensor("hum", "humidity", "sensor.living_hum", "52"),
+      sensor("presence", "presence", "binary_sensor.living_presence", "on"),
+      sensor("meter", "energy", "sensor.living_energy", "120.4"),
+    ],
+  };
+}
+
+test("projects real climate and presence into space metrics without inventing values", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", { snapshot: () => climateWorldFixture() });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z") });
+
+  const projection = ctx.homeInbox.getProductShellProjection();
+  const living = projection.spaces[0]!;
+  assert.deepEqual(living.metrics, [
+    { label: "温度", value: "24.5°" },
+    { label: "湿度", value: "52%" },
+  ]);
+  assert.equal(living.state, "有人在");
+  const control = projection.controlSpaces[0]!;
+  assert.deepEqual(control.metrics, living.metrics);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("reports today's energy only from complete monotone counter evidence", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  const queries: unknown[] = [];
+  ctx.provide("homeWorld", {
+    snapshot: () => climateWorldFixture(),
+    queryRecentEvidence: (query: { hwCapabilityIds: string[]; lookbackHours: number }) => {
+      queries.push(query);
+      const event = (observedAt: string, value: number) => ({
+        hwId: "meter", hwCapabilityId: "cap-meter", semanticKind: "energy",
+        value, observedAt, sourceTsQuality: "platform", origin: "observed",
+        provenance: { bridgeId: "bridge-main", epochId: "epoch-main", seq: 1 },
+      });
+      return {
+        requestedSince: "2026-08-19T00:00:00.000Z",
+        requestedUntil: "2026-08-20T10:00:00.000Z",
+        events: [
+          event("2026-08-19T16:10:00.000Z", 108.0),
+          event("2026-08-19T22:00:00.000Z", 112.2),
+          event("2026-08-20T09:30:00.000Z", 118.1),
+          event("2026-08-20T09:59:00.000Z", 120.4),
+        ],
+        coverage: [{ bridgeId: "bridge-main", status: "complete", reasons: [] }],
+      };
+    },
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z"), timezone: "UTC" });
+
+  const projection = ctx.homeInbox.getProductShellProjection();
+  assert.ok(projection.energy, "complete monotone evidence produces an energy summary");
+  assert.equal(projection.energy!.value, "8.2 度");
+  assert.equal(projection.energy!.change, undefined, "a sparse history never fabricates a comparison");
+  assert.deepEqual(queries.length, 1);
+  assert.deepEqual((queries[0] as { hwCapabilityIds: string[] }).hwCapabilityIds, ["cap-meter"]);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("omits the energy summary when coverage has gaps", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", {
+    snapshot: () => climateWorldFixture(),
+    queryRecentEvidence: () => ({
+      requestedSince: "2026-08-19T00:00:00.000Z",
+      requestedUntil: "2026-08-20T10:00:00.000Z",
+      events: [],
+      coverage: [{ bridgeId: "bridge-main", status: "partial", reasons: ["history_gap"] }],
+    }),
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z"), timezone: "UTC" });
+
+  assert.equal(ctx.homeInbox.getProductShellProjection().energy, undefined);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
