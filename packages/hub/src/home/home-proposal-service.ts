@@ -42,9 +42,10 @@ export interface ProposalDeploymentPort {
     readonly title: string;
     readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
   }): Promise<ProposalDeploymentOutcome> | ProposalDeploymentOutcome;
-  pause?(request: { readonly proposalId: string; readonly deploymentId?: string }): Promise<void> | void;
-  resume?(request: { readonly proposalId: string; readonly deploymentId?: string }): Promise<void> | void;
-  withdraw?(request: { readonly proposalId: string; readonly deploymentId: string }):
+  status?(request: { readonly deploymentId: string; readonly target: string }): Promise<"running" | "paused" | "missing" | "unknown"> | "running" | "paused" | "missing" | "unknown";
+  pause?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
+  resume?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
+  withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string }):
     | Promise<{ readonly restored: boolean }>
     | { readonly restored: boolean };
 }
@@ -148,6 +149,7 @@ export class HomeProposalService extends Service {
       ? []
       : artifactCapabilityIds(artifactCandidate.content);
     const candidateCapabilityIdSet = new Set(candidateCapabilityIds);
+    const actionPolicyClasses = new Set<"direct" | "confirmation">();
     if (artifactCandidate !== undefined) {
       if (candidateCapabilityIds.some((id) => !selectedCapabilities.has(id))) {
         throw new TypeError("home proposal artifact candidate capabilities must belong to selected devices");
@@ -158,9 +160,13 @@ export class HomeProposalService extends Service {
         if (authority.status !== "available") {
           throw new TypeError("home proposal artifact candidate requires explicit action policy");
         }
+        // Administrator-class actions never enter a native automation. A
+        // confirmation-class action may: the enable decision itself is the
+        // household's consent (DR-015), and the plan card must disclose it.
         if (authority.policyClass === "administrator") {
           throw new TypeError("home proposal artifact candidate cannot target an administrator policy capability");
         }
+        actionPolicyClasses.add(authority.policyClass === "confirmation" ? "confirmation" : "direct");
       }
       if (input.selectedHwCapabilityIds !== undefined
         && candidateCapabilityIds.some((id) => !input.selectedHwCapabilityIds!.includes(id))) {
@@ -275,6 +281,7 @@ export class HomeProposalService extends Service {
       kind: input.kind,
       title: input.title,
       summary: input.summary,
+      ...(actionPolicyClasses.size === 0 ? {} : { actionPolicyClasses: [...actionPolicyClasses].sort() }),
       ...(input.dedupKey === undefined ? {} : { dedupKey: input.dedupKey }),
       idempotencyKey: input.idempotencyKey,
       provenance: input.provenance,
@@ -398,14 +405,35 @@ export class HomeProposalService extends Service {
 
   async pauseAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
     const current = this.requireDeployed(input.proposalId);
-    await this.deployment?.pause?.({ proposalId: current.id, deploymentId: current.deployment?.deploymentId });
-    return this.store.pauseAutomation(input);
+    const paused = this.store.pauseAutomation(input);
+    try {
+      await this.deployment?.pause?.({
+        proposalId: current.id,
+        deploymentId: current.deployment?.deploymentId,
+        target: current.deployment?.target,
+      });
+    } catch (error) {
+      // The bridge disagreed; read-back reconciliation converges the lifecycle.
+      this.store.resumeAutomation({ proposalId: paused.id, actor: "system" });
+      throw error;
+    }
+    return this.store.get(paused.id) ?? paused;
   }
 
   async resumeAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
     const current = this.requireDeployed(input.proposalId);
-    await this.deployment?.resume?.({ proposalId: current.id, deploymentId: current.deployment?.deploymentId });
-    return this.store.resumeAutomation(input);
+    const resumed = this.store.resumeAutomation(input);
+    try {
+      await this.deployment?.resume?.({
+        proposalId: current.id,
+        deploymentId: current.deployment?.deploymentId,
+        target: current.deployment?.target,
+      });
+    } catch (error) {
+      this.store.pauseAutomation({ proposalId: resumed.id, actor: "system" });
+      throw error;
+    }
+    return this.store.get(resumed.id) ?? resumed;
   }
 
   /** Closing withdraws the automation and restores the configuration it replaced. */
@@ -416,11 +444,74 @@ export class HomeProposalService extends Service {
       const result = await this.deployment.withdraw({
         proposalId: current.id,
         deploymentId: current.deployment.deploymentId,
+        target: current.deployment.target,
       });
       restored = result?.restored === true;
     }
     const closeInput: ProposalCloseInput = { ...input, restored };
     return this.store.closeAutomation(closeInput);
+  }
+
+  /** The household's deployed automations, most recent first. */
+  listAutomations(): readonly ProposalEnvelope[] {
+    return this.store.list({ status: "approved", limit: 100 })
+      .filter((proposal) => proposal.lifecycle === "enabling"
+        || proposal.lifecycle === "active"
+        || proposal.lifecycle === "paused"
+        || proposal.lifecycle === "enable_failed"
+        || proposal.lifecycle === "closed")
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  }
+
+  /**
+   * Converges local lifecycles with the target bridge, which owns the truth
+   * about whether an automation runs. A crash between decision and record
+   * heals here: a deployed-but-unrecorded enablement becomes active, a
+   * missing one becomes an explicit failure, and a natively toggled or deleted
+   * automation is reflected instead of contradicted.
+   */
+  async reconcileAutomations(): Promise<void> {
+    const status = this.deployment?.status;
+    if (status === undefined) return;
+    for (const proposal of this.listAutomations()) {
+      const deployment = proposal.deployment;
+      if (deployment?.deploymentId === undefined || deployment.target === undefined) continue;
+      if (proposal.lifecycle === "closed") continue;
+      let observed: "running" | "paused" | "missing" | "unknown";
+      try {
+        observed = await status.call(this.deployment, { deploymentId: deployment.deploymentId, target: deployment.target });
+      } catch {
+        continue;
+      }
+      if (observed === "unknown") continue;
+      try {
+        if (proposal.lifecycle === "enabling") {
+          if (observed === "running") {
+            this.store.recordProposalDeployment({
+              proposalId: proposal.id,
+              expectedRevision: proposal.revision,
+              actor: "system",
+              outcome: { status: "verified", deploymentId: deployment.deploymentId, target: deployment.target },
+            });
+          } else if (observed === "missing") {
+            this.store.recordProposalDeployment({
+              proposalId: proposal.id,
+              expectedRevision: proposal.revision,
+              actor: "system",
+              outcome: { status: "failed", reason: "部署没有完成，家里的设置保持原样。" },
+            });
+          }
+        } else if (proposal.lifecycle === "active" && observed === "paused") {
+          this.store.pauseAutomation({ proposalId: proposal.id, actor: "system" });
+        } else if (proposal.lifecycle === "paused" && observed === "running") {
+          this.store.resumeAutomation({ proposalId: proposal.id, actor: "system" });
+        } else if ((proposal.lifecycle === "active" || proposal.lifecycle === "paused") && observed === "missing") {
+          this.store.closeAutomation({ proposalId: proposal.id, actor: "system", restored: false });
+        }
+      } catch {
+        // Another writer converged first; the next pass observes the result.
+      }
+    }
   }
 
   private requireDeployed(proposalId: string): ProposalEnvelope {

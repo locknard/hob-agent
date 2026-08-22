@@ -26,6 +26,7 @@ import {
   type BridgeAutomationAction,
   type BridgeAutomationCondition,
   type BridgeAutomationDeployResult,
+  type BridgeAutomationStatusResult,
   type BridgeAutomationSpec,
   type BridgeAutomationCommandResult,
 } from "@hob/bridge-contract";
@@ -693,6 +694,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     }
     if (name === "automations@1") {
       const handle: AutomationsExtension = {
+        status: (request, options) => this.automationStatus(request, options.signal),
         deploy: (spec, options) => this.deployAutomation(spec, options.signal),
         setEnabled: (request, options) => this.setAutomationEnabled(request, options.signal),
         withdraw: (request, options) => this.withdrawAutomation(request, options.signal),
@@ -766,6 +768,31 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       return { status: "rejected", reason: "failed", detail: `Home Assistant rejected the removal (${deleted.statusCode})` };
     } catch {
       return { status: "rejected", reason: "unavailable", detail: "Home Assistant configuration API is unreachable" };
+    }
+  }
+
+  /** Reads the automation entity state; the config read-back covers existence. */
+  private async automationStatus(
+    request: { readonly nativeAutomationId: string },
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationStatusResult> {
+    if (!/^[a-z0-9][a-z0-9_]{2,120}$/.test(request.nativeAutomationId)) return { status: "missing" };
+    try {
+      const accessToken = await this.resolveAccessToken();
+      const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+      const url = new URL(`/api/states/automation.${request.nativeAutomationId}`, this.context.config.baseUrl);
+      const response = await fetchImpl(url, {
+        signal,
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      if (response.status === 404) return { status: "missing" };
+      if (!response.ok) return { status: "unknown" };
+      const body = await response.json() as { state?: unknown };
+      if (body?.state === "on") return { status: "running" };
+      if (body?.state === "off") return { status: "paused" };
+      return { status: "unknown" };
+    } catch {
+      return { status: "unknown" };
     }
   }
 

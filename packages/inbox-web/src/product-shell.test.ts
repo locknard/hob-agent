@@ -359,7 +359,7 @@ test("shows correction acknowledgement only when the Hub projection supplies it"
   assert.match(acknowledged, /当前 1 条建议/);
 });
 
-test("separates proposal snooze from the one-decision detail and explains activity cause attribution", () => {
+test("separates the later action from the one-decision detail and explains activity cause attribution", () => {
   const review = renderProductShell(model({ route: "reviews", selectedProposalId: "media-power" }));
 
   assert.match(review, /data-runtime-countdown/);
@@ -367,14 +367,9 @@ test("separates proposal snooze from the one-decision detail and explains activi
   assert.match(review, /今天 21:03/);
   assert.doesNotMatch(review, />2026-08-21T13:03:00.000Z</);
   assert.match(review, /查看方案/);
-  assert.match(review, /暂缓/);
-  assert.match(review, /明天晚上/);
-  assert.match(review, /周末/);
-  assert.match(review, /下周/);
-  assert.match(review, /name="until" value="next_week"/);
-  assert.doesNotMatch(review, /value="next-week"/);
+  assert.match(review, /以后再说/);
+  assert.match(review, /name="until" value="later"/);
   assert.match(review, /action="\/review-center\/proposals\/media-power\/enable"/);
-  assert.match(review, /action="\/review-center\/proposals\/media-power\/modify"/);
   assert.match(review, /name="expectedRevision" value="1"/);
   assert.doesNotMatch(review, /action="\/review-center\/proposals\/media-power\/advance"/);
   assert.match(review, />启用</);
@@ -1076,7 +1071,7 @@ test("action buttons keep their decision hierarchy inside action forms", () => {
 });
 
 
-test("presents a prepared plan as one decision with five household actions", () => {
+test("presents a prepared plan as one decision with three honest choices", () => {
   const html = renderProductShell(model({
     route: "reviews",
     selectedProposalId: "media-power",
@@ -1089,17 +1084,35 @@ test("presents a prepared plan as one decision with five household actions", () 
       why: ["连续 12 天，你在 23:00 后手动关多媒体室插线板"],
       willDo: ["每天 23:30，若 30 分钟无人且没在播放，断开插线板"],
       willNotDo: ["不碰路由器和 NAS 所在插座"],
+      gateClasses: ["confirmation"],
       risk: "低 · 可逆",
       afterEnable: "随时可以暂停或关闭并恢复原来的设置。",
     },
   }));
 
   assert.match(html, /方案已备好/);
-  assert.match(html, /修改…/);
-  assert.match(html, /这次跳过/);
-  assert.match(html, /不再建议这件事/);
-  assert.match(html, /不会做/);
-  assert.doesNotMatch(html, /试运行|两次确认|同意方向|确认方向/);
+  assert.match(html, />启用</);
+  assert.match(html, /以后再说/);
+  assert.match(html, /仅这次不要/);
+  assert.match(html, /不再提这件事/);
+  assert.match(html, /在对话里改/);
+  assert.match(html, /包含需要确认的设备：这次启用就是你的授权/);
+  assert.doesNotMatch(html, /修改…|试运行|两次确认|同意方向|确认方向/);
+});
+
+test("keeps a preparing plan out of decision reach", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    selectedProposalId: "media-power",
+    selectedProposal: {
+      id: "media-power",
+      revision: 1,
+      title: "睡前自动关掉多媒体室电源",
+      lifecycle: "preparing",
+    },
+  }));
+  assert.match(html, /正在后台准备/);
+  assert.doesNotMatch(html.slice(html.indexOf("proposal-detail-heading")), /action="\/review-center\/proposals\/media-power\/enable"/);
 });
 
 test("reports a running automation only after the deployment is verified", () => {
@@ -1199,7 +1212,7 @@ test("closes a runtime confirmation with an honest outcome instead of a dead car
   assert.match(html, /href="\/control"/);
 });
 
-test("states the snooze budget with the attempt count", () => {
+test("offers one later action without pressure copy", () => {
   const html = renderProductShell(model({
     route: "reviews",
     proposals: [{
@@ -1211,7 +1224,9 @@ test("states the snooze budget with the attempt count", () => {
       snoozeCount: 1,
     }],
   }));
-  assert.match(html, /暂缓也占建议名额；这是第 2 次，最多 2 次/);
+  assert.match(html, /name="until" value="later"/);
+  assert.match(html, /以后再说/);
+  assert.doesNotMatch(html, /最多 2 次|明天晚上|周末(?!早晨)|这是第/);
 });
 
 test("activity carries full dates, the closed vocabulary and per-item verification", () => {

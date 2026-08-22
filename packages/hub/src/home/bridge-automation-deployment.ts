@@ -1,6 +1,7 @@
 import type {
   AutomationsExtension,
   BridgeActionTarget,
+  BridgeAutomationStatusResult,
   BridgeAutomationAction,
   BridgeAutomationCondition,
   BridgeAutomationSpec,
@@ -19,11 +20,12 @@ import type { ProposalDeploymentOutcome } from "./proposal-store.js";
  * neutral: no bridge-native payload or endpoint detail reaches the caller.
  */
 export interface AutomationBridgeSource {
-  automationBridge(): {
+  automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
     readonly bridgeId: string;
     readonly automations: AutomationsExtension;
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined;
+  automationsHandleFor(bridgeId: string): AutomationsExtension | undefined;
 }
 
 const NO_BRIDGE_REASON = "这个家还没有可用的自动化部署通道，方案已保留，接通后可以重试。";
@@ -41,7 +43,11 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
       return { status: "failed", reason: "这条建议不包含可部署的自动化方案。" };
     }
-    const bridge = this.world.automationBridge();
+    const capabilityIds = deviceCapabilityIdsOf(request.artifactCandidate.content);
+    if (capabilityIds === undefined) {
+      return { status: "failed", reason: "自动化方案的内容没有通过校验，家里的设置保持原样。" };
+    }
+    const bridge = this.world.automationBridgeForTargets(capabilityIds);
     if (bridge === undefined) return { status: "failed", reason: NO_BRIDGE_REASON };
     const spec = compileAutomationSpec(request.proposalId, request.title, request.artifactCandidate.content, bridge.resolveTarget);
     if ("reason" in spec) return { status: "failed", reason: spec.reason };
@@ -56,18 +62,33 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     return { status: "failed", reason: deployRejectionReason(result.reason) };
   }
 
-  async pause(request: { readonly proposalId: string; readonly deploymentId?: string }): Promise<void> {
-    await this.toggle(request.deploymentId, false);
+  /** Asks the target bridge whether the deployed automation actually runs. */
+  async status(request: { readonly deploymentId: string; readonly target: string }): Promise<BridgeAutomationStatusResult["status"]> {
+    const automations = this.world.automationsHandleFor(request.target);
+    if (automations === undefined) return "unknown";
+    try {
+      const result = await automations.status(
+        { nativeAutomationId: request.deploymentId },
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      return result.status;
+    } catch {
+      return "unknown";
+    }
   }
 
-  async resume(request: { readonly proposalId: string; readonly deploymentId?: string }): Promise<void> {
-    await this.toggle(request.deploymentId, true);
+  async pause(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> {
+    await this.toggle(request, false);
   }
 
-  async withdraw(request: { readonly proposalId: string; readonly deploymentId: string }): Promise<{ readonly restored: boolean }> {
-    const bridge = this.world.automationBridge();
-    if (bridge === undefined) return { restored: false };
-    const result = await bridge.automations.withdraw(
+  async resume(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> {
+    await this.toggle(request, true);
+  }
+
+  async withdraw(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string }): Promise<{ readonly restored: boolean }> {
+    const automations = request.target === undefined ? undefined : this.world.automationsHandleFor(request.target);
+    if (automations === undefined) return { restored: false };
+    const result = await automations.withdraw(
       { nativeAutomationId: request.deploymentId },
       { signal: AbortSignal.timeout(15_000) },
     );
@@ -76,16 +97,36 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     return { restored: result.status === "acknowledged" };
   }
 
-  private async toggle(deploymentId: string | undefined, enabled: boolean): Promise<void> {
-    if (deploymentId === undefined) return;
-    const bridge = this.world.automationBridge();
-    if (bridge === undefined) throw new Error("automation_bridge_unavailable");
-    const result = await bridge.automations.setEnabled(
-      { nativeAutomationId: deploymentId, enabled },
+  private async toggle(
+    request: { readonly deploymentId?: string; readonly target?: string },
+    enabled: boolean,
+  ): Promise<void> {
+    if (request.deploymentId === undefined) return;
+    const automations = request.target === undefined ? undefined : this.world.automationsHandleFor(request.target);
+    if (automations === undefined) throw new Error("automation_bridge_unavailable");
+    const result = await automations.setEnabled(
+      { nativeAutomationId: request.deploymentId, enabled },
       { signal: AbortSignal.timeout(15_000) },
     );
     if (result.status !== "acknowledged") throw new Error("automation_toggle_rejected");
   }
+}
+
+/** Device capability ids referenced by the plan; undefined when it cannot parse. */
+function deviceCapabilityIdsOf(content: unknown): readonly string[] | undefined {
+  let parsed: ReturnType<typeof parseArtifactContent>;
+  try {
+    parsed = parseArtifactContent(content);
+  } catch {
+    return undefined;
+  }
+  const ids = new Set<string>();
+  if (parsed.trigger.kind === "capability_changed") ids.add(parsed.trigger.source.hwCapabilityId);
+  for (const condition of parsed.conditions) ids.add(condition.source.hwCapabilityId);
+  for (const action of parsed.actions) {
+    if (action.kind !== "notify_local") ids.add(action.target.hwCapabilityId);
+  }
+  return [...ids];
 }
 
 /** Stable, adapter-safe automation identity derived from the proposal id. */

@@ -94,21 +94,27 @@ once in its owning store.
   stays out of the household inbox. Only a prepared plan spends household
   attention, so `ready + snoozed <= 5` while preparation holds its own small
   budget. A proposal with nothing to compile reaches the inbox directly.
-- Snooze choices are tomorrow, weekend, or next week. A proposal may be snoozed
-  twice; the next appearance must be decided or allowed to expire naturally.
+- "以后再说" sleeps the card: it returns once before natural expiry and new
+  evidence wakes it. There is no attempt cap and no forced decision, and a
+  sleeping card frees household attention.
 - Natural expiry is normally fourteen days and is not a rejection latch.
-- The household makes one decision on a prepared plan. Its five actions each
-  carry one consequence: enable starts a running automation, modify returns the
-  plan to preparation as a new revision, "only this time" closes the current
-  proposal without a latch, "do not suggest this again" writes a `dedupKey`
-  latch and visibly acknowledges the promise, and snooze defers the decision.
+- The household makes one decision on a prepared plan with three choices:
+  enable starts a running automation, "以后再说" sleeps the card, and "不用了"
+  opens the honest pair — "仅这次不要" closes without a latch, "不再提这件事"
+  writes a `dedupKey` latch and visibly acknowledges the promise. Changing a
+  plan happens in conversation, which produces the next prepared revision.
 - New evidence for the same `dedupKey` merges into the existing unresolved card.
 - Enablement is real. The decision records `enabling`, the governed deployment
   seam applies the neutral artifact, and the interface reports a running
   automation only after the deployment verifies. A failure is explicit and
   stated in household language; it never appears as a running automation.
-- A running automation stays controllable: pause, resume, and close with the
-  original configuration restored, with its version history visible.
+- A running automation stays controllable: pause, resume, retry after an
+  explicit failure, and close with the original configuration restored.
+- A confirmation-class action may live inside an enabled automation; the plan
+  card discloses it and the enable decision is the household's consent
+  (administrator-class actions never deploy). The deployment target follows the
+  plan's own capability bindings, and the target execution domain's read-back
+  is the truth about whether the automation runs.
 
 The Web sidebar and mobile navigation show independent amber and blue counts.
 There is no aggregate red dot.

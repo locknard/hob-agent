@@ -292,14 +292,7 @@ class ProposalEnableInbox extends StubInbox {
     this.enablements.push(input);
   }
 
-  readonly changeRequests: unknown[] = [];
   readonly automationCommands: unknown[] = [];
-
-  canModifyProposal() { return true; }
-
-  modifyProposal(input: unknown) {
-    this.changeRequests.push(input);
-  }
 
   canControlAutomation() { return true; }
 
@@ -2875,7 +2868,7 @@ test("requires an explicit principal role and device binding for Basic-authentic
 });
 
 
-test("routes a change request back to preparation and controls a running automation", async () => {
+test("controls a deployed automation including an enable retry", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(ProposalEnableInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -2890,20 +2883,7 @@ test("routes a change request back to preparation and controls a running automat
     "content-type": "application/x-www-form-urlencoded",
   };
   try {
-    const modified = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable/modify`, {
-      method: "POST",
-      headers,
-      body: "expectedRevision=9",
-      redirect: "manual",
-    });
-    assert.equal(modified.status, 303);
-    assert.deepEqual((ctx.homeInbox as unknown as ProposalEnableInbox).changeRequests, [{
-      proposalId: "proposal-enable",
-      expectedRevision: 9,
-      reviewer: "adult-2",
-    }]);
-
-    for (const command of ["pause", "resume", "close"] as const) {
+    for (const command of ["pause", "resume", "close", "retry"] as const) {
       const controlled = await fetch(`${ctx.homeInboxHttp.origin}/automations/proposal-enable/${command}`, {
         method: "POST",
         headers,
@@ -2916,6 +2896,7 @@ test("routes a change request back to preparation and controls a running automat
       { proposalId: "proposal-enable", command: "pause", actor: "adult-2" },
       { proposalId: "proposal-enable", command: "resume", actor: "adult-2" },
       { proposalId: "proposal-enable", command: "close", actor: "adult-2" },
+      { proposalId: "proposal-enable", command: "retry", actor: "adult-2" },
     ]);
 
     const foreign = await fetch(`${ctx.homeInboxHttp.origin}/automations/proposal-enable/pause`, {

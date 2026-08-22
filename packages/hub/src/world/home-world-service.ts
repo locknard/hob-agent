@@ -926,44 +926,68 @@ export class HomeWorldService extends Service {
    * a read-only result.
    */
   /**
-   * Grants the automation deployment seam only while one bridge is ready with a
-   * live automations extension. Target resolution requires exactly one binding
-   * on that bridge; every ambiguity yields no deployment path, never a guess.
+   * The deployment target is decided by the plan's own capability bindings,
+   * never by bridge registration order. Every referenced capability must bind
+   * to exactly one bridge, all to the same one, and that bridge must be ready
+   * with a live automations extension. Cross-bridge plans yield no deployment
+   * path — the neutral seam stays open for any execution domain, including a
+   * future hub-native automation engine, but Phase 0 never splits one plan.
    */
-  automationBridge(): {
+  automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
     readonly bridgeId: string;
     readonly automations: AutomationsExtension;
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined {
-    for (const [bridgeId, runtime] of this.runtimesById) {
-      if (runtime.extensionAvailability["automations@1"] !== "available") continue;
-      if (runtime.ingest.diagnostics().connectionState !== "ready") continue;
-      let handle: AutomationsExtension | undefined;
-      try {
-        handle = runtime.adapter.extension("automations@1") as AutomationsExtension | undefined;
-      } catch {
-        continue;
-      }
-      if (handle === undefined || typeof handle.deploy !== "function") continue;
-      const resolveTarget = (hwCapabilityId: string): BridgeActionTarget | undefined => {
-        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
-        const capability = this.authority.capability(hwCapabilityId);
-        const bindings = capability?.bindings.filter((binding) => binding.bridgeId === bridgeId) ?? [];
-        if (bindings.length !== 1) return undefined;
-        const [binding] = bindings;
-        if (binding === undefined) return undefined;
-        return {
-          hwCapabilityId,
-          binding: {
-            bridgeId: binding.bridgeId,
-            nativeId: binding.nativeId,
-            nativeInstanceId: binding.nativeInstanceId,
-          },
-        };
-      };
-      return { bridgeId, automations: handle, resolveTarget };
+    const deviceCapabilityIds = hwCapabilityIds.filter((id) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id));
+    if (deviceCapabilityIds.length === 0 || deviceCapabilityIds.length !== hwCapabilityIds.length) return undefined;
+    let targetBridgeId: string | undefined;
+    for (const hwCapabilityId of deviceCapabilityIds) {
+      const bindings = this.authority.capability(hwCapabilityId)?.bindings ?? [];
+      const bridgeIds = new Set(bindings.map((binding) => binding.bridgeId));
+      if (bridgeIds.size !== 1) return undefined;
+      const [bridgeId] = bridgeIds;
+      if (targetBridgeId === undefined) targetBridgeId = bridgeId;
+      else if (targetBridgeId !== bridgeId) return undefined;
     }
-    return undefined;
+    if (targetBridgeId === undefined) return undefined;
+    const handle = this.liveAutomationsHandle(targetBridgeId);
+    if (handle === undefined) return undefined;
+    const bridgeId = targetBridgeId;
+    const resolveTarget = (hwCapabilityId: string): BridgeActionTarget | undefined => {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
+      const bindings = this.authority.capability(hwCapabilityId)?.bindings.filter((binding) => binding.bridgeId === bridgeId) ?? [];
+      if (bindings.length !== 1) return undefined;
+      const [binding] = bindings;
+      if (binding === undefined) return undefined;
+      return {
+        hwCapabilityId,
+        binding: {
+          bridgeId: binding.bridgeId,
+          nativeId: binding.nativeId,
+          nativeInstanceId: binding.nativeInstanceId,
+        },
+      };
+    };
+    return { bridgeId, automations: handle, resolveTarget };
+  }
+
+  /** Control and reconciliation address the bridge a deployment was recorded on. */
+  automationsHandleFor(bridgeId: string): AutomationsExtension | undefined {
+    return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
+  }
+
+  private liveAutomationsHandle(bridgeId: string): AutomationsExtension | undefined {
+    const runtime = this.runtimesById.get(bridgeId);
+    if (runtime === undefined
+      || runtime.extensionAvailability["automations@1"] !== "available"
+      || runtime.ingest.diagnostics().connectionState !== "ready") return undefined;
+    let handle: AutomationsExtension | undefined;
+    try {
+      handle = runtime.adapter.extension("automations@1") as AutomationsExtension | undefined;
+    } catch {
+      return undefined;
+    }
+    return handle !== undefined && typeof handle.deploy === "function" ? handle : undefined;
   }
 
   actionDescriptorFor(hwCapabilityId: string): BridgeActionDescriptor | undefined {

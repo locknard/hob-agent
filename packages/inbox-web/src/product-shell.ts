@@ -95,6 +95,8 @@ export interface ProductProposal {
   readonly evidence?: readonly string[];
   readonly unknowns?: readonly string[];
   readonly dependency?: string;
+  /** Present when the plan touches confirmation-class devices (DR-015 disclosure). */
+  readonly gateClasses?: readonly ("direct" | "confirmation")[];
   readonly risk?: string;
   readonly afterEnable?: string;
   readonly snoozeCount?: number;
@@ -943,7 +945,7 @@ function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
   const statusLabel = proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
   const snoozedTwice = (proposal.snoozeCount ?? 0) >= 2;
-  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${snoozedTwice ? `<span class="product-subtle">下次请做决定</span>` : renderSnoozeDisclosure(proposal)}</div></article>`;
+  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${snoozedTwice ? `<span class="product-subtle">下次请做决定</span>` : renderLaterForm(proposal)}</div></article>`;
 }
 
 function renderInsightCardActions(proposal: ProductProposal): string {
@@ -963,6 +965,9 @@ function renderProposalDetail(proposal: ProductProposal): string {
     proposal.unknowns?.length ? `<section><h3>仍待确认</h3>${list(proposal.unknowns)}</section>` : "",
   ].join("");
   const risk = proposal.risk === undefined ? "" : `<p class="product-detail-risk">风险与权限：${escapeHtml(proposal.risk)}</p>`;
+  const gateDisclosure = proposal.gateClasses?.includes("confirmation")
+    ? `<p class="product-gate-disclosure">包含需要确认的设备：这次启用就是你的授权，之后由自动化直接执行；随时可以暂停或关闭。</p>`
+    : "";
   const dependency = proposal.dependency === undefined
     ? ""
     : `<p class="product-dependency">需要：${escapeHtml(proposal.dependency)}。</p>`;
@@ -970,26 +975,29 @@ function renderProposalDetail(proposal: ProductProposal): string {
   const journey = proposal.trace === undefined
     ? ""
     : `<details class="product-agent-journey"><summary>这条建议怎么得来的</summary>${renderAgentLoopTimeline(proposal.trace)}</details>`;
+  const preparing = proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info";
   const decide = insight
     ? renderInsightActions(proposal)
-    : `<div class="product-card-actions">${enableForm(proposal)}${modifyForm(proposal)}${renderSnoozeDisclosure(proposal)}${skipForm(proposal)}${latchForm(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停或关闭。</p>`;
-  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${dependency}${insight ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
+    : preparing
+      ? `<p class="product-muted">正在后台准备：核对证据、检查冲突、确认权限。备好后它会来找你，现在不用做任何决定。</p>`
+      : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停、关闭并恢复原来的设置。</p>`;
+  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
 }
 
 function enableForm(proposal: ProductProposal): string {
   return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/enable"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">启用</button></form>`;
 }
 
-function modifyForm(proposal: ProductProposal): string {
-  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/modify"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">修改…</button></form>`;
+/** Changing a plan happens in conversation, where suggestions are born. */
+function conversationEntry(proposal: ProductProposal): string {
+  return `<form class="product-action-form" method="post" action="/conversation"><button class="product-quiet-action" type="submit" name="question" value="${escapeHtml(`我想调整建议「${proposal.title}」：`)}">在对话里改</button></form>`;
 }
 
-function skipForm(proposal: ProductProposal): string {
-  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">这次跳过</button></form>`;
-}
-
-function latchForm(proposal: ProductProposal): string {
-  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject-latch"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-danger-action" type="submit">不再建议这件事</button></form>`;
+/** "不用了" opens the honest pair: dismiss once, or never suggest this again. */
+function declineDisclosure(proposal: ProductProposal): string {
+  const reject = `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">仅这次不要</button></form>`;
+  const latch = `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject-latch"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-danger-action" type="submit">不再提这件事</button></form>`;
+  return `<details class="product-snooze"><summary>不用了</summary><div class="product-snooze-options">${reject}${latch}</div><p class="product-snooze-note">「不再提」会当面承诺并永久遵守，可在设置里解除。</p></details>`;
 }
 
 /** A household insight has nothing to enable; it only collects usefulness. */
@@ -997,10 +1005,8 @@ function renderInsightActions(proposal: ProductProposal): string {
   return `<div class="product-card-actions"><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/helpful"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">有帮助</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">不需要</button></form></div><p>这类建议只是让你知道；要不要动手由你决定。</p>`;
 }
 
-function renderSnoozeDisclosure(proposal: Pick<ProductProposal, "id" | "snoozeCount">): string {
-  const option = (value: string, label: string) => `<form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="${value}">${label}</button></form>`;
-  const attempt = Math.min((proposal.snoozeCount ?? 0) + 1, 2);
-  return `<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options">${option("tomorrow", "明天晚上")}${option("weekend", "周末")}${option("next_week", "下周")}</div><p class="product-snooze-note">暂缓也占建议名额；这是第 ${attempt} 次，最多 2 次。</p></details>`;
+function renderLaterForm(proposal: Pick<ProductProposal, "id">): string {
+  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button class="product-secondary-action" type="submit" name="until" value="later">以后再说</button></form>`;
 }
 
 const AUTOMATION_PRESENTATION = {

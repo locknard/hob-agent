@@ -184,6 +184,7 @@ export class HomeAgentRuntime {
         preparation: this.artifactPipeline,
       });
       await this.preparationRunner.start();
+      void this.context.homeProposals.reconcileAutomations().catch(() => undefined);
       await this.context.plugin(HomeRetentionService);
       if (this.options.mediaCatalog !== undefined) {
         await this.context.plugin(HomeMediaCatalogService, this.options.mediaCatalog);

@@ -31,6 +31,7 @@ import type {
   ProductSpace,
   ProductEnergySummary,
   ProductConcern,
+  ProductAutomation,
   ProductControlSpace,
   ProductControlFeedback,
   ProductActivityRecord,
@@ -311,16 +312,12 @@ export interface ProposalInboxProposalGovernancePort {
     readonly expectedRevision: number;
     readonly reviewer: string;
   }): void | Promise<void>;
-  /** Returns the plan to preparation without spending the household decision. */
-  requestProposalChanges?(input: {
-    readonly proposalId: string;
-    readonly expectedRevision: number;
-    readonly actor: string;
-    readonly note?: string;
-  }): void | Promise<void>;
   pauseAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
   resumeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
   closeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  retryEnable?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  listAutomations?(): readonly unknown[];
+  reconcileAutomations?(): Promise<void>;
 }
 
 export interface InboxProductReviewProjection {
@@ -337,6 +334,7 @@ export interface InboxProductShellProjection {
   readonly spaces: readonly ProductSpace[];
   readonly energy?: ProductEnergySummary;
   readonly concern?: ProductConcern;
+  readonly automations?: readonly ProductAutomation[];
   readonly controlSpaces: readonly ProductControlSpace[];
   readonly activity: readonly ProductActivityRecord[];
   readonly safetyAlerts?: readonly ProductSafetyAlert[];
@@ -515,15 +513,55 @@ export class ProposalInboxService extends Service {
     const batchControl = this.batchControlProjection(projection, batchRequestId);
     const energy = projectEnergyToday(world, this.world, now, this.timezone);
     const concern = this.projectConcern(now);
+    const automations = this.projectAutomations();
     return {
       ...projection,
       ...(energy === undefined ? {} : { energy }),
       ...(concern === undefined ? {} : { concern }),
+      ...(automations === undefined ? {} : { automations }),
       activity: projectRuntimeActivity(this.runtime?.activities?.() ?? [], now),
       ...(safetyAlerts === undefined ? {} : { safetyAlerts }),
       ...(completionNotification === undefined ? {} : { completionNotification }),
       ...(batchControl === undefined ? {} : { batchControl }),
     };
+  }
+
+  /** Deployed automations from the governance owner; the bridge read-back converges in the background. */
+  private projectAutomations(): readonly ProductAutomation[] | undefined {
+    const governance = this.proposalGovernance;
+    if (governance?.listAutomations === undefined) return undefined;
+    void governance.reconcileAutomations?.().catch(() => undefined);
+    let records: readonly unknown[];
+    try {
+      records = governance.listAutomations();
+    } catch {
+      return undefined;
+    }
+    const automations: ProductAutomation[] = [];
+    for (const value of records.slice(0, 50)) {
+      const record = productRecord(value);
+      const id = productText(record?.id, 256);
+      const title = productText(record?.title, 512);
+      const lifecycle = productText(record?.lifecycle, 32);
+      if (id === undefined || title === undefined
+        || (lifecycle !== "enabling" && lifecycle !== "active" && lifecycle !== "paused"
+          && lifecycle !== "closed" && lifecycle !== "enable_failed")) continue;
+      const deployment = productRecord(record?.deployment);
+      const verifiedAt = productText(deployment?.verifiedAt, 64);
+      const reason = productText(deployment?.reason, 1_000);
+      const revision = typeof record?.revision === "number" ? record.revision : undefined;
+      automations.push({
+        id,
+        title,
+        lifecycle,
+        ...(revision === undefined ? {} : { version: revision }),
+        ...(lifecycle === "active" && verifiedAt !== undefined
+          ? { lastResult: `已部署并读回核对 · ${verifiedAt.slice(0, 10)}` }
+          : {}),
+        ...(lifecycle === "enable_failed" && reason !== undefined ? { failureReason: reason } : {}),
+      });
+    }
+    return automations;
   }
 
   /** Relays only a fresh, completed finding; the product never invents a concern. */
@@ -760,26 +798,6 @@ export class ProposalInboxService extends Service {
     await enable.call(this.proposalGovernance, input);
   }
 
-  canModifyProposal(): boolean {
-    return typeof this.proposalGovernance?.requestProposalChanges === "function";
-  }
-
-  async modifyProposal(input: {
-    readonly proposalId: string;
-    readonly expectedRevision: number;
-    readonly reviewer: string;
-    readonly note?: string;
-  }): Promise<void> {
-    const request = this.proposalGovernance?.requestProposalChanges;
-    if (request === undefined) throw new Error("proposal_modify_unavailable");
-    await request.call(this.proposalGovernance, {
-      proposalId: input.proposalId,
-      expectedRevision: input.expectedRevision,
-      actor: input.reviewer,
-      ...(input.note === undefined ? {} : { note: input.note }),
-    });
-  }
-
   canControlAutomation(): boolean {
     return typeof this.proposalGovernance?.pauseAutomation === "function"
       && typeof this.proposalGovernance?.resumeAutomation === "function"
@@ -788,13 +806,15 @@ export class ProposalInboxService extends Service {
 
   async controlAutomation(input: {
     readonly proposalId: string;
-    readonly command: "pause" | "resume" | "close";
+    readonly command: "pause" | "resume" | "close" | "retry";
     readonly actor: string;
   }): Promise<void> {
     const governance = this.proposalGovernance;
     const handler = input.command === "pause"
       ? governance?.pauseAutomation
-      : input.command === "resume" ? governance?.resumeAutomation : governance?.closeAutomation;
+      : input.command === "resume"
+        ? governance?.resumeAutomation
+        : input.command === "retry" ? governance?.retryEnable : governance?.closeAutomation;
     if (handler === undefined) throw new Error("automation_control_unavailable");
     await handler.call(governance, { proposalId: input.proposalId, actor: input.actor });
   }
@@ -968,7 +988,8 @@ export class ProposalInboxService extends Service {
   }
 
   private pendingProductProposals(): readonly InboxProposal[] {
-    return this.proposals.list({ status: "pending_review", limit: 200, visibleOnly: true });
+    return this.proposals.list({ status: "pending_review", limit: 200, visibleOnly: true })
+      .filter((proposal) => proposal.lifecycle === undefined || proposal.lifecycle === "ready");
   }
 
   private async decideRuntime(
@@ -1246,6 +1267,9 @@ function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDe
       : proposal.status === "expired" ? "expired" : proposal.status,
     ...(proposal.kind === "automation-draft" || proposal.kind === "household-insight"
       ? { kind: proposal.kind }
+      : {}),
+    ...(Array.isArray(proposal.actionPolicyClasses) && proposal.actionPolicyClasses.includes("confirmation")
+      ? { gateClasses: ["confirmation" as const] }
       : {}),
     ...(proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info" || proposal.lifecycle === "ready"
       ? { lifecycle: proposal.lifecycle }

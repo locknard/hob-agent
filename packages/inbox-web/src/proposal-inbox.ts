@@ -226,6 +226,7 @@ export interface InboxProposal {
   readonly snoozedUntil?: string;
   readonly newEvidence?: boolean;
   readonly lifecycle?: "preparing" | "needs_info" | "ready" | "enabling" | "active" | "paused" | "closed" | "enable_failed";
+  readonly actionPolicyClasses?: readonly ("direct" | "confirmation")[];
   readonly trial?: {
     readonly durationDays: 7;
     readonly startedAt: string;

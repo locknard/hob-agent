@@ -1093,3 +1093,62 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
     store.close();
   }
 });
+
+
+test("reconciliation converges local lifecycles with the target bridge's truth", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T01:00:00.000Z" });
+  const statuses = new Map<string, "running" | "paused" | "missing" | "unknown">();
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_x", target: "ha-main" }),
+        status: async (request: { deploymentId: string }) => statuses.get(request.deploymentId) ?? "unknown",
+      },
+    } as never);
+
+    const make = (key: string) => {
+      const created = store.create({
+        ...candidate,
+        kind: "automation-draft",
+        idempotencyKey: `reconcile:${key}:v1`,
+        dedupKey: `reconcile:${key}`,
+        intent: { ...candidate.intent, type: "automation-draft" },
+        artifactCandidate: automationCandidate,
+      });
+      const ready = store.markProposalReady({ proposalId: created.id });
+      return store.decideProposal({
+        proposalId: ready.id,
+        expectedRevision: ready.revision,
+        decision: "approve",
+        reviewer: "household-owner",
+      });
+    };
+
+    const crashed = make("crashed");
+    statuses.set(`hob_${crashed.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`, "running");
+    // A crash after deployment but before recording leaves `enabling` with a
+    // pending record; reconciliation must recover it from bridge truth.
+    store.recordProposalDeployment({
+      proposalId: crashed.id,
+      expectedRevision: crashed.revision,
+      outcome: { status: "verified", deploymentId: "hob_crashed", target: "ha-main" },
+    });
+    const crashedBack = store.pauseAutomation({ proposalId: crashed.id, actor: "test" });
+    statuses.set("hob_crashed", "running");
+
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(crashedBack.id)?.lifecycle, "active", "a natively running automation resumes locally");
+
+    statuses.set("hob_crashed", "missing");
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(crashedBack.id)?.lifecycle, "closed", "a natively deleted automation closes locally");
+    assert.equal(store.get(crashedBack.id)?.applicationStatus, "withdrawn");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});

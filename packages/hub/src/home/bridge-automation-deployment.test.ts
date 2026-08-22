@@ -51,7 +51,13 @@ function bridgeStub(overrides: {
       ? { hwCapabilityId, binding: { bridgeId: "ha-main", nativeId: `dev-${hwCapabilityId}`, nativeInstanceId: `ent-${hwCapabilityId}` } }
       : undefined,
   };
-  return { calls, world: { automationBridge: () => bridge } };
+  return {
+    calls,
+    world: {
+      automationBridgeForTargets: (ids: readonly string[]) => (overrides.resolvable ?? true) && ids.length > 0 ? bridge : bridge,
+      automationsHandleFor: (bridgeId: string) => bridgeId === "ha-main" ? bridge.automations : undefined,
+    },
+  };
 }
 
 test("compiles the neutral artifact with resolved bindings and reports a verified deployment", async () => {
@@ -77,7 +83,10 @@ test("compiles the neutral artifact with resolved bindings and reports a verifie
 });
 
 test("fails in household language when no bridge, no binding, or the adapter rejects", async () => {
-  const noBridge = new BridgeAutomationDeployment({ automationBridge: () => undefined });
+  const noBridge = new BridgeAutomationDeployment({
+    automationBridgeForTargets: () => undefined,
+    automationsHandleFor: () => undefined,
+  });
   const missing = await noBridge.deploy({
     proposalId: "p1", revision: 1, kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
@@ -108,9 +117,9 @@ test("fails in household language when no bridge, no binding, or the adapter rej
 test("pause, resume and withdraw address only the hub deployment", async () => {
   const { calls, world } = bridgeStub();
   const port = new BridgeAutomationDeployment(world);
-  await port.pause({ proposalId: "p1", deploymentId: "hob_p1" });
-  await port.resume({ proposalId: "p1", deploymentId: "hob_p1" });
-  const withdrawal = await port.withdraw({ proposalId: "p1", deploymentId: "hob_p1" });
+  await port.pause({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
+  await port.resume({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
+  const withdrawal = await port.withdraw({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
   assert.deepEqual(calls.toggles, [
     { nativeAutomationId: "hob_p1", enabled: false },
     { nativeAutomationId: "hob_p1", enabled: true },

@@ -93,7 +93,17 @@ export const bridgeAutomationCommandResultSchema = z.discriminatedUnion("status"
 ]);
 export type BridgeAutomationCommandResult = z.infer<typeof bridgeAutomationCommandResultSchema>;
 
+export const bridgeAutomationStatusResultSchema = z.object({
+  status: z.enum(["running", "paused", "missing", "unknown"]),
+}).strict();
+export type BridgeAutomationStatusResult = z.infer<typeof bridgeAutomationStatusResultSchema>;
+
 export interface AutomationsExtension {
+  /** The native runtime is the source of truth for whether an automation runs. */
+  status(
+    request: { readonly nativeAutomationId: string },
+    options: { readonly signal: AbortSignal },
+  ): Promise<BridgeAutomationStatusResult>;
   deploy(
     spec: BridgeAutomationSpec,
     options: { readonly signal: AbortSignal },

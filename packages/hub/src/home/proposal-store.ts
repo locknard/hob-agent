@@ -172,6 +172,8 @@ const createProposalInputSchema = z.object({
   ]),
   title: z.string().trim().min(1).max(120),
   summary: boundedText,
+  /** Gate classes of the plan's device actions, recorded for household disclosure. */
+  actionPolicyClasses: z.array(z.enum(["direct", "confirmation"])).max(2).optional(),
   /** Stable identity of the behavior being discussed, independent of one producer attempt. */
   dedupKey: boundedId.optional(),
   idempotencyKey: boundedId,

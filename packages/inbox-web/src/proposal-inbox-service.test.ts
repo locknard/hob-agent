@@ -726,12 +726,12 @@ test("uses the proposal owner for capacity, visible cards, snooze, and both prop
   assert.equal(selected?.id, trialProposal.id);
   assert.equal(selected?.lifecycle, "ready");
 
-  await ctx.homeInbox.snoozeProposal({ proposalId: reviewProposal.id, until: "tomorrow" });
+  await ctx.homeInbox.snoozeProposal({ proposalId: reviewProposal.id, until: "later" });
   await ctx.homeInbox.rejectProposal({ proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1" });
   await ctx.homeInbox.latchProposal({ proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1" });
   await ctx.homeInbox.enableProposal({ proposalId: trialProposal.id, expectedRevision: 8, reviewer: "admin-1" });
 
-  assert.deepEqual(proposals.snoozes, [{ proposalId: reviewProposal.id, until: "tomorrow" }]);
+  assert.deepEqual(proposals.snoozes, [{ proposalId: reviewProposal.id, until: "later" }]);
   assert.deepEqual(proposals.decisions, [
     { proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1", decision: "reject_once" },
     { proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1", decision: "do_not_suggest" },
