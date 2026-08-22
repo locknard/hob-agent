@@ -29,7 +29,7 @@ import type { SelectedModelCredential } from "./model-credential-profile.js";
 import {
   parseMusicAssistantCredentialRef,
 } from "./music-assistant-credential-setup.js";
-import { toMusicAssistantWebSocketUrl } from "./music-assistant-websocket-client.js";
+import { toMusicAssistantWebSocketUrl } from "./media/music-assistant-websocket-client.js";
 import { parseHomeSafetyBindings, type HomeSafetyBinding } from "./home-safety-service.js";
 
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;

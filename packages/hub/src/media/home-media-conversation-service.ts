@@ -11,10 +11,10 @@ import type {
   OneShotActionActor,
   OneShotActionResult,
   OneShotActionTicket,
-} from "./authority/one-shot-action-plane.js";
+} from "../authority/one-shot-action-plane.js";
 import type {
   RuntimeDecisionProjection,
-} from "./household-review-center-service.js";
+} from "../household-review-center-service.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {

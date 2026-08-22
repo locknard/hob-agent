@@ -54,6 +54,12 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     .filter((name) => /^(?:action-authority-config|authority-|identity-authority|one-shot-action-|principal-registry)/.test(name));
   assert.deepEqual(misplacedAuthorityFiles, [], "authority domain modules and their tests belong under src/authority");
 
+  const misplacedMediaFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => /^(?:media-|music-assistant-(?!credential-setup)|home-media-)/.test(name));
+  assert.deepEqual(misplacedMediaFiles, [], "media domain modules and their tests belong under src/media");
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],

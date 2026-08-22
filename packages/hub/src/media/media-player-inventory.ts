@@ -1,4 +1,4 @@
-import type { HomeWorldSnapshot } from "./home-world-service.js";
+import type { HomeWorldSnapshot } from "../home-world-service.js";
 
 export type MediaPlayerAvailability = "available" | "unavailable" | "unknown";
 export type MediaPlayerPlaybackState =

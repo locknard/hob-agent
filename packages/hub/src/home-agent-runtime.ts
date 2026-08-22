@@ -53,11 +53,11 @@ import {
   HomeMediaPlayerService,
   type HomeMediaCatalogServiceOptions,
   type HomeMediaPlaybackExecutionServiceOptions,
-} from "./home-media-services.js";
+} from "./media/home-media-services.js";
 import {
   HomeMediaConversationService,
   type HomeMediaConversationServiceOptions,
-} from "./home-media-conversation-service.js";
+} from "./media/home-media-conversation-service.js";
 import {
   HouseholdReviewCenterService,
   type HouseholdReviewCenterServiceOptions,

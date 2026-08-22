@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 
-import type { OneShotActionActor, OneShotActionResult } from "./authority/one-shot-action-plane.js";
+import type { OneShotActionActor, OneShotActionResult } from "../authority/one-shot-action-plane.js";
 
 interface ConversationModule {
   readonly HomeMediaConversationService: new (ctx: Context, options?: Record<string, unknown>) => Service;

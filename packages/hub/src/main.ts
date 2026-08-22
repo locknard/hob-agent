@@ -23,8 +23,8 @@ import {
   loadSelectedModelCredential,
   type SelectedModelCredential,
 } from "./model-credential-profile.js";
-import { MusicAssistantMediaCatalogProvider } from "./music-assistant-media-provider.js";
-import { MusicAssistantWebSocketSearchClient } from "./music-assistant-websocket-client.js";
+import { MusicAssistantMediaCatalogProvider } from "./media/music-assistant-media-provider.js";
+import { MusicAssistantWebSocketSearchClient } from "./media/music-assistant-websocket-client.js";
 
 type ActionAuthorityConfig = Readonly<Record<string, ActionAuthorityConfiguration>>;
 
