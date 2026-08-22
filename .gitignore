@@ -13,4 +13,4 @@ coverage/
 !.env.example
 
 # Runtime home workspace (copied from home-template/); never commit household data.
-home/
+/home/

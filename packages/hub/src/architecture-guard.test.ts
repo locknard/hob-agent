@@ -72,6 +72,13 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     .filter((name) => /^(?:home-(?!agent-runtime)|household-review-center-service|observation-audit-store|proposal-store|product-view-recipe-draft-store)/.test(name));
   assert.deepEqual(misplacedHomeFiles, [], "household product modules and their tests belong under src/home");
 
+  const ignoreRules = readFileSync(join(repositoryRoot, ".gitignore"), "utf8")
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  assert.ok(ignoreRules.includes("/home/"), "the runtime household workspace ignore is anchored to the repository root");
+  assert.equal(ignoreRules.includes("home/"), false, "the Hub home source domain remains trackable");
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],

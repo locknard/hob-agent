@@ -1,0 +1,357 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { Context, Service } from "@deepseek-ai/cordis";
+
+import { HomeObservationSchedulerService } from "./home-observation-scheduler.js";
+
+class StubWorld extends Service {
+  ready = true;
+
+  constructor(ctx: Context) {
+    super(ctx, "homeWorld");
+  }
+
+  snapshot() {
+    return {
+      bridges: { "bridge-a": {} },
+      bridgeWatermarks: this.ready ? [{ bridgeId: "bridge-a", epochId: "epoch-a", lastSeq: 4 }] : [],
+      diagnostics: [{
+        bridgeId: "bridge-a",
+        connectionState: this.ready ? "ready" : "syncing",
+        ...(this.ready ? { currentProcessReadyAt: "2026-08-19T03:59:00.000Z" } : {}),
+      }],
+    };
+  }
+}
+
+class StubProposals extends Service {
+  pending = false;
+
+  constructor(ctx: Context) {
+    super(ctx, "homeProposals");
+  }
+
+  list() {
+    return this.pending ? [{ id: "proposal-1" }] : [];
+  }
+}
+
+class StubAgent extends Service {
+  observationStatus: "idle" | "running" = "idle";
+  observations = 0;
+  onObservation: (() => void) | undefined;
+  disposition: "insufficient_evidence" | undefined;
+
+  constructor(ctx: Context) {
+    super(ctx, "homeAgent");
+  }
+
+  async requestObservation() {
+    this.observations += 1;
+    this.onObservation?.();
+    return this.disposition;
+  }
+
+  observationMetrics() {
+    return {
+      durationMs: 25,
+      inputTokens: 10,
+      outputTokens: 2,
+      reasoningTokens: 1,
+      toolCalls: 3,
+      failedToolCalls: 0,
+    };
+  }
+}
+
+class StubObservationAudit extends Service {
+  readonly starts: { id: string; trigger: string; startedAt: string }[] = [];
+  readonly completions: { id: string; completedAt: string; outcome: string; disposition?: string; metrics?: unknown }[] = [];
+  failBegin = false;
+  failCompletion = false;
+
+  constructor(ctx: Context) {
+    super(ctx, "homeObservationAudit");
+  }
+
+  begin(input: { trigger: string; startedAt: string }) {
+    if (this.failBegin) throw new Error("audit unavailable");
+    const id = `observation-${this.starts.length + 1}`;
+    this.starts.push({ id, ...input });
+    return id;
+  }
+
+  complete(input: { id: string; completedAt: string; outcome: string; disposition?: string; metrics?: unknown }) {
+    if (this.failCompletion) throw new Error("audit completion unavailable");
+    this.completions.push(input);
+  }
+
+  list() { return []; }
+}
+
+class StubOnboarding extends Service {
+  constructor(ctx: Context) { super(ctx, "homeOnboarding"); }
+  snapshot() {
+    return {
+      observation: {
+        enabled: true,
+        intervalMinutes: 720,
+        configuredAt: "2026-08-19T03:00:00.000Z",
+      },
+    };
+  }
+}
+
+async function setup() {
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    intervalMinutes: 60,
+    scheduler: { wait: (_delay: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+  return { ctx, fiber };
+}
+
+test("supports explicit observation while recurring scheduling is disabled", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  let waits = 0;
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    scheduler: { wait: async () => { waits += 1; } },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+
+  assert.deepEqual(ctx.homeObservationScheduler.snapshot(), {
+    enabled: false,
+    runOnStart: false,
+    state: "waiting",
+  });
+  assert.equal(waits, 0);
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "no_proposal");
+  assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeObservationAudit.starts[0]?.trigger, "manual");
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("starts one explicit observation only for a ready idle home with an empty Inbox", async () => {
+  const { ctx, fiber } = await setup();
+  ctx.homeAgent.disposition = "insufficient_evidence";
+
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "no_proposal");
+  assert.equal(ctx.homeAgent.observations, 1);
+  assert.deepEqual(ctx.homeObservationScheduler.snapshot().lastAttempt, {
+    at: "2026-08-19T04:00:00.000Z",
+    outcome: "no_proposal",
+    disposition: "insufficient_evidence",
+    metrics: {
+      durationMs: 25,
+      inputTokens: 10,
+      outputTokens: 2,
+      reasoningTokens: 1,
+      toolCalls: 3,
+      failedToolCalls: 0,
+    },
+  });
+
+  ctx.homeAgent.onObservation = () => { ctx.homeProposals.pending = true; };
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "proposal_created");
+  assert.equal(ctx.homeAgent.observations, 2);
+
+  ctx.homeWorld.ready = false;
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "world_not_ready");
+  ctx.homeWorld.ready = true;
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "proposal_pending");
+  ctx.homeProposals.pending = false;
+  ctx.homeAgent.observationStatus = "running";
+  assert.equal(await ctx.homeObservationScheduler.observeNow(), "agent_busy");
+  assert.equal(ctx.homeAgent.observations, 2);
+  assert.deepEqual(ctx.homeObservationScheduler.snapshot(), {
+    enabled: true,
+    intervalMinutes: 60,
+    runOnStart: false,
+    state: "waiting",
+    lastAttempt: { at: "2026-08-19T04:00:00.000Z", outcome: "agent_busy" },
+  });
+  assert.deepEqual(ctx.homeObservationAudit.starts.map((attempt) => attempt.trigger), [
+    "manual",
+    "manual",
+    "manual",
+    "manual",
+    "manual",
+  ]);
+  assert.deepEqual(ctx.homeObservationAudit.completions.map((attempt) => attempt.outcome), [
+    "no_proposal",
+    "proposal_created",
+    "world_not_ready",
+    "proposal_pending",
+    "agent_busy",
+  ]);
+  assert.equal(ctx.homeObservationAudit.completions[0]?.disposition, "insufficient_evidence");
+  assert.deepEqual(ctx.homeObservationAudit.completions[0]?.metrics, {
+    durationMs: 25,
+    inputTokens: 10,
+    outputTokens: 2,
+    reasoningTokens: 1,
+    toolCalls: 3,
+    failedToolCalls: 0,
+  });
+  assert.equal(ctx.homeObservationAudit.completions[1]?.disposition, undefined);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("runs on the configured boundary and keeps scheduling after a successful turn", async () => {
+  const waits: { delay: number; release: () => void }[] = [];
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    intervalMinutes: 60,
+    scheduler: { wait: (delay, signal) => new Promise<void>((resolve) => {
+      const release = () => {
+        signal.removeEventListener("abort", release);
+        resolve();
+      };
+      waits.push({ delay, release });
+      signal.addEventListener("abort", release, { once: true });
+    }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+
+  assert.equal(waits[0]?.delay, 60 * 60_000);
+  waits[0]?.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeObservationAudit.starts[0]?.trigger, "scheduled");
+  assert.equal(waits[1]?.delay, 60 * 60_000);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("fails closed before the Agent when audit start is unavailable and resets after completion failure", async () => {
+  const { ctx, fiber } = await setup();
+  ctx.homeObservationAudit.failBegin = true;
+  await assert.rejects(ctx.homeObservationScheduler.observeNow(), /audit unavailable/);
+  assert.equal(ctx.homeAgent.observations, 0);
+  assert.equal(ctx.homeObservationScheduler.snapshot().state, "waiting");
+
+  ctx.homeObservationAudit.failBegin = false;
+  ctx.homeObservationAudit.failCompletion = true;
+  await assert.rejects(ctx.homeObservationScheduler.observeNow(), /audit completion unavailable/);
+  assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeObservationScheduler.snapshot().state, "waiting");
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("keeps recurring scheduling alive after one audit failure without calling the Agent", async () => {
+  const waits: { release: () => void }[] = [];
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  ctx.homeObservationAudit.failBegin = true;
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    intervalMinutes: 60,
+    scheduler: { wait: (_delay, signal) => new Promise<void>((resolve) => {
+      const release = () => {
+        signal.removeEventListener("abort", release);
+        resolve();
+      };
+      waits.push({ release });
+      signal.addEventListener("abort", release, { once: true });
+    }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+
+  waits[0]?.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ctx.homeAgent.observations, 0);
+  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "failed");
+  assert.equal(waits.length, 2);
+
+  ctx.homeObservationAudit.failBegin = false;
+  waits[1]?.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ctx.homeAgent.observations, 1);
+  assert.equal(ctx.homeObservationScheduler.snapshot().lastAttempt?.outcome, "no_proposal");
+  assert.equal(waits.length, 3);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("restores the persisted onboarding schedule and applies a new schedule at the scheduler boundary", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  await ctx.plugin(StubOnboarding);
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    onboarding: ctx.homeOnboarding,
+    scheduler: { wait: (_delay, signal) => new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }) },
+    clock: () => "2026-08-19T04:00:00.000Z",
+  });
+  try {
+    assert.deepEqual(ctx.homeObservationScheduler.snapshot(), {
+      enabled: true,
+      intervalMinutes: 720,
+      runOnStart: false,
+      state: "waiting",
+    });
+    ctx.homeObservationScheduler.configure({ enabled: true, intervalMinutes: 1_440 });
+    assert.equal(ctx.homeObservationScheduler.snapshot().intervalMinutes, 1_440);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("honors the persisted quiet-hours boundary for recurring observations", async () => {
+  const waits: { readonly release: () => void }[] = [];
+  const ctx = new Context();
+  await ctx.plugin(StubWorld);
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubAgent);
+  await ctx.plugin(StubObservationAudit);
+  const fiber = await ctx.plugin(HomeObservationSchedulerService, {
+    intervalMinutes: 60,
+    quietHours: { start: "22:00", end: "08:00" },
+    scheduler: { wait: (_delay, signal) => new Promise<void>((resolve) => {
+      const release = () => resolve();
+      waits.push({ release });
+      signal.addEventListener("abort", release, { once: true });
+    }) },
+    clock: () => "2026-08-19T23:30:00",
+  });
+  try {
+    waits[0]?.release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(ctx.homeAgent.observations, 0);
+    assert.equal(waits.length, 2);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
