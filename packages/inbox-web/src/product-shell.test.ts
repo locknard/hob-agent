@@ -15,7 +15,7 @@ import { PRODUCT_SHELL_CSS } from "./product-shell-styles.js";
 function model(overrides: Partial<ProductShellModel> = {}): ProductShellModel {
   return {
     route: "overview",
-    household: { name: "小海的家", agentName: "阿灶", memberName: "小海", memberRole: "管理员" },
+    household: { name: "小海的家", agentName: "阿灶", memberName: "小海" },
     connection: { state: "quiet", lastChanged: "刚刚" },
     runtimeConfirmations: [
       {
@@ -171,7 +171,8 @@ test("projects unknown household facts and connection states without inventing a
     household: {},
   }));
   assert.match(settings, /当前成员.*待设置/s);
-  assert.match(settings, /身份.*待确认/s);
+  assert.match(settings, /高影响动作.*在绑定本人的私人手机上确认/s);
+  assert.doesNotMatch(settings, /身份|管理员|成年成员/, "the settings surface names no member ranks");
   assert.doesNotMatch(settings, /连接详情|查看连接/);
   assert.doesNotMatch(settings, /小海|管理员手机确认/);
 
@@ -647,7 +648,7 @@ test("renders neutral control forms and explicit action feedback with a ten-seco
   assert.match(html, /data-control-space="living-room"/);
   assert.match(html, /data-control-capability="cap-light"/);
   assert.match(html, /class="product-control-current-value">开<\/span>/);
-  assert.match(html, /每项动作都会按成员权限处理，需要确认的会先等你同意/);
+  assert.match(html, /每项动作都按影响程度处理，需要确认的会先等你同意/);
   assert.doesNotMatch(html, />[^<]*Hub[^<]*</);
   assert.doesNotMatch(html, /product-card product-control-card/);
   assert.match(html, /data-control-status="verified"/);
@@ -692,8 +693,8 @@ test("models control availability across every household connection state", () =
     readonly disabled: boolean;
     readonly value: string;
   }>> = {
-    connected: { availability: "available", summary: "每项动作都会按成员权限处理", disabled: false, value: "开" },
-    quiet: { availability: "available", summary: "每项动作都会按成员权限处理", disabled: false, value: "开" },
+    connected: { availability: "available", summary: "每项动作都按影响程度处理", disabled: false, value: "开" },
+    quiet: { availability: "available", summary: "每项动作都按影响程度处理", disabled: false, value: "开" },
     connecting: { availability: "waiting", summary: "正在连接家庭设备", disabled: true, value: "上次：开" },
     disconnected: { availability: "waiting", summary: "家庭连接正在恢复", disabled: true, value: "上次：开" },
     unknown: { availability: "waiting", summary: "正在确认家庭连接", disabled: true, value: "上次：开" },
@@ -1118,6 +1119,8 @@ test("a blocked plan stops honestly with only the revise and decline exits", () 
       title: "睡前自动关掉多媒体室电源",
       lifecycle: "ready",
       why: ["连续 12 天，你在 23:00 后手动关多媒体室插线板"],
+      gateClasses: ["confirmation"],
+      confirmationDeviceNames: ["插座（多媒体室）"],
       enableBlockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。",
     },
   }));
@@ -1130,6 +1133,7 @@ test("a blocked plan stops honestly with only the revise and decline exits", () 
   assert.doesNotMatch(html, />启用</);
   assert.doesNotMatch(html, /以后再说/);
   assert.doesNotMatch(html, /启用后：/, "a blocked plan makes no after-enable promise");
+  assert.doesNotMatch(html, /这次启用就是你的授权/, "a blocked plan makes no present-tense authorization promise");
 });
 
 test("keeps a preparing plan out of decision reach", () => {

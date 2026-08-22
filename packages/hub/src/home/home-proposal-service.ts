@@ -24,6 +24,7 @@ import {
   ProposalStoreError,
 } from "./proposal-store.js";
 import type { HomeWorldService } from "../world/home-world-service.js";
+import { householdCapabilityLabel } from "../world/home-world-service.js";
 import {
   parseArtifactContent,
   type ArtifactContent,
@@ -188,9 +189,17 @@ export class HomeProposalService extends Service {
         }
         actionPolicyClasses.add(authority.policyClass === "confirmation" ? "confirmation" : "direct");
         if (authority.policyClass === "confirmation") {
+          // Named-device authorization is an invariant, not a best effort: a
+          // confirmation action the household cannot name cannot be disclosed,
+          // so admission fails toward fixing the home map.
           const device = selectedDevices.find((candidateDevice) =>
             candidateDevice.capabilities.some((capability) => capability.hwCapabilityId === action.target.hwCapabilityId));
-          if (device?.name !== undefined) confirmationDeviceNames.add(device.name);
+          const name = device?.name
+            ?? householdCapabilityLabel(selectedCapabilities.get(action.target.hwCapabilityId)?.semanticKind);
+          if (name === undefined) {
+            throw new TypeError("home proposal confirmation action requires a household-readable device name; name the device in the home map first");
+          }
+          confirmationDeviceNames.add(name);
         }
       }
       if (input.selectedHwCapabilityIds !== undefined

@@ -1059,7 +1059,7 @@ export class ProposalInboxHttpService extends Service {
         const adviceId = safeDecode(adviceCorrection[1]!);
         if (adviceId === undefined) return send(response, 400, "Invalid household correction");
         if (this.principal === undefined || !canUsePrivateCorrectionPrincipal(this.principal)) {
-          return send(response, 403, "Household correction requires a present adult household member on a bound private device");
+          return send(response, 403, "Household correction requires a present member on a private device bound to themselves");
         }
         if (this.inbox.submitConversationCorrection === undefined) {
           return send(response, 503, "Household correction is unavailable");
@@ -1237,14 +1237,15 @@ export class ProposalInboxHttpService extends Service {
         const confirmationId = safeDecode(runtimeDecision[1]!);
         if (confirmationId === undefined) return send(response, 400, "Invalid runtime confirmation");
         if (this.principal === undefined || !canUsePresentHouseholdPrincipal(this.principal)) {
-          return send(response, 403, "Runtime review requires a present adult household member");
+          return send(response, 403, "Runtime review requires a present household member");
         }
         const decide = runtimeDecision[2] === "approve"
           ? this.inbox.approveRuntimeConfirmation
           : this.inbox.rejectRuntimeConfirmation;
         if (decide === undefined) return send(response, 404, "Runtime confirmation review unavailable");
-        if (this.inbox.canApproveRuntimeConfirmation?.(this.principal, confirmationId) === false) {
-          return send(response, 403, "This confirmation requires an eligible present household member on an authorized device");
+        if (runtimeDecision[2] === "approve"
+          && this.inbox.canApproveRuntimeConfirmation?.(this.principal, confirmationId) === false) {
+          return send(response, 403, "Approval requires a present member on a private device bound to themselves");
         }
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
           return send(response, 415, "Unsupported runtime confirmation content type");
@@ -2223,20 +2224,8 @@ function productHouseholdFromIdentity(
   return {
     ...(identity?.householdName === undefined ? {} : { name: identity.householdName }),
     ...(identity?.agentName === undefined ? {} : { agentName: identity.agentName }),
-    ...(principal === undefined ? {} : { memberName: principal.principalId, memberRole: principalRoleLabel(principal.role) }),
+    ...(principal === undefined ? {} : { memberName: principal.principalId }),
   };
-}
-
-function principalRoleLabel(role: InboxReviewActor["role"]): string {
-  // Product language knows the household owner (product administration) and
-  // members; the finer wire roles are accepted but never shown as ranks.
-  switch (role) {
-    case "admin": return "屋主";
-    case "adult_member":
-    case "member":
-    case "child": return "成员";
-    case "guest": return "访客";
-  }
 }
 
 function productShellModel(route: ProductRoute, context: ProductRouteRenderContext): ProductShellModel {

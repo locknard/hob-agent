@@ -998,7 +998,9 @@ export class ProposalInboxService extends Service {
     decision: "approve" | "reject",
   ): Promise<InboxRuntimeDecisionResult> {
     if (this.runtime === undefined) throw new Error("runtime_confirmation_unavailable");
-    if (!this.runtime.canApproveRuntimeConfirmation(input.confirmationId, input.actor)) {
+    // Approval needs the bound private phone; rejection executes nothing, so
+    // any present entry may say no and the hub records the source device.
+    if (decision === "approve" && !this.runtime.canApproveRuntimeConfirmation(input.confirmationId, input.actor)) {
       return { status: "denied", reason: "unauthorized" };
     }
     return await (decision === "approve"

@@ -81,6 +81,9 @@ const evidenceReferenceSchema = z.object({
     }
   });
 
+/** One bound for the runtime guard and the persisted deployment schema: what validates writes must read back. */
+const MAX_DEPLOYMENT_TARGETS = 16;
+
 const evidenceSchema = z.object({
   references: z.array(evidenceReferenceSchema).max(50),
   watermarks: z.array(z.object({
@@ -442,7 +445,7 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
         nativeId: boundedId,
         nativeInstanceId: boundedId,
       }).strict(),
-    }).strict()).max(16).optional(),
+    }).strict()).max(MAX_DEPLOYMENT_TARGETS).optional(),
   }).strict().optional(),
   openQuestion: z.string().trim().min(1).max(1_000).optional(),
   preparedContentHash: z.string().trim().min(1).max(128).optional(),
@@ -1427,10 +1430,15 @@ export class SqliteProposalStore {
       }
       // Enablement of an automation is the deployment path; an approval without
       // a persisted intent would strand the proposal in enabling forever.
-      if (input.decision === "approve"
-        && current.kind === "automation-draft" && current.artifactCandidate !== undefined
+      const deployable = current.kind === "automation-draft" && current.artifactCandidate !== undefined;
+      if (input.decision === "approve" && deployable
         && (input.deploymentIntent === undefined || input.deploymentIntent.targets.length === 0)) {
         throw new ProposalStoreError("lifecycle_invalid", "Automation enablement requires a deployment intent with its binding vector");
+      }
+      // The inverse also holds: only that combination deploys, so an intent on
+      // any other decision would dress an insight up as a running automation.
+      if (input.deploymentIntent !== undefined && (input.decision !== "approve" || !deployable)) {
+        throw new ProposalStoreError("lifecycle_invalid", "A deployment intent only accompanies an automation approval");
       }
       const reviewer = (input.reviewer ?? input.reviewerId ?? "household-owner").trim();
       const feedbackCode = input.decision === "approve"
@@ -2547,7 +2555,7 @@ function validateDecideInput(input: ProposalDecideInput): void {
 function validateDeploymentIntent(intent: ProposalDeploymentIntent): void {
   validateBoundedKey(intent?.deploymentId, "deployment intent id");
   validateBoundedKey(intent?.target, "deployment intent target");
-  if (!Array.isArray(intent.targets) || intent.targets.length === 0 || intent.targets.length > 64) {
+  if (!Array.isArray(intent.targets) || intent.targets.length === 0 || intent.targets.length > MAX_DEPLOYMENT_TARGETS) {
     throw new TypeError("deployment intent targets are invalid");
   }
   const seen = new Set<string>();

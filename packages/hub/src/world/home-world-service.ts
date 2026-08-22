@@ -961,13 +961,20 @@ export class HomeWorldService extends Service {
     return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
   }
 
-  /** The household-facing device name behind a capability, for gate disclosure. */
+  /**
+   * The household-facing name behind a capability, for gate disclosure:
+   * the device name first, then the stable semantic label. A capability
+   * without either cannot be disclosed and cannot enter an automation.
+   */
   capabilityDeviceName(hwCapabilityId: string): string | undefined {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
     const hwId = this.authority.capability(hwCapabilityId)?.hwId;
     if (hwId === undefined) return undefined;
     const device = this.snapshot().devices.find((candidate) => candidate.hwId === hwId);
-    return device?.name;
+    if (device === undefined) return undefined;
+    if (device.name !== undefined) return device.name;
+    const capability = device.capabilities.find((candidate) => candidate.hwCapabilityId === hwCapabilityId);
+    return householdCapabilityLabel(capability?.semanticKind);
   }
 
   /** Deploy against a recorded intent: the same bridge, the same resolution rules. */
@@ -1997,4 +2004,32 @@ function normalizeClock(value: string | number | Date): string {
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** Household-readable fallback labels for capabilities on unnamed devices. */
+const HOUSEHOLD_CAPABILITY_LABELS: Readonly<Record<string, string>> = {
+  light: "灯",
+  switch: "开关",
+  button: "按钮",
+  sensor: "传感器",
+  "binary-sensor": "传感器",
+  "numeric-control": "调节器",
+  "choice-control": "选择器",
+  "text-control": "文本控制",
+  "time-control": "定时控制",
+  event: "事件源",
+  media: "媒体设备",
+  cover: "窗帘",
+  lock: "门锁",
+  presence: "在家感应",
+  fan: "风扇",
+  camera: "摄像头",
+  vacuum: "扫地机",
+  climate: "空调",
+  weather: "天气",
+  automation: "自动化",
+};
+
+export function householdCapabilityLabel(semanticKind: string | undefined): string | undefined {
+  return semanticKind === undefined ? undefined : HOUSEHOLD_CAPABILITY_LABELS[semanticKind];
 }

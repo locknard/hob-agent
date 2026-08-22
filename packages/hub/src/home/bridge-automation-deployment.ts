@@ -82,16 +82,25 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
       if (action.kind === "notify_local") continue;
       const authority = this.world.resolveActionAuthority(action.target.hwCapabilityId);
       if (authority.status !== "available") {
-        return { blockedReason: "方案里有设备现在暂时无法执行动作，家里的设置保持原样。可以在对话里改方案，或不用了。" };
+        // A bridge outage or an unsettled binding is a passing state: report it
+        // as a retryable failure and never persist it as a blocked plan.
+        return { reason: "方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。" };
       }
       if (authority.policyClass === "administrator") {
+        // Protected escalation is a standing household fact: the plan blocks
+        // honestly until the household revises or declines it.
         return { blockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
       }
       const gateClass = authority.policyClass === "confirmation" ? "confirmation" as const : "direct" as const;
       recomputed.add(gateClass);
       if (gateClass === "confirmation") {
         const name = this.world.capabilityDeviceName(action.target.hwCapabilityId);
-        if (name !== undefined) confirmationNames.add(name);
+        if (name === undefined) {
+          // Dropping the name would make the disclosure sets agree by
+          // under-disclosing; the honest outcome is a retryable map defect.
+          return { reason: "方案里需要确认的设备现在没有可读名称，请先在家庭地图里补全设备名称，再试一次。" };
+        }
+        confirmationNames.add(name);
       }
     }
     // The household approved a disclosure: the gate-class set AND the named

@@ -101,7 +101,7 @@ class StubHomeWorld extends Service {
   bridgeConnectionState: "ready" | "degraded" = "ready";
   bridgeHistoryGapCount = 0;
   extraCapabilities = 0;
-  capabilitySemanticKind: "light" | "lock" = "light";
+  capabilitySemanticKind: "light" | "lock" | undefined = "light";
   actionPolicyClass: "direct" | "confirmation" | "administrator" | "unavailable" = "direct";
 
   constructor(ctx: Context) {
@@ -142,7 +142,7 @@ class StubHomeWorld extends Service {
           hwId: "hw-1",
           schema: "fixture.boolean",
           schemaVersion: "1.0.0",
-          semanticKind: this.capabilitySemanticKind,
+          ...(this.capabilitySemanticKind === undefined ? {} : { semanticKind: this.capabilitySemanticKind }),
           bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
         }, ...Array.from({ length: this.extraCapabilities }, (_, index) => ({
           hwCapabilityId: `hwc-${index + 2}`,
@@ -452,6 +452,18 @@ test("uses explicit action policy for proposal safety and fails closed without i
   world.capabilitySemanticKind = "lock";
   const proposal = await ctx.homeProposals.createDraft({ ...base, idempotencyKey: "policy:direct-lock-hint:v1" });
   assert.equal(proposal.status, "pending_review");
+
+  world.actionPolicyClass = "confirmation";
+  world.capabilitySemanticKind = undefined;
+  await assert.rejects(
+    () => ctx.homeProposals.createDraft({ ...base, dedupKey: "policy:unnamed", idempotencyKey: "policy:unnamed:v1" }),
+    /household-readable device name/,
+    "a confirmation action nobody can name never enters review",
+  );
+
+  world.capabilitySemanticKind = "light";
+  const disclosed = await ctx.homeProposals.createDraft({ ...base, dedupKey: "policy:labeled", idempotencyKey: "policy:labeled:v1" });
+  assert.deepEqual(disclosed.confirmationDeviceNames, ["灯"], "an unnamed device falls back to its stable household label");
 
   await fiber.dispose();
   await ctx.fiber.dispose();
@@ -1216,6 +1228,57 @@ test("drift survives persistence and the fingerprint baseline reaches the record
     statuses.set("hob_drift", { status: "running", configFingerprint: "sha256:approved-behavior" });
     await ctx.homeProposals.reconcileAutomations();
     assert.equal(store.get(active.id)?.deployment?.drifted, false, "restoring the behavior clears the drift");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("a passing outage keeps the plan enableable and recovery enables it", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  let available = false;
+  const intent = {
+    deploymentId: "hob_recover",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } }],
+  };
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => available
+          ? intent
+          : { reason: "方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。" },
+        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_recover", target: "ha-main" }),
+      },
+    } as never);
+
+    const created = ctx.homeProposals.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "outage:recover:v1",
+      dedupKey: "outage:recover",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+
+    await assert.rejects(
+      () => ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" }),
+      (error: unknown) => error instanceof ProposalStoreError && /稍后再试/.test(error.message),
+    );
+    const afterOutage = store.get(ready.id);
+    assert.equal(afterOutage?.lifecycle, "ready", "the outage spends nothing");
+    assert.equal(afterOutage?.enableBlockedReason, undefined, "a passing outage never persists a block");
+    assert.equal(afterOutage?.revision, ready.revision);
+
+    available = true;
+    const enabled = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(enabled.lifecycle, "active", "the same plan enables once the world recovers");
   } finally {
     await fiber?.dispose();
     await ctx.fiber.dispose();

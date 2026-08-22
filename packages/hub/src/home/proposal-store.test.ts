@@ -401,6 +401,54 @@ test("clears a do-not-suggest latch only through an explicit audited governance 
   }
 });
 
+test("a decision persists only what the schema reads back, and an insight never deploys", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const binding = { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" };
+    const ready = prepareToReady(store, store.create(input({ artifactCandidate, idempotencyKey: "cap-parity" })).id);
+    assert.throws(() => store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: {
+        deploymentId: "hob_cap",
+        target: "ha-main",
+        targets: Array.from({ length: 17 }, (_, index) => ({ hwCapabilityId: `hwc-${index}`, binding })),
+      },
+    }), /targets are invalid/, "the runtime guard shares the persisted schema bound");
+
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_cap", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding }] },
+    });
+    const readBack = store.get(enabling.id);
+    assert.equal(readBack?.lifecycle, "enabling", "the decision survives an immediate read-back");
+    assert.equal(readBack?.deployment?.targets?.length, 1);
+
+    const insight = prepareToReady(store, store.create(input({
+      kind: "household-insight",
+      dedupKey: "insight-no-deploy",
+      idempotencyKey: "insight-no-deploy",
+    })).id);
+    assert.throws(() => store.decideProposal({
+      proposalId: insight.id,
+      expectedRevision: insight.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_insight", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding }] },
+    }), /only accompanies an automation approval/, "an insight never enters the deployment lifecycle");
+    const untouched = store.get(insight.id);
+    assert.equal(untouched?.lifecycle, "ready");
+    assert.equal(untouched?.applicationStatus, "not_available");
+  } finally {
+    store.close();
+  }
+});
+
 test("the store refuses a malformed deployment intent at the door", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {

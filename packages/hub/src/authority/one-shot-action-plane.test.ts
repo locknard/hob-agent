@@ -279,6 +279,30 @@ test("confirmation waits for an eligible present member and expires fail-closed"
   assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, child), true, "a child on their own bound phone confirms");
   assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, sharedAdult), false, "a shared screen never confirms");
 
+  const sharedRejectFixture = fixture({ policyClass: "confirmation", ttlMs: 10_000 });
+  const sharedRejectPending = await sharedRejectFixture.plane.request({
+    requestId: "request-shared-reject",
+    capabilityId: "cap-light",
+    action: action(true),
+    actor: member,
+  });
+  assert.equal(sharedRejectPending.status, "pending_confirmation");
+  const sharedRejected = sharedRejectFixture.plane.reject({ ticketId: sharedRejectPending.ticket.id, actor: sharedAdult });
+  assert.equal(sharedRejected.status, "rejected", "any present entry may say no; rejection executes nothing");
+  assert.equal(sharedRejected.ticket?.rejectedBy, sharedAdult.principalId);
+  assert.equal(sharedRejected.ticket?.decidedVia, "shared", "the source device enters the record");
+  const notPresentReject = fixture({ policyClass: "confirmation", ttlMs: 10_000 });
+  const notPresentPending = await notPresentReject.plane.request({
+    requestId: "request-absent-reject",
+    capabilityId: "cap-light",
+    action: action(true),
+    actor: member,
+  });
+  assert.equal(notPresentReject.plane.reject({
+    ticketId: notPresentPending.ticket.id,
+    actor: { ...member, present: false },
+  }).status, "denied", "absence still cannot decide anything");
+
   fixtureValue.advance(11);
   assert.equal(fixtureValue.plane.canApprove(pending.ticket.id, member), false);
   const expired = fixtureValue.plane.expireDue();

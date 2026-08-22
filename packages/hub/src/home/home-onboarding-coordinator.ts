@@ -364,7 +364,7 @@ export class HomeOnboardingCoordinatorService extends Service {
       case "set_action_policy": {
         const world = this.requireWorld();
         const all = [...command.directCapabilityIds, ...command.confirmationCapabilityIds, ...command.administratorCapabilityIds];
-        if (new Set(all).size !== all.length) throw new HomeOnboardingCoordinatorError("invalid_input", "每项操作权限只能属于一个权限级别");
+        if (new Set(all).size !== all.length) throw new HomeOnboardingCoordinatorError("invalid_input", "每个动作只能选择一种确认方式");
         const available = capabilityIds(world.snapshot());
         if (all.some((id) => !available.has(id))) return this.blockStep(step, now, "操作权限必须来自当前家庭地图中的真实能力。");
         if (this.actionAuthority === undefined) return this.blockStep(step, now, "操作权限配置服务尚未就绪，家庭保持安全默认值。");

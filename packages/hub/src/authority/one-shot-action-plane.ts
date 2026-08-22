@@ -130,6 +130,9 @@ export interface OneShotActionTicket {
   readonly resultReason?: string;
   readonly approvedAt?: string;
   readonly approvedBy?: string;
+  /** The kind of device the deciding member used, for the audit trail. */
+  readonly decidedVia?: "private" | "shared";
+  readonly rejectedBy?: string;
   readonly undoExpiresAt?: string;
   readonly undoStatus?: OneShotActionUndoStatus;
   readonly undoOf?: string;
@@ -404,6 +407,7 @@ export class OneShotActionPlane {
       status: "approved",
       approvedAt: this.timestamp(),
       approvedBy: actor.principalId,
+      decidedVia: actor.device.kind,
     }));
     this.appendActivity(ticket.id, "confirmation_approved", actor.principalId);
     return this.executeTicket(approved.id, input.signal ?? new AbortController().signal);
@@ -437,13 +441,15 @@ export class OneShotActionPlane {
         ticket: this.cloneTicket(ticket),
       };
     }
-    if (!isEligible(actor)) {
+    if (!canRejectFrom(actor)) {
       return { status: "denied", reason: "unauthorized", ticket: this.cloneTicket(ticket) };
     }
     const rejected = this.updateTicket(ticket.id, (current) => ({
       ...current,
       status: "rejected",
       resultReason: "rejected_by_actor",
+      rejectedBy: actor.principalId,
+      decidedVia: actor.device.kind,
     }));
     this.appendActivity(rejected.id, "confirmation_rejected", actor.principalId, "rejected_by_actor");
     return this.resultFor(rejected, "rejected_by_actor");
@@ -859,6 +865,15 @@ function isEligible(actor: OneShotActionActor): boolean {
   return actor.present
     && actor.device.kind === "private"
     && actor.device.boundPrincipalId === actor.principalId;
+}
+
+/**
+ * Rejection executes nothing and fails closed by itself, so any present
+ * household entry — a shared wall panel included — may say no. The source
+ * device still enters the record.
+ */
+function canRejectFrom(actor: OneShotActionActor): boolean {
+  return actor.present;
 }
 
 function deriveInverse(action: OneShotAction, before: OneShotActionValue): OneShotAction | undefined {

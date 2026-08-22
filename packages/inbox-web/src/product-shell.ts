@@ -24,7 +24,7 @@ export interface ProductShellHousehold {
   readonly name?: string;
   readonly agentName?: string;
   readonly memberName?: string;
-  readonly memberRole?: string;
+
 }
 
 export interface ProductViewState {
@@ -749,7 +749,6 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
   const agentName = model.household.agentName ?? "家庭助手";
   const householdName = model.household.name;
   const memberName = model.household.memberName ?? "当前成员";
-  const memberRole = model.household.memberRole ?? "身份待确认";
   const safety = model.safetyAlert === undefined ? "" : renderSafetyBanner(model.safetyAlert);
   const completion = renderAdviceCompletionNotification(model.completionNotification);
   const viewSwitcher = renderHostViewSwitcher(model.view, options);
@@ -757,7 +756,7 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
   const mobileRoutes: readonly ProductShellRoute[] = ["overview", "reviews", "control", "activity", "settings"];
   const mobileCurrentRoute = route === "conversation" ? "overview" : route === "onboarding" ? "settings" : route;
   const mobileNav = mobileRoutes.map((item) => navigationLink(item, mobileCurrentRoute, model, options, true)).join("");
-  return `<div class="product-shell" data-route="${escapeHtml(route)}" data-connection-state="${escapeHtml(model.connection.state)}"${model.view === undefined ? "" : ` data-view-provider="${escapeHtml(model.view.activeId)}"`}>${safety}${completion}${viewSwitcher}<a class="product-skip-link" href="#product-main">跳到主要内容</a><div class="product-layout"><aside class="product-sidebar" aria-label="家庭导航"><a class="product-brand" href="${routeHref("overview", options)}"><span class="product-brand-mark" aria-hidden="true">h</span><span class="product-brand-copy"><strong>${escapeHtml(agentName)}</strong>${householdName === undefined ? "" : `<small>${escapeHtml(householdName)}</small>`}<small>HobAgent</small></span></a><nav aria-label="家庭导航">${desktopNav}</nav><div class="product-profile"><span class="product-profile-mark" aria-hidden="true">${escapeHtml(memberName.slice(0, 1))}</span><span class="product-profile-copy"><strong>${escapeHtml(memberName)}</strong><small>${escapeHtml(memberRole)}</small></span></div></aside><div class="product-content"><main class="product-main" id="product-main">${page}</main><nav class="product-mobile-nav" aria-label="移动家庭导航">${mobileNav}</nav></div></div></div>`;
+  return `<div class="product-shell" data-route="${escapeHtml(route)}" data-connection-state="${escapeHtml(model.connection.state)}"${model.view === undefined ? "" : ` data-view-provider="${escapeHtml(model.view.activeId)}"`}>${safety}${completion}${viewSwitcher}<a class="product-skip-link" href="#product-main">跳到主要内容</a><div class="product-layout"><aside class="product-sidebar" aria-label="家庭导航"><a class="product-brand" href="${routeHref("overview", options)}"><span class="product-brand-mark" aria-hidden="true">h</span><span class="product-brand-copy"><strong>${escapeHtml(agentName)}</strong>${householdName === undefined ? "" : `<small>${escapeHtml(householdName)}</small>`}<small>HobAgent</small></span></a><nav aria-label="家庭导航">${desktopNav}</nav><div class="product-profile"><span class="product-profile-mark" aria-hidden="true">${escapeHtml(memberName.slice(0, 1))}</span><span class="product-profile-copy"><strong>${escapeHtml(memberName)}</strong></span></div></aside><div class="product-content"><main class="product-main" id="product-main">${page}</main><nav class="product-mobile-nav" aria-label="移动家庭导航">${mobileNav}</nav></div></div></div>`;
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -913,7 +912,13 @@ function renderRuntimeCard(item: ProductRuntimeConfirmation): string {
   const canApprove = item.canApprove !== false && status === "pending";
   const administrator = item.policyClass === "administrator" || item.policyClass === "admin";
   const tags = `${item.eligibleActor === undefined ? "" : `<span class="product-tag ${administrator ? "product-tag--red" : "product-tag--neutral"}">${escapeHtml(item.eligibleActor)}</span>`}${item.source === undefined ? "" : `<span class="product-tag product-tag--amber">来自：${escapeHtml(item.source)}</span>`}`;
-  const actions = status !== "pending" ? renderRuntimeOutcome(item, status) : canApprove ? `<div class="product-card-actions"><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form><form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (administrator ? "放行（手机确认）" : "放行"))}</button></form></div>` : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "请在可批准的设备上完成放行")} · 已推送到家人的手机</p>`;
+  const rejectForm = `<form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/reject"><button class="product-secondary-action" type="submit">${escapeHtml(item.rejectLabel ?? "拒绝")}</button></form>`;
+  const approveEntry = canApprove
+    ? `<form class="product-action-form" method="post" action="/runtime-confirmations/${encodedPathSegment(item.id)}/approve"><button class="product-primary-action" type="submit">${escapeHtml(item.approveLabel ?? (administrator ? "放行（手机确认）" : "放行"))}</button></form>`
+    : `<p class="product-muted">${escapeHtml(item.eligibleActor ?? "放行需要绑定本人的私人手机")} · 已推送到家人的手机</p>`;
+  const actions = status !== "pending"
+    ? renderRuntimeOutcome(item, status)
+    : `<div class="product-card-actions">${rejectForm}${approveEntry}</div>`;
   return `<article class="product-card product-card--amber product-review-card" data-review-kind="runtime" data-review-id="${escapeHtml(item.id)}"><div class="product-card-tags">${tags}</div><h3>${escapeHtml(item.title)}</h3>${item.effect === undefined ? "" : `<p>${escapeHtml(item.effect)}</p>`}${renderRuntimeWindow(item)}${actions}</article>`;
 }
 
@@ -964,7 +969,11 @@ function renderProposalDetail(proposal: ProductProposal): string {
     proposal.unknowns?.length ? `<section><h3>仍待确认</h3>${list(proposal.unknowns)}</section>` : "",
   ].join("");
   const risk = proposal.risk === undefined ? "" : `<p class="product-detail-risk">风险与权限：${escapeHtml(proposal.risk)}</p>`;
-  const gateDisclosure = proposal.gateClasses?.includes("confirmation")
+  const preparing = proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info";
+  const blocked = !insight && !preparing && proposal.enableBlockedReason !== undefined;
+  // A blocked plan makes no present-tense authorization promise: the card
+  // states only the current blocking fact.
+  const gateDisclosure = !blocked && proposal.gateClasses?.includes("confirmation")
     ? `<p class="product-gate-disclosure">需要确认的设备${proposal.confirmationDeviceNames?.length ? `（${proposal.confirmationDeviceNames.map(escapeHtml).join("、")}）` : ""}：这次启用就是你的授权，之后由自动化直接执行；随时可以暂停或关闭。</p>`
     : "";
   const dependency = proposal.dependency === undefined
@@ -974,8 +983,6 @@ function renderProposalDetail(proposal: ProductProposal): string {
   const journey = proposal.trace === undefined
     ? ""
     : `<details class="product-agent-journey"><summary>这条建议怎么得来的</summary>${renderAgentLoopTimeline(proposal.trace)}</details>`;
-  const preparing = proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info";
-  const blocked = !insight && !preparing && proposal.enableBlockedReason !== undefined;
   const decide = insight
     ? renderInsightActions(proposal)
     : preparing
@@ -1121,12 +1128,12 @@ const CONTROL_CONNECTION_PRESENTATION = {
   connected: {
     availability: "available",
     countLabel: "项可用动作",
-    summary: "每项动作都会按成员权限处理，需要确认的会先等你同意。",
+    summary: "每项动作都按影响程度处理，需要确认的会先等你同意。",
   },
   quiet: {
     availability: "available",
     countLabel: "项可用动作",
-    summary: "每项动作都会按成员权限处理，需要确认的会先等你同意。",
+    summary: "每项动作都按影响程度处理，需要确认的会先等你同意。",
   },
   connecting: {
     availability: "waiting",
@@ -1261,17 +1268,15 @@ function renderViewPresentationPreferences(view: ProductViewState): string {
 
 function renderManagedSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const memberName = model.household.memberName ?? "待设置";
-  const memberRole = model.household.memberRole ?? "待确认";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接和权限细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>成员与权限</h2><p class="product-muted">高影响动作继续按成员和设备身份确认。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>身份</span><strong>${escapeHtml(memberRole)}</strong></li><li><span>高影响动作</span><strong>${model.household.memberRole === undefined ? "完成身份设置后显示" : "按动作权限确认"}</strong></li></ul></section><section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接与设备细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>家人与设备</h2><p class="product-muted">需要确认的动作推送到绑定本人的私人手机。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section><section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
 }
 
 function renderSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   if (model.view !== undefined) return renderManagedSettings(model, options);
   const memberName = model.household.memberName ?? "待设置";
-  const memberRole = model.household.memberRole ?? "待确认";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、成员权限和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid"><section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>成员与权限</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>身份</span><strong>${escapeHtml(memberRole)}</strong></li><li><span>高影响动作</span><strong>${model.household.memberRole === undefined ? "完成身份设置后显示" : "按动作权限确认"}</strong></li></ul></section><section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、家人与设备和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid"><section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>家人与设备</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section><section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
 }
 
 function onboardingSteps(model: NormalizedProductShellModel): readonly ProductOnboardingStepData[] {
@@ -1286,7 +1291,7 @@ function onboardingSteps(model: NormalizedProductShellModel): readonly ProductOn
     ? []
     : [{
         label: `${model.household.memberName}（当前成员）`,
-        detail: model.household.memberRole ?? "身份待确认",
+        detail: "手机绑定后可确认需要确认的动作",
         status: "等待绑定私人设备",
         tone: "neutral",
       }];
@@ -1345,14 +1350,14 @@ function onboardingSteps(model: NormalizedProductShellModel): readonly ProductOn
                     { value: "confirmation", label: "每次先确认", checked: capability.suggestedPolicyClass === "confirmation" },
                     { value: "administrator", label: "高影响 · 手机确认", checked: capability.suggestedPolicyClass === "administrator" },
                   ],
-                  help: `${capability.bridgeLabel} · 建议权限：${policySuggestionLabel(capability.suggestedPolicyClass)}（由你确认）`,
+                  help: `${capability.bridgeLabel} · 建议方式：${policySuggestionLabel(capability.suggestedPolicyClass)}（由你确认）`,
                 })),
                 submitDisabled: choices?.status !== "available" || capabilities.length === 0,
                 note: choices?.status === "unavailable"
                   ? "家庭设置正在准备，连接完成后从这里继续。"
                   : capabilities.length === 0
                     ? "家庭能力列表正在准备，连接完成后从这里继续。"
-                    : "每项能力都会按你选择的权限级别运行。",
+                    : "每项动作都按你选择的确认方式执行。",
               }
             : defaultStep.step === 4
               ? { ...defaultStep, items: defaultMembers }

@@ -952,7 +952,7 @@ test("renders the real runtime queue and sends runtime approval through the type
   }
 });
 
-test("keeps administrator confirmations and proposal decisions on a bound private device", async () => {
+test("approval stays on a bound private device while any present entry may reject", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(RuntimeDecisionInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -972,15 +972,22 @@ test("keeps administrator confirmations and proposal decisions on a bound privat
     const page = await fetch(`${ctx.homeInboxHttp.origin}/review-center`, { headers: { authorization } });
     const html = await page.text();
     assert.equal(html.includes("runtime-confirmations/runtime-1/approve"), false);
-    const denied = await fetch(`${ctx.homeInboxHttp.origin}/runtime-confirmations/runtime-1/reject`, {
+    const sharedReject = await fetch(`${ctx.homeInboxHttp.origin}/runtime-confirmations/runtime-1/reject`, {
       method: "POST",
       headers,
       body: "",
       redirect: "manual",
     });
-    assert.equal(denied.status, 403);
+    assert.equal(sharedReject.status, 303, "rejection executes nothing, so a present shared screen may say no");
 
-    assert.match(await denied.text(), /authorized device/i);
+    const sharedApprove = await fetch(`${ctx.homeInboxHttp.origin}/runtime-confirmations/runtime-1/approve`, {
+      method: "POST",
+      headers,
+      body: "",
+      redirect: "manual",
+    });
+    assert.equal(sharedApprove.status, 403, "approval still requires the bound private phone");
+    assert.match(await sharedApprove.text(), /private device/i);
 
     const unavailableSnooze = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-1/snooze`, {
       method: "POST",

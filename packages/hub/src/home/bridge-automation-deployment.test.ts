@@ -113,6 +113,12 @@ test("the approval binds the named confirmation devices, not only the class set"
   const unchanged = confirming.resolveIntent({ ...request, confirmationDeviceNames: ["插座（多媒体室）"] });
   assert.ok("deploymentId" in unchanged, "an unchanged disclosure converges to the intent");
 
+  const unnameable = new BridgeAutomationDeployment(
+    bridgeStub({ authority: { status: "available", policyClass: "confirmation" } }).world,
+  ).resolveIntent({ ...request, confirmationDeviceNames: ["插座（多媒体室）"] });
+  assert.ok("reason" in unnameable, "an unnameable confirmation device is a map defect, not an under-disclosure");
+  assert.match((unnameable as { reason: string }).reason, /可读名称/);
+
   const classShift = confirming.resolveIntent({ ...request, actionPolicyClasses: ["direct"], confirmationDeviceNames: [] });
   assert.ok("revalidationReason" in classShift);
   assert.match((classShift as { revalidationReason: string }).revalidationReason, /确认档位已变化/);
@@ -126,8 +132,8 @@ test("blocked enablement names the actual household fact", () => {
   };
   const unavailable = new BridgeAutomationDeployment(bridgeStub({ authority: { status: "unavailable" } }).world)
     .resolveIntent(request);
-  assert.ok("blockedReason" in unavailable);
-  assert.match((unavailable as { blockedReason: string }).blockedReason, /暂时无法执行动作/);
+  assert.ok("reason" in unavailable, "a passing outage is retryable and never persists a block");
+  assert.match((unavailable as { reason: string }).reason, /暂时连不上.*稍后再试/);
 
   const protectedNow = new BridgeAutomationDeployment(
     bridgeStub({ authority: { status: "available", policyClass: "administrator" } }).world,
