@@ -739,7 +739,11 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       if (!readBack.ok || !isRecord(readBack.body) || !storedAutomationMatches(config.value, readBack.body)) {
         return { status: "rejected", reason: "failed", detail: "Home Assistant did not store the compiled automation" };
       }
-      return { status: "deployed", nativeAutomationId: spec.automationId };
+      return {
+        status: "deployed",
+        nativeAutomationId: spec.automationId,
+        configFingerprint: automationConfigFingerprint(readBack.body),
+      };
     } catch {
       return { status: "rejected", reason: "unavailable", detail: "Home Assistant configuration API is unreachable" };
     }
@@ -817,9 +821,16 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       if (response.status === 404) return { status: "missing" };
       if (!response.ok) return { status: "unknown" };
       const body = await response.json() as { state?: unknown };
-      if (body?.state === "on") return { status: "running" };
-      if (body?.state === "off") return { status: "paused" };
-      return { status: "unknown" };
+      const state = body?.state === "on" ? "running" as const : body?.state === "off" ? "paused" as const : undefined;
+      if (state === undefined) return { status: "unknown" };
+      try {
+        const config = await this.automationConfigRequest("GET", request.nativeAutomationId, signal);
+        return config.ok && isRecord(config.body)
+          ? { status: state, configFingerprint: automationConfigFingerprint(config.body) }
+          : { status: state };
+      } catch {
+        return { status: state };
+      }
     } catch {
       return { status: "unknown" };
     }
@@ -1714,6 +1725,17 @@ type NativeQueueItem =
   | { kind: "state"; event: HomeAssistantNativeStateEvent }
   | { kind: "resync"; snapshot: HomeAssistantSnapshot }
   | { kind: "heartbeat" };
+
+/** Behavioral identity of a stored automation, ignoring bookkeeping keys. */
+function automationConfigFingerprint(stored: Record<string, unknown>): string {
+  const material = stableJson({
+    trigger: stored.trigger,
+    condition: stored.condition,
+    action: stored.action,
+    mode: stored.mode,
+  });
+  return `sha256:${createHash("sha256").update(material).digest("hex")}`;
+}
 
 /** Deep equality on the behavioral fields; storage may add bookkeeping keys. */
 function storedAutomationMatches(sent: Record<string, unknown>, stored: Record<string, unknown>): boolean {

@@ -559,6 +559,7 @@ export class ProposalInboxService extends Service {
           ? { lastResult: `已部署并读回核对 · ${verifiedAt.slice(0, 10)}` }
           : {}),
         ...(lifecycle === "enable_failed" && reason !== undefined ? { failureReason: reason } : {}),
+        ...(productRecord(record?.deployment)?.drifted === true ? { drifted: true } : {}),
       });
     }
     return automations;

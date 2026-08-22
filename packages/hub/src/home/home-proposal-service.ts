@@ -52,8 +52,11 @@ export interface ProposalDeploymentPort {
     readonly kind: CreateProposalInput["kind"];
     readonly title: string;
     readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
+    readonly intent?: ProposalDeploymentIntent;
   }): Promise<ProposalDeploymentOutcome> | ProposalDeploymentOutcome;
-  status?(request: { readonly deploymentId: string; readonly target: string }): Promise<"running" | "paused" | "missing" | "unknown"> | "running" | "paused" | "missing" | "unknown";
+  status?(request: { readonly deploymentId: string; readonly target: string }):
+    | Promise<{ readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string }>
+    | { readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string };
   pause?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
   resume?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
   withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string }):
@@ -369,9 +372,22 @@ export class HomeProposalService extends Service {
     return this.store.requestProposalInfo(input);
   }
 
-  /** Retries a failed enablement through the same governed deployment seam. */
+  /** Retries a failed enablement through the same governed deployment seam and intent. */
   async retryEnable(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
-    const enabling = this.store.beginDeploymentRetry(input);
+    const current = this.store.get(input.proposalId);
+    const backfill = current !== undefined
+      && current.deployment?.deploymentId === undefined
+      && this.deployment?.resolveIntent !== undefined
+      ? this.deployment.resolveIntent({
+          proposalId: current.id,
+          kind: current.kind,
+          ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
+        })
+      : undefined;
+    const enabling = this.store.beginDeploymentRetry({
+      ...input,
+      ...(backfill !== undefined && !("reason" in backfill) ? { deploymentIntent: backfill } : {}),
+    });
     const outcome = await this.deploy(enabling);
     return this.store.recordProposalDeployment({
       proposalId: enabling.id,
@@ -422,17 +438,26 @@ export class HomeProposalService extends Service {
     });
   }
 
+  private deploymentIntentOf(proposal: ProposalEnvelope): ProposalDeploymentIntent | undefined {
+    const deployment = proposal.deployment;
+    return deployment?.deploymentId !== undefined && deployment.target !== undefined
+      ? { deploymentId: deployment.deploymentId, target: deployment.target }
+      : undefined;
+  }
+
   private async deploy(proposal: ProposalEnvelope): Promise<ProposalDeploymentOutcome> {
     if (this.deployment === undefined) {
       return { status: "failed", reason: "这个家还没有可用的自动化部署通道，方案已保留，接通后可以重试。" };
     }
     try {
+      const intent = this.deploymentIntentOf(proposal);
       return await this.deployment.deploy({
         proposalId: proposal.id,
         revision: proposal.revision,
         kind: proposal.kind,
         title: proposal.title,
         artifactCandidate: proposal.artifactCandidate,
+        ...(intent === undefined ? {} : { intent }),
       });
     } catch {
       return { status: "failed", reason: "部署没有完成，家里的设置保持原样。" };
@@ -513,13 +538,26 @@ export class HomeProposalService extends Service {
       const deployment = proposal.deployment;
       if (deployment?.deploymentId === undefined || deployment.target === undefined) continue;
       if (proposal.lifecycle === "closed") continue;
-      let observed: "running" | "paused" | "missing" | "unknown";
+      let observedResult: { readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string };
       try {
-        observed = await status.call(this.deployment, { deploymentId: deployment.deploymentId, target: deployment.target });
+        observedResult = await status.call(this.deployment, { deploymentId: deployment.deploymentId, target: deployment.target });
       } catch {
         continue;
       }
+      const observed = observedResult.status;
       if (observed === "unknown") continue;
+      if ((proposal.lifecycle === "active" || proposal.lifecycle === "paused")
+        && observedResult.configFingerprint !== undefined
+        && deployment.configFingerprint !== undefined) {
+        const drifted = observedResult.configFingerprint !== deployment.configFingerprint;
+        if (drifted !== (deployment.drifted ?? false)) {
+          try {
+            this.store.setAutomationDrift({ proposalId: proposal.id, actor: "system", drifted });
+          } catch {
+            // Another writer converged first; the next pass observes the result.
+          }
+        }
+      }
       try {
         if (proposal.lifecycle === "enabling") {
           if (observed === "running") {

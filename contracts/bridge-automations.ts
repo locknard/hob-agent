@@ -79,6 +79,8 @@ export const bridgeAutomationDeployResultSchema = z.discriminatedUnion("status",
     status: z.literal("deployed"),
     /** Verified by read-back before the adapter reports it. */
     nativeAutomationId: boundedId,
+    /** Stable fingerprint of the stored behavioral configuration. */
+    configFingerprint: z.string().min(1).max(128).optional(),
   }).strict(),
   z.object({
     status: z.literal("rejected"),
@@ -100,6 +102,8 @@ export type BridgeAutomationCommandResult = z.infer<typeof bridgeAutomationComma
 
 export const bridgeAutomationStatusResultSchema = z.object({
   status: z.enum(["running", "paused", "missing", "unknown"]),
+  /** Present when the runtime can read the stored configuration back. */
+  configFingerprint: z.string().min(1).max(128).optional(),
 }).strict();
 export type BridgeAutomationStatusResult = z.infer<typeof bridgeAutomationStatusResultSchema>;
 

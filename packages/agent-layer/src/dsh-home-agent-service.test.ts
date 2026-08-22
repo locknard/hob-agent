@@ -330,6 +330,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "get_home_snapshot",
     "get_home_evidence",
     "get_home_rules",
+    "list_home_proposals",
     "create_home_proposal",
     "report_home_advice",
     "report_home_observation",

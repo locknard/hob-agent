@@ -233,6 +233,10 @@ export interface ProposalDeployment {
   readonly restoredAt?: string;
   /** Household-readable reason. Bridge-native payloads never reach this field. */
   readonly reason?: string;
+  /** Behavioral fingerprint recorded at verification. */
+  readonly configFingerprint?: string;
+  /** The native runtime holds a different behavior than the household approved. */
+  readonly drifted?: boolean;
 }
 
 export interface ProposalEnablement {
@@ -308,6 +312,7 @@ export interface ProposalAuditEvent {
     | "deployment_retried"
     | "deployment_verified"
     | "deployment_failed"
+    | "drift_detected"
     | "paused"
     | "resumed"
     | "closed";
@@ -349,8 +354,16 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly snoozedUntil?: string;
   readonly newEvidence: boolean;
   readonly lifecycle: ProposalLifecycle;
-  /** Hash of the plan content the household saw when it became ready. */
+  /** Hash of the plan the household saw when it became ready. */
   readonly preparedContentHash?: string;
+  /** Audit link to the immutable preparation outputs behind this ready state. */
+  readonly preparedArtifact?: {
+    readonly artifactId: string;
+    readonly revision: number;
+    readonly contentHash: string;
+    readonly compileResultId: string;
+    readonly dryRunResultId: string;
+  };
   readonly deployment?: ProposalDeployment;
   readonly enablement?: ProposalEnablement;
   /** Present while preparation waits for one household answer. */
@@ -414,9 +427,18 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
     failedAt: isoTimestamp.optional(),
     restoredAt: isoTimestamp.optional(),
     reason: z.string().trim().min(1).max(1_000).optional(),
+    configFingerprint: z.string().trim().min(1).max(128).optional(),
+    drifted: z.boolean().optional(),
   }).strict().optional(),
   openQuestion: z.string().trim().min(1).max(1_000).optional(),
   preparedContentHash: z.string().trim().min(1).max(128).optional(),
+  preparedArtifact: z.object({
+    artifactId: boundedId,
+    revision: z.number().int().positive(),
+    contentHash: z.string().trim().min(1).max(128),
+    compileResultId: z.string().trim().min(1).max(128),
+    dryRunResultId: z.string().trim().min(1).max(128),
+  }).strict().optional(),
   enablement: z.object({
     enabledAt: isoTimestamp,
     reviewer: boundedId,
@@ -504,11 +526,22 @@ export interface ProposalLifecycleInput {
   readonly note?: string;
 }
 
+export interface ProposalReadyInput extends ProposalLifecycleInput {
+  readonly preparedArtifact?: {
+    readonly artifactId: string;
+    readonly revision: number;
+    readonly contentHash: string;
+    readonly compileResultId: string;
+    readonly dryRunResultId: string;
+  };
+}
+
 export interface ProposalInfoRequestInput extends ProposalLifecycleInput {
   readonly question: string;
 }
 
 export interface ProposalDeploymentOutcome {
+  readonly configFingerprint?: string;
   readonly status: "verified" | "failed";
   readonly deploymentId?: string;
   readonly target?: string;
@@ -927,13 +960,18 @@ export class SqliteProposalStore {
   }
 
   /** Preparation carries no side effect; only a prepared plan may spend household attention. */
-  markProposalReady(input: ProposalLifecycleInput): ProposalEnvelope {
+  markProposalReady(input: ProposalReadyInput): ProposalEnvelope {
     return this.transition(input, "ready transition", (current, at, revision) => {
       // A prepared plan is already ready; repeating the signal changes nothing,
       // so a retried preparation run stays safe.
       if (current.lifecycle === "ready") return current;
       if (current.lifecycle !== "preparing" && current.lifecycle !== "needs_info") {
         throw new ProposalStoreError("lifecycle_invalid", "Only a preparing proposal can become ready");
+      }
+      // The inbox only ever shows verified plans: a plan with something to
+      // compile requires a succeeded preparation for exactly this revision.
+      if (requiresPreparation(current) && !this.preparationSucceededInTransaction(current.id, current.revision)) {
+        throw new ProposalStoreError("lifecycle_invalid", "Preparation has not succeeded for this plan revision");
       }
       if (this.readyCountInTransaction() >= MAX_PROPOSAL_CAPACITY) {
         throw new ProposalStoreError("capacity_full", "Household review capacity is full");
@@ -945,11 +983,18 @@ export class SqliteProposalStore {
         lifecycle: "ready",
         ...(current.artifactCandidate === undefined
           ? {}
-          : { preparedContentHash: proposalContentHash(current.artifactCandidate) }),
+          : { preparedContentHash: proposalContentHash(preparedPlanSnapshot(current)) }),
+        ...(input.preparedArtifact === undefined ? {} : { preparedArtifact: input.preparedArtifact }),
         updatedAt: at,
         audit: [...current.audit, this.auditEvent(at, "prepared", input.actor ?? "system", revision)],
       };
     });
+  }
+
+  private preparationSucceededInTransaction(proposalId: string, proposalRevision: number): boolean {
+    const row = this.db.prepare(`SELECT status FROM approved_proposal_preparation_jobs
+      WHERE proposal_id = ? AND proposal_revision = ?`).get(proposalId, proposalRevision) as { status?: unknown } | undefined;
+    return row?.status === "succeeded";
   }
 
   /** Preparation may need one household answer; the question stays out of the inbox. */
@@ -974,17 +1019,26 @@ export class SqliteProposalStore {
   }
 
   /** A failed enablement may retry once the household asks; the decision itself is already made. */
-  beginDeploymentRetry(input: ProposalLifecycleInput): ProposalEnvelope {
+  beginDeploymentRetry(input: ProposalLifecycleInput & { readonly deploymentIntent?: ProposalDeploymentIntent }): ProposalEnvelope {
     return this.transition(input, "deployment retry", (current, at, revision) => {
       if (current.lifecycle !== "enable_failed") {
         throw new ProposalStoreError("lifecycle_invalid", "Only a failed enablement can retry");
       }
+      // The intent survives every retry: same deterministic native id, same
+      // target domain, so recovery always knows exactly where to look.
+      const deploymentId = current.deployment?.deploymentId ?? input.deploymentIntent?.deploymentId;
+      const target = current.deployment?.target ?? input.deploymentIntent?.target;
       return {
         ...current,
         revision,
         lifecycle: "enabling",
         applicationStatus: "deploying",
-        deployment: { status: "pending", requestedAt: at },
+        deployment: {
+          status: "pending",
+          requestedAt: at,
+          ...(deploymentId === undefined ? {} : { deploymentId }),
+          ...(target === undefined ? {} : { target }),
+        },
         updatedAt: at,
         audit: [...current.audit, this.auditEvent(at, "deployment_retried", input.actor ?? "household-owner", revision)],
       };
@@ -1000,6 +1054,11 @@ export class SqliteProposalStore {
     return this.transition(input, "deployment record", (current, at, revision) => {
       if (current.lifecycle !== "enabling") {
         throw new ProposalStoreError("lifecycle_invalid", "Only an enabling proposal records a deployment");
+      }
+      if (outcome.status === "verified" && current.deployment?.deploymentId !== undefined
+        && (outcome.deploymentId !== current.deployment.deploymentId
+          || (current.deployment.target !== undefined && outcome.target !== current.deployment.target))) {
+        throw new ProposalStoreError("lifecycle_invalid", "The deployment outcome contradicts the recorded intent");
       }
       const requestedAt = current.deployment?.requestedAt ?? at;
       const reason = outcome.reason?.trim();
@@ -1017,6 +1076,7 @@ export class SqliteProposalStore {
           ...(outcome.target ? { target: outcome.target } : {}),
           ...(verified ? { verifiedAt: at } : { failedAt: at }),
           ...(reason ? { reason } : {}),
+          ...(verified && outcome.configFingerprint ? { configFingerprint: outcome.configFingerprint } : {}),
         },
         audit: [...current.audit, {
           ...this.auditEvent(at, verified ? "deployment_verified" : "deployment_failed", input.actor ?? "system", revision),
@@ -1052,6 +1112,24 @@ export class SqliteProposalStore {
         lifecycle: "active",
         updatedAt: at,
         audit: [...current.audit, this.auditEvent(at, "resumed", input.actor ?? "household-owner", revision)],
+      };
+    });
+  }
+
+  /** Reflects whether the native runtime still holds the approved behavior. */
+  setAutomationDrift(input: ProposalLifecycleInput & { readonly drifted: boolean }): ProposalEnvelope {
+    if (typeof input?.drifted !== "boolean") throw new TypeError("proposal drift flag is invalid");
+    return this.transition(input, "drift", (current, at, revision) => {
+      if (current.lifecycle !== "active" && current.lifecycle !== "paused") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a deployed automation records drift");
+      }
+      if (current.deployment === undefined || (current.deployment.drifted ?? false) === input.drifted) return current;
+      return {
+        ...current,
+        revision,
+        updatedAt: at,
+        deployment: { ...current.deployment, drifted: input.drifted },
+        audit: [...current.audit, this.auditEvent(at, "drift_detected", input.actor ?? "system", revision)],
       };
     });
   }
@@ -1202,7 +1280,7 @@ export class SqliteProposalStore {
         throw new ProposalStoreError("lifecycle_invalid", "The household decides on a prepared plan");
       }
       if (current.kind === "automation-draft" && current.artifactCandidate !== undefined
-        && current.preparedContentHash !== proposalContentHash(current.artifactCandidate)) {
+        && current.preparedContentHash !== proposalContentHash(preparedPlanSnapshot(current))) {
         throw new ProposalStoreError("lifecycle_invalid", "The plan changed after preparation; it must prepare again");
       }
       const reviewer = (input.reviewer ?? input.reviewerId ?? "household-owner").trim();
@@ -1534,7 +1612,7 @@ export class SqliteProposalStore {
         throw new ProposalStoreError("lifecycle_invalid", "The household decides on a prepared plan");
       }
       if (current.kind === "automation-draft" && current.artifactCandidate !== undefined
-        && current.preparedContentHash !== proposalContentHash(current.artifactCandidate)) {
+        && current.preparedContentHash !== proposalContentHash(preparedPlanSnapshot(current))) {
         throw new ProposalStoreError("lifecycle_invalid", "The plan changed after preparation; it must prepare again");
       }
       const revision = current.revision + 1;
@@ -1866,7 +1944,7 @@ export class SqliteProposalStore {
         lifecycle: "ready",
         ...(current.artifactCandidate === undefined
           ? {}
-          : { preparedContentHash: proposalContentHash(current.artifactCandidate) }),
+          : { preparedContentHash: proposalContentHash(preparedPlanSnapshot(current)) }),
         updatedAt: at,
         audit: [...current.audit, this.auditEvent(at, "prepared", "system", revision)],
       };
@@ -2068,8 +2146,14 @@ function mergeProposalEvidence(
       // New evidence or a revised plan wakes the card and sends it back through
       // preparation; the household only ever decides on a re-verified plan.
       ...(revisedPlan ? {
+        // The revision replaces the full household-visible snapshot, so the
+        // card, the hash and the deployed behavior always tell one story.
         artifactCandidate: input.artifactCandidate,
+        title: input.title,
         summary: input.summary,
+        intent: input.intent,
+        ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+        risk: input.risk,
         ...(input.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: input.actionPolicyClasses }),
         ...(input.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: input.confirmationDeviceNames }),
       } : {}),
@@ -2158,9 +2242,20 @@ function fromDedupLatchRow(row: ProposalDedupLatchRow): ProposalDedupLatch {
   };
 }
 
-/** Stable identity of the plan content itself, independent of envelope bookkeeping. */
-function proposalContentHash(candidate: unknown): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify(candidate)).digest("hex")}`;
+/** Stable identity of everything the household sees and approves about a plan. */
+function proposalContentHash(snapshot: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}`;
+}
+
+/** The household-visible behavior semantics: title, story, intent and the plan itself. */
+function preparedPlanSnapshot(proposal: Pick<ProposalEnvelope, "title" | "summary" | "intent" | "rationale" | "artifactCandidate">): unknown {
+  return {
+    title: proposal.title,
+    summary: proposal.summary,
+    intent: proposal.intent,
+    rationale: proposal.rationale ?? null,
+    artifactCandidate: proposal.artifactCandidate ?? null,
+  };
 }
 
 function requiresPreparation(input: Pick<CreateProposalInput, "kind" | "artifactCandidate">): boolean {
@@ -2173,7 +2268,7 @@ const PENDING_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "prepared", "info_requested", "deployment_retried",
 ];
 const APPROVED_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
-  "approved", "deployment_verified", "deployment_failed", "deployment_retried", "paused", "resumed", "closed",
+  "approved", "deployment_verified", "deployment_failed", "deployment_retried", "drift_detected", "paused", "resumed", "closed",
 ];
 const DEPLOYED_LIFECYCLES: readonly ProposalLifecycle[] = ["enabling", "active", "paused", "enable_failed", "closed"];
 

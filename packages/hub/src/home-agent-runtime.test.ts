@@ -606,14 +606,6 @@ test("wakes the private durable runner after an approved automation job commits"
         },
       },
     });
-    const prepared = runtime.context.homeProposals.markProposalReady({ proposalId: pending.id });
-    const approved = runtime.context.homeProposals.review({
-      proposalId: prepared.id,
-      expectedRevision: prepared.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
-    });
 
     const observer = new SqliteProposalStore({ path: proposalPath });
     let job = observer.getPreparationJobForProposal(pending.id, pending.revision);
@@ -695,14 +687,6 @@ test("retries one failed exact preparation through the full Inbox facade and wak
           postconditions: [],
         },
       },
-    });
-    const prepared = runtime.context.homeProposals.markProposalReady({ proposalId: pending.id });
-    const approved = runtime.context.homeProposals.review({
-      proposalId: prepared.id,
-      expectedRevision: prepared.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
     });
 
     let failed = observer.getPreparationJobForProposal(pending.id, pending.revision);

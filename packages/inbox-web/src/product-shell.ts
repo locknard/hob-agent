@@ -118,6 +118,8 @@ export interface ProductAutomation {
   readonly version?: number;
   readonly lastResult?: string;
   readonly failureReason?: string;
+  /** The native system holds a different behavior than the approved plan. */
+  readonly drifted?: boolean;
   readonly recentActivity?: readonly string[];
 }
 
@@ -972,7 +974,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
   const dependency = proposal.dependency === undefined
     ? ""
     : `<p class="product-dependency">需要：${escapeHtml(proposal.dependency)}。</p>`;
-  const after = `<p class="product-detail-after">启用后：${escapeHtml(proposal.afterEnable ?? "随时可以暂停、关闭并恢复原来的设置。")}</p>`;
+  const after = `<p class="product-detail-after">启用后：${escapeHtml(proposal.afterEnable ?? "随时可以暂停，或关闭并移除；它从不改动你原有的规则。")}</p>`;
   const journey = proposal.trace === undefined
     ? ""
     : `<details class="product-agent-journey"><summary>这条建议怎么得来的</summary>${renderAgentLoopTimeline(proposal.trace)}</details>`;
@@ -981,7 +983,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
     ? renderInsightActions(proposal)
     : preparing
       ? `<p class="product-muted">正在后台准备：核对证据、检查冲突、确认权限。备好后它会来找你，现在不用做任何决定。</p>`
-      : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停、关闭并恢复原来的设置。</p>`;
+      : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停，或关闭并移除；它从不改动你原有的规则。</p>`;
   return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
 }
 
@@ -991,7 +993,7 @@ function enableForm(proposal: ProductProposal): string {
 
 /** Changing a plan happens in conversation, where suggestions are born. */
 function conversationEntry(proposal: ProductProposal): string {
-  return `<form class="product-action-form" method="post" action="/conversation"><button class="product-quiet-action" type="submit" name="question" value="${escapeHtml(`【建议 ${proposal.id}】我想调整「${proposal.title}」：`)}">在对话里改</button></form>`;
+  return `<form class="product-action-form" method="post" action="/conversation"><button class="product-quiet-action" type="submit" name="question" value="${escapeHtml(`我想调整建议「${proposal.title}」：`)}">在对话里改</button></form>`;
 }
 
 /** "不用了" opens the honest pair: dismiss once, or never suggest this again. */
@@ -1023,12 +1025,15 @@ function renderAutomations(model: NormalizedProductShellModel): string {
   const cards = automations.length === 0
     ? `<section class="product-card product-review-empty"><h2>还没有运行中的自动化</h2><p class="product-muted">你在处理中心启用的自动化会出现在这里。</p></section>`
     : automations.map(renderAutomationCard).join("");
-  return `<header class="product-page-header"><div><p class="product-kicker">自动化</p><h1>它替你做的事</h1><p class="product-muted">每一条都可以暂停、关闭并恢复原来的设置。</p></div></header><div class="product-automation-list">${cards}</div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">自动化</p><h1>它替你做的事</h1><p class="product-muted">每一条都可以暂停或移除；它们从不改动你原有的规则。</p></div></header><div class="product-automation-list">${cards}</div>`;
 }
 
 function renderAutomationCard(automation: ProductAutomation): string {
   const presentation = AUTOMATION_PRESENTATION[automation.lifecycle];
   const version = automation.version === undefined ? "" : `<span class="product-subtle">版本 v${escapeHtml(automation.version)}</span>`;
+  const drift = automation.drifted === true
+    ? `<span class="product-tag product-tag--pending">已在原生系统被改动</span>`
+    : "";
   const detail = automation.lifecycle === "enable_failed"
     ? `<p class="product-automation-failure">${escapeHtml(automation.failureReason ?? "启用没有完成，家里的设置保持原样。")}</p>`
     : automation.lastResult === undefined ? "" : `<p class="product-muted">最近一次：${escapeHtml(automation.lastResult)}</p>`;
@@ -1037,13 +1042,13 @@ function renderAutomationCard(automation: ProductAutomation): string {
     : "";
   const control = (action: string, label: string, className: string) => `<form class="product-action-form" method="post" action="/automations/${encodedPathSegment(automation.id)}/${action}"><button class="${className}" type="submit">${label}</button></form>`;
   const actions = automation.lifecycle === "active"
-    ? `${control("pause", "暂停", "product-secondary-action")}${control("close", "关闭并恢复原设置", "product-danger-action")}`
+    ? `${control("pause", "暂停", "product-secondary-action")}${control("close", "关闭并移除", "product-danger-action")}`
     : automation.lifecycle === "paused"
-      ? `${control("resume", "继续运行", "product-primary-action")}${control("close", "关闭并恢复原设置", "product-danger-action")}`
+      ? `${control("resume", "继续运行", "product-primary-action")}${control("close", "关闭并移除", "product-danger-action")}`
       : automation.lifecycle === "enable_failed"
-        ? `${control("retry", "重试启用", "product-primary-action")}${control("close", "关闭并恢复原设置", "product-secondary-action")}`
+        ? `${control("retry", "重试启用", "product-primary-action")}${control("close", "关闭并移除", "product-secondary-action")}`
         : "";
-  return `<article class="product-card product-automation-card" data-automation-id="${escapeHtml(automation.id)}" data-automation-state="${escapeHtml(automation.lifecycle)}"><div class="product-card-tags"><span class="product-tag product-tag--${presentation.tone}">${presentation.label}</span>${version}</div><h2>${escapeHtml(automation.title)}</h2>${detail}${activity}${actions === "" ? "" : `<div class="product-card-actions">${actions}</div>`}</article>`;
+  return `<article class="product-card product-automation-card" data-automation-id="${escapeHtml(automation.id)}" data-automation-state="${escapeHtml(automation.lifecycle)}"><div class="product-card-tags"><span class="product-tag product-tag--${presentation.tone}">${presentation.label}</span>${drift}${version}</div><h2>${escapeHtml(automation.title)}</h2>${detail}${activity}${actions === "" ? "" : `<div class="product-card-actions">${actions}</div>`}</article>`;
 }
 
 function renderActivity(model: NormalizedProductShellModel): string {

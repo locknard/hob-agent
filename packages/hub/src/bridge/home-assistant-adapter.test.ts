@@ -1158,7 +1158,9 @@ test("deploys a hub automation through the config API and verifies by read-back"
     actions: [{ kind: "set_boolean", target: automationTarget, value: false }],
   }, { signal: new AbortController().signal });
 
-  assert.deepEqual(result, { status: "deployed", nativeAutomationId: "hob_media_power" });
+  assert.equal(result.status, "deployed");
+  assert.equal((result as { nativeAutomationId: string }).nativeAutomationId, "hob_media_power");
+  assert.match((result as { configFingerprint?: string }).configFingerprint ?? "", /^sha256:/);
   const post = fake.requests.find((request) => request.method === "POST");
   assert.ok(post);
   assert.match(post.url, /\/api\/config\/automation\/config\/hob_media_power$/);

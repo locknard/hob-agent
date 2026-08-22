@@ -953,7 +953,28 @@ export class HomeWorldService extends Service {
     const handle = this.liveAutomationsHandle(targetBridgeId);
     if (handle === undefined) return undefined;
     const bridgeId = targetBridgeId;
-    const resolveTarget = (hwCapabilityId: string): BridgeActionTarget | undefined => {
+    return { bridgeId, automations: handle, resolveTarget: this.automationTargetResolver(bridgeId) };
+  }
+
+  /** Control and reconciliation address the bridge a deployment was recorded on. */
+  automationsHandleFor(bridgeId: string): AutomationsExtension | undefined {
+    return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
+  }
+
+  /** Deploy against a recorded intent: the same bridge, the same resolution rules. */
+  automationBridgeById(bridgeId: string): {
+    readonly bridgeId: string;
+    readonly automations: AutomationsExtension;
+    resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
+  } | undefined {
+    if (typeof bridgeId !== "string" || bridgeId.length === 0) return undefined;
+    const handle = this.liveAutomationsHandle(bridgeId);
+    if (handle === undefined) return undefined;
+    return { bridgeId, automations: handle, resolveTarget: this.automationTargetResolver(bridgeId) };
+  }
+
+  private automationTargetResolver(bridgeId: string): (hwCapabilityId: string) => BridgeActionTarget | undefined {
+    return (hwCapabilityId: string): BridgeActionTarget | undefined => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
       const bindings = this.authority.capability(hwCapabilityId)?.bindings.filter((binding) => binding.bridgeId === bridgeId) ?? [];
       if (bindings.length !== 1) return undefined;
@@ -968,12 +989,6 @@ export class HomeWorldService extends Service {
         },
       };
     };
-    return { bridgeId, automations: handle, resolveTarget };
-  }
-
-  /** Control and reconciliation address the bridge a deployment was recorded on. */
-  automationsHandleFor(bridgeId: string): AutomationsExtension | undefined {
-    return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
   }
 
   private liveAutomationsHandle(bridgeId: string): AutomationsExtension | undefined {

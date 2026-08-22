@@ -280,6 +280,52 @@ const artifactCandidateParameter = {
 
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
+    name: "list_home_proposals",
+    description: [
+      "List the household's unresolved proposals with their stable dedupKey.",
+      "To revise one after the household asks for a change, call create_home_proposal with the SAME dedupKey and the full replacement plan; the Hub replaces the plan content, wakes the card, and re-verifies it before the household decides.",
+      "Read-only; it exposes no device control and no approval authority.",
+    ].join(" "),
+    parameters: {},
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          proposals: {
+            type: "array",
+            required: true,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                title: { type: "string", required: true },
+                summary: { type: "string", required: true },
+                dedupKey: { type: "string", required: true },
+                kind: { type: "string", required: true },
+                lifecycle: { type: "string", required: true },
+              },
+            },
+          },
+        },
+      } as never,
+      render: (_args: unknown, value: unknown) => [{ type: "text" as const, text: JSON.stringify(value) }],
+    },
+    execute: async () => {
+      const proposals = (ctx as ProposalContext).homeProposals.list({ status: "pending_review", limit: 20 });
+      return {
+        proposals: proposals.map((proposal) => ({
+          title: proposal.title,
+          summary: proposal.summary,
+          dedupKey: proposal.dedupKey,
+          kind: proposal.kind,
+          lifecycle: proposal.lifecycle ?? "ready",
+        })),
+      };
+    },
+  } as never));
+
+  ctx.tools.register(defineTool({
     name: "create_home_proposal",
     description: [
       "Create a local pending household proposal from bounded hub evidence.",

@@ -14,6 +14,20 @@ import {
   type CreateProposalInput,
 } from "./proposal-store.js";
 
+
+function completePreparation(store: SqliteProposalStore, proposalId: string): void {
+  const job = store.listPreparationJobs().find((candidate) =>
+    candidate.proposalId === proposalId && candidate.status === "queued");
+  if (job === undefined) return;
+  const claimed = store.claimPreparationJob({ jobId: job.jobId, expectedVersion: job.version });
+  store.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+}
+
+function prepareToReady(store: SqliteProposalStore, proposalId: string) {
+  completePreparation(store, proposalId);
+  return store.markProposalReady({ proposalId });
+}
+
 const rationale = {
   householdValue: "Reduce a recurring household inconvenience.",
   whyNow: "Recent bounded evidence makes the suggestion timely.",
@@ -311,17 +325,17 @@ test("exposes the hub-owned proposal lifecycle as a Cordis service", async () =>
 
 test("exposes the synchronous approved source gate without accepting caller evidence", async () => {
   const ctx = new Context();
-  const fiber = await ctx.plugin(HomeProposalService, {
-    path: ":memory:",
-    now: () => "2026-08-19T01:00:00.000Z",
-  });
-  const created = ctx.homeProposals.markProposalReady({ proposalId: ctx.homeProposals.create({
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-19T01:00:00.000Z" });
+  const fiber = await ctx.plugin(HomeProposalService, { store } as never);
+  const createdCreated = ctx.homeProposals.create({
     ...candidate,
     kind: "automation-draft",
     intent: { ...candidate.intent, type: "automation-draft" },
     idempotencyKey: "source-gate:automation:v1",
     artifactCandidate: automationCandidate,
-  }).id });
+  });
+  completePreparation(store, createdCreated.id);
+  const created = ctx.homeProposals.markProposalReady({ proposalId: createdCreated.id });
   const source = ctx.homeProposals.withApprovedProposalAtRevision(
     created.id,
     created.revision,
@@ -339,7 +353,8 @@ test("exposes the synchronous approved source gate without accepting caller evid
 test("requires a Hub-verifiable artifact candidate for new automation drafts", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);
-  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const store = new SqliteProposalStore({ path: ":memory:" });
+  const fiber = await ctx.plugin(HomeProposalService, { store } as never);
   const base = {
     kind: "automation-draft" as const,
     title: "Review one bounded light trial",
@@ -375,7 +390,9 @@ test("requires a Hub-verifiable artifact candidate for new automation drafts", a
       },
     },
   }), /selected devices/i);
-  const proposal = ctx.homeProposals.markProposalReady({ proposalId: (await ctx.homeProposals.createDraft({ ...base, artifactCandidate: automationCandidate })).id });
+  const proposalCreated = await ctx.homeProposals.createDraft({ ...base, artifactCandidate: automationCandidate });
+  completePreparation(store, proposalCreated.id);
+  const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
   assert.deepEqual(proposal.artifactCandidate, automationCandidate);
   ctx.homeProposals.review({
     proposalId: proposal.id,
@@ -536,7 +553,7 @@ test("retains current evidence for an exact candidate capability beyond the gene
 test("creates evidence and conflict findings from the hub instead of trusting model claims", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);
-  const fiber = await ctx.plugin(HomeProposalService, {
+  const store = new SqliteProposalStore({
     path: ":memory:",
     now: () => "2026-08-19T01:00:00.000Z",
     id: (() => {
@@ -544,8 +561,9 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
       return () => String(++value);
     })(),
   });
+  const fiber = await ctx.plugin(HomeProposalService, { store } as never);
 
-  const proposal = ctx.homeProposals.markProposalReady({ proposalId: (await ctx.homeProposals.createDraft({
+  const proposalCreated = await ctx.homeProposals.createDraft({
     kind: "automation-draft",
     title: "Arrival light follow-up",
     summary: "Review a possible arrival light automation.",
@@ -562,7 +580,9 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
       description: "Prepare a review-only draft.",
       rollback: "Discard the draft.",
     },
-  })).id });
+  });
+  completePreparation(store, proposalCreated.id);
+  const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
 
   assert.deepEqual(proposal.evidence.watermarks, [{
     bridgeId: "bridge-a",
@@ -814,7 +834,7 @@ test("uses an injected proposal store for existing reads and review without clos
   const ctx = new Context();
   let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
   try {
-    const created = store.markProposalReady({ proposalId: store.create(candidate).id });
+    const created = prepareToReady(store, store.create(candidate).id);
     fiber = await ctx.plugin(HomeProposalService, { store } as never);
 
     for (const forbidden of ["listPreparationJobs", "claimPreparationJob", "retryPreparationJob"]) {
@@ -859,13 +879,16 @@ test("wakes exactly once with the committed queued job when a qualifying automat
         callbackVisibleJobs.push(observer.getPreparationJob(job.jobId));
       },
     } as never);
-    const proposal = ctx.homeProposals.markProposalReady({ proposalId: ctx.homeProposals.create({
+    const proposalCreated = ctx.homeProposals.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-wake:approved:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
-    }).id });
+    });
+    const queued = observer.listPreparationJobs()[0];
+    completePreparation(store, proposalCreated.id);
+    const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
 
     const approved = ctx.homeProposals.review({
       proposalId: proposal.id,
@@ -874,7 +897,6 @@ test("wakes exactly once with the committed queued job when a qualifying automat
       reviewer: "household-owner",
       feedbackCode: "useful_as_is",
     });
-    const queued = observer.listPreparationJobs()[0];
 
     assert.equal(approved.status, "approved");
     assert.equal(callbackJobs.length, 1);
@@ -903,20 +925,24 @@ test("does not wake for rejected, expired, or non-automation reviews", async () 
       store,
       onPreparationQueued: (job: ArtifactPreparationJob) => callbackJobs.push(job),
     } as never);
-    const rejected = store.markProposalReady({ proposalId: (store.create({
+    const rejectedCreated = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-wake:rejected:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
-    })).id });
-    const expired = store.markProposalReady({ proposalId: (store.create({
+    });
+    completePreparation(store, rejectedCreated.id);
+    const rejected = store.markProposalReady({ proposalId: rejectedCreated.id });
+    const expiredCreated = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-wake:expired:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
-    })).id });
+    });
+    completePreparation(store, expiredCreated.id);
+    const expired = store.markProposalReady({ proposalId: expiredCreated.id });
     const insight = store.create({
       ...candidate,
       idempotencyKey: "service-wake:insight:v1",
@@ -968,13 +994,15 @@ test("does not report a wake-hook failure after the proposal and queued job comm
         throw new Error("worker wake failed");
       },
     } as never);
-    const proposal = ctx.homeProposals.markProposalReady({ proposalId: ctx.homeProposals.create({
+    const proposalCreated = ctx.homeProposals.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-wake:error:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
-    }).id });
+    });
+    completePreparation(store, proposalCreated.id);
+    const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
 
     let approved;
     assert.doesNotThrow(() => {
@@ -1007,15 +1035,16 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
   const ctx = new Context();
   let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
   try {
-    const proposal = store.markProposalReady({ proposalId: (store.create({
+    const proposalCreated = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-projection:exact:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
-    })).id });
+    });
     const queued = store.listPreparationJobs()[0];
     assert.ok(queued);
+    const proposal = proposalCreated;
 
     fiber = await ctx.plugin(HomeProposalService, { store } as never);
     const service = ctx.homeProposals as unknown as {
@@ -1105,7 +1134,7 @@ test("recovers the crash window between external deployment and the local record
       store,
       deployment: {
         deploy: async () => ({ status: "verified" as const, deploymentId: "hob_x", target: "ha-main" }),
-        status: async (request: { deploymentId: string }) => statuses.get(request.deploymentId) ?? "unknown",
+        status: async (request: { deploymentId: string }) => ({ status: statuses.get(request.deploymentId) ?? "unknown" }),
       },
     } as never);
 
@@ -1117,7 +1146,7 @@ test("recovers the crash window between external deployment and the local record
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
     });
-    const ready = store.markProposalReady({ proposalId: created.id });
+    const ready = prepareToReady(store, created.id);
     // The approval persists the deployment intent; the process dies before the
     // external result is recorded.
     const enabling = store.decideProposal({

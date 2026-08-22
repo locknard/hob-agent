@@ -54,7 +54,7 @@ export class ArtifactPreparationJobRunner {
   private async execute(jobId: string, expectedVersion: number): Promise<void> {
     const claimed = this.jobs.claimPreparationJob({ jobId, expectedVersion });
     try {
-      await this.preparation.prepare({
+      const receipt = await this.preparation.prepare({
         proposalId: claimed.proposalId,
         proposalRevision: claimed.proposalRevision,
       });
@@ -64,6 +64,15 @@ export class ArtifactPreparationJobRunner {
           proposalId: claimed.proposalId,
           expectedRevision: claimed.proposalRevision,
           actor: "system",
+          ...(receipt === undefined ? {} : {
+            preparedArtifact: {
+              artifactId: receipt.compilation.artifact.artifactId,
+              revision: receipt.compilation.artifact.revision,
+              contentHash: receipt.compilation.artifact.contentHash,
+              compileResultId: receipt.compilation.compile.resultId,
+              dryRunResultId: receipt.compilation.dryRun.resultId,
+            },
+          }),
         });
       } catch {
         // The preparation itself is durable; a full inbox or a superseded

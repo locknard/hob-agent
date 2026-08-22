@@ -1087,7 +1087,7 @@ test("presents a prepared plan as one decision with three honest choices", () =>
       gateClasses: ["confirmation"],
       confirmationDeviceNames: ["空调（客厅）"],
       risk: "低 · 可逆",
-      afterEnable: "随时可以暂停或关闭并恢复原来的设置。",
+      afterEnable: "随时可以暂停，或关闭并移除这条自动化。",
     },
   }));
 
@@ -1129,7 +1129,7 @@ test("reports a running automation only after the deployment is verified", () =>
   }));
   assert.match(running, /运行中/);
   assert.match(running, /暂停/);
-  assert.match(running, /关闭并恢复原设置/);
+  assert.match(running, /关闭并移除/);
 
   const failed = renderProductShell(model({
     route: "automations",

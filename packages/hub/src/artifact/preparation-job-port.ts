@@ -62,5 +62,12 @@ export interface ArtifactPreparationJobPort {
     readonly proposalId: string;
     readonly expectedRevision?: number;
     readonly actor?: string;
+    readonly preparedArtifact?: {
+      readonly artifactId: string;
+      readonly revision: number;
+      readonly contentHash: string;
+      readonly compileResultId: string;
+      readonly dryRunResultId: string;
+    };
   }) => unknown;
 }

@@ -27,6 +27,11 @@ export interface AutomationBridgeSource {
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined;
   automationsHandleFor(bridgeId: string): AutomationsExtension | undefined;
+  automationBridgeById(bridgeId: string): {
+    readonly bridgeId: string;
+    readonly automations: AutomationsExtension;
+    resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
+  } | undefined;
 }
 
 const NO_BRIDGE_REASON = "这个家还没有可用的自动化部署通道，方案已保留，接通后可以重试。";
@@ -58,6 +63,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     readonly kind: string;
     readonly title: string;
     readonly artifactCandidate?: { readonly schemaVersion: "1"; readonly content: unknown };
+    readonly intent?: ProposalDeploymentIntent;
   }): Promise<ProposalDeploymentOutcome> {
     if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
       return { status: "failed", reason: "这条建议不包含可部署的自动化方案。" };
@@ -66,10 +72,19 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     if (capabilityIds === undefined) {
       return { status: "failed", reason: "自动化方案的内容没有通过校验，家里的设置保持原样。" };
     }
-    const bridge = this.world.automationBridgeForTargets(capabilityIds);
+    // Initial enablement, retry and crash recovery all walk one path: the
+    // persisted intent decides the target domain and the native id; without an
+    // intent (legacy rows) the plan's own bindings decide, exactly as
+    // resolveIntent would have.
+    const bridge = request.intent === undefined
+      ? this.world.automationBridgeForTargets(capabilityIds)
+      : this.world.automationBridgeById(request.intent.target);
     if (bridge === undefined) return { status: "failed", reason: NO_BRIDGE_REASON };
     const spec = compileAutomationSpec(request.proposalId, request.title, request.artifactCandidate.content, bridge.resolveTarget);
     if ("reason" in spec) return { status: "failed", reason: spec.reason };
+    if (request.intent !== undefined && spec.value.automationId !== request.intent.deploymentId) {
+      return { status: "failed", reason: "部署身份与批准时的意图不一致，家里的设置保持原样。" };
+    }
     const result = await bridge.automations.deploy(spec.value, { signal: AbortSignal.timeout(15_000) });
     if (result.status === "deployed") {
       return {
@@ -82,17 +97,16 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
   }
 
   /** Asks the target bridge whether the deployed automation actually runs. */
-  async status(request: { readonly deploymentId: string; readonly target: string }): Promise<BridgeAutomationStatusResult["status"]> {
+  async status(request: { readonly deploymentId: string; readonly target: string }): Promise<BridgeAutomationStatusResult> {
     const automations = this.world.automationsHandleFor(request.target);
-    if (automations === undefined) return "unknown";
+    if (automations === undefined) return { status: "unknown" };
     try {
-      const result = await automations.status(
+      return await automations.status(
         { nativeAutomationId: request.deploymentId },
         { signal: AbortSignal.timeout(10_000) },
       );
-      return result.status;
     } catch {
-      return "unknown";
+      return { status: "unknown" };
     }
   }
 
