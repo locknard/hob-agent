@@ -169,7 +169,7 @@ V3 的评审会议把 DR-001 至 DR-004 及本轮补充视为“已接受、检�
   一句“别再这样 / 不再建议这件事”即整条停用；由已启用规则触发、无人在场的管理员档动作
   仍转入「等待你放行」由管理员手机批准。
 - **实施说明：** 提案生命周期由 direction/trial/enable 三段收敛为 批准即生效 一段。
-  `docs/v4-product-implementation.md` 第 3、4 节与设计稿「提案精读·两次点头」屏随实现
+  `docs/v5-product-implementation.md` 第 3、4 节与设计稿「提案精读·一次决定」屏随实现
   同步修订。
 - **验收：** `approved proposal -> second approval gate` 是不可发生组合；批准后的界面状态
   直接显示“已生效”与停用入口。

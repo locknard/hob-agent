@@ -279,8 +279,8 @@ class ProposalEnableInbox extends StubInbox {
           id: "proposal-enable",
           revision: 9,
           title: "周末窗帘慢亮",
-          stage: "enable" as const,
-          status: "approved" as const,
+          lifecycle: "ready" as const,
+          status: "pending" as const,
         },
       } : {}),
     };
@@ -290,6 +290,21 @@ class ProposalEnableInbox extends StubInbox {
 
   enableProposal(input: unknown) {
     this.enablements.push(input);
+  }
+
+  readonly changeRequests: unknown[] = [];
+  readonly automationCommands: unknown[] = [];
+
+  canModifyProposal() { return true; }
+
+  modifyProposal(input: unknown) {
+    this.changeRequests.push(input);
+  }
+
+  canControlAutomation() { return true; }
+
+  controlAutomation(input: unknown) {
+    this.automationCommands.push(input);
   }
 }
 
@@ -2857,4 +2872,61 @@ test("requires an explicit principal role and device binding for Basic-authentic
   }); }, /explicit principal role and device binding/i);
   await inboxFiber.dispose();
   await ctx.fiber.dispose();
+});
+
+
+test("routes a change request back to preparation and controls a running automation", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(ProposalEnableInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adultAdminPrincipal,
+    reviewer: "adult-2",
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  try {
+    const modified = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable/modify`, {
+      method: "POST",
+      headers,
+      body: "expectedRevision=9",
+      redirect: "manual",
+    });
+    assert.equal(modified.status, 303);
+    assert.deepEqual((ctx.homeInbox as unknown as ProposalEnableInbox).changeRequests, [{
+      proposalId: "proposal-enable",
+      expectedRevision: 9,
+      reviewer: "adult-2",
+    }]);
+
+    for (const command of ["pause", "resume", "close"] as const) {
+      const controlled = await fetch(`${ctx.homeInboxHttp.origin}/automations/proposal-enable/${command}`, {
+        method: "POST",
+        headers,
+        redirect: "manual",
+      });
+      assert.equal(controlled.status, 303);
+      assert.equal(controlled.headers.get("location"), "/automations");
+    }
+    assert.deepEqual((ctx.homeInbox as unknown as ProposalEnableInbox).automationCommands, [
+      { proposalId: "proposal-enable", command: "pause", actor: "adult-2" },
+      { proposalId: "proposal-enable", command: "resume", actor: "adult-2" },
+      { proposalId: "proposal-enable", command: "close", actor: "adult-2" },
+    ]);
+
+    const foreign = await fetch(`${ctx.homeInboxHttp.origin}/automations/proposal-enable/pause`, {
+      method: "POST",
+      headers: { authorization, origin: "https://elsewhere.example" },
+      redirect: "manual",
+    });
+    assert.equal(foreign.status, 403);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
 });

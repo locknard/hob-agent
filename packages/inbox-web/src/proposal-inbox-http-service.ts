@@ -78,6 +78,7 @@ export type ProductRoute =
   | "home"
   | "conversation"
   | "review-center"
+  | "automations"
   | "activity"
   | "control"
   | "settings"
@@ -216,6 +217,7 @@ const PRODUCT_HREFS: Partial<Record<ProductShellRoute, string>> = {
   overview: "/home",
   conversation: "/conversation",
   reviews: "/review-center",
+  automations: "/automations",
   activity: "/activity",
   control: "/control",
   settings: "/settings",
@@ -497,6 +499,10 @@ interface InboxHttpPort {
   latchProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
   canEnableProposal?(): boolean;
   enableProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
+  canModifyProposal?(): boolean;
+  modifyProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
+  canControlAutomation?(): boolean;
+  controlAutomation?(input: { readonly proposalId: string; readonly command: "pause" | "resume" | "close"; readonly actor: string }): unknown | Promise<unknown>;
 }
 
 declare module "@deepseek-ai/cordis" {
@@ -1335,6 +1341,52 @@ export class ProposalInboxHttpService extends Service {
         }
         return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}`);
       }
+      const proposalModify = /^\/review-center\/proposals\/([^/]+)\/modify$/.exec(url.pathname);
+      if (method === "POST" && proposalModify) {
+        const proposalId = safeDecode(proposalModify[1]!);
+        if (proposalId === undefined) return send(response, 400, "Invalid proposal change request");
+        if (this.principal === undefined || !canUsePrivateProposalReviewPrincipal(this.principal)) {
+          return send(response, 403, "Proposal review is read-only on this device; use a bound private device");
+        }
+        if (!(this.inbox.canModifyProposal?.() ?? false) || this.inbox.modifyProposal === undefined) {
+          return send(response, 404, "Proposal change request unavailable");
+        }
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported proposal change request content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid proposal change request");
+        }
+        const expectedRevision = proposalDecisionInput(body);
+        if (expectedRevision === undefined) return send(response, 400, "Invalid proposal change request");
+        try {
+          await this.inbox.modifyProposal({ proposalId, expectedRevision, reviewer: this.reviewer });
+        } catch (error) {
+          return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
+        }
+        return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}`);
+      }
+      const automationControl = /^\/automations\/([^/]+)\/(pause|resume|close)$/.exec(url.pathname);
+      if (method === "POST" && automationControl) {
+        const proposalId = safeDecode(automationControl[1]!);
+        const command = automationControl[2] as "pause" | "resume" | "close";
+        if (proposalId === undefined) return send(response, 400, "Invalid automation command");
+        if (this.principal === undefined || !canUsePrivateProposalReviewPrincipal(this.principal)) {
+          return send(response, 403, "Automation control needs a bound private device");
+        }
+        if (!(this.inbox.canControlAutomation?.() ?? false) || this.inbox.controlAutomation === undefined) {
+          return send(response, 404, "Automation control unavailable");
+        }
+        try {
+          await this.inbox.controlAutomation({ proposalId, command, actor: this.reviewer });
+        } catch (error) {
+          return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
+        }
+        return redirect(response, "/automations");
+      }
       const detail = /^\/review-center\/proposals\/([^/]+)$/.exec(url.pathname);
       if ((method === "GET" || method === "HEAD") && detail) {
         const proposalId = safeDecode(detail[1]!);
@@ -1828,6 +1880,7 @@ function productRouteForPath(path: string): ProductRoute | undefined {
   if (path === "/home") return "home";
   if (path === "/conversation") return "conversation";
   if (path === "/review-center") return "review-center";
+  if (path === "/automations") return "automations";
   if (path === "/activity") return "activity";
   if (path === "/control") return "control";
   if (path === "/settings") return "settings";
@@ -2420,6 +2473,7 @@ function productRouteTitle(route: ProductRoute): string {
     case "home": return "总览";
     case "conversation": return "对话";
     case "review-center": return "处理中心";
+    case "automations": return "自动化";
     case "activity": return "活动";
     case "control": return "控制";
     case "settings": return "设置";

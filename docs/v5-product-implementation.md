@@ -1,7 +1,7 @@
-# V4 product implementation contract
+# V5 product implementation contract
 
 Status: implementation source of truth
-Design source: `HobAgentUI设计稿评审包v4.zip` (2026-08, 32 screens)
+Design source: `HobAgentUI设计稿评审包v5.zip` (2026-08, 33 screens)
 Scope: the existing `packages/hub`, `packages/agent-layer`, and
 `packages/inbox-web` runtime; this is not a separate prototype runtime.
 
@@ -21,6 +21,7 @@ stable semantic destinations:
 | Conversation | Ask, watch progress, stop, resume, and correct | durable advice turn, replayable SSE, structured answer and correction acknowledgement |
 | Review center | Decide runtime confirmations and persistent proposals | two independent queues, independent counts and commands |
 | Activity | Understand who did what and why | bounded household activity records and redacted cause chains |
+| Automations | See what it runs, pause it, close it | proposal lifecycle, deployment verification and version history |
 | Control | Use the same home state in a denser layout | neutral capabilities and the same governed intent seam |
 | Settings | Complete setup and manage connections, permissions and preferences | non-secret setup checkpoints and explicit capability availability |
 
@@ -89,15 +90,25 @@ once in its owning store.
 
 ### Persistent proposal
 
-- `pending + snoozed <= 5`; a snoozed proposal still occupies one slot.
+- Preparation begins when a candidate is admitted, carries no side effect and
+  stays out of the household inbox. Only a prepared plan spends household
+  attention, so `ready + snoozed <= 5` while preparation holds its own small
+  budget. A proposal with nothing to compile reaches the inbox directly.
 - Snooze choices are tomorrow, weekend, or next week. A proposal may be snoozed
   twice; the next appearance must be decided or allowed to expire naturally.
 - Natural expiry is normally fourteen days and is not a rejection latch.
-- “Only this time” closes the current proposal without a latch. “Do not suggest
-  this again” writes a `dedupKey` latch and visibly acknowledges the promise.
+- The household makes one decision on a prepared plan. Its five actions each
+  carry one consequence: enable starts a running automation, modify returns the
+  plan to preparation as a new revision, "only this time" closes the current
+  proposal without a latch, "do not suggest this again" writes a `dedupKey`
+  latch and visibly acknowledges the promise, and snooze defers the decision.
 - New evidence for the same `dedupKey` merges into the existing unresolved card.
-- Direction approval is the first consent. Trial and eventual enablement remain
-  separate, visible states; Phase 0 never implies that approval installed a rule.
+- Enablement is real. The decision records `enabling`, the governed deployment
+  seam applies the neutral artifact, and the interface reports a running
+  automation only after the deployment verifies. A failure is explicit and
+  stated in household language; it never appears as a running automation.
+- A running automation stays controllable: pause, resume, and close with the
+  original configuration restored, with its version history visible.
 
 The Web sidebar and mobile navigation show independent amber and blue counts.
 There is no aggregate red dot.
@@ -211,7 +222,8 @@ status vocabulary is:
 | Media clarification and playback | exact player and media refs, queue clarification, typed `play_media`, policy ticket and verification | domain-passed |
 | Direct action / high-impact confirmation / undo | exact descriptor re-read, three policy classes, private-device guard, fresh read-back, ten-second inverse action | http-passed + domain-passed |
 | Batch action | preflighted exact targets, per-target policy, ordered verified/pending/failed/unknown result | browser-passed + domain-passed |
-| Review center · two sections / detail / snooze | independent lifecycles and badges, live TTL, 5-slot capacity, two consent stages, three snooze choices | browser-passed + domain-passed |
+| Review center · two sections / prepared plan / snooze | independent lifecycles and badges, live TTL, 5-slot capacity, one decision with five actions, three snooze choices | browser-passed + domain-passed |
+| Automations · run view | verified-only running state, explicit enable failure, pause, resume, close with restore | browser-passed + domain-passed |
 | Activity · cause chain | closed attribution vocabulary, bounded causes and verification text | browser-passed + domain-passed |
 | Safety · banner / handling | Host-owned penetrating alert, acknowledgement, fresh-sensor resolution | http-passed + domain-passed |
 | Onboarding · steps 1–8 | durable checkpoints, real bridge/capability choices, authority policy, observation schedule, first durable advice turn | browser-passed + domain-passed |

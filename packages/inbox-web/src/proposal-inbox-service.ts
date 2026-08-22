@@ -309,6 +309,16 @@ export interface ProposalInboxProposalGovernancePort {
     readonly expectedRevision: number;
     readonly reviewer: string;
   }): void | Promise<void>;
+  /** Returns the plan to preparation without spending the household decision. */
+  requestProposalChanges?(input: {
+    readonly proposalId: string;
+    readonly expectedRevision: number;
+    readonly actor: string;
+    readonly note?: string;
+  }): void | Promise<void>;
+  pauseAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  resumeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  closeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
 }
 
 export interface InboxProductReviewProjection {
@@ -708,6 +718,45 @@ export class ProposalInboxService extends Service {
     const enable = this.proposalGovernance?.enableProposal;
     if (enable === undefined) throw new Error("proposal_enable_unavailable");
     await enable.call(this.proposalGovernance, input);
+  }
+
+  canModifyProposal(): boolean {
+    return typeof this.proposalGovernance?.requestProposalChanges === "function";
+  }
+
+  async modifyProposal(input: {
+    readonly proposalId: string;
+    readonly expectedRevision: number;
+    readonly reviewer: string;
+    readonly note?: string;
+  }): Promise<void> {
+    const request = this.proposalGovernance?.requestProposalChanges;
+    if (request === undefined) throw new Error("proposal_modify_unavailable");
+    await request.call(this.proposalGovernance, {
+      proposalId: input.proposalId,
+      expectedRevision: input.expectedRevision,
+      actor: input.reviewer,
+      ...(input.note === undefined ? {} : { note: input.note }),
+    });
+  }
+
+  canControlAutomation(): boolean {
+    return typeof this.proposalGovernance?.pauseAutomation === "function"
+      && typeof this.proposalGovernance?.resumeAutomation === "function"
+      && typeof this.proposalGovernance?.closeAutomation === "function";
+  }
+
+  async controlAutomation(input: {
+    readonly proposalId: string;
+    readonly command: "pause" | "resume" | "close";
+    readonly actor: string;
+  }): Promise<void> {
+    const governance = this.proposalGovernance;
+    const handler = input.command === "pause"
+      ? governance?.pauseAutomation
+      : input.command === "resume" ? governance?.resumeAutomation : governance?.closeAutomation;
+    if (handler === undefined) throw new Error("automation_control_unavailable");
+    await handler.call(governance, { proposalId: input.proposalId, actor: input.actor });
   }
 
   async latchProposal(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): Promise<void> {
