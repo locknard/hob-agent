@@ -55,7 +55,10 @@ function bridgeStub(overrides: {
     calls,
     world: {
       automationBridgeForTargets: (ids: readonly string[]) => (overrides.resolvable ?? true) && ids.length > 0 ? bridge : bridge,
+      automationBridgeById: (bridgeId: string) => bridgeId === "ha-main" ? bridge : undefined,
       automationsHandleFor: (bridgeId: string) => bridgeId === "ha-main" ? bridge.automations : undefined,
+      resolveActionAuthority: () => ({ status: "available", policyClass: "direct" }),
+      capabilityDeviceName: () => undefined,
     },
   };
 }
@@ -69,6 +72,10 @@ test("compiles the neutral artifact with resolved bindings and reports a verifie
     kind: "automation-draft",
     title: "睡前自动关掉多媒体室电源",
     artifactCandidate: { schemaVersion: "1", content },
+    intent: { deploymentId: "hob_proposal_media_power_41", target: "ha-main", targets: [
+      { hwCapabilityId: "hwc-presence", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-presence", nativeInstanceId: "ent-hwc-presence" } },
+      { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
+    ] },
   });
   assert.deepEqual(outcome, {
     status: "verified",
@@ -85,11 +92,17 @@ test("compiles the neutral artifact with resolved bindings and reports a verifie
 test("fails in household language when no bridge, no binding, or the adapter rejects", async () => {
   const noBridge = new BridgeAutomationDeployment({
     automationBridgeForTargets: () => undefined,
+    automationBridgeById: () => undefined,
     automationsHandleFor: () => undefined,
+    resolveActionAuthority: () => ({ status: "available", policyClass: "direct" }),
+    capabilityDeviceName: () => undefined,
   });
   const missing = await noBridge.deploy({
     proposalId: "p1", revision: 1, kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
+    intent: { deploymentId: "hob_p", target: "ha-main", targets: [
+      { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
+    ] },
   });
   assert.equal(missing.status, "failed");
   assert.match((missing as { reason: string }).reason, /部署通道/);
@@ -98,9 +111,12 @@ test("fails in household language when no bridge, no binding, or the adapter rej
   const unresolved = await unbound.deploy({
     proposalId: "p2", revision: 1, kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
+    intent: { deploymentId: "hob_p", target: "ha-main", targets: [
+      { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
+    ] },
   });
   assert.equal(unresolved.status, "failed");
-  assert.match((unresolved as { reason: string }).reason, /无法定位/);
+  assert.match((unresolved as { reason: string }).reason, /接入方式.*发生了变化/, "a binding the bridge can no longer resolve fails closed against the authorized vector");
 
   const rejecting = new BridgeAutomationDeployment(
     bridgeStub({ deployResult: { status: "rejected", reason: "unsupported" } }).world,
@@ -108,6 +124,9 @@ test("fails in household language when no bridge, no binding, or the adapter rej
   const rejected = await rejecting.deploy({
     proposalId: "p3", revision: 1, kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
+    intent: { deploymentId: "hob_p3", target: "ha-main", targets: [
+      { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
+    ] },
   });
   assert.equal(rejected.status, "failed");
   assert.match((rejected as { reason: string }).reason, /暂不支持/);

@@ -897,20 +897,9 @@ test("wakes exactly once with the committed queued job when a qualifying automat
       artifactCandidate: automationCandidate,
     });
     const queued = observer.listPreparationJobs()[0];
-    completePreparation(store, proposalCreated.id);
-    const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
 
-    const approved = ctx.homeProposals.review({
-      proposalId: proposal.id,
-      expectedRevision: proposal.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
-    });
-
-    assert.equal(approved.status, "approved");
     assert.equal(callbackJobs.length, 1);
-    assert.equal(queued?.proposalId, approved.id);
+    assert.equal(queued?.proposalId, proposalCreated.id);
     assert.equal(queued?.proposalRevision, 1);
     assert.deepEqual(callbackJobs, [queued]);
     assert.deepEqual(callbackVisibleJobs, [queued]);
@@ -1012,21 +1001,13 @@ test("does not report a wake-hook failure after the proposal and queued job comm
       artifactCandidate: automationCandidate,
     });
     completePreparation(store, proposalCreated.id);
-    const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
-
-    let approved;
+    let proposal;
     assert.doesNotThrow(() => {
-      approved = ctx.homeProposals.review({
-        proposalId: proposal.id,
-        expectedRevision: proposal.revision,
-        decision: "approved",
-        reviewer: "household-owner",
-        feedbackCode: "useful_as_is",
-      });
+      proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
     });
-    assert.equal(approved?.status, "approved");
+    assert.equal(proposal.lifecycle, "ready");
     assert.equal(calls, 1);
-    assert.equal(observer.get(proposal.id)?.status, "approved");
+    assert.equal(observer.get(proposal.id)?.status, "pending_review");
     assert.equal(observer.listPreparationJobs().length, 1);
   } finally {
     await fiber?.dispose();
@@ -1164,7 +1145,7 @@ test("recovers the crash window between external deployment and the local record
       expectedRevision: ready.revision,
       decision: "approve",
       reviewer: "household-owner",
-      deploymentIntent: { deploymentId: "hob_crashed", target: "ha-main" },
+      deploymentIntent: { deploymentId: "hob_crashed", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
     });
     assert.equal(enabling.lifecycle, "enabling");
     assert.equal(enabling.deployment?.deploymentId, "hob_crashed");
@@ -1200,6 +1181,7 @@ test("drift survives persistence and the fingerprint baseline reaches the record
     fiber = await ctx.plugin(HomeProposalService, {
       store,
       deployment: {
+        resolveIntent: () => ({ deploymentId: "hob_drift", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] }),
         deploy: async () => ({
           status: "verified" as const,
           deploymentId: "hob_drift",

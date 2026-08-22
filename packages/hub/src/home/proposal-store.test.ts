@@ -426,6 +426,7 @@ test("prepares before the inbox and turns one decision into a verified automatio
       expectedRevision: ready.revision,
       decision: "approve",
       reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_one_decision", target: "home-assistant", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
     });
     assert.equal(enabling.lifecycle, "enabling");
     assert.equal(enabling.status, "approved");
@@ -435,11 +436,12 @@ test("prepares before the inbox and turns one decision into a verified automatio
     const active = store.recordProposalDeployment({
       proposalId: enabling.id,
       expectedRevision: enabling.revision,
-      outcome: { status: "verified", deploymentId: "ha-automation-41", target: "home-assistant" },
+      outcome: { status: "verified", deploymentId: "hob_one_decision", target: "home-assistant" },
     });
     assert.equal(active.lifecycle, "active");
     assert.equal(active.applicationStatus, "running");
     assert.equal(active.deployment?.verifiedAt, now);
+    assert.deepEqual(active.deployment?.targets, [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }], "the authorized binding vector survives the record");
     assert.equal(store.proposalCapacity().used, 0, "a running automation leaves the inbox");
 
     const paused = store.pauseAutomation({ proposalId: active.id, actor: "household-owner" });
@@ -468,6 +470,7 @@ test("reports an explicit failure instead of a running automation when deploymen
       expectedRevision: ready.revision,
       decision: "approve",
       reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_deploy_fails", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
     });
     const failed = store.recordProposalDeployment({
       proposalId: enabling.id,
@@ -496,6 +499,7 @@ test("retries a failed enablement without asking for a second decision", () => {
       expectedRevision: ready.revision,
       decision: "approve",
       reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_deploy_fails", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
     });
     const failed = store.recordProposalDeployment({
       proposalId: enabling.id,
@@ -638,7 +642,7 @@ test("rejects an asynchronous retention evidence callback before committing", ()
 test("reviews with optimistic concurrency and never treats approval as application", () => {
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
-  const proposal = prepareToReady(store, store.create(input({ artifactCandidate })).id);
+  const proposal = prepareToReady(store, store.create(input()).id);
   now = "2026-08-19T01:05:00.000Z";
 
   const approved = store.review({
@@ -651,12 +655,11 @@ test("reviews with optimistic concurrency and never treats approval as applicati
   });
 
   assert.equal(approved.status, "approved");
-  assert.equal(approved.revision, 3);
-  assert.equal(approved.applicationStatus, "deploying");
+  assert.equal(approved.applicationStatus, "not_available", "an approval without a deployment intent applies nothing");
   assert.equal(approved.review?.reviewer, "household-owner");
   assert.equal(approved.review?.feedbackCode, "useful_as_is");
   assert.equal(approved.audit.at(-1)?.feedbackCode, "useful_as_is");
-  assert.deepEqual(approved.audit.map((event) => event.action), ["created", "prepared", "approved"]);
+  assert.equal(approved.audit.at(-1)?.action, "approved");
   assert.throws(
     () => store.review({
       proposalId: proposal.id,
@@ -670,7 +673,7 @@ test("reviews with optimistic concurrency and never treats approval as applicati
   assert.throws(
     () => store.review({
       proposalId: proposal.id,
-      expectedRevision: 3,
+      expectedRevision: approved.revision,
       decision: "rejected",
       reviewer: "second-reviewer",
       feedbackCode: "not_useful",
@@ -722,6 +725,7 @@ test("fails closed for missing, non-current, pending, and non-approved source re
     expectedRevision: prepared.revision,
     decision: "approve",
     reviewer: "household-owner",
+    deploymentIntent: { deploymentId: "hob_source_gate", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
   });
   assert.throws(
     () => store.withApprovedProposalAtRevision(decided.id, decided.revision, () => undefined),
@@ -1300,7 +1304,8 @@ test("records precise succeeded and failed preparation job states without unboun
     const succeeded = preparationJobs(store).completePreparationJob({
       jobId: successRunning.jobId,
       expectedVersion: successRunning.version,
-    });
+      preparedArtifact: { artifactId: "artifact-inline", revision: 1, contentHash: "sha256:inline", compileResultId: "sha256:inline-compile", dryRunResultId: "sha256:inline-dry-run" },
+      });
     assert.equal(succeeded.status, "succeeded");
     assert.equal(succeeded.attempt, 1);
     assert.equal(succeeded.stage, undefined);
@@ -1308,7 +1313,8 @@ test("records precise succeeded and failed preparation job states without unboun
     assertJobTransitionConflict(() => preparationJobs(store).completePreparationJob({
       jobId: succeeded.jobId,
       expectedVersion: succeeded.version,
-    }));
+      preparedArtifact: { artifactId: "artifact-inline", revision: 1, contentHash: "sha256:inline", compileResultId: "sha256:inline-compile", dryRunResultId: "sha256:inline-dry-run" },
+      }));
 
     const failedQueued = approvedPreparationJob(store, "preparation:fail");
     const failedRunning = preparationJobs(store).claimPreparationJob({
@@ -1377,7 +1383,8 @@ test("explicitly retries only a failed preparation attempt and increments its at
     const succeeded = preparationJobs(store).completePreparationJob({
       jobId: succeededRunning.jobId,
       expectedVersion: succeededRunning.version,
-    });
+      preparedArtifact: { artifactId: "artifact-inline", revision: 1, contentHash: "sha256:inline", compileResultId: "sha256:inline-compile", dryRunResultId: "sha256:inline-dry-run" },
+      });
     assert.equal(succeeded.status, "succeeded");
     assertJobTransitionConflict(() => preparationJobs(store).retryPreparationJob({
       jobId: succeeded.jobId,
@@ -1532,6 +1539,7 @@ test("new evidence sends a ready plan back through preparation and wakes a sleep
       expectedRevision: merged.proposal.revision,
       decision: "approve",
       reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_re_verify", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
     }), /prepared/i, "an un-reverified plan cannot be enabled");
     assert.equal(store.listPreparationJobs().some((job) =>
       job.proposalId === merged.proposal.id && job.proposalRevision === merged.proposal.revision), true,

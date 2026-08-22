@@ -41,19 +41,22 @@ export interface ProposalDeploymentPort {
    * plan without writing anything, so the approval can persist the intent
    * before the external write happens.
    */
-  resolveIntent?(request: {
+  resolveIntent(request: {
     readonly proposalId: string;
     readonly kind: CreateProposalInput["kind"];
     readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
     readonly actionPolicyClasses?: readonly string[];
-  }): ProposalDeploymentIntent | { readonly reason: string } | { readonly revalidationReason: string };
+  }): ProposalDeploymentIntent
+    | { readonly reason: string }
+    | { readonly revalidationReason: string; readonly updatedGateDisclosure?: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
+    | { readonly blockedReason: string };
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
     readonly kind: CreateProposalInput["kind"];
     readonly title: string;
     readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
-    readonly intent?: ProposalDeploymentIntent;
+    readonly intent: ProposalDeploymentIntent;
   }): Promise<ProposalDeploymentOutcome> | ProposalDeploymentOutcome;
   status?(request: { readonly deploymentId: string; readonly target: string }):
     | Promise<{ readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string }>
@@ -378,16 +381,17 @@ export class HomeProposalService extends Service {
     const current = this.store.get(input.proposalId);
     const backfill = current !== undefined
       && current.deployment?.deploymentId === undefined
-      && this.deployment?.resolveIntent !== undefined
+      && this.deployment !== undefined
       ? this.deployment.resolveIntent({
           proposalId: current.id,
           kind: current.kind,
           ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
+          ...(current.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: current.actionPolicyClasses }),
         })
       : undefined;
     const enabling = this.store.beginDeploymentRetry({
       ...input,
-      ...(backfill !== undefined && !("reason" in backfill) && !("revalidationReason" in backfill)
+      ...(backfill !== undefined && !("reason" in backfill) && !("revalidationReason" in backfill) && !("blockedReason" in backfill)
         ? { deploymentIntent: backfill }
         : {}),
     });
@@ -408,42 +412,53 @@ export class HomeProposalService extends Service {
    */
   async enableProposal(input: ProposalLifecycleInput & { readonly reviewer: string }): Promise<ProposalEnvelope> {
     const current = this.store.get(input.proposalId);
-    const resolved = current === undefined || this.deployment?.resolveIntent === undefined
-      ? undefined
-      : this.deployment.resolveIntent({
+    if (current === undefined) throw new ProposalStoreError("not_found", "Proposal was not found");
+    const automation = current.kind === "automation-draft" && current.artifactCandidate !== undefined;
+    if (automation && this.deployment === undefined) {
+      throw new ProposalStoreError("lifecycle_invalid", "这个家还没有可用的自动化部署通道，方案已保留，接通后可以启用。");
+    }
+    const resolved = automation && this.deployment !== undefined
+      ? this.deployment.resolveIntent({
           proposalId: current.id,
           kind: current.kind,
           ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
           ...(current.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: current.actionPolicyClasses }),
-        });
+        })
+      : undefined;
+    if (resolved !== undefined && "blockedReason" in resolved) {
+      // The plan can no longer enable; the card says so instead of looping, and
+      // the household keeps the revise and decline entries.
+      return this.store.markEnableBlocked({
+        proposalId: input.proposalId,
+        ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
+        actor: "system",
+        reason: resolved.blockedReason,
+      });
+    }
     if (resolved !== undefined && "revalidationReason" in resolved) {
-      // The world changed under the prepared plan; it re-verifies before it can
-      // be decided, and the household's decision is never spent on stale facts.
+      // The gate disclosure changed: re-prepare once with the refreshed truth,
+      // never spending the household decision on stale facts.
       const demoted = this.store.returnToPreparation({
         proposalId: input.proposalId,
         ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
         actor: "system",
         note: resolved.revalidationReason,
+        ...(resolved.updatedGateDisclosure === undefined ? {} : { updatedGateDisclosure: resolved.updatedGateDisclosure }),
       });
       return this.wakePreparation(demoted);
     }
-    const intent = resolved !== undefined && !("reason" in resolved) && !("revalidationReason" in resolved) ? resolved : undefined;
+    if (resolved !== undefined && "reason" in resolved) {
+      throw new ProposalStoreError("lifecycle_invalid", resolved.reason);
+    }
     const enabling = this.store.decideProposal({
       proposalId: input.proposalId,
       ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
       decision: "approve",
       reviewer: input.reviewer,
       ...(input.note === undefined ? {} : { note: input.note }),
-      ...(intent === undefined ? {} : { deploymentIntent: intent }),
+      ...(resolved === undefined ? {} : { deploymentIntent: resolved }),
     });
-    if (resolved !== undefined && "reason" in resolved && !("revalidationReason" in resolved)) {
-      return this.store.recordProposalDeployment({
-        proposalId: enabling.id,
-        expectedRevision: enabling.revision,
-        actor: input.reviewer,
-        outcome: { status: "failed", reason: resolved.reason },
-      });
-    }
+    if (!automation) return enabling;
     const outcome = await this.deploy(enabling);
     return this.store.recordProposalDeployment({
       proposalId: enabling.id,
@@ -455,8 +470,8 @@ export class HomeProposalService extends Service {
 
   private deploymentIntentOf(proposal: ProposalEnvelope): ProposalDeploymentIntent | undefined {
     const deployment = proposal.deployment;
-    return deployment?.deploymentId !== undefined && deployment.target !== undefined
-      ? { deploymentId: deployment.deploymentId, target: deployment.target }
+    return deployment?.deploymentId !== undefined && deployment.target !== undefined && deployment.targets !== undefined
+      ? { deploymentId: deployment.deploymentId, target: deployment.target, targets: deployment.targets }
       : undefined;
   }
 
@@ -464,15 +479,18 @@ export class HomeProposalService extends Service {
     if (this.deployment === undefined) {
       return { status: "failed", reason: "这个家还没有可用的自动化部署通道，方案已保留，接通后可以重试。" };
     }
+    const intent = this.deploymentIntentOf(proposal);
+    if (intent === undefined) {
+      return { status: "failed", reason: "这次启用缺少部署意图，请重新发起一次。" };
+    }
     try {
-      const intent = this.deploymentIntentOf(proposal);
       return await this.deployment.deploy({
         proposalId: proposal.id,
         revision: proposal.revision,
         kind: proposal.kind,
         title: proposal.title,
         artifactCandidate: proposal.artifactCandidate,
-        ...(intent === undefined ? {} : { intent }),
+        intent,
       });
     } catch {
       return { status: "failed", reason: "部署没有完成，家里的设置保持原样。" };

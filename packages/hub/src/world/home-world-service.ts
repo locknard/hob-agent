@@ -961,6 +961,15 @@ export class HomeWorldService extends Service {
     return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
   }
 
+  /** The household-facing device name behind a capability, for gate disclosure. */
+  capabilityDeviceName(hwCapabilityId: string): string | undefined {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
+    const hwId = this.authority.capability(hwCapabilityId)?.hwId;
+    if (hwId === undefined) return undefined;
+    const device = this.snapshot().devices.find((candidate) => candidate.hwId === hwId);
+    return device?.name;
+  }
+
   /** Deploy against a recorded intent: the same bridge, the same resolution rules. */
   automationBridgeById(bridgeId: string): {
     readonly bridgeId: string;

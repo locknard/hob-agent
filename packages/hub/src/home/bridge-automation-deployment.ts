@@ -22,6 +22,7 @@ import type { ProposalDeploymentOutcome } from "./proposal-store.js";
  */
 export interface AutomationBridgeSource {
   resolveActionAuthority(hwCapabilityId: string): { readonly status: string; readonly policyClass?: string };
+  capabilityDeviceName(hwCapabilityId: string): string | undefined;
   automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
     readonly bridgeId: string;
     readonly automations: AutomationsExtension;
@@ -46,7 +47,10 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     readonly kind: string;
     readonly artifactCandidate?: { readonly schemaVersion: "1"; readonly content: unknown };
     readonly actionPolicyClasses?: readonly string[];
-  }): ProposalDeploymentIntent | { readonly reason: string } | { readonly revalidationReason: string } {
+  }): ProposalDeploymentIntent
+    | { readonly reason: string }
+    | { readonly revalidationReason: string; readonly updatedGateDisclosure: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
+    | { readonly blockedReason: string } {
     if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
       return { reason: "这条建议不包含可部署的自动化方案。" };
     }
@@ -68,27 +72,34 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
       if (target === undefined) return { reason: "方案里有设备现在无法定位，家里的设置保持原样。" };
       targets.push(target);
     }
-    // The world may have changed since preparation: an authority escalation or
-    // a policy-class change sends the plan back through preparation instead of
-    // silently deploying under stale consent.
-    const recomputed = new Set<string>();
+    // The world may have changed since preparation. An action that is no
+    // longer automatable blocks honestly; a gate-class shift re-prepares once
+    // with the refreshed disclosure so the loop always converges.
+    const recomputed = new Set<"direct" | "confirmation">();
+    const confirmationNames = new Set<string>();
     for (const action of parsed.actions) {
       if (action.kind === "notify_local") continue;
       const authority = this.world.resolveActionAuthority(action.target.hwCapabilityId);
-      if (authority.status !== "available") {
-        return { revalidationReason: "方案里的设备权限状态已变化，需要重新准备。" };
+      if (authority.status !== "available" || authority.policyClass === "administrator") {
+        return { blockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
       }
-      if (authority.policyClass === "administrator") {
-        return { revalidationReason: "方案里有设备已改为管理员档，需要重新准备。" };
+      const gateClass = authority.policyClass === "confirmation" ? "confirmation" as const : "direct" as const;
+      recomputed.add(gateClass);
+      if (gateClass === "confirmation") {
+        const name = this.world.capabilityDeviceName(action.target.hwCapabilityId);
+        if (name !== undefined) confirmationNames.add(name);
       }
-      recomputed.add(authority.policyClass === "confirmation" ? "confirmation" : "direct");
     }
-    if (request.actionPolicyClasses !== undefined) {
-      const recorded = [...request.actionPolicyClasses].sort().join(",");
-      const observed = [...recomputed].sort().join(",");
-      if (recorded !== observed) {
-        return { revalidationReason: "方案里设备的确认档位已变化，需要重新准备。" };
-      }
+    const recorded = [...(request.actionPolicyClasses ?? [])].sort().join(",");
+    const observed = [...recomputed].sort().join(",");
+    if (recorded !== observed) {
+      return {
+        revalidationReason: "方案里设备的确认档位已变化，需要重新准备并更新说明。",
+        updatedGateDisclosure: {
+          actionPolicyClasses: [...recomputed].sort(),
+          ...(confirmationNames.size === 0 ? {} : { confirmationDeviceNames: [...confirmationNames].sort() }),
+        },
+      };
     }
     return { deploymentId: automationIdForProposal(request.proposalId), target: bridge.bridgeId, targets };
   }
@@ -99,39 +110,29 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     readonly kind: string;
     readonly title: string;
     readonly artifactCandidate?: { readonly schemaVersion: "1"; readonly content: unknown };
-    readonly intent?: ProposalDeploymentIntent;
+    readonly intent: ProposalDeploymentIntent;
   }): Promise<ProposalDeploymentOutcome> {
     if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
       return { status: "failed", reason: "这条建议不包含可部署的自动化方案。" };
     }
-    const capabilityIds = deviceCapabilityIdsOf(request.artifactCandidate.content);
-    if (capabilityIds === undefined) {
-      return { status: "failed", reason: "自动化方案的内容没有通过校验，家里的设置保持原样。" };
-    }
     // Initial enablement, retry and crash recovery all walk one path: the
-    // persisted intent decides the target domain and the native id; without an
-    // intent (legacy rows) the plan's own bindings decide, exactly as
-    // resolveIntent would have.
-    const bridge = request.intent === undefined
-      ? this.world.automationBridgeForTargets(capabilityIds)
-      : this.world.automationBridgeById(request.intent.target);
+    // persisted intent decides the target domain and the native id.
+    const bridge = this.world.automationBridgeById(request.intent.target);
     if (bridge === undefined) return { status: "failed", reason: NO_BRIDGE_REASON };
     // The authorized binding vector is the deployment's contract: a device that
     // re-bound since the decision fails closed instead of being followed.
-    if (request.intent?.targets !== undefined) {
-      for (const authorized of request.intent.targets) {
-        const currentTarget = bridge.resolveTarget(authorized.hwCapabilityId);
-        if (currentTarget === undefined
-          || currentTarget.binding.bridgeId !== authorized.binding.bridgeId
-          || currentTarget.binding.nativeId !== authorized.binding.nativeId
-          || currentTarget.binding.nativeInstanceId !== authorized.binding.nativeInstanceId) {
-          return { status: "failed", reason: "设备的接入方式在批准后发生了变化，家里的设置保持原样；重新准备后再启用。" };
-        }
+    for (const authorized of request.intent.targets) {
+      const currentTarget = bridge.resolveTarget(authorized.hwCapabilityId);
+      if (currentTarget === undefined
+        || currentTarget.binding.bridgeId !== authorized.binding.bridgeId
+        || currentTarget.binding.nativeId !== authorized.binding.nativeId
+        || currentTarget.binding.nativeInstanceId !== authorized.binding.nativeInstanceId) {
+        return { status: "failed", reason: "设备的接入方式在批准后发生了变化，家里的设置保持原样；重新准备后再启用。" };
       }
     }
     const spec = compileAutomationSpec(request.proposalId, request.title, request.artifactCandidate.content, bridge.resolveTarget);
     if ("reason" in spec) return { status: "failed", reason: spec.reason };
-    if (request.intent !== undefined && spec.value.automationId !== request.intent.deploymentId) {
+    if (spec.value.automationId !== request.intent.deploymentId) {
       return { status: "failed", reason: "部署身份与批准时的意图不一致，家里的设置保持原样。" };
     }
     const result = await bridge.automations.deploy(spec.value, { signal: AbortSignal.timeout(15_000) });

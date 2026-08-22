@@ -61,15 +61,13 @@ export class ArtifactPreparationJobRunner {
       this.jobs.completePreparationJob({
         jobId: claimed.jobId,
         expectedVersion: claimed.version,
-        ...(receipt === undefined ? {} : {
-          preparedArtifact: {
-            artifactId: receipt.compilation.artifact.artifactId,
-            revision: receipt.compilation.artifact.revision,
-            contentHash: receipt.compilation.artifact.contentHash,
-            compileResultId: receipt.compilation.compile.resultId,
-            dryRunResultId: receipt.compilation.dryRun.resultId,
-          },
-        }),
+        preparedArtifact: {
+          artifactId: receipt.compilation.artifact.artifactId,
+          revision: receipt.compilation.artifact.revision,
+          contentHash: receipt.compilation.artifact.contentHash,
+          compileResultId: receipt.compilation.compile.resultId,
+          dryRunResultId: receipt.compilation.dryRun.resultId,
+        },
       });
       try {
         this.jobs.markProposalReady?.({

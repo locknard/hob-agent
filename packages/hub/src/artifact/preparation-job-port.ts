@@ -51,7 +51,8 @@ export interface ArtifactPreparationJobFailure extends ArtifactPreparationJobTra
 export interface ArtifactPreparationJobPort {
   readonly claimPreparationJob: (input: ArtifactPreparationJobTransition) => ArtifactPreparationJob;
   readonly completePreparationJob: (input: ArtifactPreparationJobTransition & {
-    readonly preparedArtifact?: {
+    /** The immutable receipt refs commit atomically with the success itself. */
+    readonly preparedArtifact: {
       readonly artifactId: string;
       readonly revision: number;
       readonly contentHash: string;

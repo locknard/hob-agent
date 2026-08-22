@@ -316,6 +316,7 @@ export interface ProposalAuditEvent {
     | "deployment_verified"
     | "deployment_failed"
     | "drift_detected"
+    | "drift_restored"
     | "paused"
     | "resumed"
     | "closed";
@@ -371,6 +372,8 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly enablement?: ProposalEnablement;
   /** Present while preparation waits for one household answer. */
   readonly openQuestion?: string;
+  /** The world no longer allows this plan to enable; the card says so instead of looping. */
+  readonly enableBlockedReason?: string;
   readonly decision?: ProposalGovernanceDecisionRecord;
   readonly review?: ProposalReview;
   readonly audit: readonly ProposalAuditEvent[];
@@ -382,7 +385,7 @@ const proposalAuditEventSchema = z.object({
   action: z.enum([
     "created", "approved", "rejected", "expired", "evidence_merged", "snoozed", "snooze_elapsed",
     "prepared", "info_requested", "revalidation_required", "deployment_retried",
-    "deployment_verified", "deployment_failed", "drift_detected", "paused", "resumed", "closed",
+    "deployment_verified", "deployment_failed", "drift_detected", "drift_restored", "paused", "resumed", "closed",
   ]),
   actor: boundedId,
   revision: z.number().int().positive(),
@@ -443,6 +446,7 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   }).strict().optional(),
   openQuestion: z.string().trim().min(1).max(1_000).optional(),
   preparedContentHash: z.string().trim().min(1).max(128).optional(),
+  enableBlockedReason: z.string().trim().min(1).max(1_000).optional(),
   preparedArtifact: z.object({
     artifactId: boundedId,
     revision: z.number().int().positive(),
@@ -502,7 +506,7 @@ export interface ProposalDeploymentIntent {
   readonly deploymentId: string;
   readonly target: string;
   /** The exact device bindings the plan was validated against. */
-  readonly targets?: readonly ProposalDeploymentTargetBinding[];
+  readonly targets: readonly ProposalDeploymentTargetBinding[];
 }
 
 export interface ProposalDecideInput {
@@ -659,6 +663,7 @@ interface ArtifactPreparationJobMutation {
   readonly stage?: ArtifactPreparationJobStage;
   readonly errorCode?: ArtifactPreparationJobErrorCode;
   readonly updatedAt: string;
+  readonly preparedRefsJson?: string;
 }
 
 const MAX_ARTIFACT_PREPARATION_ATTEMPTS = 5;
@@ -1156,11 +1161,46 @@ export class SqliteProposalStore {
   }
 
   /**
+   * The plan's actions stopped being automatable (an administrator escalation
+   * or a lost authority). The card stays visible with an honest notice; the
+   * household keeps the revise and decline entries and is never sent in a loop.
+   */
+  markEnableBlocked(input: ProposalLifecycleInput & { readonly reason: string }): ProposalEnvelope {
+    const reason = input.reason?.trim();
+    if (typeof reason !== "string" || reason.length === 0 || reason.length > 1_000) {
+      throw new TypeError("proposal enable block reason is invalid");
+    }
+    return this.transition(input, "enable block", (current, at, revision) => {
+      if (current.lifecycle !== "ready") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a prepared plan records an enable block");
+      }
+      if (current.enableBlockedReason === reason) return current;
+      return {
+        ...current,
+        revision,
+        enableBlockedReason: reason,
+        updatedAt: at,
+        audit: [...current.audit, {
+          ...this.auditEvent(at, "revalidation_required", input.actor ?? "system", revision),
+          note: reason,
+        }],
+      };
+    });
+  }
+
+  /**
    * The world changed under a prepared plan (binding or authority drift): it
    * returns to preparation instead of being decidable, and a fresh preparation
    * job is queued for the new revision in the same transaction.
    */
-  returnToPreparation(input: ProposalLifecycleInput & { readonly note?: string }): ProposalEnvelope {
+  returnToPreparation(input: ProposalLifecycleInput & {
+    readonly note?: string;
+    /** Refreshed gate disclosure so the re-prepared card tells the current truth. */
+    readonly updatedGateDisclosure?: {
+      readonly actionPolicyClasses: readonly ("direct" | "confirmation")[];
+      readonly confirmationDeviceNames?: readonly string[];
+    };
+  }): ProposalEnvelope {
     validateLifecycleInput(input, "revalidation");
     const at = this.timestamp();
     this.db.exec("BEGIN IMMEDIATE");
@@ -1179,10 +1219,25 @@ export class SqliteProposalStore {
         snoozedUntil: _sleep,
         preparedContentHash: _hash,
         preparedArtifact: _refs,
+        actionPolicyClasses: _staleClasses,
+        confirmationDeviceNames: _staleNames,
+        enableBlockedReason: _staleBlock,
         ...basePlan
       } = current;
+      const disclosure = input.updatedGateDisclosure;
       const demoted: ProposalEnvelope = {
         ...basePlan,
+        ...(disclosure === undefined
+          ? {
+              ...(current.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: current.actionPolicyClasses }),
+              ...(current.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: current.confirmationDeviceNames }),
+            }
+          : {
+              actionPolicyClasses: [...disclosure.actionPolicyClasses],
+              ...(disclosure.confirmationDeviceNames === undefined || disclosure.confirmationDeviceNames.length === 0
+                ? {}
+                : { confirmationDeviceNames: [...disclosure.confirmationDeviceNames] }),
+            }),
         revision,
         lifecycle: "preparing",
         updatedAt: at,
@@ -1216,7 +1271,7 @@ export class SqliteProposalStore {
         revision,
         updatedAt: at,
         deployment: { ...current.deployment, drifted: input.drifted },
-        audit: [...current.audit, this.auditEvent(at, "drift_detected", input.actor ?? "system", revision)],
+        audit: [...current.audit, this.auditEvent(at, input.drifted ? "drift_detected" : "drift_restored", input.actor ?? "system", revision)],
       };
     });
   }
@@ -1370,6 +1425,13 @@ export class SqliteProposalStore {
         && current.preparedContentHash !== proposalContentHash(preparedPlanSnapshot(current))) {
         throw new ProposalStoreError("lifecycle_invalid", "The plan changed after preparation; it must prepare again");
       }
+      // Enablement of an automation is the deployment path; an approval without
+      // a persisted intent would strand the proposal in enabling forever.
+      if (input.decision === "approve"
+        && current.kind === "automation-draft" && current.artifactCandidate !== undefined
+        && (input.deploymentIntent === undefined || input.deploymentIntent.targets.length === 0)) {
+        throw new ProposalStoreError("lifecycle_invalid", "Automation enablement requires a deployment intent with its binding vector");
+      }
       const reviewer = (input.reviewer ?? input.reviewerId ?? "household-owner").trim();
       const feedbackCode = input.decision === "approve"
         ? "useful_as_is" as const
@@ -1386,18 +1448,16 @@ export class SqliteProposalStore {
         status,
         updatedAt: at,
         newEvidence: false,
-        ...(status === "approved"
+        ...(status === "approved" && input.deploymentIntent !== undefined
           ? {
               lifecycle: "enabling" as const,
               applicationStatus: "deploying" as const,
               deployment: {
                 status: "pending" as const,
                 requestedAt: at,
-                ...(input.deploymentIntent === undefined ? {} : {
-                  deploymentId: input.deploymentIntent.deploymentId,
-                  target: input.deploymentIntent.target,
-                  ...(input.deploymentIntent.targets === undefined ? {} : { targets: input.deploymentIntent.targets }),
-                }),
+                deploymentId: input.deploymentIntent.deploymentId,
+                target: input.deploymentIntent.target,
+                targets: input.deploymentIntent.targets,
               },
             }
           : {}),
@@ -1699,6 +1759,10 @@ export class SqliteProposalStore {
       if (current.lifecycle !== "ready") {
         throw new ProposalStoreError("lifecycle_invalid", "The household decides on a prepared plan");
       }
+      if (input.decision === "approved"
+        && current.kind === "automation-draft" && current.artifactCandidate !== undefined) {
+        throw new ProposalStoreError("lifecycle_invalid", "Automation enablement walks the deployment path");
+      }
       if (current.kind === "automation-draft" && current.artifactCandidate !== undefined
         && current.preparedContentHash !== proposalContentHash(preparedPlanSnapshot(current))) {
         throw new ProposalStoreError("lifecycle_invalid", "The plan changed after preparation; it must prepare again");
@@ -1718,13 +1782,7 @@ export class SqliteProposalStore {
         status: input.decision,
         updatedAt: at,
         newEvidence: false,
-        ...(input.decision === "approved"
-          ? {
-              lifecycle: "enabling" as const,
-              applicationStatus: "deploying" as const,
-              deployment: { status: "pending" as const, requestedAt: at },
-            }
-          : {}),
+
         ...(governanceDecision === undefined ? {} : { decision: governanceDecision }),
         review: {
           decision: input.decision,
@@ -1811,15 +1869,20 @@ export class SqliteProposalStore {
    * between completion and promotion loses nothing.
    */
   completePreparationJob(
-    input: ArtifactPreparationJobTransition & { readonly preparedArtifact?: PreparedArtifactRefs },
+    input: ArtifactPreparationJobTransition & { readonly preparedArtifact: PreparedArtifactRefs },
   ): ArtifactPreparationJob {
-    const refs = input.preparedArtifact === undefined ? undefined : validatePreparedRefs(input.preparedArtifact);
-    const job = this.transitionPreparationJob(input, "running", "succeeded");
-    if (refs !== undefined) {
-      this.db.prepare(`UPDATE approved_proposal_preparation_jobs
-        SET prepared_refs_json = ? WHERE job_id = ?`).run(JSON.stringify(refs), job.jobId);
-    }
-    return job;
+    const refs = validatePreparedRefs(input.preparedArtifact);
+    validatePreparationTransition(input);
+    return this.mutatePreparationJob(input, (current, at) => {
+      if (current.status !== "running") throw preparationTransitionConflict();
+      return {
+        status: "succeeded",
+        attempt: current.attempt,
+        version: current.version + 1,
+        updatedAt: at,
+        preparedRefsJson: JSON.stringify(refs),
+      };
+    });
   }
 
   private preparedRefsForRevision(proposalId: string, proposalRevision: number): PreparedArtifactRefs | undefined {
@@ -1892,19 +1955,36 @@ export class SqliteProposalStore {
       if (current === undefined) throw new ProposalStoreError("not_found", "Preparation job was not found");
       if (current.version !== input.expectedVersion) throw preparationTransitionConflict();
       const next = mutation(current, this.timestamp());
-      const result = this.db.prepare(`UPDATE approved_proposal_preparation_jobs
-        SET status = ?, attempt = ?, version = ?, stage = ?, error_code = ?, updated_at = ?
-        WHERE job_id = ? AND version = ? AND status = ?`).run(
-        next.status,
-        next.attempt,
-        next.version,
-        next.stage ?? null,
-        next.errorCode ?? null,
-        next.updatedAt,
-        current.jobId,
-        current.version,
-        current.status,
-      );
+      const result = next.preparedRefsJson === undefined
+        ? this.db.prepare(`UPDATE approved_proposal_preparation_jobs
+            SET status = ?, attempt = ?, version = ?, stage = ?, error_code = ?, updated_at = ?
+            WHERE job_id = ? AND version = ? AND status = ?`).run(
+          next.status,
+          next.attempt,
+          next.version,
+          next.stage ?? null,
+          next.errorCode ?? null,
+          next.updatedAt,
+          current.jobId,
+          current.version,
+          current.status,
+        )
+        // Success and its receipt refs commit in one statement: a crash can
+        // never leave a succeeded job that cannot promote its proposal.
+        : this.db.prepare(`UPDATE approved_proposal_preparation_jobs
+            SET status = ?, attempt = ?, version = ?, stage = ?, error_code = ?, updated_at = ?, prepared_refs_json = ?
+            WHERE job_id = ? AND version = ? AND status = ?`).run(
+          next.status,
+          next.attempt,
+          next.version,
+          next.stage ?? null,
+          next.errorCode ?? null,
+          next.updatedAt,
+          next.preparedRefsJson,
+          current.jobId,
+          current.version,
+          current.status,
+        );
       if (Number(result.changes) !== 1) throw preparationTransitionConflict();
       const updated = this.getPreparationJob(current.jobId);
       if (updated === undefined) throw new ProposalStoreError("corrupt_store", "Preparation job disappeared");
@@ -2252,6 +2332,7 @@ function mergeProposalEvidence(
     snoozedUntil: _sleep,
     preparedContentHash: _preparedHash,
     preparedArtifact: _preparedRefs,
+    enableBlockedReason: _staleBlock,
     ...base
   } = current;
   return {
@@ -2264,16 +2345,16 @@ function mergeProposalEvidence(
       // New evidence or a revised plan wakes the card and sends it back through
       // preparation; the household only ever decides on a re-verified plan.
       ...(revisedPlan ? {
-        // The revision replaces the full household-visible snapshot, so the
-        // card, the hash and the deployed behavior always tell one story.
+        // The revision replaces the full household-visible snapshot — including
+        // absent optional fields, which clear instead of leaking stale values.
         artifactCandidate: input.artifactCandidate,
         title: input.title,
         summary: input.summary,
         intent: input.intent,
-        ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+        rationale: input.rationale,
         risk: input.risk,
-        ...(input.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: input.actionPolicyClasses }),
-        ...(input.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: input.confirmationDeviceNames }),
+        actionPolicyClasses: input.actionPolicyClasses,
+        confirmationDeviceNames: input.confirmationDeviceNames,
       } : {}),
       ...(requiresPreparationAfterMerge ? { lifecycle: "preparing" as const } : {}),
       audit: [...current.audit, {
@@ -2390,7 +2471,7 @@ const PENDING_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "prepared", "info_requested", "deployment_retried",
 ];
 const APPROVED_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
-  "approved", "deployment_verified", "deployment_failed", "deployment_retried", "drift_detected", "paused", "resumed", "closed",
+  "approved", "deployment_verified", "deployment_failed", "deployment_retried", "drift_detected", "drift_restored", "paused", "resumed", "closed",
 ];
 const DEPLOYED_LIFECYCLES: readonly ProposalLifecycle[] = ["enabling", "active", "paused", "enable_failed", "closed"];
 
