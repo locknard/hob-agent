@@ -93,9 +93,10 @@ the change.
    this activated generation whenever deployment environment values leave model
    or bridges unspecified.
 2. **Implemented:** launch parsing exposes a bootstrap minimum containing only the
-   validated private data directory. The operational parser composes model,
-   bridges, credentials, policy and services from the activated generation while
-   retaining one `main` and one `HomeAgentRuntime` composition root.
+   validated private data directory. The composition root classifies `setup` or
+   `operational` from non-secret metadata and reports only the activated generation.
+   The operational parser composes model, bridges, credentials, policy and services
+   from that generation while retaining one `main` and one `HomeAgentRuntime` root.
 3. Add pairing/session ownership and the `/setup` Host workspace.
 4. Connect model setup to the existing Keychain provisioner and DSH profile-scoped
    probe.

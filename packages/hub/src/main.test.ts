@@ -9,6 +9,7 @@ import { Context } from "@deepseek-ai/cordis";
 import {
   createHomeHubProcessOptions,
   main,
+  resolveProductLaunchSelection,
   resolveHomeHubProcessOptions,
 } from "./main.js";
 import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
@@ -32,6 +33,31 @@ const MUSIC_ASSISTANT_ENV = {
   HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: "env:HOB_MUSIC_ASSISTANT_TOKEN",
   HOB_MUSIC_ASSISTANT_TOKEN: "music-assistant-private-token",
 };
+
+test("classifies first-run and activated product launch without exposing secrets", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-launch-selection-"));
+  try {
+    assert.deepEqual(await resolveProductLaunchSelection({ HOB_DATA_DIR: dataDirectory }), {
+      state: "setup",
+      dataDirectory,
+    });
+    await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
+      modelReference: "gpt/gpt-5.4",
+      bridges: [],
+    });
+    assert.deepEqual(await resolveProductLaunchSelection({ HOB_DATA_DIR: dataDirectory }), {
+      state: "operational",
+      dataDirectory,
+      activatedGeneration: 1,
+    });
+    assert.deepEqual(await resolveProductLaunchSelection(ENV), {
+      state: "operational",
+      dataDirectory: ENV.HOB_DATA_DIR,
+    });
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
 
 test("resolves the activated product configuration through the single production launch path", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-product-config-"));

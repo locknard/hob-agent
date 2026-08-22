@@ -119,7 +119,9 @@ The follow-up now establishes a directed production graph through narrow ports:
     the same composition root. The bootstrap contract validates only the private
     data directory; the operational contract adds the activated model, bridges,
     scoped credentials, policy and services. Setup can therefore mount without
-    synthetic model or bridge values.
+    synthetic model or bridge values. Lifecycle selection exposes only `setup` or
+    `operational`, the data directory and an optional activated generation number;
+    environment credentials and configuration contents stay inside composition.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and
@@ -298,7 +300,7 @@ corresponding binding; the Phase 0 server itself stays loopback-only.
   `main` landmark, zero horizontal overflow and zero console warnings/errors. The
   layout publication workspace additionally covers exact actor-attributed history,
   hidden generation identifiers and complete wrapping at 390 px.
-- Fresh release commands: `pnpm test` (1,234 passing tests), `pnpm check`,
+- Fresh release commands: `pnpm test` (1,235 passing tests), `pnpm check`,
   `git diff --check`, and a repository secret scan.
 
 ## Reviewed structural constraint

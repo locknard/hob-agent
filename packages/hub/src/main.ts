@@ -50,6 +50,22 @@ export interface HomeHubProcessOptions {
   readonly shutdownTimeoutMs?: number;
 }
 
+export type ProductLaunchSelection =
+  | { readonly state: "setup"; readonly dataDirectory: string }
+  | { readonly state: "operational"; readonly dataDirectory: string; readonly activatedGeneration?: number };
+
+interface PreparedProductLaunch {
+  readonly selection: ProductLaunchSelection;
+  readonly activated?: Awaited<ReturnType<ProductBootstrapConfigStore["load"]>>;
+}
+
+/** Classifies the process lifecycle using non-secret configuration metadata. */
+export async function resolveProductLaunchSelection(
+  environment: LaunchEnvironment,
+): Promise<ProductLaunchSelection> {
+  return (await prepareProductLaunch(environment)).selection;
+}
+
 /** Converts the explicit launch environment into the root composition input. */
 export function createHomeHubProcessOptions(
   environment: LaunchEnvironment,
@@ -133,8 +149,9 @@ export async function resolveHomeHubProcessOptions(
   environment: LaunchEnvironment,
   vault?: SecretVault,
 ): Promise<HomeHubProcessOptions> {
-  const { dataDirectory } = readProductBootstrapLaunchConfig(environment);
-  const activated = await new ProductBootstrapConfigStore(dataDirectory).load();
+  const prepared = await prepareProductLaunch(environment);
+  const { dataDirectory } = prepared.selection;
+  const activated = prepared.activated;
   const effectiveEnvironment: LaunchEnvironment = activated === undefined
     ? environment
     : {
@@ -160,6 +177,27 @@ export async function resolveHomeHubProcessOptions(
   readHomeHubLaunchConfig(effectiveEnvironment, selectedCredential, vault);
   const actionAuthorityConfig = await loadActionAuthorityConfigurationIfConfigured(dataDirectory);
   return createHomeHubProcessOptions(effectiveEnvironment, selectedCredential, actionAuthorityConfig, vault);
+}
+
+async function prepareProductLaunch(environment: LaunchEnvironment): Promise<PreparedProductLaunch> {
+  const { dataDirectory } = readProductBootstrapLaunchConfig(environment);
+  const activated = await new ProductBootstrapConfigStore(dataDirectory).load();
+  const hasDirectOperationalConfig = hasValue(environment.HOB_MODEL) && hasValue(environment.HOB_BRIDGES);
+  if (activated === undefined && !hasDirectOperationalConfig) {
+    return { selection: { state: "setup", dataDirectory } };
+  }
+  return {
+    selection: {
+      state: "operational",
+      dataDirectory,
+      ...(activated === undefined ? {} : { activatedGeneration: activated.generation }),
+    },
+    ...(activated === undefined ? {} : { activated }),
+  };
+}
+
+function hasValue(value: string | undefined): boolean {
+  return value !== undefined && value.trim() !== "";
 }
 
 async function loadActionAuthorityConfigurationIfConfigured(
