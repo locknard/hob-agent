@@ -316,6 +316,18 @@ in 874 lines. Separate internal SQLite record codecs from command rules before
 adding package metadata or signature state. This extraction preserves the current
 public contracts and Hub authority owner.
 
+`proposal-store.ts` remains the single transaction owner for proposal admission,
+review governance, dedup latches, audit, and approved-proposal preparation jobs.
+Its reviewed extraction plan is recorded in
+[`proposal-store-architecture.md`](./proposal-store-architecture.md): pure policy,
+typed contracts, codecs, and borrowed repositories are separated while one facade
+retains every atomic boundary. Implementation starts after architecture review.
+
+`artifact-registry.ts` still keeps artifact revisions, evidence, authority, risk,
+compiler results, assessments, and artifact audit in one owner. A later extraction
+requires a separate artifact-domain design so the proposal refactor does not create
+cross-store transactions or split artifact invariants by file size alone.
+
 Capability compatibility is the next neutral bridge seam. The Artifact owner
 currently evaluates an exact trusted registry containing HA and MIOT schema/version
 pairs. This keeps native payloads and dispatch authority inside Hub, while adding a
