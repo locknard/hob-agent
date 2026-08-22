@@ -25,6 +25,7 @@ import {
 } from "./model-credential-profile.js";
 import { MusicAssistantMediaCatalogProvider } from "./media/music-assistant-media-provider.js";
 import { MusicAssistantWebSocketSearchClient } from "./media/music-assistant-websocket-client.js";
+import { ProductBootstrapConfigStore } from "./home/product-bootstrap-config-store.js";
 
 type ActionAuthorityConfig = Readonly<Record<string, ActionAuthorityConfiguration>>;
 
@@ -132,22 +133,34 @@ export async function resolveHomeHubProcessOptions(
   vault?: SecretVault,
 ): Promise<HomeHubProcessOptions> {
   const dataDirectory = environment.HOB_DATA_DIR?.trim();
-  const modelReference = environment.HOB_MODEL?.trim();
+  const activated = dataDirectory !== undefined && isAbsolute(dataDirectory)
+    ? await new ProductBootstrapConfigStore(dataDirectory).load()
+    : undefined;
+  const effectiveEnvironment: LaunchEnvironment = activated === undefined
+    ? environment
+    : {
+        ...environment,
+        HOB_MODEL: environment.HOB_MODEL ?? activated.modelReference,
+        HOB_MODEL_BASE_URL: environment.HOB_MODEL_BASE_URL
+          ?? (environment.HOB_MODEL === undefined ? activated.modelBaseURL : undefined),
+        HOB_BRIDGES: environment.HOB_BRIDGES ?? JSON.stringify(activated.bridges),
+      };
+  const modelReference = effectiveEnvironment.HOB_MODEL?.trim();
   if (dataDirectory === undefined || !isAbsolute(dataDirectory) || !modelReference) {
-    return createHomeHubProcessOptions(environment);
+    return createHomeHubProcessOptions(effectiveEnvironment);
   }
   let provider;
   try {
     provider = parseModelReference(modelReference).provider;
   } catch {
-    return createHomeHubProcessOptions(environment);
+    return createHomeHubProcessOptions(effectiveEnvironment);
   }
   const selectedCredential = await loadSelectedModelCredential(dataDirectory, provider, vault);
   // Validate the complete launch contract before touching the optional
   // authority file so malformed bridge/model input keeps its bounded error.
-  readHomeHubLaunchConfig(environment, selectedCredential, vault);
+  readHomeHubLaunchConfig(effectiveEnvironment, selectedCredential, vault);
   const actionAuthorityConfig = await loadActionAuthorityConfigurationIfConfigured(dataDirectory);
-  return createHomeHubProcessOptions(environment, selectedCredential, actionAuthorityConfig, vault);
+  return createHomeHubProcessOptions(effectiveEnvironment, selectedCredential, actionAuthorityConfig, vault);
 }
 
 async function loadActionAuthorityConfigurationIfConfigured(

@@ -84,8 +84,12 @@ the change.
 
 ## Implementation slices
 
-1. Introduce the versioned non-secret configuration store and staged generation
-   transaction with deterministic tests.
+1. **Implemented:** the versioned non-secret configuration store commits an
+   owner-only, bounded, atomically replaced generation with optimistic revision,
+   canonical credential references, secret-shaped field rejection, and
+   deterministic tests. The single production `main` reads this activated
+   generation whenever deployment environment values leave model or bridges
+   unspecified.
 2. Split launch parsing into bootstrap minimum and activated generation while
    retaining one `main` and one `HomeAgentRuntime` composition root.
 3. Add pairing/session ownership and the `/setup` Host workspace.

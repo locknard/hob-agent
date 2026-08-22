@@ -108,6 +108,11 @@ The follow-up now establishes a directed production graph through narrow ports:
     module is reachable from a published package entry. The synthetic bridge test
     adapter belongs to `@hob/bridge-contract/testing`, where Hub and third-party
     bridge suites share the same deterministic fixture.
+11. Product bootstrap configuration has one durable, non-secret generation store.
+    Its owner-only atomic file carries model reference, optional custom endpoint,
+    bridge config and canonical credential references. The production `main` uses
+    the activated generation as its configuration source while explicit deployment
+    values retain field-level precedence.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and
@@ -286,7 +291,7 @@ corresponding binding; the Phase 0 server itself stays loopback-only.
   `main` landmark, zero horizontal overflow and zero console warnings/errors. The
   layout publication workspace additionally covers exact actor-attributed history,
   hidden generation identifiers and complete wrapping at 390 px.
-- Fresh release commands: `pnpm test` (1,229 passing tests), `pnpm check`,
+- Fresh release commands: `pnpm test` (1,232 passing tests), `pnpm check`,
   `git diff --check`, and a repository secret scan.
 
 ## Reviewed structural constraint

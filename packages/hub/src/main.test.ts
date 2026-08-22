@@ -12,6 +12,7 @@ import {
   resolveHomeHubProcessOptions,
 } from "./main.js";
 import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
+import { ProductBootstrapConfigStore } from "./home/product-bootstrap-config-store.js";
 
 const ENV = {
   HOB_DATA_DIR: "/tmp/hob-agent-main-test",
@@ -31,6 +32,41 @@ const MUSIC_ASSISTANT_ENV = {
   HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: "env:HOB_MUSIC_ASSISTANT_TOKEN",
   HOB_MUSIC_ASSISTANT_TOKEN: "music-assistant-private-token",
 };
+
+test("resolves the activated product configuration through the single production launch path", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-product-config-"));
+  try {
+    await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
+      modelReference: "custom/deepseek-v4-flash-0731",
+      modelBaseURL: "https://model.example.test/v1",
+      bridges: [{
+        ...JSON.parse(ENV.HOB_BRIDGES)[0],
+        credentialRefs: { "access-token": "env:HOB_HA_TOKEN" },
+      }],
+    });
+    const options = await resolveHomeHubProcessOptions({
+      HOB_DATA_DIR: dataDirectory,
+      HOB_HA_TOKEN: ENV.HOB_HA_TOKEN,
+      HOB_CUSTOM_MODEL_API_KEY: ENV.OPENAI_API_KEY,
+    });
+
+    assert.equal(options.runtime.agent.provider, "custom");
+    assert.equal(options.runtime.agent.model, "deepseek-v4-flash-0731");
+    assert.equal(options.runtime.agent.baseURL, "https://model.example.test/v1");
+    assert.equal(options.runtime.homeWorld.bridges[0]?.adapterType, "home-assistant");
+
+    const overridden = await resolveHomeHubProcessOptions({
+      HOB_DATA_DIR: dataDirectory,
+      HOB_MODEL: "gpt/gpt-5.4",
+      HOB_HA_TOKEN: ENV.HOB_HA_TOKEN,
+      OPENAI_API_KEY: ENV.OPENAI_API_KEY,
+    });
+    assert.equal(overridden.runtime.agent.provider, "gpt");
+    assert.equal(overridden.runtime.agent.baseURL, undefined);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
 
 test("builds neutral HomeWorld process options from the allowlisted environment", () => {
   const options = createHomeHubProcessOptions(ENV);
