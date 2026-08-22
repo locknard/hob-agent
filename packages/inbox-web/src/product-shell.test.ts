@@ -40,7 +40,6 @@ function model(overrides: Partial<ProductShellModel> = {}): ProductShellModel {
         willDo: ["每天 23:30，若多媒体室 30 分钟无人且没有播放，关闭插线板"],
         dependency: "需要「插座」授权（当前未开）",
         snoozeCount: 0,
-        stage: "direction",
       },
     ],
     spaces: [
@@ -291,14 +290,12 @@ test("states missing proposal evidence and actions without inventing recent cont
       revision: 1,
       title: "一项待补充的家庭建议",
       status: "pending",
-      stage: "direction",
     }],
     selectedProposal: {
       id: "proposal-empty",
       revision: 1,
       title: "一项待补充的家庭建议",
       status: "pending",
-      stage: "direction",
     },
   }));
   assert.match(html, /暂无已记录证据/);
@@ -362,30 +359,27 @@ test("shows correction acknowledgement only when the Hub projection supplies it"
   assert.match(acknowledged, /当前 1 条建议/);
 });
 
-test("separates proposal snooze from the two-consent detail and explains activity cause attribution", () => {
+test("separates proposal snooze from the one-decision detail and explains activity cause attribution", () => {
   const review = renderProductShell(model({ route: "reviews", selectedProposalId: "media-power" }));
 
   assert.match(review, /data-runtime-countdown/);
   assert.match(review, /data-expires-at="2026-08-21T13:03:00.000Z"/);
   assert.match(review, /今天 21:03/);
   assert.doesNotMatch(review, />2026-08-21T13:03:00.000Z</);
-  assert.match(review, /查看建议/);
+  assert.match(review, /查看方案/);
   assert.match(review, /暂缓/);
   assert.match(review, /明天晚上/);
   assert.match(review, /周末/);
   assert.match(review, /下周/);
   assert.match(review, /name="until" value="next_week"/);
   assert.doesNotMatch(review, /value="next-week"/);
-  assert.match(review, /action="\/review-center\/proposals\/media-power\/review"/);
+  assert.match(review, /action="\/review-center\/proposals\/media-power\/enable"/);
+  assert.match(review, /action="\/review-center\/proposals\/media-power\/modify"/);
   assert.match(review, /name="expectedRevision" value="1"/);
-  assert.match(review, /name="decision" value="approved"/);
-  assert.match(review, /name="feedbackCode" value="useful_as_is"/);
   assert.doesNotMatch(review, /action="\/review-center\/proposals\/media-power\/advance"/);
-  assert.match(review, /确认方向，开始准备/);
-  assert.match(review, /<ol class="product-stepper" aria-label="建议进度">/);
-  assert.equal((review.match(/<li class="product-step"/g) ?? []).length, 3);
-  assert.match(review, /试运行阶段/);
-  assert.match(review, /你决定是否长期使用/);
+  assert.match(review, />启用</);
+  assert.match(review, /<ul class="product-readiness" aria-label="方案已备好">|方案已备好/);
+  assert.match(review, /这是唯一一次点头/);
   assert.match(review, /action="\/review-center\/proposals\/media-power\/reject"[^>]*>/);
   assert.match(review, /action="\/review-center\/proposals\/media-power\/reject-latch"[^>]*>/);
   assert.match(review, /需要「插座」授权/);
@@ -431,26 +425,6 @@ test("uses the household agent name for agent-attributed activity", () => {
 
   assert.match(activity, /data-attribution="hob"[^>]*>小满</);
   assert.doesNotMatch(activity, />阿灶</);
-});
-
-test("keeps the selected proposal visible through trial and renders the second enablement consent", () => {
-  const html = renderProductShell({
-    route: "reviews",
-    selectedProposalId: "proposal-enable",
-    proposals: [],
-    selectedProposal: {
-      id: "proposal-enable",
-      revision: 9,
-      title: "周末窗帘慢亮",
-      stage: "enable",
-      status: "approved",
-    },
-  });
-
-  assert.match(html, /周末窗帘慢亮/);
-  assert.match(html, /action="\/review-center\/proposals\/proposal-enable\/enable"/);
-  assert.match(html, /name="expectedRevision" value="9"/);
-  assert.match(html, /确认长期使用/);
 });
 
 test("ships responsive and preference-aware presentation tokens without decorative assets", () => {
@@ -1098,4 +1072,79 @@ test("action buttons keep their decision hierarchy inside action forms", () => {
     activeTurn: { id: "turn-1", question: "窗帘为什么开得晚？", status: "streaming", canStop: true, canBackground: true },
   }));
   assert.match(streaming, /class="product-quiet-action" type="submit">停止/);
+});
+
+
+test("presents a prepared plan as one decision with five household actions", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    selectedProposalId: "media-power",
+    selectedProposal: {
+      id: "media-power",
+      revision: 3,
+      title: "睡前自动关掉多媒体室电源",
+      lifecycle: "ready",
+      readiness: ["证据已核对", "与现有规则无冲突", "权限已确认", "试算未写入设备"],
+      why: ["连续 12 天，你在 23:00 后手动关多媒体室插线板"],
+      willDo: ["每天 23:30，若 30 分钟无人且没在播放，断开插线板"],
+      willNotDo: ["不碰路由器和 NAS 所在插座"],
+      risk: "低 · 可逆",
+      afterEnable: "随时可以暂停或关闭并恢复原来的设置。",
+    },
+  }));
+
+  assert.match(html, /方案已备好/);
+  assert.match(html, /修改…/);
+  assert.match(html, /这次跳过/);
+  assert.match(html, /不再建议这件事/);
+  assert.match(html, /不会做/);
+  assert.doesNotMatch(html, /试运行|两次确认|同意方向|确认方向/);
+});
+
+test("reports a running automation only after the deployment is verified", () => {
+  const running = renderProductShell(model({
+    route: "automations",
+    automations: [{
+      id: "media-power",
+      title: "睡前自动关掉多媒体室电源",
+      lifecycle: "active",
+      lastResult: "昨晚 23:30 已执行 · 已回读核实",
+      version: 2,
+    }],
+  }));
+  assert.match(running, /运行中/);
+  assert.match(running, /暂停/);
+  assert.match(running, /关闭并恢复原设置/);
+
+  const failed = renderProductShell(model({
+    route: "automations",
+    automations: [{
+      id: "media-power",
+      title: "睡前自动关掉多媒体室电源",
+      lifecycle: "enable_failed",
+      failureReason: "这个家还没有可用的自动化部署通道。",
+      version: 1,
+    }],
+  }));
+  assert.match(failed, /没能启用/);
+  assert.match(failed, /这个家还没有可用的自动化部署通道。/);
+  assert.doesNotMatch(failed, /运行中/);
+});
+
+test("offers a household insight without an enable path", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    proposals: [{
+      id: "balcony-sensor",
+      revision: 1,
+      kind: "household-insight",
+      title: "阳台加一个土壤湿度传感器会更准",
+      summary: "现在只能按天数估计，装了就能按真实湿度浇水。",
+      lifecycle: "ready",
+    }],
+  }));
+  const card = html.slice(html.indexOf('data-review-id="balcony-sensor"'));
+  assert.match(card, /有帮助/);
+  assert.match(card, /不需要/);
+  assert.doesNotMatch(card.slice(0, card.indexOf("</article>")), /启用/);
 });

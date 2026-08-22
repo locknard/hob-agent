@@ -11,6 +11,7 @@ const recipeRouteSchema = z.enum([
   "activity",
   "control",
   "settings",
+  "automations",
   "onboarding",
 ]);
 
@@ -28,6 +29,7 @@ const recipeSlotSchema = z.enum([
   "activity.workspace",
   "control.workspace",
   "settings.workspace",
+  "automations.workspace",
   "onboarding.workspace",
 ]);
 

@@ -1155,11 +1155,12 @@ function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDe
     status: proposal.status === "pending_review"
       ? "pending"
       : proposal.status === "expired" ? "expired" : proposal.status,
-    stage: proposal.rolloutState === "trial_active"
-      ? "trial"
-      : proposal.rolloutState === "enable_pending"
-        ? "enable"
-        : proposal.rolloutState === "enabled" ? "complete" : "direction",
+    ...(proposal.kind === "automation-draft" || proposal.kind === "household-insight"
+      ? { kind: proposal.kind }
+      : {}),
+    ...(proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info" || proposal.lifecycle === "ready"
+      ? { lifecycle: proposal.lifecycle }
+      : {}),
     snoozeCount: proposal.snoozeCount ?? 0,
     newEvidence: proposal.newEvidence ?? false,
     ...(trace === undefined ? {} : { trace }),

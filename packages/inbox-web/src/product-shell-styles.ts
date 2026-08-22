@@ -231,6 +231,16 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-tag--red { background: var(--shell-red-soft); color: var(--shell-red); }
 .product-tag--green { background: var(--shell-green-soft); color: var(--shell-green); }
 .product-tag--neutral { background: var(--shell-bg); color: var(--shell-muted); }
+.product-tag--verified { background: var(--shell-green-soft); color: var(--shell-green); }
+.product-tag--pending { background: var(--shell-amber-soft); color: var(--shell-amber); }
+.product-tag--failed { background: var(--shell-red-soft); color: var(--shell-red); }
+.product-readiness { display: flex; flex-wrap: wrap; gap: .4rem .9rem; margin: .1rem 0 .9rem; padding: 0; list-style: none; color: var(--shell-green); font-size: .84rem; font-weight: 650; }
+.product-readiness li::before { content: "✓ "; }
+.product-detail-risk, .product-detail-after { margin: .2rem 0 0; color: var(--shell-muted); font-size: .88rem; }
+.product-automation-list { display: grid; gap: 1rem; }
+.product-automation-card h2 { margin: .35rem 0 .3rem; }
+.product-automation-failure { margin: 0; color: var(--shell-red); }
+.product-automation-activity { margin: .5rem 0 0; padding-inline-start: 1.1rem; color: var(--shell-muted); font-size: .86rem; }
 .product-runtime-window { display: grid; gap: .18rem; margin: .35rem 0 .55rem; }
 .product-runtime-window .product-runtime-countdown { color: var(--shell-amber); font-weight: 760; }
 .product-status-copy { display: grid; gap: .2rem; min-width: 0; }

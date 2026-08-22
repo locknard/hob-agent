@@ -216,7 +216,7 @@ export interface InboxProposal {
   readonly id: string;
   readonly revision: number;
   readonly status: InboxProposalStatus;
-  readonly applicationStatus: "not_available";
+  readonly applicationStatus: "not_available" | "deploying" | "running" | "failed" | "withdrawn";
   readonly kind: string;
   readonly title: string;
   readonly summary: string;
@@ -225,7 +225,7 @@ export interface InboxProposal {
   readonly snoozeCount?: number;
   readonly snoozedUntil?: string;
   readonly newEvidence?: boolean;
-  readonly rolloutState?: "direction_pending" | "trial_active" | "enable_pending" | "enabled";
+  readonly lifecycle?: "preparing" | "needs_info" | "ready" | "enabling" | "active" | "paused" | "closed" | "enable_failed";
   readonly trial?: {
     readonly durationDays: 7;
     readonly startedAt: string;

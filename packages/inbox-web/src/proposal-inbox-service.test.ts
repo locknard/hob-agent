@@ -62,7 +62,7 @@ const trialProposal = {
   id: "proposal-trial",
   revision: 8,
   status: "approved" as const,
-  rolloutState: "trial_active" as const,
+  lifecycle: "ready" as const,
   trial: {
     durationDays: 7 as const,
     startedAt: "2026-08-20T01:00:00.000Z",
@@ -724,7 +724,7 @@ test("uses the proposal owner for capacity, visible cards, snooze, and both prop
 
   const selected = ctx.homeInbox.getProductReviewProjection(runtimeAdminActor, trialProposal.id).selectedProposal;
   assert.equal(selected?.id, trialProposal.id);
-  assert.equal(selected?.stage, "trial");
+  assert.equal(selected?.lifecycle, "ready");
 
   await ctx.homeInbox.snoozeProposal({ proposalId: reviewProposal.id, until: "tomorrow" });
   await ctx.homeInbox.rejectProposal({ proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1" });

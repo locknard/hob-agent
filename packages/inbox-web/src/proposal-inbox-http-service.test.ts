@@ -998,7 +998,7 @@ test("keeps administrator confirmations and proposal decisions on a bound privat
   }
 });
 
-test("keeps the trial proposal detail reachable and accepts the second enablement consent", async () => {
+test("keeps the prepared plan detail reachable and accepts the single enable decision", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(ProposalEnableInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -1019,7 +1019,7 @@ test("keeps the trial proposal detail reachable and accepts the second enablemen
     assert.equal(detail.status, 200);
     const detailHtml = await detail.text();
     assert.match(detailHtml, /周末窗帘慢亮/);
-    assert.match(detailHtml, /确认长期使用/);
+    assert.match(detailHtml, />启用</);
 
     const enabled = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable/enable`, {
       method: "POST",

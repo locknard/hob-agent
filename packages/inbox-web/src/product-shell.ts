@@ -14,6 +14,7 @@ export type ProductShellRoute =
   | "reviews"
   | "activity"
   | "control"
+  | "automations"
   | "settings"
   | "onboarding";
 
@@ -70,24 +71,46 @@ export interface ProductRuntimeConfirmation {
   readonly rejectLabel?: string;
 }
 
-export type ProductProposalStage = "direction" | "trial" | "enable" | "complete";
+export type ProductProposalKind = "automation-draft" | "household-insight";
 
+export type ProductProposalLifecycle = "preparing" | "needs_info" | "ready";
+
+/** A prepared plan the household decides on once. */
 export interface ProductProposal {
   readonly id: string;
   readonly revision: number;
   readonly title: string;
+  readonly kind?: ProductProposalKind;
+  readonly lifecycle?: ProductProposalLifecycle;
   readonly summary?: string;
+  /** What preparation already settled, shown before the decision. */
+  readonly readiness?: readonly string[];
   readonly why?: readonly string[];
   readonly willDo?: readonly string[];
+  readonly willNotDo?: readonly string[];
   readonly evidence?: readonly string[];
   readonly unknowns?: readonly string[];
   readonly dependency?: string;
+  readonly risk?: string;
+  readonly afterEnable?: string;
   readonly snoozeCount?: number;
-  readonly stage?: ProductProposalStage;
   readonly status?: "pending" | "snoozed" | "expired" | "rejected" | "approved";
   readonly expiresAt?: string;
   readonly newEvidence?: boolean;
   readonly trace?: AgentLoopTrace;
+}
+
+export type ProductAutomationLifecycle = "enabling" | "active" | "paused" | "closed" | "enable_failed";
+
+/** A household automation after the decision. Running means a verified deployment. */
+export interface ProductAutomation {
+  readonly id: string;
+  readonly title: string;
+  readonly lifecycle: ProductAutomationLifecycle;
+  readonly version?: number;
+  readonly lastResult?: string;
+  readonly failureReason?: string;
+  readonly recentActivity?: readonly string[];
 }
 
 export interface ProductSpace {
@@ -350,6 +373,7 @@ export interface ProductShellModel {
   readonly runtimeConfirmationCount?: number;
   readonly proposals?: readonly ProductProposal[];
   readonly selectedProposal?: ProductProposal;
+  readonly automations?: readonly ProductAutomation[];
   readonly proposalCapacityUsed?: number;
   readonly proposalCapacity?: number;
   readonly expiredSummary?: string;
@@ -375,12 +399,13 @@ export interface ProductShellRenderOptions {
   readonly hrefs?: Partial<Record<ProductShellRoute, string>>;
 }
 
-const ROUTES: readonly ProductShellRoute[] = ["overview", "conversation", "reviews", "activity", "control", "settings", "onboarding"];
+const ROUTES: readonly ProductShellRoute[] = ["overview", "conversation", "reviews", "automations", "activity", "control", "settings", "onboarding"];
 
 const DEFAULT_HREFS: Readonly<Record<ProductShellRoute, string>> = {
   overview: "/",
   conversation: "/conversation",
   reviews: "/review-center",
+  automations: "/automations",
   activity: "/activity",
   control: "/control",
   settings: "/settings",
@@ -391,6 +416,7 @@ const ROUTE_LABELS: Readonly<Record<ProductShellRoute, string>> = {
   overview: "总览",
   conversation: "对话",
   reviews: "处理中心",
+  automations: "自动化",
   activity: "活动",
   control: "控制",
   settings: "设置",
@@ -401,6 +427,7 @@ const MOBILE_ROUTE_LABELS: Readonly<Record<ProductShellRoute, string>> = {
   overview: "家",
   conversation: "对话",
   reviews: "处理",
+  automations: "自动化",
   activity: "活动",
   control: "空间",
   settings: "设置",
@@ -870,32 +897,101 @@ function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
 }
 
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
-  const statusLabel = proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : "新建议";
+  const statusLabel = proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
   const snoozedTwice = (proposal.snoozeCount ?? 0) >= 2;
-  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span>${proposal.summary === undefined ? "" : `<span class="product-subtle">${escapeHtml(proposal.summary)}</span>`}</div><h3>${escapeHtml(proposal.title)}</h3><p class="product-muted">${escapeHtml(proposal.expiresAt ?? "请在建议到期前决定")}</p><div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">查看建议</a>${snoozedTwice ? `<span class="product-subtle">下次请做决定</span>` : `<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options"><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="tomorrow">明天晚上</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="weekend">周末</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="next_week">下周</button></form></div><p class="product-snooze-note">这条建议最多暂缓两次，之后请做决定。</p></details>`}</div></article>`;
+  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${snoozedTwice ? `<span class="product-subtle">下次请做决定</span>` : `<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options"><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="tomorrow">明天晚上</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="weekend">周末</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="next_week">下周</button></form></div><p class="product-snooze-note">这条建议最多暂缓两次，之后请做决定。</p></details>`}</div></article>`;
+}
+
+function renderInsightCardActions(proposal: ProductProposal): string {
+  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/helpful"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">有帮助</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">不需要</button></form>`;
 }
 
 function renderProposalDetail(proposal: ProductProposal): string {
-  const currentStage = proposal.stage ?? "direction";
-  const stageState = (stage: ProductProposalStage): "current" | "complete" | "pending" => {
-    const order: readonly ProductProposalStage[] = ["direction", "trial", "enable", "complete"];
-    const currentIndex = order.indexOf(currentStage);
-    const index = order.indexOf(stage);
-    return index < currentIndex ? "complete" : index === currentIndex ? "current" : "pending";
-  };
-  const action = currentStage === "complete"
-    ? `<a class="product-primary-action" href="/activity">查看活动记录</a>`
-    : currentStage === "direction"
-      ? `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/review"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><input type="hidden" name="decision" value="approved"><input type="hidden" name="feedbackCode" value="useful_as_is"><button class="product-primary-action" type="submit">确认方向，开始准备</button></form>`
-      : currentStage === "trial"
-        ? `<p class="product-muted">试运行结果准备好后会在这里出现。</p>`
-        : `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/enable"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">确认长期使用</button></form>`;
+  const insight = proposal.kind === "household-insight";
+  const readiness = proposal.readiness?.length
+    ? `<ul class="product-readiness" aria-label="方案已备好">${proposal.readiness.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+    : "";
   const why = proposal.why?.length ? proposal.why : proposal.evidence?.length ? proposal.evidence : ["暂无已记录证据"];
-  const willDo = proposal.willDo?.length ? proposal.willDo : ["待补充"];
+  const sections = [
+    `<section><h3>为什么提这个</h3>${list(why, "product-cause-chain")}</section>`,
+    proposal.willDo?.length ? `<section><h3>具体会改变什么</h3>${list(proposal.willDo, "product-cause-chain")}</section>` : "",
+    proposal.willNotDo?.length ? `<section><h3>不会做</h3>${list(proposal.willNotDo, "product-cause-chain")}</section>` : "",
+    proposal.unknowns?.length ? `<section><h3>仍待确认</h3>${list(proposal.unknowns)}</section>` : "",
+  ].join("");
+  const risk = proposal.risk === undefined ? "" : `<p class="product-detail-risk">风险与权限：${escapeHtml(proposal.risk)}</p>`;
+  const dependency = proposal.dependency === undefined
+    ? ""
+    : `<p class="product-dependency">需要：${escapeHtml(proposal.dependency)}。</p>`;
+  const after = `<p class="product-detail-after">启用后：${escapeHtml(proposal.afterEnable ?? "随时可以暂停、关闭并恢复原来的设置。")}</p>`;
   const journey = proposal.trace === undefined
     ? ""
     : `<details class="product-agent-journey"><summary>这条建议怎么得来的</summary>${renderAgentLoopTimeline(proposal.trace)}</details>`;
-  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">需要两次确认</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div><ol class="product-stepper" aria-label="建议进度"><li class="product-step" data-state="${stageState("direction")}"><span class="product-step-index">1</span><span>确认方向</span></li><li class="product-step" data-state="${stageState("trial")}"><span class="product-step-index">2</span><span>试运行阶段（每次先告诉你）</span></li><li class="product-step" data-state="${stageState("enable")}"><span class="product-step-index">3</span><span>你决定是否长期使用</span></li></ol><div class="product-detail-columns"><section><h3>为什么提这个</h3>${list(why, "product-cause-chain")}</section><section><h3>会做什么</h3>${list(willDo, "product-cause-chain")}</section></div>${proposal.dependency === undefined ? "" : `<p class="product-dependency">需要：${escapeHtml(proposal.dependency)}。确认方向后，试运行会按当前权限进行；要长期使用时，你可以在设置里打开对应权限。</p>`}${proposal.unknowns?.length ? `<section><h3>仍待确认</h3>${list(proposal.unknowns)}</section>` : ""}${journey}<div class="product-review-boundary"><div class="product-card-actions">${action}<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options"><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="tomorrow">明天晚上</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="weekend">周末</button></form><form method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button type="submit" name="until" value="next_week">下周</button></form></div></details><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">这次跳过</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject-latch"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-danger-action" type="submit">不再建议这件事</button></form></div><p>试运行结束后，你会看到结果，再决定是否长期使用。</p></div></article>`;
+  const decide = insight
+    ? renderInsightActions(proposal)
+    : `<div class="product-card-actions">${enableForm(proposal)}${modifyForm(proposal)}${renderSnoozeDisclosure(proposal.id)}${skipForm(proposal)}${latchForm(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停或关闭。</p>`;
+  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${dependency}${insight ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
+}
+
+function enableForm(proposal: ProductProposal): string {
+  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/enable"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">启用</button></form>`;
+}
+
+function modifyForm(proposal: ProductProposal): string {
+  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/modify"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">修改…</button></form>`;
+}
+
+function skipForm(proposal: ProductProposal): string {
+  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">这次跳过</button></form>`;
+}
+
+function latchForm(proposal: ProductProposal): string {
+  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject-latch"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-danger-action" type="submit">不再建议这件事</button></form>`;
+}
+
+/** A household insight has nothing to enable; it only collects usefulness. */
+function renderInsightActions(proposal: ProductProposal): string {
+  return `<div class="product-card-actions"><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/helpful"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">有帮助</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">不需要</button></form></div><p>这类建议只是让你知道；要不要动手由你决定。</p>`;
+}
+
+function renderSnoozeDisclosure(proposalId: string): string {
+  const option = (value: string, label: string) => `<form method="post" action="/review-center/proposals/${encodedPathSegment(proposalId)}/snooze"><button type="submit" name="until" value="${value}">${label}</button></form>`;
+  return `<details class="product-snooze"><summary>暂缓</summary><div class="product-snooze-options">${option("tomorrow", "明天晚上")}${option("weekend", "周末")}${option("next_week", "下周")}</div><p class="product-snooze-note">暂缓也占一个建议名额，同一条最多暂缓两次。</p></details>`;
+}
+
+const AUTOMATION_PRESENTATION = {
+  enabling: { label: "正在启用", tone: "pending" },
+  active: { label: "运行中", tone: "verified" },
+  paused: { label: "已暂停", tone: "pending" },
+  closed: { label: "已关闭", tone: "neutral" },
+  enable_failed: { label: "没能启用", tone: "failed" },
+} as const satisfies Readonly<Record<ProductAutomationLifecycle, { readonly label: string; readonly tone: string }>>;
+
+function renderAutomations(model: NormalizedProductShellModel): string {
+  const automations = model.automations ?? [];
+  const cards = automations.length === 0
+    ? `<section class="product-card product-review-empty"><h2>还没有运行中的自动化</h2><p class="product-muted">你在处理中心启用的自动化会出现在这里。</p></section>`
+    : automations.map(renderAutomationCard).join("");
+  return `<header class="product-page-header"><div><p class="product-kicker">自动化</p><h1>它替你做的事</h1><p class="product-muted">每一条都可以暂停、关闭并恢复原来的设置。</p></div></header><div class="product-automation-list">${cards}</div>`;
+}
+
+function renderAutomationCard(automation: ProductAutomation): string {
+  const presentation = AUTOMATION_PRESENTATION[automation.lifecycle];
+  const version = automation.version === undefined ? "" : `<span class="product-subtle">版本 v${escapeHtml(automation.version)}</span>`;
+  const detail = automation.lifecycle === "enable_failed"
+    ? `<p class="product-automation-failure">${escapeHtml(automation.failureReason ?? "启用没有完成，家里的设置保持原样。")}</p>`
+    : automation.lastResult === undefined ? "" : `<p class="product-muted">最近一次：${escapeHtml(automation.lastResult)}</p>`;
+  const activity = automation.recentActivity?.length
+    ? `<ul class="product-automation-activity">${automation.recentActivity.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+    : "";
+  const control = (action: string, label: string, className: string) => `<form class="product-action-form" method="post" action="/automations/${encodedPathSegment(automation.id)}/${action}"><button class="${className}" type="submit">${label}</button></form>`;
+  const actions = automation.lifecycle === "active"
+    ? `${control("pause", "暂停", "product-secondary-action")}${control("close", "关闭并恢复原设置", "product-danger-action")}`
+    : automation.lifecycle === "paused"
+      ? `${control("resume", "继续运行", "product-primary-action")}${control("close", "关闭并恢复原设置", "product-danger-action")}`
+      : automation.lifecycle === "enable_failed"
+        ? `${control("retry", "重试启用", "product-primary-action")}${control("close", "关闭并恢复原设置", "product-secondary-action")}`
+        : "";
+  return `<article class="product-card product-automation-card" data-automation-id="${escapeHtml(automation.id)}" data-automation-state="${escapeHtml(automation.lifecycle)}"><div class="product-card-tags"><span class="product-tag product-tag--${presentation.tone}">${presentation.label}</span>${version}</div><h2>${escapeHtml(automation.title)}</h2>${detail}${activity}${actions === "" ? "" : `<div class="product-card-actions">${actions}</div>`}</article>`;
 }
 
 function renderActivity(model: NormalizedProductShellModel): string {
@@ -1309,6 +1405,7 @@ function renderProductViewRecipeSlot(
     case "activity.workspace": return renderActivity(model);
     case "control.workspace": return renderControl(model, options);
     case "settings.workspace": return renderSettings(model, options);
+    case "automations.workspace": return renderAutomations(model);
     case "onboarding.workspace": return renderOnboarding(model, options);
   }
 }
@@ -1328,7 +1425,9 @@ export function renderProductContent(source: ProductShellModel = {}, options: Pr
             ? renderSettings(model, options)
             : model.route === "onboarding"
               ? renderOnboarding(model, options)
-              : renderOverview(model, options);
+              : model.route === "automations"
+                ? renderAutomations(model)
+                : renderOverview(model, options);
 }
 
 /** Render the non-overridable navigation, safety, review badges and content boundary. */
