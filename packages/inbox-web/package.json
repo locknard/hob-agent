@@ -7,7 +7,8 @@
     "./http": "./src/proposal-inbox-http-service.ts",
     "./service": "./src/proposal-inbox-service.ts",
     "./view-recipe": "./src/product-view-recipe.ts",
-    "./view-recipe-conformance": "./src/product-view-recipe-conformance.ts"
+    "./view-recipe-conformance": "./src/product-view-recipe-conformance.ts",
+    "./view-recipe-source-check": "./src/product-view-recipe-source-check.ts"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",

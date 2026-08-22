@@ -471,7 +471,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-layout-publication-history-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .product-layout-publication-history-list li { display: grid; grid-template-columns: .65rem minmax(0, 1fr); align-items: start; gap: .7rem; padding-block: .7rem; border-block-start: 1px solid var(--shell-rule); }
 .product-layout-publication-history-list li > div { display: grid; gap: .12rem; min-width: 0; }
-.product-layout-publication-history-list strong, .product-layout-publication-history-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.product-layout-publication-history-list strong, .product-layout-publication-history-list small { overflow-wrap: anywhere; }
 .product-layout-publication-history-list small { color: var(--shell-muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
 .product-layout-publication-history-mark { width: .5rem; height: .5rem; margin-block-start: .42rem; border-radius: 50%; background: var(--shell-blue); box-shadow: 0 0 0 .2rem var(--shell-blue-soft); }
 .product-layout-preview { display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; min-width: 0; max-width: 100%; padding: 1rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); background: var(--shell-bg); }

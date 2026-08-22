@@ -177,10 +177,17 @@ revision. The Hub recompiles and rechecks conformance, retains the immutable sou
 and digest as a bounded publication generation, and moves an active recipe pointer
 only after registry ownership is available. Publication, rollback and deactivation
 are administrator actions with the latest 256 actor-attributed audit events retained.
-They change chooser
-availability only; current-session and device-default selection remain separate Host
-commands. Static provider ids keep their original owner and cannot be replaced by a
-published draft.
+The administrator workspace presents the latest eight events as action, recipe id,
+actor and time while keeping source, digest and generation identifiers inside the
+Hub boundary. They change chooser availability only; current-session and
+device-default selection remain separate Host commands. Static provider ids keep
+their original owner and remain reserved from published drafts.
+
+The checked developer recipe under `examples/views` enters the same source-size,
+JSON compilation and seven-check conformance path used by publication. The local
+`pnpm check:view` command prints only recipe id, exact digest and check count on
+success, or one stable failure category. Submitted content and parser details remain
+inside the local validator.
 
 The local HTTP credential is a trusted deployment credential. Launch
 configuration binds that credential to one explicit principal, presence state
@@ -196,9 +203,22 @@ corresponding binding; the Phase 0 server itself stays loopback-only.
   impossible confirmation decisions, capacity limits, correction concurrency,
   onboarding replay, batch partial results and media confirmation.
 - Browser verification covers all eight routes at 1440×900 and 390×844 with one
-  `main` landmark, zero horizontal overflow and zero console warnings/errors.
-- Fresh release commands: `pnpm test` (1,184 passing tests), `pnpm check`,
+  `main` landmark, zero horizontal overflow and zero console warnings/errors. The
+  layout publication workspace additionally covers exact actor-attributed history,
+  hidden generation identifiers and complete wrapping at 390 px.
+- Fresh release commands: `pnpm test` (1,225 passing tests), `pnpm check`,
   `git diff --check`, and a repository secret scan.
+
+## Reviewed structural constraint
+
+`proposal-inbox-http-service.ts` remains the single authenticated HTTP composition
+owner, while its current 3,268 lines raise the review cost of further layout work.
+Before package discovery or installable layout contributions enter scope, extract
+the layout-workspace presenter into an internal `inbox-web` module with the same
+typed port and Host registry inputs. `product-view-recipe-draft-store.ts` similarly
+keeps draft and publication invariants together in 874 lines; separate internal
+SQLite record codecs from command rules before adding package metadata or signature
+state. Both extractions preserve the current public contracts and authority owners.
 
 ## Current architectural direction
 

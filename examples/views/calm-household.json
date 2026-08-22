@@ -1,0 +1,32 @@
+{
+  "apiVersion": "hob.view.recipe/v1",
+  "id": "community.calm-household",
+  "title": "从容家庭",
+  "pages": [
+    {
+      "route": "overview",
+      "layout": "split",
+      "slots": [
+        { "slot": "overview.header", "width": "full" },
+        { "slot": "overview.status", "width": "full" },
+        { "slot": "overview.spaces", "width": "half" },
+        { "slot": "overview.review-summary", "width": "half" },
+        { "slot": "overview.composer", "width": "full" }
+      ]
+    },
+    {
+      "route": "reviews",
+      "layout": "stack",
+      "slots": [
+        { "slot": "reviews.workspace", "width": "full" }
+      ]
+    },
+    {
+      "route": "control",
+      "layout": "stack",
+      "slots": [
+        { "slot": "control.workspace", "width": "full" }
+      ]
+    }
+  ]
+}

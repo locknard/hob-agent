@@ -13,6 +13,7 @@
     "credentials:music-assistant": "tsx packages/hub/src/music-assistant-credential-setup.ts",
     "credentials:test": "tsx packages/hub/src/model-credential-probe.ts",
     "draft:home-map": "tsx packages/hub/src/home-map-draft.ts",
+    "check:view": "tsx scripts/check-view-recipe.ts",
     "check": "pnpm check:types && pnpm check:instructions",
     "check:types": "tsc --noEmit -p tsconfig.json",
     "check:instructions": "sh scripts/sync-agent-instructions.sh --check",

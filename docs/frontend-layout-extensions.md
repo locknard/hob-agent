@@ -449,6 +449,20 @@ active pointer changes. Draft deletion leaves published generations intact; edit
 a draft never mutates an active generation. Device selection and device default stay
 in their existing Host-owned paths.
 
+### F2h checked developer recipe
+
+[`examples/views/calm-household.json`](../examples/views/calm-household.json) is the
+smallest complete developer reference for a multi-page household layout. It contains
+data only and names Host-owned semantic slots; the Host continues to own household
+truth, safety surfaces, identity, approvals and device execution.
+
+Run `pnpm check:view` to validate the checked example, or
+`pnpm check:view path/to/layout.json` for another local recipe. The command enforces
+the 64 KiB source boundary, parses the inert JSON and runs the same deterministic
+conformance set used before publication. Success prints the recipe id, exact digest
+and passed-check count. Failure prints one stable category and keeps submitted
+content and parser details inside the local validation boundary.
+
 ## Failure and recovery
 
 - Provider 加载超时、崩溃、版本不兼容或被撤销：继续显示当前安全视图；不可用 provider
