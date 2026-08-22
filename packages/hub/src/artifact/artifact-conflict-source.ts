@@ -15,7 +15,7 @@ import {
   type ArtifactRef,
   type ArtifactRevision,
 } from "./neutral-artifact.js";
-import type { HubVerifiedProposalSource } from "./proposal-store.js";
+import type { HubVerifiedProposalSource } from "../proposal-store.js";
 
 const MAX_CAPABILITY_IDS = 16;
 const MAX_SCAN_ENTRIES = 200;

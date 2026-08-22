@@ -10,12 +10,12 @@ import {
   type ArtifactRegistryEntry,
   type ArtifactRegistryListQuery,
   type ArtifactRegistryOptions,
-} from "./artifact-registry.js";
+} from "./artifact/artifact-registry.js";
 import type {
   ArtifactCompileAttestation,
   NeutralDryRunAttestation,
-} from "./artifact-compiler-contract.js";
-import type { ArtifactRef } from "./neutral-artifact.js";
+} from "./artifact/artifact-compiler-contract.js";
+import type { ArtifactRef } from "./artifact/neutral-artifact.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {

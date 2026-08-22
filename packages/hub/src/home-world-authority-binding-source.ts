@@ -1,10 +1,10 @@
-import { artifactRefSchema, type ArtifactRef } from "./neutral-artifact.js";
+import { artifactRefSchema, type ArtifactRef } from "./artifact/neutral-artifact.js";
 import type { AuthorityCandidateResolveInput } from "./authority-candidate-registry.js";
 import type {
   AuthorityBindingInputPort,
   AuthorityFreshWorldCut,
   AuthorityWorldWatermark,
-} from "./artifact-authority-producer.js";
+} from "./artifact/artifact-authority-producer.js";
 import type {
   HomeWorldCapabilitySnapshot,
   HomeWorldSnapshot,

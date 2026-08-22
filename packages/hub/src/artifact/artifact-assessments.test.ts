@@ -19,7 +19,7 @@ import {
   parseArtifactRiskAssessment,
   preflightAssessmentInput,
 } from "./artifact-assessments.js";
-import type { HomeWorldEvidenceCoverageReason } from "./home-world-service.js";
+import type { HomeWorldEvidenceCoverageReason } from "../home-world-service.js";
 
 type MissingCoverageReason = Exclude<
   HomeWorldEvidenceCoverageReason,

@@ -27,26 +27,26 @@ import { ArtifactWorldCutSource } from "./artifact-world-cut-source.js";
 import type {
   AuthorityCandidateRegistry,
   AuthorityCandidateResolveInput,
-} from "./authority-candidate-registry.js";
+} from "../authority-candidate-registry.js";
 import {
   checkCapabilityAction,
   checkCapabilityPredicate,
   resolveCapabilityRead,
-} from "./bridge/capability-semantics.js";
+} from "../bridge/capability-semantics.js";
 import {
   HomeArtifactService,
   type HomeArtifactRegistryReader,
-} from "./home-artifact-service.js";
-import { HomeWorldAuthorityBindingSource } from "./home-world-authority-binding-source.js";
+} from "../home-artifact-service.js";
+import { HomeWorldAuthorityBindingSource } from "../home-world-authority-binding-source.js";
 import type { ArtifactMutationProposalCommand } from "./artifact-mutation-coordinator.js";
 import type { ArtifactRef } from "./neutral-artifact.js";
-import type { SqliteProposalStore } from "./proposal-store.js";
+import type { SqliteProposalStore } from "../proposal-store.js";
 import type {
   HomeWorldEvidenceQuery,
   HomeWorldEvidenceResult,
   HomeWorldForeignRuleCatalog,
   HomeWorldSnapshot,
-} from "./home-world-service.js";
+} from "../home-world-service.js";
 
 interface PipelineProposalPort {
   readonly get: SqliteProposalStore["get"];

@@ -42,6 +42,12 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     .filter((name) => /^(?:bridge-(?!credential-setup)|home-assistant-(?:adapter|bridge)|xiaomi-home-bridge|synthetic-bridge|capability-semantics)/.test(name));
   assert.deepEqual(misplacedBridgeFiles, [], "bridge domain modules and their tests belong under src/bridge");
 
+  const misplacedArtifactFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => /^(?:artifact-|neutral-artifact)/.test(name));
+  assert.deepEqual(misplacedArtifactFiles, [], "artifact domain modules and their tests belong under src/artifact");
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],

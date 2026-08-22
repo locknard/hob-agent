@@ -9,16 +9,16 @@ import {
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
 import { HomeProposalService } from "./home-proposal-service.js";
-import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact-registry.js";
+import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {
   AuthorityCandidateRegistry,
   type AuthorityCandidateRegistryOptions,
 } from "./authority-candidate-registry.js";
-import { ArtifactPreparationJobRunner } from "./artifact-preparation-job-runner.js";
+import { ArtifactPreparationJobRunner } from "./artifact/artifact-preparation-job-runner.js";
 import {
   createArtifactPipelineComposition,
   type ArtifactPipelineComposition,
-} from "./artifact-pipeline-composition.js";
+} from "./artifact/artifact-pipeline-composition.js";
 import { HomeRetentionService } from "./home-retention-service.js";
 import {
   HomeObservationAuditService,

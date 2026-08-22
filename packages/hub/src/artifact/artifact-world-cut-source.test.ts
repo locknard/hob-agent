@@ -9,12 +9,12 @@ import type {
   HomeWorldDiagnostics,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "./home-world-service.js";
+} from "../home-world-service.js";
 import {
   checkCapabilityAction,
   checkCapabilityPredicate,
   resolveCapabilityRead,
-} from "./bridge/capability-semantics.js";
+} from "../bridge/capability-semantics.js";
 import {
   ArtifactWorldCutSource,
   type ArtifactWorldCutCapabilityResolver,

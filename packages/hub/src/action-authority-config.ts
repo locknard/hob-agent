@@ -7,7 +7,7 @@ import type {
   ActionAuthorityConfiguration,
   ActionAuthorityPolicyClass,
 } from "./authority-coordinator.js";
-import { canonicalAssessmentInput } from "./artifact-assessments.js";
+import { canonicalAssessmentInput } from "./artifact/artifact-assessments.js";
 
 export const ACTION_AUTHORITY_CONFIG_FILE = "action-authority.json";
 export const ACTION_AUTHORITY_CONFIG_VERSION = 2;

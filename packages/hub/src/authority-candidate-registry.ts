@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { canonicalAssessmentInput } from "./artifact-assessments.js";
+import { canonicalAssessmentInput } from "./artifact/artifact-assessments.js";
 import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
 
 export type AuthorityCandidateLifecycle = "active" | "superseded" | "revoked";

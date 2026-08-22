@@ -29,14 +29,14 @@ import {
   type ArtifactRef,
   type ArtifactRevision,
 } from "./neutral-artifact.js";
-import type { HubVerifiedProposalSource } from "./proposal-store.js";
+import type { HubVerifiedProposalSource } from "../proposal-store.js";
 import type {
   HomeWorldBridgeSnapshot,
   HomeWorldCapabilitySnapshot,
   HomeWorldForeignRuleCatalog,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "./home-world-service.js";
+} from "../home-world-service.js";
 
 const MAX_CAPABILITY_IDS = 16;
 const MAX_RELEVANT_BRIDGES = 16;

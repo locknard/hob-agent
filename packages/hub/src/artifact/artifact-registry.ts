@@ -29,7 +29,7 @@ import {
   verifyArtifactRevision,
   type ArtifactRevision,
 } from "./neutral-artifact.js";
-import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
+import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 
 export type ArtifactRegistryStatus = "draft" | "superseded";
 export type ArtifactRegistryAuditAction =

@@ -10,7 +10,7 @@ import {
   createArtifactAuthorityAssessment,
   createArtifactEvidenceAttestation,
   createArtifactRiskAssessment,
-} from "./artifact-assessments.js";
+} from "./artifact/artifact-assessments.js";
 import {
   computeNeutralForeignCatalogIdentity,
   createArtifactCompileAttestation,
@@ -20,10 +20,10 @@ import {
   createNeutralDiff,
   createNeutralDryRunAttestation,
   createNeutralWorldCut,
-} from "./artifact-compiler-contract.js";
-import { ArtifactRegistry } from "./artifact-registry.js";
+} from "./artifact/artifact-compiler-contract.js";
+import { ArtifactRegistry } from "./artifact/artifact-registry.js";
 import { HomeArtifactService } from "./home-artifact-service.js";
-import { createArtifactRevision } from "./neutral-artifact.js";
+import { createArtifactRevision } from "./artifact/neutral-artifact.js";
 
 function fixtureArtifact(options: {
   readonly artifactId?: string;

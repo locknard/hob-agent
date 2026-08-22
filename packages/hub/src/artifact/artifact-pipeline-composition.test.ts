@@ -4,17 +4,17 @@ import test from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 
 import { ArtifactRegistry } from "./artifact-registry.js";
-import { AuthorityCandidateRegistry } from "./authority-candidate-registry.js";
+import { AuthorityCandidateRegistry } from "../authority-candidate-registry.js";
 import { createArtifactPipelineComposition } from "./artifact-pipeline-composition.js";
 import {
   SqliteProposalStore,
   type CreateProposalInput,
-} from "./proposal-store.js";
+} from "../proposal-store.js";
 import type {
   HomeWorldBridgeSnapshot,
   HomeWorldEvidenceResult,
   HomeWorldSnapshot,
-} from "./home-world-service.js";
+} from "../home-world-service.js";
 import type { ArtifactContent } from "./neutral-artifact.js";
 
 const capturedAt = "2026-08-20T01:00:00.000Z";

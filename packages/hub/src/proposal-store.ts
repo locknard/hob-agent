@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
 import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
-import { artifactContentSchema } from "./neutral-artifact.js";
+import { artifactContentSchema } from "./artifact/neutral-artifact.js";
 
 const boundedId = z.string().trim().min(1).max(200);
 const boundedText = z.string().trim().min(1).max(1_000);

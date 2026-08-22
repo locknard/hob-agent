@@ -6,7 +6,7 @@ import {
   type CreateArtifactRevisionInput,
 } from "./neutral-artifact.js";
 import type { ArtifactRegistryEntry } from "./artifact-registry.js";
-import type { HubVerifiedProposalSource } from "./proposal-store.js";
+import type { HubVerifiedProposalSource } from "../proposal-store.js";
 
 /**
  * The only proposal read seam an Artifact producer may use. The concrete

@@ -6,7 +6,7 @@ import {
   type CapabilityReadResult,
   type CapabilitySemanticsState,
   resolveCapabilityRead,
-} from "./bridge/capability-semantics.js";
+} from "../bridge/capability-semantics.js";
 import {
   parseArtifactAuthorityAssessment,
   parseArtifactEvidenceAttestation,
@@ -21,7 +21,7 @@ import type {
   HomeWorldDeviceSnapshot,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "./home-world-service.js";
+} from "../home-world-service.js";
 import {
   closedReasonCodeSchema,
   createNeutralWorldCut,

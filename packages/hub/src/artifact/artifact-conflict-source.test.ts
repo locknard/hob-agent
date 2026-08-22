@@ -18,7 +18,7 @@ import {
   type ArtifactRef,
   type ArtifactRevision,
 } from "./neutral-artifact.js";
-import type { HubVerifiedProposalSource } from "./proposal-store.js";
+import type { HubVerifiedProposalSource } from "../proposal-store.js";
 
 const capturedAt = "2026-08-20T04:00:00.000Z";
 

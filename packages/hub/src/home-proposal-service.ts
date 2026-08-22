@@ -24,7 +24,7 @@ import type { HomeWorldService } from "./home-world-service.js";
 import {
   parseArtifactContent,
   type ArtifactContent,
-} from "./neutral-artifact.js";
+} from "./artifact/neutral-artifact.js";
 
 export interface BorrowedHomeProposalServiceOptions {
   readonly store: SqliteProposalStore;
