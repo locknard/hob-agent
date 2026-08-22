@@ -13,15 +13,16 @@ projected into these shapes before they reach hub or agent-layer code.
 ## Entry points
 
 - `bridge-contract.ts` is the canonical implementation.
-- `bridge-contract-v6.ts` is the sole explicit frozen-version entry point and
-  `index.ts` is the package entry point; both re-export the canonical
-  implementation. There is no legacy v0 contract entry point.
+- `index.ts` is the sole package entry point and exports the canonical core,
+  adapter conformance helper, actions, foreign-rules and organization-hints
+  surfaces. Consumers use `@hob/bridge-contract` so the workspace dependency
+  graph preserves the future process boundary.
 - `bridge-adapter-conformance.ts` is an opt-in test helper exported from the
   package entry point. It is not a second runtime or ingest implementation.
 
-The package depends on `zod` at the workspace root. Consumers should import
-both the schema they need (for example `envelopeSchema`) and its inferred type
-(for example `Envelope`) from one of the entry points above.
+The package declares its own `zod` dependency. Consumers import both the schema
+they need (for example `envelopeSchema`) and its inferred type (for example
+`Envelope`) from `@hob/bridge-contract`.
 
 ## Frozen Step 0 surface
 

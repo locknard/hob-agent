@@ -13,8 +13,8 @@ import {
   type BridgeInfo,
   type Envelope,
   type WorldCapability,
-} from "../../../contracts/bridge-contract.js";
-import type { ActionsExtension, BridgeActionRequest } from "../../../contracts/bridge-actions.js";
+} from "@hob/bridge-contract";
+import type { ActionsExtension, BridgeActionRequest } from "@hob/bridge-contract";
 import { BridgeCatalog, type AdapterRegistration } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore, type BridgeConfigEntry } from "./bridge-registry.js";
 import { AuthorityCoordinator } from "./authority-coordinator.js";

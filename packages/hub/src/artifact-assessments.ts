@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { z, type RefinementCtx } from "zod";
 
-import { semverSchema } from "../../../contracts/bridge-contract.js";
+import { semverSchema } from "@hob/bridge-contract";
 import {
   artifactRefSchema,
   type ArtifactRef,

@@ -8,7 +8,7 @@ import type {
   EquivalenceMapping,
   JsonValue as ContractJsonValue,
   SchemaRegistration as ContractSchemaRegistration,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 
 /** Contract-owned Zod schema; the hub only retains the parse seam internally. */
 export type BridgeSchema<T> = ContractAdapterRegistration<T>["configSchema"];

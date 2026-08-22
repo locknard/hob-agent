@@ -1,4 +1,4 @@
-import type { ControlResult, WorldCapability } from "../../../contracts/bridge-contract.js";
+import type { ControlResult, WorldCapability } from "@hob/bridge-contract";
 
 import type {
   GovernanceAuditRecord,

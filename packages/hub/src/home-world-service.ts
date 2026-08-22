@@ -7,8 +7,8 @@ import type { ZodType } from "zod";
 import {
   foreignRuleCatalogSchema,
   type ForeignRuleSummary,
-} from "../../../contracts/bridge-foreign-rules.js";
-import { orgHintPayloadSchema } from "../../../contracts/bridge-org-hints.js";
+} from "@hob/bridge-contract";
+import { orgHintPayloadSchema } from "@hob/bridge-contract";
 import {
   bridgeActionDescriptorRequestSchema,
   bridgeActionDescriptorSchema,
@@ -18,7 +18,7 @@ import {
   type BridgeActionCurrentState,
   type BridgeActionDescriptor,
   type BridgeActionResult,
-} from "../../../contracts/bridge-actions.js";
+} from "@hob/bridge-contract";
 
 import {
   canonicalExtensionKey,
@@ -30,7 +30,7 @@ import {
   type DeviceDescriptor,
   type StateEvent,
   type WorldSpace,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 import {
   BridgeCatalog,
   type BridgeAdapter as CatalogBridgeAdapter,

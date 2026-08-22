@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { IngestRecord } from "../../../contracts/bridge-contract.js";
+import type { IngestRecord } from "@hob/bridge-contract";
 import {
   WorldModelIndex,
   WorldModelIndexError,

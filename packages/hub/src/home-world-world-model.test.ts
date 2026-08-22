@@ -6,7 +6,7 @@ import test from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 import { z } from "zod";
 
-import type { BridgeEvent, Envelope } from "../../../contracts/bridge-contract.js";
+import type { BridgeEvent, Envelope } from "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, type BridgeConfigEntry } from "./bridge-registry.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";

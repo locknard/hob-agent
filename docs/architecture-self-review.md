@@ -33,6 +33,13 @@ path. The retired Inbox runtime and Control Center have been removed.
 - `contracts` owns the Zod-first neutral bridge boundary. HA and Xiaomi are
   equal adapters behind this boundary.
 
+The neutral boundary is one explicit workspace package at version 6.5.0. Hub
+declares `@hob/bridge-contract` as a `workspace:*` dependency, and every Hub
+production or test import enters through that package root. The public entry exports
+the core, adapter conformance, actions, foreign-rules and organization-hints
+surfaces. Architecture guards keep cross-package relative imports and superseded
+version shims out of the repository.
+
 ## Action and safety closure
 
 Every one-shot action is prepared from an exact `actions@1` descriptor. Before

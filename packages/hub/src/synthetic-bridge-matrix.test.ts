@@ -11,7 +11,7 @@ import {
   type Envelope,
   type StateEvent,
 } from "./bridge-ingest.js";
-import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
+import { runBridgeAdapterConformance } from "@hob/bridge-contract";
 import {
   BridgeCatalog,
   type AdapterRegistration,

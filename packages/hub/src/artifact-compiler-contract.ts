@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { z, type ZodType } from "zod";
 
-import { capabilitySemanticKindSchema, semverSchema } from "../../../contracts/bridge-contract.js";
+import { capabilitySemanticKindSchema, semverSchema } from "@hob/bridge-contract";
 import {
   artifactAuthorityAssessmentSchema,
   artifactEvidenceAttestationSchema,

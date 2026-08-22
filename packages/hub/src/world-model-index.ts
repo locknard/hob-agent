@@ -7,7 +7,7 @@ import {
   type IngestRecord,
   type JsonValue,
   type StateEvent,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
 
 export type WorldModelFreshness = "fresh" | "stale-gap";

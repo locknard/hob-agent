@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { JsonValue } from "../../../contracts/bridge-contract.js";
+import type { JsonValue } from "@hob/bridge-contract";
 import type {
   HomeWorldBridgeSnapshot,
   HomeWorldCapabilitySnapshot,

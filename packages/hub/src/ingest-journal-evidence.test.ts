@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { BridgeEvent, Envelope } from "../../../contracts/bridge-contract.js";
+import type { BridgeEvent, Envelope } from "@hob/bridge-contract";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 
 function append(

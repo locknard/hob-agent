@@ -20,7 +20,7 @@ import {
   type ExtensionHandleRegistry,
   type JsonValue,
   type StateEvent,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 import {
   ACTIONS_EXTENSION,
   bridgeActionDescriptorRequestSchema,
@@ -31,7 +31,7 @@ import {
   type ActionsExtension,
   type BridgeActionRequest,
   type BridgeActionResult,
-} from "../../../contracts/bridge-actions.js";
+} from "@hob/bridge-contract";
 
 export const XIAOMI_HOME_ADAPTER_TYPE = "xiaomi-home";
 export const XIAOMI_HOME_PROPERTY_SCHEMA = "miot.property";

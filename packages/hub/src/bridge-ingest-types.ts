@@ -15,7 +15,7 @@ export type {
   ResourceBudget,
   SnapshotManifest,
   StateEvent,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 
 export interface JournalWatermark {
   epochId: string;

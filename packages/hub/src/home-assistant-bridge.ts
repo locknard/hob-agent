@@ -18,7 +18,7 @@ import {
   type ExtensionHandleRegistry,
   type IdentityClaim as ContractIdentityClaim,
   type StateEvent as ContractStateEvent,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 import {
   ACTIONS_EXTENSION,
   bridgeActionDescriptorRequestSchema,
@@ -30,18 +30,18 @@ import {
   type BridgeActionDescriptorRequest,
   type BridgeActionRequest,
   type BridgeActionResult,
-} from "../../../contracts/bridge-actions.js";
+} from "@hob/bridge-contract";
 import {
   FOREIGN_RULES_EXTENSION,
   MAX_FOREIGN_RULES,
   type ForeignRuleCatalog,
   type ForeignRuleSummary,
   type ForeignRulesHandle,
-} from "../../../contracts/bridge-foreign-rules.js";
+} from "@hob/bridge-contract";
 import {
   ORG_HINTS_EXTENSION,
   type OrgHintPayload,
-} from "../../../contracts/bridge-org-hints.js";
+} from "@hob/bridge-contract";
 
 export interface WebSocketLike {
   send(data: string): void;

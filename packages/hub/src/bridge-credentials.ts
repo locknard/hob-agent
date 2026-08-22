@@ -1,7 +1,7 @@
 import type {
   BridgeCredentialProvider as ContractBridgeCredentialProvider,
   CredentialMaterial as ContractCredentialMaterial,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 import type { CredentialKind, CredentialRequirement } from "./bridge-catalog.js";
 
 export type { CredentialKind, CredentialRequirement } from "./bridge-catalog.js";

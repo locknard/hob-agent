@@ -15,7 +15,7 @@ import {
 import {
   bridgeInfoSchema,
   canonicalExtensionKey,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 
 export { SqliteBridgeRegistryStore } from "./bridge-registry-store.js";
 

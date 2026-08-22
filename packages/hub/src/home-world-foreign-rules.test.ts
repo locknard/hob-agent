@@ -4,8 +4,8 @@ import test from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 import { z } from "zod";
 
-import type { BridgeAdapter } from "../../../contracts/bridge-contract.js";
-import "../../../contracts/bridge-foreign-rules.js";
+import type { BridgeAdapter } from "@hob/bridge-contract";
+import "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
 import { HomeWorldService } from "./home-world-service.js";

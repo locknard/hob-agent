@@ -5,10 +5,10 @@ import {
   BridgeStreamError,
   type BridgeEvent,
   type Envelope,
-} from "../../../contracts/bridge-contract.js";
-import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
-import type { ActionsExtension, BridgeActionDescriptor } from "../../../contracts/bridge-actions.js";
-import type { ForeignRulesHandle } from "../../../contracts/bridge-foreign-rules.js";
+} from "@hob/bridge-contract";
+import { runBridgeAdapterConformance } from "@hob/bridge-contract";
+import type { ActionsExtension, BridgeActionDescriptor } from "@hob/bridge-contract";
+import type { ForeignRulesHandle } from "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
 import {

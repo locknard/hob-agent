@@ -20,7 +20,7 @@ import {
 import type { HomeWorldService } from "./home-world-service.js";
 import type { OneShotActionGateway, OneShotActionRead } from "./one-shot-action-plane.js";
 import type { MusicAssistantPlaybackClient } from "./music-assistant-websocket-client.js";
-import type { BridgeActionResult } from "../../../contracts/bridge-actions.js";
+import type { BridgeActionResult } from "@hob/bridge-contract";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {

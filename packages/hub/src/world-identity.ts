@@ -6,7 +6,7 @@ import type {
   IdentityClaim,
   WorldCapability,
   WorldSpace,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 
 export type IdentityClaimSourceKind = IdentityClaim["source"]["kind"];
 export type GovernanceProposalKind =

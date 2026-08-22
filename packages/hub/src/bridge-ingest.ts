@@ -6,7 +6,7 @@ import {
   type HubBridgeDiagnostics as ContractHubBridgeDiagnostics,
   type IngestRecord,
   type SchemaRegistration,
-} from "../../../contracts/bridge-contract.js";
+} from "@hob/bridge-contract";
 import type {
   BridgeAdapter,
   BridgeControl,

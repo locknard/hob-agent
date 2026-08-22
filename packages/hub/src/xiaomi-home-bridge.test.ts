@@ -5,9 +5,9 @@ import {
   BridgeStreamError,
   EnvelopeSchema,
   type Envelope,
-} from "../../../contracts/bridge-contract.js";
-import { runBridgeAdapterConformance } from "../../../contracts/bridge-adapter-conformance.js";
-import type { ActionsExtension, BridgeActionDescriptor } from "../../../contracts/bridge-actions.js";
+} from "@hob/bridge-contract";
+import { runBridgeAdapterConformance } from "@hob/bridge-contract";
+import type { ActionsExtension, BridgeActionDescriptor } from "@hob/bridge-contract";
 import {
   createXiaomiHomeAdapterRegistration,
   deriveXiaomiRemoteInstanceId,

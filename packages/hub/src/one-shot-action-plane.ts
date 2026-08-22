@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { BridgeActionResult } from "../../../contracts/bridge-actions.js";
+import type { BridgeActionResult } from "@hob/bridge-contract";
 import {
   InMemoryOneShotActionStore,
   SqliteOneShotActionStore,

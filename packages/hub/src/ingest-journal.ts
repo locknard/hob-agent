@@ -7,7 +7,7 @@ import type {
   JournalWatermark,
   RejectionRecord,
 } from "./bridge-ingest-types.js";
-import type { IngestRecord } from "../../../contracts/bridge-contract.js";
+import type { IngestRecord } from "@hob/bridge-contract";
 import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
 
 export class JournalCapacityError extends Error {

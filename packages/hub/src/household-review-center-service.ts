@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 
-import type { StateEvent } from "../../../contracts/bridge-contract.js";
-import type { BridgeActionDescriptor, BridgeActionResult } from "../../../contracts/bridge-actions.js";
+import type { StateEvent } from "@hob/bridge-contract";
+import type { BridgeActionDescriptor, BridgeActionResult } from "@hob/bridge-contract";
 import type { ActionAuthorityPolicyClass, ActionAuthorityResolution } from "./authority-coordinator.js";
 import type { HomeWorldOneShotActionInput, HomeWorldSnapshot } from "./home-world-service.js";
 import {
