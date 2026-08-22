@@ -111,7 +111,7 @@ export class HomeProposalService extends Service {
 
   createGoverned(input: CreateProposalInput) {
     const result = this.store.createGoverned(input);
-    if (result.kind === "created") this.wakePreparation(result.proposal);
+    if (result.kind === "created" || result.kind === "merged") this.wakePreparation(result.proposal);
     return result;
   }
 
@@ -344,8 +344,16 @@ export class HomeProposalService extends Service {
     return this.store.requestProposalInfo(input);
   }
 
-  requestProposalChanges(input: ProposalLifecycleInput): ProposalEnvelope {
-    return this.store.requestProposalChanges(input);
+  /** Retries a failed enablement through the same governed deployment seam. */
+  async retryEnable(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
+    const enabling = this.store.beginDeploymentRetry(input);
+    const outcome = await this.deploy(enabling);
+    return this.store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      ...(input.actor === undefined ? {} : { actor: input.actor }),
+      outcome,
+    });
   }
 
   /**

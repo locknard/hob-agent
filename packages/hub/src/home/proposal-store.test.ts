@@ -145,21 +145,10 @@ test("returns capacity_full without persisting or later admitting a sixth propos
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
   try {
-    const proposals = Array.from({ length: 5 }, (_, index) => {
-      const created = store.create(input({
-        dedupKey: `capacity-behavior:${index}`,
-        idempotencyKey: `capacity-idempotency:${index}`,
-      }));
-      return store.markProposalReady({ proposalId: created.id });
-    });
-    const snoozed = store.snoozeProposal({
-      proposalId: proposals[0]!.id,
-      expectedRevision: proposals[0]!.revision,
-      until: "tomorrow",
-    });
-    assert.equal(snoozed.status, "pending_review");
-    assert.equal(snoozed.snoozeCount, 1);
-    assert.ok(snoozed.snoozedUntil);
+    const proposals = Array.from({ length: 5 }, (_, index) => store.create(input({
+      dedupKey: `capacity-behavior:${index}`,
+      idempotencyKey: `capacity-idempotency:${index}`,
+    })));
     assert.equal(store.proposalCapacity().used, 5);
     const full = store.createGoverned(input({
       dedupKey: "capacity-overflow",
@@ -168,12 +157,12 @@ test("returns capacity_full without persisting or later admitting a sixth propos
     assert.deepEqual(full, { kind: "capacity_full" });
     assert.equal(store.list({ status: "pending_review" }).length, 5);
 
-    now = snoozed.snoozedUntil!;
-    const reopened = store.get(snoozed.id);
-    assert.equal(reopened?.status, "pending_review");
-    assert.equal(reopened?.snoozedUntil, undefined);
-    assert.equal(reopened?.snoozeCount, 1);
-    assert.equal(reopened?.revision, snoozed.revision + 1);
+    const snoozed = store.snoozeProposal({
+      proposalId: proposals[0]!.id,
+      expectedRevision: proposals[0]!.revision,
+    });
+    assert.ok(snoozed.snoozedUntil);
+    assert.equal(store.proposalCapacity().used, 4, "a sleeping card frees household attention");
 
     const rejected = store.review({
       proposalId: proposals[1]!.id,
@@ -183,7 +172,6 @@ test("returns capacity_full without persisting or later admitting a sixth propos
       feedbackCode: "not_useful",
     });
     assert.equal(rejected.status, "rejected");
-    assert.equal(store.list({ status: "pending_review" }).length, 4);
     assert.equal(store.list({ status: "pending_review" }).some((proposal) => proposal.dedupKey === "capacity-overflow"), false);
   } finally {
     store.close();
@@ -300,22 +288,30 @@ test("does not admit a capacity rejection after a store restart", async () => {
   }
 });
 
-test("allows exactly two snoozes and exposes the three bounded targets", () => {
+test("sleeps a card without limits and wakes it on new evidence", () => {
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
   try {
     const proposal = store.create(input({ dedupKey: "snooze-behavior", idempotencyKey: "snooze-1" }));
-    const first = store.snoozeProposal({ proposalId: proposal.id, expectedRevision: proposal.revision, until: "weekend" });
-    const second = store.snoozeProposal({ proposalId: first.id, expectedRevision: first.revision, until: "next_week" });
-    assert.equal(second.snoozeCount, 2);
-    assert.throws(
-      () => store.snoozeProposal({ proposalId: second.id, expectedRevision: second.revision, until: "tomorrow" }),
-      /snooze/i,
-    );
-    assert.throws(
-      () => store.snoozeProposal({ proposalId: second.id, expectedRevision: second.revision, until: "invalid" as never }),
-      /snooze/i,
-    );
+    const first = store.snoozeProposal({ proposalId: proposal.id, expectedRevision: proposal.revision, until: "later" });
+    assert.equal(first.status, "pending_review");
+    assert.ok(first.snoozedUntil);
+    assert.ok(Date.parse(first.snoozedUntil!) < Date.parse(first.expiresAt), "the card returns before natural expiry");
+
+    now = "2026-08-20T01:00:00.000Z";
+    const second = store.snoozeProposal({ proposalId: first.id, expectedRevision: store.get(first.id)!.revision });
+    assert.equal(second.snoozeCount, 2, "no attempt cap and no forced decision");
+
+    const woken = store.createGoverned(input({
+      dedupKey: "snooze-behavior",
+      idempotencyKey: "snooze-2",
+      evidence: {
+        ...input().evidence,
+        references: [{ bridgeId: "ha-main", hwId: "hw-9", capabilityId: "hwc-9", observedAt: "2026-08-20T00:30:00.000Z" }],
+      },
+    }));
+    assert.equal(woken.kind, "merged");
+    assert.equal(woken.proposal.newEvidence, true);
   } finally {
     store.close();
   }
@@ -466,21 +462,32 @@ test("reports an explicit failure instead of a running automation when deploymen
   }
 });
 
-test("sends a change request back to preparation without spending the decision", () => {
+test("retries a failed enablement without asking for a second decision", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {
-    const proposal = store.create(input({ artifactCandidate, dedupKey: "modify-me", idempotencyKey: "modify-me-1" }));
+    const proposal = store.create(input({ artifactCandidate, dedupKey: "retry-me", idempotencyKey: "retry-me-1" }));
     const ready = store.markProposalReady({ proposalId: proposal.id });
-    const revised = store.requestProposalChanges({
+    const enabling = store.decideProposal({
       proposalId: ready.id,
       expectedRevision: ready.revision,
-      actor: "household-owner",
-      note: "周末不要动。",
+      decision: "approve",
+      reviewer: "household-owner",
     });
-    assert.equal(revised.lifecycle, "preparing");
-    assert.equal(revised.status, "pending_review");
-    assert.equal(store.proposalCapacity().used, 0);
-    assert.equal(revised.audit.at(-1)?.action, "changes_requested");
+    const failed = store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      outcome: { status: "failed", reason: "部署没有完成，家里的设置保持原样。" },
+    });
+    const retrying = store.beginDeploymentRetry({ proposalId: failed.id, actor: "household-owner" });
+    assert.equal(retrying.lifecycle, "enabling");
+    assert.equal(retrying.applicationStatus, "deploying");
+    const active = store.recordProposalDeployment({
+      proposalId: retrying.id,
+      expectedRevision: retrying.revision,
+      outcome: { status: "verified", deploymentId: "hob_retry_me", target: "ha-main" },
+    });
+    assert.equal(active.lifecycle, "active");
+    assert.equal(active.audit.some((event) => event.action === "deployment_retried"), true);
   } finally {
     store.close();
   }
@@ -1437,5 +1444,38 @@ test("reopening the proposal store preserves queued and running preparation jobs
   } finally {
     reopened.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("a succeeded preparation promotes the proposal into the inbox, deferring when it is full", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      store.create(input({ dedupKey: `promote-filler-${index}`, idempotencyKey: `promote-filler-${index}` }));
+    }
+    const preparing = store.create(input({ artifactCandidate, dedupKey: "promote-me", idempotencyKey: "promote-me-1" }));
+    assert.equal(preparing.lifecycle, "preparing");
+    const job = store.listPreparationJobs().find((candidate) => candidate.proposalId === preparing.id);
+    assert.ok(job);
+    const claimed = store.claimPreparationJob({ jobId: job.jobId, expectedVersion: job.version });
+    store.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+
+    assert.throws(() => store.markProposalReady({ proposalId: preparing.id, expectedRevision: preparing.revision, actor: "system" }),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "capacity_full");
+    assert.equal(store.get(preparing.id)?.lifecycle, "preparing", "a full inbox defers promotion");
+
+    const filler = store.list({ status: "pending_review" }).find((candidate) => candidate.dedupKey === "promote-filler-0")!;
+    store.review({
+      proposalId: filler.id,
+      expectedRevision: filler.revision,
+      decision: "rejected",
+      reviewer: "household-owner",
+      feedbackCode: "not_useful",
+    });
+    assert.equal(store.get(preparing.id)?.lifecycle, "ready", "a freed slot promotes the prepared plan");
+    assert.equal(store.get(preparing.id)?.audit.at(-1)?.action, "prepared");
+  } finally {
+    store.close();
   }
 });

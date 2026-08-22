@@ -59,6 +59,16 @@ export class ArtifactPreparationJobRunner {
         proposalRevision: claimed.proposalRevision,
       });
       this.jobs.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+      try {
+        this.jobs.markProposalReady?.({
+          proposalId: claimed.proposalId,
+          expectedRevision: claimed.proposalRevision,
+          actor: "system",
+        });
+      } catch {
+        // The preparation itself is durable; a full inbox or a superseded
+        // revision defers promotion to the store's lazy sweep.
+      }
     } catch (error) {
       const failure = boundedFailure(error);
       this.failClaimedJob(claimed, failure.stage, failure.code);

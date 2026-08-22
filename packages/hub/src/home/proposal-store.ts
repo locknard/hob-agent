@@ -239,7 +239,6 @@ export interface ProposalEnablement {
 
 /** The household inbox holds prepared plans; preparation holds its own small budget. */
 export const MAX_PREPARING_PROPOSALS = 3;
-export const MAX_PROPOSAL_SNOOZES = 2;
 export const MAX_PROPOSAL_CAPACITY = 5;
 export const PROPOSAL_EXPIRY_MS = 14 * 24 * 60 * 60 * 1_000;
 export type ProposalApprovalFeedbackCode = "useful_as_is";
@@ -302,7 +301,7 @@ export interface ProposalAuditEvent {
     | "snooze_elapsed"
     | "prepared"
     | "info_requested"
-    | "changes_requested"
+    | "deployment_retried"
     | "deployment_verified"
     | "deployment_failed"
     | "paused"
@@ -360,7 +359,7 @@ const proposalAuditEventSchema = z.object({
   at: isoTimestamp,
   action: z.enum([
     "created", "approved", "rejected", "expired", "evidence_merged", "snoozed", "snooze_elapsed",
-    "prepared", "info_requested", "changes_requested",
+    "prepared", "info_requested", "deployment_retried",
     "deployment_verified", "deployment_failed", "paused", "resumed", "closed",
   ]),
   actor: boundedId,
@@ -394,7 +393,7 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   updatedAt: isoTimestamp,
   dedupKey: boundedId.optional(),
   expiresAt: isoTimestamp.optional(),
-  snoozeCount: z.number().int().nonnegative().max(MAX_PROPOSAL_SNOOZES).optional(),
+  snoozeCount: z.number().int().nonnegative().optional(),
   snoozedUntil: isoTimestamp.optional(),
   newEvidence: z.boolean().optional(),
   lifecycle: z.enum([
@@ -732,6 +731,7 @@ export class SqliteProposalStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.expireDueInTransaction(at);
+      this.promotePreparedInTransaction(at);
       const concurrent = this.findByIdempotency(input.provenance.producer, input.idempotencyKey);
       if (concurrent) {
         this.db.exec("COMMIT");
@@ -747,6 +747,7 @@ export class SqliteProposalStore {
       if (unresolved !== undefined) {
         const merged = mergeProposalEvidence(unresolved, input, at, this.id);
         this.updateProposal(merged.proposal, unresolved.revision);
+        this.enqueuePreparationJob(merged.proposal, at);
         this.insertIdempotencyAlias(input.provenance.producer, input.idempotencyKey, unresolved.id);
         this.db.exec("COMMIT");
         return {
@@ -755,9 +756,10 @@ export class SqliteProposalStore {
           mergedEvidenceCount: merged.mergedEvidenceCount,
         };
       }
-      const inboxFull = this.readyCountInTransaction() >= MAX_PROPOSAL_CAPACITY;
-      if (inboxFull
-        && (!requiresPreparation(input) || this.preparingCountInTransaction() >= MAX_PREPARING_PROPOSALS)) {
+      const admissionFull = requiresPreparation(input)
+        ? this.preparingCountInTransaction() >= MAX_PREPARING_PROPOSALS
+        : this.readyCountInTransaction() >= MAX_PROPOSAL_CAPACITY;
+      if (admissionFull) {
         this.db.exec("COMMIT");
         return { kind: "capacity_full" };
       }
@@ -955,22 +957,20 @@ export class SqliteProposalStore {
     });
   }
 
-  /** A change request returns the plan to preparation without spending the one decision. */
-  requestProposalChanges(input: ProposalLifecycleInput): ProposalEnvelope {
-    return this.transition(input, "change request", (current, at, revision) => {
-      if (current.lifecycle !== "ready") {
-        throw new ProposalStoreError("lifecycle_invalid", "Only a prepared plan can receive changes");
+  /** A failed enablement may retry once the household asks; the decision itself is already made. */
+  beginDeploymentRetry(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.transition(input, "deployment retry", (current, at, revision) => {
+      if (current.lifecycle !== "enable_failed") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a failed enablement can retry");
       }
-      const note = input.note?.trim();
       return {
         ...current,
         revision,
-        lifecycle: "preparing",
+        lifecycle: "enabling",
+        applicationStatus: "deploying",
+        deployment: { status: "pending", requestedAt: at },
         updatedAt: at,
-        audit: [...current.audit, {
-          ...this.auditEvent(at, "changes_requested", input.actor ?? "household-owner", revision),
-          ...(note ? { note } : {}),
-        }],
+        audit: [...current.audit, this.auditEvent(at, "deployment_retried", input.actor ?? "household-owner", revision)],
       };
     });
   }
@@ -1073,11 +1073,14 @@ export class SqliteProposalStore {
     return this.countPendingByLifecycle((value) => value === "preparing" || value === "needs_info");
   }
 
+
   private readyCountInTransaction(): number {
-    return this.countPendingByLifecycle((value) => value === "ready");
+    const now = Date.parse(this.timestamp());
+    return this.countPendingByLifecycle((value, payload) => value === "ready"
+      && (payload.snoozedUntil === undefined || Date.parse(String(payload.snoozedUntil)) <= now));
   }
 
-  private countPendingByLifecycle(match: (lifecycle: unknown) => boolean): number {
+  private countPendingByLifecycle(match: (lifecycle: unknown, payload: { snoozedUntil?: unknown }) => boolean): number {
     const rows = this.db.prepare(
       "SELECT payload_json FROM proposals WHERE status = 'pending_review'",
     ).all() as Array<{ payload_json?: unknown }>;
@@ -1085,7 +1088,8 @@ export class SqliteProposalStore {
     for (const row of rows) {
       if (typeof row.payload_json !== "string") continue;
       try {
-        if (match((JSON.parse(row.payload_json) as { lifecycle?: unknown }).lifecycle)) matched += 1;
+        const payload = JSON.parse(row.payload_json) as { lifecycle?: unknown; snoozedUntil?: unknown };
+        if (match(payload.lifecycle, payload)) matched += 1;
       } catch {
         throw new ProposalStoreError("corrupt_store", "Proposal review capacity is unavailable");
       }
@@ -1119,6 +1123,11 @@ export class SqliteProposalStore {
     }
   }
 
+  /**
+   * "以后再说": the card sleeps and returns once before natural expiry. New
+   * evidence for the same behavior wakes it early. There is no attempt cap and
+   * no forced decision — expiry closes what the household never chose.
+   */
   snoozeProposal(input: ProposalSnoozeInput): ProposalEnvelope {
     validateSnoozeInput(input);
     this.expireDue();
@@ -1133,29 +1142,19 @@ export class SqliteProposalStore {
       if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
         throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
       }
-      if (current.snoozeCount >= MAX_PROPOSAL_SNOOZES) {
-        throw new ProposalStoreError("snooze_limit_reached", "Proposal snooze limit reached");
-      }
-      const snoozedUntil = calculateProposalSnoozeAt(at, input.until);
-      if (Date.parse(snoozedUntil) >= Date.parse(current.expiresAt)) {
-        throw new ProposalStoreError("snooze_target_invalid", "Proposal snooze must end before natural expiry");
-      }
       const revision = current.revision + 1;
-      const reviewer = input.reviewer?.trim();
-      const { snoozedUntil: _previousSnoozedUntil, ...baseCurrent } = current;
+      const oneWeek = Date.parse(at) + 7 * 24 * 3_600_000;
+      const snoozedUntil = new Date(Math.min(oneWeek, Date.parse(current.expiresAt) - 3_600_000)).toISOString();
+      if (Date.parse(snoozedUntil) <= Date.parse(at)) {
+        throw new ProposalStoreError("terminal_status", "The proposal expires too soon to sleep");
+      }
       const snoozed: ProposalEnvelope = {
-        ...baseCurrent,
+        ...current,
         revision,
-        updatedAt: at,
         snoozeCount: current.snoozeCount + 1,
         snoozedUntil,
-        audit: [...current.audit, {
-          id: `audit-${this.id()}`,
-          at,
-          action: "snoozed",
-          actor: reviewer || "household-owner",
-          revision,
-        }],
+        updatedAt: at,
+        audit: [...current.audit, this.auditEvent(at, "snoozed", "household-owner", revision)],
       };
       this.updateProposal(snoozed, current.revision);
       this.db.exec("COMMIT");
@@ -1290,6 +1289,7 @@ export class SqliteProposalStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const changed = this.expireDueInTransaction(at);
+      this.promotePreparedInTransaction(at);
       this.db.exec("COMMIT");
       return changed.map(clone);
     } catch (error) {
@@ -1809,6 +1809,37 @@ export class SqliteProposalStore {
     }
   }
 
+  /**
+   * Promotes prepared-but-deferred proposals as inbox slots free up. Promotion
+   * requires a succeeded preparation job for the proposal's current revision.
+   */
+  private promotePreparedInTransaction(at: string): void {
+    const rows = this.db.prepare(`SELECT
+        proposal_id, producer, idempotency_key, status, revision,
+        created_at, updated_at, payload_json
+      FROM proposals WHERE status = 'pending_review'`).all() as ProposalRow[];
+    let available = MAX_PROPOSAL_CAPACITY - this.readyCountInTransaction();
+    for (const row of rows) {
+      if (available <= 0) return;
+      const current = fromRow(row);
+      if (current.lifecycle !== "preparing") continue;
+      const job = this.db.prepare(`SELECT status FROM approved_proposal_preparation_jobs
+        WHERE proposal_id = ? AND proposal_revision = ?`).get(current.id, current.revision) as { status?: unknown } | undefined;
+      if (job?.status !== "succeeded") continue;
+      const revision = current.revision + 1;
+      const { openQuestion: _open, ...base } = current;
+      const promoted: ProposalEnvelope = {
+        ...base,
+        revision,
+        lifecycle: "ready",
+        updatedAt: at,
+        audit: [...current.audit, this.auditEvent(at, "prepared", "system", revision)],
+      };
+      this.updateProposal(promoted, current.revision);
+      available -= 1;
+    }
+  }
+
   private expireDueInTransaction(at: string): ProposalEnvelope[] {
     const rows = this.db.prepare(`SELECT
         proposal_id, producer, idempotency_key, status, revision,
@@ -2081,10 +2112,10 @@ function requiresPreparation(input: Pick<CreateProposalInput, "kind" | "artifact
 const PREPARABLE_LIFECYCLES: readonly ProposalLifecycle[] = ["preparing", "needs_info", "ready"];
 const PENDING_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "created", "evidence_merged", "snoozed", "snooze_elapsed",
-  "prepared", "info_requested", "changes_requested",
+  "prepared", "info_requested", "deployment_retried",
 ];
 const APPROVED_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
-  "approved", "deployment_verified", "deployment_failed", "paused", "resumed", "closed",
+  "approved", "deployment_verified", "deployment_failed", "deployment_retried", "paused", "resumed", "closed",
 ];
 const DEPLOYED_LIFECYCLES: readonly ProposalLifecycle[] = ["enabling", "active", "paused", "enable_failed", "closed"];
 
@@ -2125,16 +2156,13 @@ function boundedKeyIsValid(value: unknown): value is string {
 function validateSnoozeInput(input: ProposalSnoozeInput): void {
   if (!input || typeof input !== "object") throw new TypeError("proposal snooze is required");
   validateBoundedKey(input.proposalId, "proposal snooze id");
-  if (!("tomorrow" === input.until
-    || "weekend" === input.until
-    || "next_week" === input.until)) {
-    throw new ProposalStoreError("snooze_target_invalid", "Proposal snooze target is invalid");
-  }
   if (input.expectedRevision !== undefined
     && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) {
     throw new TypeError("proposal snooze expectedRevision is invalid");
   }
-  if (input.reviewer !== undefined) validateBoundedKey(input.reviewer, "proposal snooze reviewer");
+  if (input.until !== undefined && !["later", "tomorrow", "weekend", "next_week"].includes(input.until)) {
+    throw new ProposalStoreError("snooze_target_invalid", "The snooze target is not recognized");
+  }
 }
 
 function validateDecideInput(input: ProposalDecideInput): void {
@@ -2397,7 +2425,6 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
       || !isoTimestamp.safeParse(proposal.expiresAt).success
       || Date.parse(proposal.expiresAt) <= Date.parse(proposal.createdAt)
       || proposal.snoozeCount < 0
-      || proposal.snoozeCount > MAX_PROPOSAL_SNOOZES
       || (proposal.snoozedUntil !== undefined
         && (proposal.status !== "pending_review" || Date.parse(proposal.snoozedUntil) <= Date.parse(proposal.updatedAt)))) {
       throw new Error("invalid governance metadata");
