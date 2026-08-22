@@ -115,6 +115,11 @@ The follow-up now establishes a directed production graph through narrow ports:
     values retain field-level precedence. Activation concurrency uses owner-token
     locking: live work stays exclusive and abandoned locks become recoverable after
     a bounded lease.
+12. Product bootstrap and household operation have separate launch contracts at
+    the same composition root. The bootstrap contract validates only the private
+    data directory; the operational contract adds the activated model, bridges,
+    scoped credentials, policy and services. Setup can therefore mount without
+    synthetic model or bridge values.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and

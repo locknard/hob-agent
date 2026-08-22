@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  readProductBootstrapLaunchConfig,
   readHomeHubLaunchConfig,
   readHomeWorldLaunchConfig,
 } from "./launch-config.js";
@@ -28,6 +29,18 @@ const BASE_ENV = {
   OPENAI_API_KEY: "openai-secret",
   DEEPSEEK_API_KEY: "must-not-enter-the-snapshot",
 };
+
+test("reads the product bootstrap minimum without a model or bridge", () => {
+  assert.deepEqual(readProductBootstrapLaunchConfig({
+    HOB_DATA_DIR: "/tmp/hob-agent-first-run",
+  }), {
+    dataDirectory: "/tmp/hob-agent-first-run",
+  });
+  assert.throws(
+    () => readProductBootstrapLaunchConfig({ HOB_DATA_DIR: "./private-data" }),
+    /HOB_DATA_DIR/,
+  );
+});
 
 const INBOX_PRINCIPAL_ENV = {
   HOB_INBOX_PRINCIPAL_ID: "household-member",

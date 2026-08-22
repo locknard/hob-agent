@@ -1,6 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
 import type { SecretVault } from "@hob-agent/agent-layer/model-credentials";
@@ -14,6 +14,7 @@ import {
   type StartHomeHubProcessOptions,
 } from "./process-entry.js";
 import {
+  readProductBootstrapLaunchConfig,
   readHomeHubLaunchConfig,
   type LaunchEnvironment,
 } from "./launch-config.js";
@@ -132,10 +133,8 @@ export async function resolveHomeHubProcessOptions(
   environment: LaunchEnvironment,
   vault?: SecretVault,
 ): Promise<HomeHubProcessOptions> {
-  const dataDirectory = environment.HOB_DATA_DIR?.trim();
-  const activated = dataDirectory !== undefined && isAbsolute(dataDirectory)
-    ? await new ProductBootstrapConfigStore(dataDirectory).load()
-    : undefined;
+  const { dataDirectory } = readProductBootstrapLaunchConfig(environment);
+  const activated = await new ProductBootstrapConfigStore(dataDirectory).load();
   const effectiveEnvironment: LaunchEnvironment = activated === undefined
     ? environment
     : {
@@ -146,7 +145,7 @@ export async function resolveHomeHubProcessOptions(
         HOB_BRIDGES: environment.HOB_BRIDGES ?? JSON.stringify(activated.bridges),
       };
   const modelReference = effectiveEnvironment.HOB_MODEL?.trim();
-  if (dataDirectory === undefined || !isAbsolute(dataDirectory) || !modelReference) {
+  if (!modelReference) {
     return createHomeHubProcessOptions(effectiveEnvironment);
   }
   let provider;

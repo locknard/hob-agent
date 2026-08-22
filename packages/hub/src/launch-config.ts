@@ -105,12 +105,23 @@ export interface HomeWorldLaunchConfig {
   readonly catalog: BridgeCatalog;
 }
 
+export interface ProductBootstrapLaunchConfig {
+  readonly dataDirectory: string;
+}
+
+/** Reads the private process root needed before a household generation exists. */
+export function readProductBootstrapLaunchConfig(
+  environment: LaunchEnvironment,
+): ProductBootstrapLaunchConfig {
+  return { dataDirectory: requiredDataDirectory(environment) };
+}
+
 /** Reads only the neutral HomeWorld launch slice; no model credential is required. */
 export function readHomeWorldLaunchConfig(
   environment: LaunchEnvironment,
   bridgeCredentialVault: SecretVault = new MacOSKeychainSecretVault(),
 ): HomeWorldLaunchConfig {
-  const dataDirectory = requiredDataDirectory(environment);
+  const { dataDirectory } = readProductBootstrapLaunchConfig(environment);
   const bridgeEntries = parseBridgeEntries(requiredValue(environment, "HOB_BRIDGES"));
   const refsByBridge = new Map(bridgeEntries.map((entry) => [entry.bridgeId, entry.credentialRefs]));
   return {
