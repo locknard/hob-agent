@@ -36,7 +36,7 @@ import type {
   HomeWorldForeignRuleCatalog,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "../home-world-service.js";
+} from "../world/home-world-service.js";
 
 const MAX_CAPABILITY_IDS = 16;
 const MAX_RELEVANT_BRIDGES = 16;

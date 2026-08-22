@@ -20,7 +20,7 @@ import {
   type SqliteProposalStoreOptions,
   ProposalStoreError,
 } from "./proposal-store.js";
-import type { HomeWorldService } from "./home-world-service.js";
+import type { HomeWorldService } from "./world/home-world-service.js";
 import {
   parseArtifactContent,
   type ArtifactContent,

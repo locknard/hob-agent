@@ -7,7 +7,7 @@ import type {
   IngestJournalRetentionPolicy,
   IngestJournalRetentionResult,
   JournalCapacityStatus,
-} from "./ingest-journal.js";
+} from "./world/ingest-journal.js";
 import { MAX_PROPOSAL_RETENTION_REFERENCES } from "./proposal-store.js";
 
 declare module "@deepseek-ai/cordis" {

@@ -6,9 +6,9 @@ import type {
   HistoryGapRecord,
   JournalWatermark,
   RejectionRecord,
-} from "./bridge/bridge-ingest-types.js";
+} from "../bridge/bridge-ingest-types.js";
 import type { IngestRecord } from "@hob/bridge-contract";
-import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
+import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 
 export class JournalCapacityError extends Error {
   readonly code = "JOURNAL_CAPACITY";

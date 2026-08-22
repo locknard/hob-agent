@@ -37,7 +37,7 @@ import {
   HomeArtifactService,
   type HomeArtifactRegistryReader,
 } from "../home-artifact-service.js";
-import { HomeWorldAuthorityBindingSource } from "../home-world-authority-binding-source.js";
+import { HomeWorldAuthorityBindingSource } from "../world/home-world-authority-binding-source.js";
 import type { ArtifactMutationProposalCommand } from "./artifact-mutation-coordinator.js";
 import type { ArtifactRef } from "./neutral-artifact.js";
 import type { SqliteProposalStore } from "../proposal-store.js";
@@ -46,7 +46,7 @@ import type {
   HomeWorldEvidenceResult,
   HomeWorldForeignRuleCatalog,
   HomeWorldSnapshot,
-} from "../home-world-service.js";
+} from "../world/home-world-service.js";
 
 interface PipelineProposalPort {
   readonly get: SqliteProposalStore["get"];

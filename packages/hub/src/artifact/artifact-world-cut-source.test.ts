@@ -9,7 +9,7 @@ import type {
   HomeWorldDiagnostics,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "../home-world-service.js";
+} from "../world/home-world-service.js";
 import {
   checkCapabilityAction,
   checkCapabilityPredicate,

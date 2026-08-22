@@ -12,7 +12,7 @@ import {
   type StateEvent,
 } from "./bridge-ingest.js";
 import { HOME_ASSISTANT_ADAPTER_REGISTRATION } from "./home-assistant-bridge.js";
-import { SqliteIngestJournal } from "../ingest-journal.js";
+import { SqliteIngestJournal } from "../world/ingest-journal.js";
 import { SyntheticBridge } from "./synthetic-bridge.js";
 
 const descriptor = (nativeId: string, schema = "hob.light"): DeviceDescriptor => ({

@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 
-import type { HomeWorldSnapshot } from "./home-world-service.js";
+import type { HomeWorldSnapshot } from "./world/home-world-service.js";
 import {
   type HomeSafetyStore,
   type HomeSafetyAlertRecord,

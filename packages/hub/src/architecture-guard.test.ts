@@ -60,6 +60,12 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     .filter((name) => /^(?:media-|music-assistant-(?!credential-setup)|home-media-)/.test(name));
   assert.deepEqual(misplacedMediaFiles, [], "media domain modules and their tests belong under src/media");
 
+  const misplacedWorldFiles = readdirSync(hubSourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => /^(?:world-|home-world-|ingest-journal|ingest-properties)/.test(name));
+  assert.deepEqual(misplacedWorldFiles, [], "world domain modules and their tests belong under src/world");
+
   assert.deepEqual(
     violations(agentFiles, /home[ -]?assistant|homeassistant|entity_id|\bHASS\b/i),
     [],
@@ -92,9 +98,8 @@ test("architecture guards keep the agent and neutral hub boundaries closed", () 
     "main.ts",
     "process-entry.ts",
     "home-agent-runtime.ts",
-    "home-world-service.ts",
     "launch-config.ts",
-  ].map((name) => join(hubSourceRoot, name));
+  ].map((name) => join(hubSourceRoot, name)).concat(join(hubSourceRoot, "world", "home-world-service.ts"));
   assert.deepEqual(
     violations(
       compositionRootFiles,

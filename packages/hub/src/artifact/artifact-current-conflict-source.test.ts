@@ -31,7 +31,7 @@ import type {
   HomeWorldForeignRuleCatalog,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "../home-world-service.js";
+} from "../world/home-world-service.js";
 import type { HubVerifiedProposalSource } from "../proposal-store.js";
 import type {
   ArtifactRiskConflictArtifactRegistry,

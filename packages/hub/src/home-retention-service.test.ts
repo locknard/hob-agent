@@ -8,8 +8,8 @@ import type {
   IngestJournal,
   IngestJournalRetentionPolicy,
   IngestJournalRetentionResult,
-} from "./ingest-journal.js";
-import { SqliteIngestJournal } from "./ingest-journal.js";
+} from "./world/ingest-journal.js";
+import { SqliteIngestJournal } from "./world/ingest-journal.js";
 import { HomeProposalService } from "./home-proposal-service.js";
 import { HomeRetentionService } from "./home-retention-service.js";
 import type { CreateProposalInput } from "./proposal-store.js";

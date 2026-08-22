@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { BridgeEvent, Envelope } from "./bridge/bridge-ingest-types.js";
+import type { BridgeEvent, Envelope } from "../bridge/bridge-ingest-types.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 
 function append(

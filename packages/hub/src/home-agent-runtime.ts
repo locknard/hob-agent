@@ -7,7 +7,7 @@ import {
 import {
   HomeWorldService,
   type HomeWorldServiceOptions,
-} from "./home-world-service.js";
+} from "./world/home-world-service.js";
 import { HomeProposalService } from "./home-proposal-service.js";
 import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {

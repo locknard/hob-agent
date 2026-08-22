@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { RetentionCoordinator } from "./home-retention-service.js";
-import { SqliteIngestJournal, type IngestJournalRetentionResult } from "./ingest-journal.js";
+import { SqliteIngestJournal, type IngestJournalRetentionResult } from "./world/ingest-journal.js";
 import { readHomeWorldLaunchConfig, type LaunchEnvironment } from "./launch-config.js";
 import { SqliteProposalStore } from "./proposal-store.js";
 

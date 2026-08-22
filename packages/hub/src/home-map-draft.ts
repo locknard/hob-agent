@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 
 import { Context } from "@deepseek-ai/cordis";
 
-import { HomeWorldService } from "./home-world-service.js";
+import { HomeWorldService } from "./world/home-world-service.js";
 import {
   readHomeWorldLaunchConfig,
   type HomeWorldLaunchConfig,

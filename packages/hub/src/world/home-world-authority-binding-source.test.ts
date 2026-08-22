@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AuthorityCandidateResolveInput } from "./authority/authority-candidate-registry.js";
+import type { AuthorityCandidateResolveInput } from "../authority/authority-candidate-registry.js";
 import {
   HomeWorldAuthorityBindingSource,
   HomeWorldAuthorityBindingSourceError,

@@ -7,7 +7,7 @@ import {
   artifactRefSchema,
   type ArtifactRef,
 } from "./neutral-artifact.js";
-import type { HomeWorldEvidenceCoverageReason } from "../home-world-service.js";
+import type { HomeWorldEvidenceCoverageReason } from "../world/home-world-service.js";
 
 export type { ArtifactRef };
 

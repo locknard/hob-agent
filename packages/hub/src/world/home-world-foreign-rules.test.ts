@@ -6,8 +6,8 @@ import { z } from "zod";
 
 import type { BridgeAdapter } from "@hob/bridge-contract";
 import "@hob/bridge-contract";
-import { BridgeCatalog } from "./bridge/bridge-catalog.js";
-import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge/bridge-registry.js";
+import { BridgeCatalog } from "../bridge/bridge-catalog.js";
+import { BridgeRegistry, MemoryBridgeRegistryStore } from "../bridge/bridge-registry.js";
 import { HomeWorldService } from "./home-world-service.js";
 
 test("queries a bounded foreign-rule catalog through the neutral optional extension", async () => {

@@ -8,7 +8,7 @@ import {
   type JsonValue,
   type StateEvent,
 } from "@hob/bridge-contract";
-import { ensurePrivateSqliteFiles } from "./sqlite-private-files.js";
+import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 
 export type WorldModelFreshness = "fresh" | "stale-gap";
 export type WorldModelDeviceValidity = "valid" | "present-but-invalid" | "invalid-source";

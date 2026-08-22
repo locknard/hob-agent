@@ -15,7 +15,7 @@ import type {
   HomeWorldEvidenceQuery,
   HomeWorldEvidenceResult,
   HomeWorldSnapshot,
-} from "../home-world-service.js";
+} from "../world/home-world-service.js";
 import {
   artifactRefSchema,
   type ArtifactContent,

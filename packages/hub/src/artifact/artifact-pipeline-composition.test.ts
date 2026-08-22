@@ -14,7 +14,7 @@ import type {
   HomeWorldBridgeSnapshot,
   HomeWorldEvidenceResult,
   HomeWorldSnapshot,
-} from "../home-world-service.js";
+} from "../world/home-world-service.js";
 import type { ArtifactContent } from "./neutral-artifact.js";
 
 const capturedAt = "2026-08-20T01:00:00.000Z";

@@ -11,7 +11,7 @@ import {
   type ArtifactContent,
   type ArtifactRef,
 } from "./neutral-artifact.js";
-import type { HomeWorldBridgeSnapshot, HomeWorldEvidenceCoverage } from "../home-world-service.js";
+import type { HomeWorldBridgeSnapshot, HomeWorldEvidenceCoverage } from "../world/home-world-service.js";
 import type { HubVerifiedProposalSource } from "../proposal-store.js";
 import {
   ArtifactEvidenceProducer,

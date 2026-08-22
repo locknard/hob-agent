@@ -8,17 +8,17 @@ import {
   type AuthorityAvailability,
   type AuthorityResyncSnapshot,
   type StateAuthorityChoice,
-} from "./authority/authority-coordinator.js";
-import { BridgeCatalog, type AdapterRegistration } from "./bridge/bridge-catalog.js";
-import { BridgeRegistry, type BridgeConfigEntry } from "./bridge/bridge-registry.js";
+} from "../authority/authority-coordinator.js";
+import { BridgeCatalog, type AdapterRegistration } from "../bridge/bridge-catalog.js";
+import { BridgeRegistry, type BridgeConfigEntry } from "../bridge/bridge-registry.js";
 import { SqliteIngestJournal } from "./ingest-journal.js";
 import {
   HomeWorldService,
   type HomeWorldServiceOptions,
 } from "./home-world-service.js";
-import { SyntheticBridge } from "./bridge/synthetic-bridge.js";
+import { SyntheticBridge } from "../bridge/synthetic-bridge.js";
 import { WorldIdentityManager } from "./world-identity.js";
-import type { JournalWatermark } from "./bridge/bridge-ingest-types.js";
+import type { JournalWatermark } from "../bridge/bridge-ingest-types.js";
 
 const schema = {
   schema: "synthetic.light",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { BridgeIngest, type BridgeEvent, type DeviceDescriptor, type Envelope, type StateEvent } from "./bridge-ingest.js";
-import { SqliteIngestJournal } from "../ingest-journal.js";
+import { SqliteIngestJournal } from "../world/ingest-journal.js";
 
 const descriptor = (nativeId: string): DeviceDescriptor => ({
   nativeId,

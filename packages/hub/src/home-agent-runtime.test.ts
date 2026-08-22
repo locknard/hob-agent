@@ -17,7 +17,7 @@ import { SyntheticMediaCatalogProvider } from "./media/home-media-services.js";
 import { SqliteProposalStore } from "./proposal-store.js";
 import { SqliteProductViewRecipeDraftStore } from "./product-view-recipe-draft-store.js";
 import { SyntheticBridge } from "./bridge/synthetic-bridge.js";
-import { WorldIdentityManager } from "./world-identity.js";
+import { WorldIdentityManager } from "./world/world-identity.js";
 import type { BridgeAdapter } from "@hob/bridge-contract";
 import type { ActionsExtension } from "@hob/bridge-contract";
 

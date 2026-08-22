@@ -21,7 +21,7 @@ import type {
   HomeWorldDeviceSnapshot,
   HomeWorldSnapshot,
   HomeWorldWatermark,
-} from "../home-world-service.js";
+} from "../world/home-world-service.js";
 import {
   closedReasonCodeSchema,
   createNeutralWorldCut,
