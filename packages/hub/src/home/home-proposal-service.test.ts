@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HomeProposalService } from "./home-proposal-service.js";
+import { BridgeAutomationDeployment } from "./bridge-automation-deployment.js";
 import {
   ProposalStoreError,
   SqliteProposalStore,
@@ -1235,64 +1236,72 @@ test("drift survives persistence and the fingerprint baseline reaches the record
   }
 });
 
-test("a configuration gap blocks visibly and a revision under restored config enables", async () => {
-  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
+test("a configuration gap blocks visibly and the settings recheck re-enables the same card", async () => {
   const ctx = new Context();
-  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
-  let configured = false;
-  const intent = {
-    deploymentId: "hob_config_gap",
-    target: "ha-main",
-    targets: [{ hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } }],
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.actionPolicyClass = "confirmation";
+  const bridge = {
+    bridgeId: "bridge-a",
+    automations: {
+      deploy: async (spec: { automationId: string }) => ({ status: "deployed" as const, nativeAutomationId: spec.automationId }),
+      setEnabled: async () => ({ status: "acknowledged" as const }),
+      withdraw: async () => ({ status: "acknowledged" as const }),
+    },
+    resolveTarget: (hwCapabilityId: string) => ({
+      hwCapabilityId,
+      binding: { bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: `ent-${hwCapabilityId}` },
+    }),
   };
+  const deploymentWorld = {
+    resolveActionAuthority: (id: string) => world.resolveActionAuthority(id),
+    // Mirrors governed admission's fallback for the unnamed stub device.
+    capabilityDeviceName: () => "灯",
+    automationBridgeForTargets: () => bridge,
+    automationBridgeById: (bridgeId: string) => bridgeId === "bridge-a" ? bridge : undefined,
+    automationsHandleFor: (bridgeId: string) => bridgeId === "bridge-a" ? bridge.automations : undefined,
+  };
+  const fiber = await ctx.plugin(HomeProposalService, {
+    path: ":memory:",
+    deployment: new BridgeAutomationDeployment(deploymentWorld as never),
+  } as never);
   try {
-    fiber = await ctx.plugin(HomeProposalService, {
-      store,
-      deployment: {
-        resolveIntent: () => configured
-          ? intent
-          : { blockedReason: "方案里设备的确认方式还没有设置好，先在设置里为它选择确认方式；也可以在对话里改方案，或不用了。" },
-        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_config_gap", target: "ha-main" }),
-      },
-    } as never);
-
-    const created = ctx.homeProposals.create({
-      ...candidate,
+    const created = await ctx.homeProposals.createDraft({
       kind: "automation-draft",
-      idempotencyKey: "config-gap:v1",
-      dedupKey: "config-gap",
-      intent: { ...candidate.intent, type: "automation-draft" },
+      title: "回家自动开客厅灯",
+      summary: "有人回家时打开客厅灯。",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low" as const, reasons: [] },
+      intent: { type: "automation-draft", description: "有人回家时打开灯。", rollback: "恢复原状态。" },
+      idempotencyKey: "governed-recovery:v1",
+      dedupKey: "governed-recovery",
       artifactCandidate: automationCandidate,
     });
+    assert.deepEqual(created.confirmationDeviceNames, ["灯"], "governed admission disclosed the named device");
+    const store = (ctx.homeProposals as unknown as { store: SqliteProposalStore }).store;
     completePreparation(store, created.id);
     const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
 
+    world.actionPolicyClass = "unavailable";
     const blocked = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
     assert.equal(blocked.lifecycle, "ready", "the card stays in the visible ready list");
     assert.equal(blocked.status, "pending_review", "the household decision was not spent");
-    assert.match(blocked.enableBlockedReason ?? "", /确认方式还没有设置好/, "the card states the configuration gap");
+    assert.match(blocked.enableBlockedReason ?? "", /确认方式还没有设置好/);
 
-    configured = true;
-    const revised = ctx.homeProposals.create({
-      ...candidate,
-      kind: "automation-draft",
-      idempotencyKey: "config-gap:v2",
-      dedupKey: "config-gap",
-      intent: { ...candidate.intent, type: "automation-draft" },
-      summary: "修订后的方案说明。",
-      artifactCandidate: automationCandidate,
-    });
-    assert.equal(revised.id, blocked.id, "the revision lands on the same card");
-    assert.equal(revised.enableBlockedReason, undefined, "the revision clears the stale block");
-    completePreparation(store, revised.id);
-    const readyAgain = ctx.homeProposals.markProposalReady({ proposalId: revised.id });
+    world.actionPolicyClass = "confirmation";
+    const recheck = ctx.homeProposals.recheckBlockedEnablement();
+    assert.deepEqual(recheck, { rechecked: 1, cleared: 1 }, "the settings save rechecks and clears the block");
+    const cleared = store.get(blocked.id);
+    assert.equal(cleared?.enableBlockedReason, undefined);
+    assert.equal(cleared?.audit.at(-1)?.action, "enable_unblocked");
 
-    const enabled = await ctx.homeProposals.enableProposal({ proposalId: readyAgain.id, reviewer: "household-owner" });
-    assert.equal(enabled.lifecycle, "active", "the same card enables once the configuration recovers");
+    const enabled = await ctx.homeProposals.enableProposal({ proposalId: blocked.id, reviewer: "household-owner" });
+    assert.equal(enabled.lifecycle, "active", "the same card enables through the real deployment port");
   } finally {
-    await fiber?.dispose();
+    await fiber.dispose();
     await ctx.fiber.dispose();
-    store.close();
   }
 });
 

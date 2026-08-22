@@ -104,6 +104,7 @@ export interface ProductRouteRenderContext {
   readonly onboarding?: ProductOnboardingState;
   /** One-shot household feedback shown inside the selected proposal detail. */
   readonly proposalNotice?: string;
+  readonly actionPolicy?: ProductShellModel["actionPolicy"];
   readonly household?: ProductShellModel["household"];
   readonly view?: ProductShellModel["view"];
 }
@@ -117,6 +118,18 @@ export type ProductViewProvider = RegisteredProductViewProvider<ProductShellMode
 /** Static assets served alongside the fixed Host Shell and registered providers. */
 export const PRODUCT_CSS = PRODUCT_SHELL_STYLES;
 export const PRODUCT_JS = String.raw`// EventSource reconnects with Last-Event-ID for the active household turn.
+// A one-shot notice cleans its query parameter after display, so a refresh
+// or a shared link never replays it. Runs from this asset because the page
+// CSP (script-src 'self') forbids inline scripts.
+if (document.querySelector("[data-one-shot-notice]") !== null) {
+  const cleaned = new URL(location.href);
+  if (cleaned.searchParams.has("notice") || cleaned.searchParams.has("policy")) {
+    cleaned.searchParams.delete("notice");
+    cleaned.searchParams.delete("policy");
+    history.replaceState(null, "", cleaned.pathname + cleaned.search + cleaned.hash);
+  }
+}
+
 for (const hostViewMenu of document.querySelectorAll("[data-host-view-menu]")) {
   if (!(hostViewMenu instanceof HTMLDetailsElement)) continue;
   document.addEventListener("pointerdown", (event) => {
@@ -516,6 +529,8 @@ interface InboxHttpPort {
   canLatchProposal?(): boolean;
   latchProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
   canEnableProposal?(): boolean;
+  /** Settings saved a new confirmation configuration: recheck blocked plans. */
+  recheckBlockedProposals?(): { readonly rechecked: number; readonly cleared: number };
   enableProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
   canControlAutomation?(): boolean;
   controlAutomation?(input: { readonly proposalId: string; readonly command: "pause" | "resume" | "close" | "retry"; readonly actor: string }): unknown | Promise<unknown>;
@@ -670,6 +685,8 @@ export class ProposalInboxHttpService extends Service {
           productRoute === "settings" ? boundedLayoutDraftId(url.searchParams.get("layout")) : undefined,
           productRoute === "settings" && url.searchParams.get("preview") === "1",
           productRoute === "settings" ? boundedLayoutDraftNotice(url.searchParams.get("layoutNotice")) : undefined,
+          undefined,
+          productRoute === "settings" && url.searchParams.get("policy") === "saved",
         );
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
@@ -694,6 +711,34 @@ export class ProposalInboxHttpService extends Service {
         } catch (error) {
           return send(response, onboardingErrorStatus(error), onboardingErrorText(error));
         }
+      }
+      if (method === "POST" && url.pathname === "/settings/action-policy") {
+        if (this.principal === undefined || !canUsePrivateProposalReviewPrincipal(this.principal)) {
+          return send(response, 403, "Confirmation settings require a present member on their own bound private phone");
+        }
+        const configure = this.onboarding.configureActionPolicy?.bind(this.onboarding);
+        if (configure === undefined) return send(response, 404, "Confirmation settings unavailable");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported confirmation settings content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid confirmation settings");
+        }
+        const selection = actionPolicySelectionInput(body);
+        if (selection === undefined) return send(response, 400, "Invalid confirmation settings");
+        try {
+          const configured = await configure(selection, this.principal as OnboardingActor | undefined);
+          if (configured.status !== "configured") return send(response, 409, "Confirmation settings were not saved");
+        } catch (error) {
+          return send(response, onboardingErrorStatus(error), onboardingErrorText(error));
+        }
+        // The saved configuration immediately rechecks every blocked plan, so
+        // the card the household came from recovers without another step.
+        this.inbox.recheckBlockedProposals?.();
+        return redirect(response, "/settings?policy=saved#action-policy");
       }
       if (method === "POST" && url.pathname === "/settings/view-default") {
         if (!canManageProductViewDefault(this.principal)) {
@@ -1518,6 +1563,7 @@ export class ProposalInboxHttpService extends Service {
     previewLayoutDraft = false,
     layoutDraftNotice?: LayoutDraftNotice,
     proposalNotice?: string,
+    actionPolicySaved = false,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
     const reviewProjection = showsReviewSummary ? await this.productReviewProjection(proposalId) : undefined;
@@ -1548,6 +1594,7 @@ export class ProposalInboxHttpService extends Service {
       ...(controlFeedback === undefined ? {} : { controlFeedback }),
       ...(onboarding === undefined ? {} : { onboarding }),
       ...(proposalNotice === undefined ? {} : { proposalNotice }),
+      ...(route === "settings" ? this.actionPolicyEditorContext(actionPolicySaved) : {}),
       household: hostProjection.household,
     };
     const viewCurrentPath = productViewCurrentPath(path, route, proposalId, actionTicketId, batchRequestId);
@@ -1650,6 +1697,30 @@ export class ProposalInboxHttpService extends Service {
       ...(notice === undefined ? {} : { notice }),
     });
   }
+  private actionPolicyEditorContext(saved: boolean): { readonly actionPolicy?: ProductShellModel["actionPolicy"] } {
+    const read = this.onboarding.actionPolicyChoices?.bind(this.onboarding);
+    if (read === undefined || this.onboarding.configureActionPolicy === undefined) return {};
+    let choices: ReturnType<NonNullable<OnboardingPort["actionPolicyChoices"]>> | undefined;
+    try {
+      choices = read();
+    } catch {
+      return {};
+    }
+    if (choices === undefined) return {};
+    if (choices.status !== "available" || choices.capabilities.length === 0) return {};
+    return {
+      actionPolicy: {
+        capabilities: choices.capabilities.slice(0, 200).map((capability) => ({
+          id: capability.id,
+          label: capability.label,
+          bridgeLabel: capability.bridgeLabel,
+          policyClass: capability.suggestedPolicyClass,
+        })),
+        ...(saved ? { savedNotice: "已保存确认方式，受影响的建议正在重新检查。" } : {}),
+      },
+    };
+  }
+
   private async productHostProjection(reviewProjection?: InboxProductReviewProjection): Promise<{
     readonly reviewCounts: ProductReviewCounts;
     readonly onboardingState?: ProductOnboardingState;
@@ -1893,6 +1964,35 @@ function productNoticeCopy(code: string | null): string | undefined {
   return code === "enable_temporarily_unavailable"
     ? "这次启用暂时没能完成，家里的设置保持原样；稍后再试一次。"
     : undefined;
+}
+
+function actionPolicySelectionInput(body: string): {
+  readonly directCapabilityIds: readonly string[];
+  readonly confirmationCapabilityIds: readonly string[];
+  readonly administratorCapabilityIds: readonly string[];
+} | undefined {
+  let fields: URLSearchParams;
+  try {
+    fields = new URLSearchParams(body);
+  } catch {
+    return undefined;
+  }
+  const direct: string[] = [];
+  const confirmation: string[] = [];
+  const administrator: string[] = [];
+  let total = 0;
+  for (const [name, value] of fields) {
+    if (!name.startsWith("capability:")) return undefined;
+    const id = name.slice("capability:".length);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id)) return undefined;
+    if (value === "direct") direct.push(id);
+    else if (value === "confirmation") confirmation.push(id);
+    else if (value === "administrator") administrator.push(id);
+    else return undefined;
+    total += 1;
+    if (total > 200) return undefined;
+  }
+  return total === 0 ? undefined : { directCapabilityIds: direct, confirmationCapabilityIds: confirmation, administratorCapabilityIds: administrator };
 }
 
 function selectedProposalId(value: string | null): string | undefined {
@@ -2273,6 +2373,7 @@ function productShellModel(route: ProductRoute, context: ProductRouteRenderConte
     ...(context.activeTurn === undefined ? {} : { activeTurn: context.activeTurn }),
     ...(context.controlFeedback === undefined ? {} : { controlFeedback: context.controlFeedback }),
     ...(context.proposalNotice === undefined ? {} : { proposalNotice: context.proposalNotice }),
+    ...(context.actionPolicy === undefined ? {} : { actionPolicy: context.actionPolicy }),
     ...(context.onboarding === undefined ? {} : { onboarding: context.onboarding }),
   };
 }

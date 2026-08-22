@@ -260,6 +260,12 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-gate-disclosure { margin: .2rem 0 0; padding: .6rem .8rem; border-radius: .7rem; background: var(--shell-amber-soft); color: var(--shell-amber); font-size: .86rem; font-weight: 650; }
 .product-blocked-reason { margin: .2rem 0 0; padding: .6rem .8rem; border-radius: .7rem; background: var(--shell-amber-soft); color: var(--shell-amber); font-size: .88rem; font-weight: 650; }
 .product-enable-notice { margin: 0 0 .6rem; padding: .6rem .8rem; border-radius: .7rem; background: var(--shell-amber-soft); color: var(--shell-amber); font-size: .88rem; font-weight: 650; }
+.product-policy-list { list-style: none; margin: .6rem 0; padding: 0; display: grid; gap: .7rem; }
+.product-policy-row { display: flex; flex-wrap: wrap; gap: .5rem .9rem; align-items: center; justify-content: space-between; }
+.product-policy-device { display: inline-flex; flex-direction: column; font-weight: 650; }
+.product-policy-device small { color: var(--shell-muted); font-weight: 500; }
+.product-policy-options { display: inline-flex; flex-wrap: wrap; gap: .4rem .8rem; }
+.product-policy-option { display: inline-flex; align-items: center; gap: .3rem; font-size: .88rem; }
 .product-detail-risk, .product-detail-after { margin: .2rem 0 0; color: var(--shell-muted); font-size: .88rem; }
 .product-automation-list { display: grid; gap: 1rem; }
 .product-automation-card h2 { margin: .35rem 0 .3rem; }

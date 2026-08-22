@@ -315,6 +315,7 @@ export interface ProposalAuditEvent {
     | "prepared"
     | "info_requested"
     | "revalidation_required"
+    | "enable_unblocked"
     | "deployment_retried"
     | "deployment_verified"
     | "deployment_failed"
@@ -387,7 +388,7 @@ const proposalAuditEventSchema = z.object({
   at: isoTimestamp,
   action: z.enum([
     "created", "approved", "rejected", "expired", "evidence_merged", "snoozed", "snooze_elapsed",
-    "prepared", "info_requested", "revalidation_required", "deployment_retried",
+    "prepared", "info_requested", "revalidation_required", "enable_unblocked", "deployment_retried",
     "deployment_verified", "deployment_failed", "drift_detected", "drift_restored", "paused", "resumed", "closed",
   ]),
   actor: boundedId,
@@ -1187,6 +1188,28 @@ export class SqliteProposalStore {
         audit: [...current.audit, {
           ...this.auditEvent(at, "revalidation_required", input.actor ?? "system", revision),
           note: reason,
+        }],
+      };
+    });
+  }
+
+  /**
+   * A fresh, successful world validation lifts an enable block. Nothing else
+   * clears the field on a standing plan: the audit records the recheck.
+   */
+  clearEnableBlock(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.transition(input, "enable unblock", (current, at, revision) => {
+      if (current.lifecycle !== "ready" || current.enableBlockedReason === undefined) {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a blocked prepared plan clears an enable block");
+      }
+      const { enableBlockedReason: _cleared, ...rest } = current;
+      return {
+        ...rest,
+        revision,
+        updatedAt: at,
+        audit: [...current.audit, {
+          ...this.auditEvent(at, "enable_unblocked", input.actor ?? "system", revision),
+          note: "启用条件已恢复，方案重新可启用。",
         }],
       };
     });
@@ -2477,7 +2500,7 @@ function requiresPreparation(input: Pick<CreateProposalInput, "kind" | "artifact
 const PREPARABLE_LIFECYCLES: readonly ProposalLifecycle[] = ["preparing", "needs_info", "ready"];
 const PENDING_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "created", "evidence_merged", "snoozed", "snooze_elapsed",
-  "prepared", "info_requested", "revalidation_required", "deployment_retried",
+  "prepared", "info_requested", "revalidation_required", "enable_unblocked", "deployment_retried",
 ];
 const APPROVED_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "approved", "deployment_verified", "deployment_failed", "deployment_retried", "drift_detected", "drift_restored", "paused", "resumed", "closed",

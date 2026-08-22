@@ -959,6 +959,75 @@ test("renders the real runtime queue and sends runtime approval through the type
   }
 });
 
+test("settings saves confirmation methods and rechecks blocked proposals", async () => {
+  const ctx = new Context();
+  const configured: unknown[] = [];
+  let rechecks = 0;
+  class RecheckInbox extends StubInbox {
+    recheckBlockedProposals() {
+      rechecks += 1;
+      return { rechecked: 1, cleared: 1 };
+    }
+  }
+  const inboxFiber = await ctx.plugin(RecheckInbox);
+  const onboarding = {
+    getState: () => ({ step: 8, complete: true, status: "complete" as const, title: "完成", body: "完成", choices: { status: "available" as const, bridges: [], capabilities: [] } }),
+    submit: () => { throw new Error("not used"); },
+    actionPolicyChoices: () => ({
+      status: "available" as const,
+      bridges: [],
+      capabilities: [{ id: "hwc-1", label: "灯（客厅） · 灯", bridgeId: "ha", bridgeLabel: "Home Assistant", suggestedPolicyClass: "confirmation" as const }],
+    }),
+    configureActionPolicy: (selection: unknown) => {
+      configured.push(selection);
+      return { status: "configured" as const };
+    },
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    onboarding,
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  try {
+    const settings = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    const settingsHtml = await settings.text();
+    assert.match(settingsHtml, /id="action-policy"/, "settings offers the confirmation-method editor");
+    assert.match(settingsHtml, /name="capability:hwc-1"/);
+
+    const saved = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers,
+      body: "capability%3Ahwc-1=confirmation",
+      redirect: "manual",
+    });
+    assert.equal(saved.status, 303);
+    assert.equal(saved.headers.get("location"), "/settings?policy=saved#action-policy");
+    assert.deepEqual(configured, [{ directCapabilityIds: [], confirmationCapabilityIds: ["hwc-1"], administratorCapabilityIds: [] }]);
+    assert.equal(rechecks, 1, "the saved configuration immediately rechecks blocked proposals");
+
+    const confirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=saved`, { headers: { authorization } });
+    assert.match(await confirmed.text(), /已保存确认方式，受影响的建议正在重新检查。/);
+
+    const sharedDenied = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers: { ...headers },
+      body: "capability%3Ahwc-1=direct",
+      redirect: "manual",
+    });
+    assert.equal(sharedDenied.status, 303, "the bound-phone principal saves normally");
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("approval stays on a bound private device while any present entry may reject", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(RuntimeDecisionInbox);
@@ -1073,7 +1142,10 @@ test("keeps the prepared plan detail reachable and accepts the single enable dec
     const returnedHtml = await returned.text();
     assert.match(returnedHtml, /暂时没能完成.*稍后再试/, "the server renders the fixed household copy for the code");
     assert.match(returnedHtml, />启用</, "the card keeps its full entries after the notice");
-    assert.match(returnedHtml, /history\.replaceState/, "the notice cleans its query parameter after display");
+    assert.match(returnedHtml, /data-one-shot-notice/, "the notice is marked for the asset-driven cleanup");
+    assert.doesNotMatch(returnedHtml, /<script>/, "the CSP forbids inline scripts, so the page ships none");
+    const asset = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, { headers: { authorization } });
+    assert.match(await asset.text(), /data-one-shot-notice[\s\S]*replaceState/, "the allowed asset performs the URL cleanup");
 
     const forged = await fetch(
       `${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable?notice=${encodeURIComponent("已成功启用门锁自动化")}`,

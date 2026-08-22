@@ -126,6 +126,11 @@ export class HomeProposalService extends Service {
     }
   }
 
+  /**
+   * Internal/test ingress accepting a pre-validated envelope. Production
+   * proposal writes walk createDraftGoverned, which validates devices,
+   * authority, and disclosure against the live world before admission.
+   */
   create(input: CreateProposalInput): ProposalEnvelope {
     return this.wakePreparation(this.store.create(input));
   }
@@ -384,6 +389,47 @@ export class HomeProposalService extends Service {
 
   requestProposalInfo(input: ProposalInfoRequestInput): ProposalEnvelope {
     return this.store.requestProposalInfo(input);
+  }
+
+  /**
+   * Re-validates every blocked prepared plan against the current world — the
+   * follow-up to a configuration change. A block only clears through a fresh
+   * successful validation; a plan that stays blocked updates its stated
+   * reason, and a changed disclosure re-prepares without spending anything.
+   */
+  recheckBlockedEnablement(): { readonly rechecked: number; readonly cleared: number } {
+    if (this.deployment === undefined) return { rechecked: 0, cleared: 0 };
+    const blocked = this.store.list({ status: "pending_review", limit: 200 })
+      .filter((proposal) => proposal.lifecycle === "ready" && proposal.enableBlockedReason !== undefined);
+    let cleared = 0;
+    for (const proposal of blocked) {
+      const resolved = this.deployment.resolveIntent({
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        ...(proposal.artifactCandidate === undefined ? {} : { artifactCandidate: proposal.artifactCandidate }),
+        ...(proposal.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: proposal.actionPolicyClasses }),
+        ...(proposal.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: proposal.confirmationDeviceNames }),
+      });
+      if ("blockedReason" in resolved) {
+        if (resolved.blockedReason !== proposal.enableBlockedReason) {
+          this.store.markEnableBlocked({ proposalId: proposal.id, actor: "system", reason: resolved.blockedReason });
+        }
+        continue;
+      }
+      if ("revalidationReason" in resolved) {
+        this.wakePreparation(this.store.returnToPreparation({
+          proposalId: proposal.id,
+          actor: "system",
+          note: resolved.revalidationReason,
+          ...(resolved.updatedGateDisclosure === undefined ? {} : { updatedGateDisclosure: resolved.updatedGateDisclosure }),
+        }));
+        continue;
+      }
+      if ("reason" in resolved) continue;
+      this.store.clearEnableBlock({ proposalId: proposal.id, actor: "system" });
+      cleared += 1;
+    }
+    return { rechecked: blocked.length, cleared };
   }
 
   /** Retries a failed enablement through the same governed deployment seam and intent. */

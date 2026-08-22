@@ -469,6 +469,12 @@ export class ProposalInboxService extends Service {
     };
   }
 
+  /** Settings saved a new confirmation configuration: recheck blocked plans. */
+  recheckBlockedProposals(): { readonly rechecked: number; readonly cleared: number } {
+    const recheck = (this.proposals as { recheckBlockedEnablement?(): { rechecked: number; cleared: number } }).recheckBlockedEnablement;
+    return typeof recheck === "function" ? recheck.call(this.proposals) : { rechecked: 0, cleared: 0 };
+  }
+
   getProductReviewProjection(actor?: InboxReviewActor, selectedProposalId?: string): InboxProductReviewProjection {
     const runtimeConfirmations = this.runtime?.listRuntimeConfirmations() ?? [];
     const expiredSummary = this.runtime?.snapshot?.().expiredRuntimeSummary;
@@ -989,8 +995,11 @@ export class ProposalInboxService extends Service {
   }
 
   private pendingProductProposals(): readonly InboxProposal[] {
+    // Preparing and needs-info cards stay visible: a card never vanishes into
+    // background preparation (DR-017 补充, 第九轮).
     return this.proposals.list({ status: "pending_review", limit: 200, visibleOnly: true })
-      .filter((proposal) => proposal.lifecycle === undefined || proposal.lifecycle === "ready");
+      .filter((proposal) => proposal.lifecycle === undefined
+        || proposal.lifecycle === "ready" || proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info");
   }
 
   private async decideRuntime(

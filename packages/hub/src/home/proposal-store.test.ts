@@ -449,6 +449,31 @@ test("a decision persists only what the schema reads back, and an insight never 
   }
 });
 
+test("a fresh validation clears the enable block and the record reads back", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-unblock-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const ready = prepareToReady(store, store.create(input({ artifactCandidate, idempotencyKey: "unblock-readback" })).id);
+    store.markEnableBlocked({ proposalId: ready.id, actor: "system", reason: "方案里设备的确认方式还没有设置好。" });
+    const cleared = store.clearEnableBlock({ proposalId: ready.id, actor: "system" });
+    assert.equal(cleared.enableBlockedReason, undefined);
+    assert.equal(cleared.lifecycle, "ready");
+    assert.equal(cleared.audit.at(-1)?.action, "enable_unblocked");
+    assert.equal(store.get(ready.id)?.enableBlockedReason, undefined);
+    assert.throws(() => store.clearEnableBlock({ proposalId: ready.id, actor: "system" }), /blocked prepared plan/);
+    store.close();
+    const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+    try {
+      assert.equal(reopened.get(ready.id)?.audit.at(-1)?.action, "enable_unblocked");
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { store.close(); } catch { /* closed on the happy path */ }
+  }
+});
+
 test("the store refuses a malformed deployment intent at the door", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {

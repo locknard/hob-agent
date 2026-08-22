@@ -1130,10 +1130,48 @@ test("a blocked plan stops honestly with only the revise and decline exits", () 
   assert.match(html, /在对话里改/);
   assert.match(html, /仅这次不要/);
   assert.match(html, /不再提这件事/);
+  assert.match(html, /href="\/settings#action-policy">去设置确认方式/, "the blocked card walks straight to the confirmation settings");
   assert.doesNotMatch(html, />启用</);
   assert.doesNotMatch(html, /以后再说/);
   assert.doesNotMatch(html, /启用后：/, "a blocked plan makes no after-enable promise");
   assert.doesNotMatch(html, /这次启用就是你的授权/, "a blocked plan makes no present-tense authorization promise");
+});
+
+test("a preparing card stays visible in the list without decision entries", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    proposals: [{
+      id: "media-power",
+      revision: 2,
+      title: "睡前自动关掉多媒体室电源",
+      lifecycle: "preparing",
+    }],
+  }));
+  assert.match(html, /正在准备/, "the household sees the card is being prepared");
+  assert.match(html, /睡前自动关掉多媒体室电源/);
+  const listSection = html.slice(html.indexOf("给家的建议"));
+  assert.doesNotMatch(listSection.slice(0, listSection.indexOf("先放一放")), /以后再说/, "a preparing card offers no snooze");
+});
+
+test("settings renders the confirmation-method editor when the seam is available", () => {
+  const html = renderProductShell(model({
+    route: "settings",
+    actionPolicy: {
+      capabilities: [
+        { id: "hwc-1", label: "灯（客厅） · 灯", bridgeLabel: "Home Assistant", policyClass: "direct" },
+        { id: "hwc-2", label: "门锁（入户） · 门锁", bridgeLabel: "Home Assistant", policyClass: "administrator" },
+      ],
+      savedNotice: "已保存确认方式，受影响的建议正在重新检查。",
+    },
+  }));
+  assert.match(html, /id="action-policy"/);
+  assert.match(html, /设备动作的确认方式/);
+  assert.match(html, /name="capability:hwc-1"/);
+  assert.match(html, /高影响 · 手机确认/);
+  assert.match(html, /action="\/settings\/action-policy"/);
+  assert.match(html, /保存确认方式/);
+  assert.match(html, /已保存确认方式，受影响的建议正在重新检查。/);
+  assert.doesNotMatch(html, /权限级别|管理员/);
 });
 
 test("keeps a preparing plan out of decision reach", () => {

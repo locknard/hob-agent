@@ -226,6 +226,52 @@ export class HomeOnboardingCoordinatorService extends Service {
     this.ctx.effect(() => () => this.store.close?.(), "home-onboarding.close");
   }
 
+  /**
+   * The settings surface reuses the step-5 capability choices: the household
+   * can re-decide confirmation methods at any time after onboarding.
+   */
+  actionPolicyChoices(): OnboardingChoiceProjection {
+    return this.choiceProjection();
+  }
+
+  /**
+   * Re-decides confirmation methods outside the step machine. The same rules
+   * as step 5 apply: a present member on their own bound private device,
+   * capabilities from the current home map, one method per action.
+   */
+  configureActionPolicy(
+    selection: {
+      readonly directCapabilityIds: readonly string[];
+      readonly confirmationCapabilityIds: readonly string[];
+      readonly administratorCapabilityIds: readonly string[];
+    },
+    actor?: OnboardingActor,
+  ): { readonly status: "configured" } | { readonly status: "blocked"; readonly reason: string } {
+    if (!actor || !actor.present || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
+      throw new HomeOnboardingCoordinatorError("permission_denied", "确认方式设置需要在场，并使用绑定到本人的私人设备");
+    }
+    const world = this.requireWorld();
+    const all = [...selection.directCapabilityIds, ...selection.confirmationCapabilityIds, ...selection.administratorCapabilityIds];
+    if (all.length === 0 || new Set(all).size !== all.length) {
+      throw new HomeOnboardingCoordinatorError("invalid_input", "每个动作只能选择一种确认方式");
+    }
+    const available = capabilityIds(world.snapshot());
+    if (all.some((id) => !available.has(id))) {
+      return { status: "blocked", reason: "确认方式必须来自当前家庭地图中的真实能力。" };
+    }
+    if (this.actionAuthority === undefined) {
+      return { status: "blocked", reason: "确认方式配置服务尚未就绪，家庭保持安全默认值。" };
+    }
+    const configured = this.actionAuthority.configure({
+      directCapabilityIds: selection.directCapabilityIds,
+      confirmationCapabilityIds: selection.confirmationCapabilityIds,
+      administratorCapabilityIds: selection.administratorCapabilityIds,
+    });
+    return configured.status === "configured"
+      ? { status: "configured" }
+      : { status: "blocked", reason: "确认方式配置没有完成，家庭保持安全默认值。" };
+  }
+
   getState(): OnboardingViewState {
     const step = this.state.currentStep;
     const record = this.state.steps[step]!;

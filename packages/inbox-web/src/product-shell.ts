@@ -414,6 +414,16 @@ export interface ProductShellModel {
   readonly controlSpaces?: readonly ProductControlSpace[];
   readonly batchControl?: ProductBatchControl;
   readonly onboarding?: ProductOnboardingState;
+  /** The settings confirmation-method editor: step-5 choices, editable later. */
+  readonly actionPolicy?: {
+    readonly capabilities: readonly {
+      readonly id: string;
+      readonly label: string;
+      readonly bridgeLabel: string;
+      readonly policyClass: "direct" | "confirmation" | "administrator";
+    }[];
+    readonly savedNotice?: string;
+  };
 }
 
 export interface ProductShellRenderOptions {
@@ -906,7 +916,7 @@ function renderReviews(model: NormalizedProductShellModel, options: ProductShell
     ? model.selectedProposal
     : model.selectedProposalId === undefined ? undefined : model.proposals.find((proposal) => proposal.id === model.selectedProposalId);
   const selected = detail === undefined && model.selectedProposalId !== undefined ? model.proposals[0] : detail;
-  return `<header class="product-page-header"><div><p class="product-kicker">处理中心</p><h1>需要你决定的事</h1><p class="product-muted">有时限的动作会先提醒你；其他建议可以稍后决定。</p></div><a class="product-view-switcher" href="${routeHref("automations", options)}">它替你做的事</a></header>${model.expiredSummary === undefined ? "" : `<p class="product-card product-card--flat product-muted">${escapeHtml(model.expiredSummary)}</p>`}<div class="product-review-page"><div class="product-review-list"><section aria-labelledby="runtime-heading"><div class="product-review-list-heading"><h2 id="runtime-heading">等待你放行</h2><p>有时限 · 到期自动取消</p></div><div class="product-review-list">${model.runtimeConfirmations.length === 0 ? `<p class="product-card product-review-empty">当前没有等待你放行的动作。</p>` : model.runtimeConfirmations.map(renderRuntimeCard).join("")}</div></section><section aria-labelledby="proposal-heading"><div class="product-review-list-heading"><h2 id="proposal-heading">给家的建议</h2><p>${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p></div><div class="product-review-list">${model.proposals.length === 0 ? `<p class="product-card product-review-empty">新的建议会显示在这里。</p>` : model.proposals.map((proposal) => renderProposalCard(proposal, selected?.id === proposal.id, options)).join("")}</div><p class="product-muted">先放一放的建议会在过期前回来一次；有新证据也会叫醒它。</p></section></div><section class="product-proposal-detail" aria-labelledby="proposal-detail-heading">${model.proposalNotice === undefined ? "" : `<p class="product-enable-notice" role="status">${escapeHtml(model.proposalNotice)}</p><script>(function(){var u=new URL(location.href);if(u.searchParams.has("notice")){u.searchParams.delete("notice");history.replaceState(null,"",u.pathname+u.search+u.hash);}})();</script>`}${selected === undefined ? `<div class="product-card"><h2 id="proposal-detail-heading">先选一条建议</h2><p class="product-muted">查看证据、仍待确认的事和一次决定。</p></div>` : renderProposalDetail(selected)}</section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">处理中心</p><h1>需要你决定的事</h1><p class="product-muted">有时限的动作会先提醒你；其他建议可以稍后决定。</p></div><a class="product-view-switcher" href="${routeHref("automations", options)}">它替你做的事</a></header>${model.expiredSummary === undefined ? "" : `<p class="product-card product-card--flat product-muted">${escapeHtml(model.expiredSummary)}</p>`}<div class="product-review-page"><div class="product-review-list"><section aria-labelledby="runtime-heading"><div class="product-review-list-heading"><h2 id="runtime-heading">等待你放行</h2><p>有时限 · 到期自动取消</p></div><div class="product-review-list">${model.runtimeConfirmations.length === 0 ? `<p class="product-card product-review-empty">当前没有等待你放行的动作。</p>` : model.runtimeConfirmations.map(renderRuntimeCard).join("")}</div></section><section aria-labelledby="proposal-heading"><div class="product-review-list-heading"><h2 id="proposal-heading">给家的建议</h2><p>${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p></div><div class="product-review-list">${model.proposals.length === 0 ? `<p class="product-card product-review-empty">新的建议会显示在这里。</p>` : model.proposals.map((proposal) => renderProposalCard(proposal, selected?.id === proposal.id, options)).join("")}</div><p class="product-muted">先放一放的建议会在过期前回来一次；有新证据也会叫醒它。</p></section></div><section class="product-proposal-detail" aria-labelledby="proposal-detail-heading">${model.proposalNotice === undefined ? "" : `<p class="product-enable-notice" role="status" data-one-shot-notice>${escapeHtml(model.proposalNotice)}</p>`}${selected === undefined ? `<div class="product-card"><h2 id="proposal-detail-heading">先选一条建议</h2><p class="product-muted">查看证据、仍待确认的事和一次决定。</p></div>` : renderProposalDetail(selected)}</section></div>`;
 }
 
 function renderRuntimeCard(item: ProductRuntimeConfirmation): string {
@@ -950,8 +960,9 @@ function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
 
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
   const blocked = proposal.kind !== "household-insight" && proposal.enableBlockedReason !== undefined;
-  const statusLabel = blocked ? "暂时无法启用" : proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
-  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${blocked ? "" : renderLaterForm(proposal)}</div></article>`;
+  const preparing = proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info";
+  const statusLabel = blocked ? "暂时无法启用" : preparing ? "正在准备" : proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
+  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${blocked || preparing ? "" : renderLaterForm(proposal)}</div></article>`;
 }
 
 function renderInsightCardActions(proposal: ProductProposal): string {
@@ -990,7 +1001,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
     : preparing
       ? `<p class="product-muted">正在后台准备：核对证据、检查冲突、确认权限。备好后它会来找你，现在不用做任何决定。</p>`
       : blocked
-        ? `<p class="product-blocked-reason">${escapeHtml(proposal.enableBlockedReason)}</p><div class="product-card-actions">${conversationEntry(proposal)}${declineDisclosure(proposal)}</div>`
+        ? `<p class="product-blocked-reason">${escapeHtml(proposal.enableBlockedReason)}</p><div class="product-card-actions"><a class="product-secondary-action" href="/settings#action-policy">去设置确认方式</a>${conversationEntry(proposal)}${declineDisclosure(proposal)}</div>`
         : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停，或关闭并移除；它从不改动你原有的规则。</p>`;
   return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : blocked ? "暂时无法启用" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight || blocked ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
 }
@@ -1268,17 +1279,31 @@ function renderViewPresentationPreferences(view: ProductViewState): string {
   return `<section class="product-settings-section" aria-labelledby="view-presentation-heading"><div><h2 id="view-presentation-heading">${escapeHtml(providerLabel)}的显示方式</h2><p class="product-muted">这些选择只调整这台设备上的排版。</p></div><div class="product-presentation-preferences">${fields}${reset}</div></section>`;
 }
 
+function renderActionPolicyEditor(model: NormalizedProductShellModel): string {
+  const editor = model.actionPolicy;
+  if (editor === undefined || editor.capabilities.length === 0) return "";
+  const notice = editor.savedNotice === undefined ? "" : `<p class="product-enable-notice" role="status" data-one-shot-notice>${escapeHtml(editor.savedNotice)}</p>`;
+  const rows = editor.capabilities.map((capability) => {
+    const options = (["direct", "confirmation", "administrator"] as const).map((value) => {
+      const label = value === "direct" ? "直接动作" : value === "confirmation" ? "每次先确认" : "高影响 · 手机确认";
+      return `<label class="product-policy-option"><input type="radio" name="capability:${escapeHtml(capability.id)}" value="${value}"${capability.policyClass === value ? " checked" : ""}>${label}</label>`;
+    }).join("");
+    return `<li class="product-policy-row"><span class="product-policy-device">${escapeHtml(capability.label)}<small>${escapeHtml(capability.bridgeLabel)}</small></span><span class="product-policy-options">${options}</span></li>`;
+  }).join("");
+  return `<section class="product-settings-section product-card" id="action-policy"><div><h2>设备动作的确认方式</h2><p class="product-muted">逐项决定每个动作要不要先问你；保存后会重新检查受影响的建议。</p></div>${notice}<form class="product-policy-form" method="post" action="/settings/action-policy"><ul class="product-policy-list">${rows}</ul><button class="product-primary-action" type="submit">保存确认方式</button></form></section>`;
+}
+
 function renderManagedSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const memberName = model.household.memberName ?? "待设置";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接与设备细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>家人与设备</h2><p class="product-muted">需要确认的动作推送到绑定本人的私人手机。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section><section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接与设备细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>家人与设备</h2><p class="product-muted">需要确认的动作推送到绑定本人的私人手机。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}<section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
 }
 
 function renderSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   if (model.view !== undefined) return renderManagedSettings(model, options);
   const memberName = model.household.memberName ?? "待设置";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、家人与设备和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid"><section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>家人与设备</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section><section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、家人与设备和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid"><section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>家人与设备</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}<section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
 }
 
 function onboardingSteps(model: NormalizedProductShellModel): readonly ProductOnboardingStepData[] {
