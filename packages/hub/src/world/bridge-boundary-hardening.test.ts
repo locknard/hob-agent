@@ -3,7 +3,7 @@ import test from "node:test";
 import { z } from "zod";
 
 import { BridgeIngest, type BridgeEvent, type Envelope } from "./bridge-ingest.js";
-import { SqliteIngestJournal } from "../world/ingest-journal.js";
+import { SqliteIngestJournal } from "./ingest-journal.js";
 
 const attrsSchema = z.object({ state: z.string() }).strict();
 

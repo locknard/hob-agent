@@ -16,10 +16,10 @@ import {
   BridgeCatalog,
   type AdapterRegistration,
   type BridgeAdapter,
-} from "./bridge-catalog.js";
-import { BridgeRegistry, BridgeRegistryError } from "./bridge-registry.js";
-import { SqliteIngestJournal } from "../world/ingest-journal.js";
-import { SyntheticBridge } from "./synthetic-bridge.js";
+} from "../bridge/bridge-catalog.js";
+import { BridgeRegistry, BridgeRegistryError } from "../bridge/bridge-registry.js";
+import { SqliteIngestJournal } from "./ingest-journal.js";
+import { SyntheticBridge } from "../bridge/synthetic-bridge.js";
 
 const bridgeId = "synthetic-matrix";
 

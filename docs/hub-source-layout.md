@@ -17,16 +17,16 @@ remain stable through each move.
 ## Phased organization
 
 1. `bridge/` owns adapter catalog and bundle composition, bridge credentials,
-   registration, ingestion, capability semantics and concrete HA, Xiaomi and
-   synthetic adapters.
+   registration, capability semantics and concrete HA, Xiaomi and synthetic
+   adapters. Adapters emit the neutral contract event stream.
 2. `artifact/` owns neutral artifact schemas, evidence, risk, conflict, compilation,
    preparation, registry and mutation coordination.
 3. `authority/` owns principals, identity authority, action authority, candidate
    authority and one-shot action policy/store.
 4. `media/` owns neutral media catalog, player discovery, play intent and Music
    Assistant integration.
-5. `world/` owns ingest journals, world identity, state/index projection and the
-   neutral HomeWorld service.
+5. `world/` owns bridge event ingestion, ingest journals, world identity,
+   state/index projection and the neutral HomeWorld service.
 6. `home/` owns household-facing advice, correction, proposal, safety, onboarding,
    observation, retention, review and batch services.
 7. `cli/` owns executable setup, validation and one-shot operational commands.
@@ -48,3 +48,5 @@ the source root and make domain dependencies visible.
   explicit export and dependency decision.
 - Architecture tests recurse through every domain directory and keep concrete
   adapter vocabulary inside `bridge/` plus the explicit product bundle.
+- Production source in `bridge/` has no dependency on `world/`; event flow crosses
+  that boundary in one direction when the world-owned ingest consumes an adapter.

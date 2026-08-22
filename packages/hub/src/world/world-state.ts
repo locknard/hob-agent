@@ -1,4 +1,4 @@
-import type { DeviceDescriptor, StateEvent } from "../bridge/bridge-ingest-types.js";
+import type { DeviceDescriptor, StateEvent } from "./bridge-ingest-types.js";
 
 export type WorldDeviceValidity = "valid" | "stale" | "invalid-source" | "present-but-invalid";
 

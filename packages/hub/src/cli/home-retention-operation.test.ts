@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { Envelope } from "../bridge/bridge-ingest-types.js";
+import type { Envelope } from "@hob/bridge-contract";
 import { SqliteIngestJournal } from "../world/ingest-journal.js";
 import { SqliteProposalStore } from "../home/proposal-store.js";
 

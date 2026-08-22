@@ -1,5 +1,5 @@
-import { JournalCapacityError, type IngestJournal } from "../world/ingest-journal.js";
-import { WorldState, type WorldDeviceView } from "../world/world-state.js";
+import { JournalCapacityError, type IngestJournal } from "./ingest-journal.js";
+import { WorldState, type WorldDeviceView } from "./world-state.js";
 import type { ZodType } from "zod";
 import {
   bridgeEventSchema,

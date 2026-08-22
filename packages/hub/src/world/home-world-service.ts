@@ -47,8 +47,8 @@ import {
   type DeviceHealthStatus,
   type HubBridgeDiagnostics,
   type ResourceBudget,
-} from "../bridge/bridge-ingest.js";
-import type { JournalWatermark } from "../bridge/bridge-ingest-types.js";
+} from "./bridge-ingest.js";
+import type { JournalWatermark } from "./bridge-ingest-types.js";
 import {
   SqliteIngestJournal,
   type IngestJournal,

@@ -18,7 +18,7 @@ import {
 } from "./home-world-service.js";
 import { SyntheticBridge } from "../bridge/synthetic-bridge.js";
 import { WorldIdentityManager } from "./world-identity.js";
-import type { JournalWatermark } from "../bridge/bridge-ingest-types.js";
+import type { JournalWatermark } from "./bridge-ingest-types.js";
 
 const schema = {
   schema: "synthetic.light",

@@ -4,7 +4,7 @@ import type {
   BridgeInfo,
   ControlResult,
   Envelope,
-} from "./bridge-ingest-types.js";
+} from "@hob/bridge-contract";
 
 export interface SyntheticBridgeOptions {
   bridgeId: string;

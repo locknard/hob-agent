@@ -43,8 +43,8 @@ version shims out of the repository.
 Hub source organization has explicit `src/bridge/`, `src/artifact/`,
 `src/authority/`, `src/media/`, `src/world/`, `src/home/`, `src/cli/`, and
 `src/foundation/` domains.
-Adapter catalog/bundle composition, credential scoping, registry, ingestion,
-capability semantics and concrete adapters live together in `bridge/`. Neutral
+Adapter catalog/bundle composition, credential scoping, registry, capability
+semantics and concrete adapters live together in `bridge/`. Neutral
 artifact schemas, assessments, compilation, evidence, conflict analysis,
 preparation, registry and mutation coordination live together in `artifact/`.
 Principal resolution, state/action authority, durable authority candidates and the
@@ -54,8 +54,9 @@ preparation, conversation orchestration and the Music Assistant adapter live in
 `media/`. Credential setup, validation, one-time observation, retention, model
 probing and home-map drafting live in `cli/`, with every package command bound to
 its checked source entry.
-Durable ingest evidence, stable identities, current state, indexed history and the
-neutral HomeWorld aggregation service live in `world/`. Advice, onboarding,
+Bridge event ingestion, durable ingest evidence, stable identities, current state,
+indexed history and the neutral HomeWorld aggregation service live in `world/`.
+Advice, onboarding,
 observation, correction, proposals, safety, retention and household review state
 live in `home/`. The `home-agent-runtime.ts` composition root stays at `src/` so
 its complete domain wiring remains visible. Root composition modules name each
@@ -70,9 +71,9 @@ dependencies visible. It establishes ownership and review locality; the next
 architecture milestone establishes a directed dependency graph through narrow
 ports:
 
-1. `bridge` and `world` currently meet through concrete ingest, journal and state
-   modules. A Hub-owned ingestion port can place lifecycle orchestration in one
-   owner while adapters continue to emit only neutral contract events.
+1. `world` now owns bridge ingestion, journal persistence and state projection.
+   `bridge` emits neutral contract events and has no production dependency on
+   `world`; an architecture guard preserves this directed boundary.
 2. `artifact` now owns verified-proposal and preparation-job ports. The home-owned
    SQLite proposal store implements those ports structurally, and the root mounts
    `HomeArtifactService` over the shared read-only registry. Artifact production
