@@ -12,8 +12,10 @@ import {
   type ProposalQualitySummary,
   type ProposalRetentionEvidenceReference,
   type ProposalClearDedupLatchInput,
-  type ProposalTrialAdvanceInput,
-  type ProposalEnableInput,
+  type ProposalCloseInput,
+  type ProposalDeploymentOutcome,
+  type ProposalLifecycleInput,
+  type ProposalInfoRequestInput,
   type ProposalDecideInput,
   type ProposalSnoozeInput,
   type ReviewProposalInput,
@@ -26,13 +28,35 @@ import {
   type ArtifactContent,
 } from "../artifact/neutral-artifact.js";
 
+/**
+ * The governed seam that turns an approved neutral artifact into a running
+ * automation inside an ecosystem bridge. It is the only route from a household
+ * decision to persistent behavior, and it never receives bridge-native payloads
+ * from callers.
+ */
+export interface ProposalDeploymentPort {
+  deploy(request: {
+    readonly proposalId: string;
+    readonly revision: number;
+    readonly kind: CreateProposalInput["kind"];
+    readonly title: string;
+    readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
+  }): Promise<ProposalDeploymentOutcome> | ProposalDeploymentOutcome;
+  pause?(request: { readonly proposalId: string; readonly deploymentId?: string }): Promise<void> | void;
+  resume?(request: { readonly proposalId: string; readonly deploymentId?: string }): Promise<void> | void;
+  withdraw?(request: { readonly proposalId: string; readonly deploymentId: string }):
+    | Promise<{ readonly restored: boolean }>
+    | { readonly restored: boolean };
+}
+
 export interface BorrowedHomeProposalServiceOptions {
   readonly store: SqliteProposalStore;
   readonly onPreparationQueued?: (job: ArtifactPreparationJob) => void;
+  readonly deployment?: ProposalDeploymentPort;
 }
 
 export type HomeProposalServiceOptions =
-  | SqliteProposalStoreOptions
+  | (SqliteProposalStoreOptions & { readonly deployment?: ProposalDeploymentPort })
   | BorrowedHomeProposalServiceOptions;
 
 export interface HomePreparationStatus {
@@ -58,6 +82,7 @@ export class HomeProposalService extends Service {
   private readonly store: SqliteProposalStore;
   private readonly ownedStore: SqliteProposalStore | undefined;
   private readonly onPreparationQueued: BorrowedHomeProposalServiceOptions["onPreparationQueued"];
+  private readonly deployment: ProposalDeploymentPort | undefined;
 
   constructor(ctx: Context, options: HomeProposalServiceOptions) {
     super(ctx, "homeProposals");
@@ -65,10 +90,12 @@ export class HomeProposalService extends Service {
       this.store = options.store;
       this.ownedStore = undefined;
       this.onPreparationQueued = options.onPreparationQueued;
+      this.deployment = options.deployment;
     } else {
       this.store = new SqliteProposalStore(options);
       this.ownedStore = this.store;
       this.onPreparationQueued = undefined;
+      this.deployment = options.deployment;
     }
   }
 
@@ -79,11 +106,13 @@ export class HomeProposalService extends Service {
   }
 
   create(input: CreateProposalInput): ProposalEnvelope {
-    return this.store.create(input);
+    return this.wakePreparation(this.store.create(input));
   }
 
   createGoverned(input: CreateProposalInput) {
-    return this.store.createGoverned(input);
+    const result = this.store.createGoverned(input);
+    if (result.kind === "created") this.wakePreparation(result.proposal);
+    return result;
   }
 
   async createDraft(input: CreateHomeProposalDraftInput): Promise<ProposalEnvelope> {
@@ -307,12 +336,89 @@ export class HomeProposalService extends Service {
     return this.store.clearDedupLatch(input);
   }
 
-  advanceProposalTrial(input: ProposalTrialAdvanceInput): ProposalEnvelope {
-    return this.store.advanceProposalTrial(input);
+  markProposalReady(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.store.markProposalReady(input);
   }
 
-  enableProposal(input: ProposalEnableInput): ProposalEnvelope {
-    return this.store.enableProposal(input);
+  requestProposalInfo(input: ProposalInfoRequestInput): ProposalEnvelope {
+    return this.store.requestProposalInfo(input);
+  }
+
+  requestProposalChanges(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.store.requestProposalChanges(input);
+  }
+
+  /**
+   * Turns the single household decision into a running automation. The decision
+   * records `enabling`, the governed deployment seam applies the neutral
+   * artifact, and only a verified result reports a running automation. Without a
+   * deployment path the proposal fails explicitly instead of appearing to run.
+   */
+  async enableProposal(input: ProposalLifecycleInput & { readonly reviewer: string }): Promise<ProposalEnvelope> {
+    const enabling = this.store.decideProposal({
+      proposalId: input.proposalId,
+      ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
+      decision: "approve",
+      reviewer: input.reviewer,
+      ...(input.note === undefined ? {} : { note: input.note }),
+    });
+    const outcome = await this.deploy(enabling);
+    return this.store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      actor: input.reviewer,
+      outcome,
+    });
+  }
+
+  private async deploy(proposal: ProposalEnvelope): Promise<ProposalDeploymentOutcome> {
+    if (this.deployment === undefined) {
+      return { status: "failed", reason: "这个家还没有可用的自动化部署通道，方案已保留，接通后可以重试。" };
+    }
+    try {
+      return await this.deployment.deploy({
+        proposalId: proposal.id,
+        revision: proposal.revision,
+        kind: proposal.kind,
+        title: proposal.title,
+        artifactCandidate: proposal.artifactCandidate,
+      });
+    } catch {
+      return { status: "failed", reason: "部署没有完成，家里的设置保持原样。" };
+    }
+  }
+
+  async pauseAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
+    const current = this.requireDeployed(input.proposalId);
+    await this.deployment?.pause?.({ proposalId: current.id, deploymentId: current.deployment?.deploymentId });
+    return this.store.pauseAutomation(input);
+  }
+
+  async resumeAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
+    const current = this.requireDeployed(input.proposalId);
+    await this.deployment?.resume?.({ proposalId: current.id, deploymentId: current.deployment?.deploymentId });
+    return this.store.resumeAutomation(input);
+  }
+
+  /** Closing withdraws the automation and restores the configuration it replaced. */
+  async closeAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
+    const current = this.requireDeployed(input.proposalId);
+    let restored = false;
+    if (this.deployment?.withdraw !== undefined && current.deployment?.deploymentId !== undefined) {
+      const result = await this.deployment.withdraw({
+        proposalId: current.id,
+        deploymentId: current.deployment.deploymentId,
+      });
+      restored = result?.restored === true;
+    }
+    const closeInput: ProposalCloseInput = { ...input, restored };
+    return this.store.closeAutomation(closeInput);
+  }
+
+  private requireDeployed(proposalId: string): ProposalEnvelope {
+    const current = this.store.get(proposalId);
+    if (current === undefined) throw new ProposalStoreError("not_found", "Proposal was not found");
+    return current;
   }
 
   listDedupLatches() {
@@ -332,21 +438,25 @@ export class HomeProposalService extends Service {
   }
 
   review(input: ReviewProposalInput): ProposalEnvelope {
-    const reviewed = this.store.review(input);
-    if (reviewed.status === "approved"
-      && reviewed.kind === "automation-draft"
-      && reviewed.artifactCandidate !== undefined
-      && this.onPreparationQueued !== undefined) {
-      const job = this.store.getPreparationJobForProposal(reviewed.id, reviewed.revision);
-      if (job !== undefined) {
-        try {
-          this.onPreparationQueued(job);
-        } catch {
-          // The durable approval and job are already committed; wake is best-effort.
-        }
+    return this.store.review(input);
+  }
+
+  /** Preparation is admitted with the proposal, so the runner wakes before any decision. */
+  private wakePreparation(proposal: ProposalEnvelope): ProposalEnvelope {
+    if (proposal.kind !== "automation-draft"
+      || proposal.artifactCandidate === undefined
+      || this.onPreparationQueued === undefined) {
+      return proposal;
+    }
+    const job = this.store.getPreparationJobForProposal(proposal.id, proposal.revision);
+    if (job !== undefined) {
+      try {
+        this.onPreparationQueued(job);
+      } catch {
+        // The durable proposal and job are already committed; wake is best-effort.
       }
     }
-    return reviewed;
+    return proposal;
   }
 
   preparationForProposal(

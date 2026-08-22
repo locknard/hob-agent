@@ -78,9 +78,9 @@ function assessProposal(
   addUnavailable: (reason: ClosedReasonCode) => void,
   addRejected: (reason: ClosedReasonCode) => void,
 ): void {
-  if (input.proposal.status === "pending_review") {
-    addUnavailable("not_ready");
-  } else if (input.proposal.status === "rejected" || input.proposal.status === "expired") {
+  // Preparation compiles the plan before the household decides; a closed
+  // proposal is the only state that blocks it.
+  if (input.proposal.status === "rejected" || input.proposal.status === "expired") {
     addRejected("policy_blocked");
   }
 }

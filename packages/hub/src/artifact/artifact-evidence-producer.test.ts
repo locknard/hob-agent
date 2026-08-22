@@ -69,7 +69,7 @@ function source(candidateContent: ArtifactContent = content): HubVerifiedProposa
     proposalId: "proposal-evidence-1",
     revision: 4,
     kind: "automation-draft",
-    status: "approved",
+    status: "pending_review",
     applicationStatus: "not_available",
     title: "Evidence fixture",
     summary: "A bounded evidence fixture.",

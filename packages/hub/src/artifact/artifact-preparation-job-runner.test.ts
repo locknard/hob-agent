@@ -108,14 +108,7 @@ function approvedJob(idempotencyKey: string): {
       },
     },
   });
-  const approved = store.review({
-    proposalId: pending.id,
-    expectedRevision: pending.revision,
-    decision: "approved",
-    reviewer: "household-owner",
-    feedbackCode: "useful_as_is",
-  });
-  const job = store.listPreparationJobs().find((candidate) => candidate.proposalId === approved.id);
+  const job = store.listPreparationJobs().find((candidate) => candidate.proposalId === pending.id);
   assert.ok(job);
   return { store, job };
 }

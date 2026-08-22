@@ -200,21 +200,45 @@ const admittedProposalInputSchema = createProposalInputSchema.superRefine((propo
 
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
 export type ProposalStatus = "pending_review" | "approved" | "rejected" | "expired";
+export type ProposalApplicationStatus = "not_available" | "deploying" | "running" | "failed" | "withdrawn";
 export type ProposalDecision = Exclude<ProposalStatus, "pending_review">;
 export type ProposalSnoozeTarget = "tomorrow" | "weekend" | "next_week";
 export type ProposalGovernanceDecision = "approve" | "reject_once" | "do_not_suggest";
-/** Governance progress is separate from application status and never grants execution authority. */
-export type ProposalRolloutState = "direction_pending" | "trial_active" | "enable_pending" | "enabled";
-export interface ProposalTrial {
-  readonly durationDays: 7;
-  readonly startedAt: string;
-  readonly endsAt: string;
+/**
+ * One household decision moves a prepared plan into a running automation.
+ * Preparation carries no side effect and stays out of the household inbox.
+ */
+export type ProposalLifecycle =
+  | "preparing"
+  | "needs_info"
+  | "ready"
+  | "enabling"
+  | "active"
+  | "paused"
+  | "closed"
+  | "enable_failed";
+
+/** Only a verified deployment reports a running automation. */
+export interface ProposalDeployment {
+  readonly status: "pending" | "verified" | "failed" | "rolled_back";
+  readonly requestedAt: string;
+  readonly deploymentId?: string;
+  readonly target?: string;
+  readonly verifiedAt?: string;
+  readonly failedAt?: string;
+  readonly restoredAt?: string;
+  /** Household-readable reason. Bridge-native payloads never reach this field. */
+  readonly reason?: string;
 }
+
 export interface ProposalEnablement {
   readonly enabledAt: string;
   readonly reviewer: string;
   readonly note?: string;
 }
+
+/** The household inbox holds prepared plans; preparation holds its own small budget. */
+export const MAX_PREPARING_PROPOSALS = 3;
 export const MAX_PROPOSAL_SNOOZES = 2;
 export const MAX_PROPOSAL_CAPACITY = 5;
 export const PROPOSAL_EXPIRY_MS = 14 * 24 * 60 * 60 * 1_000;
@@ -276,8 +300,14 @@ export interface ProposalAuditEvent {
     | "evidence_merged"
     | "snoozed"
     | "snooze_elapsed"
-    | "trial_completed"
-    | "enabled";
+    | "prepared"
+    | "info_requested"
+    | "changes_requested"
+    | "deployment_verified"
+    | "deployment_failed"
+    | "paused"
+    | "resumed"
+    | "closed";
   readonly actor: string;
   readonly revision: number;
   readonly feedbackCode?: ProposalReviewFeedbackCode;
@@ -304,8 +334,8 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly id: string;
   readonly revision: number;
   readonly status: ProposalStatus;
-  /** M3a deliberately has no route from approval to application. */
-  readonly applicationStatus: "not_available";
+  /** Derived from the deployment record; `running` requires a verified deployment. */
+  readonly applicationStatus: ProposalApplicationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
   /** Stable behavior identity. `idempotencyKey` remains the producer-attempt key. */
@@ -315,9 +345,11 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly snoozeCount: number;
   readonly snoozedUntil?: string;
   readonly newEvidence: boolean;
-  readonly rolloutState: ProposalRolloutState;
-  readonly trial?: ProposalTrial;
+  readonly lifecycle: ProposalLifecycle;
+  readonly deployment?: ProposalDeployment;
   readonly enablement?: ProposalEnablement;
+  /** Present while preparation waits for one household answer. */
+  readonly openQuestion?: string;
   readonly decision?: ProposalGovernanceDecisionRecord;
   readonly review?: ProposalReview;
   readonly audit: readonly ProposalAuditEvent[];
@@ -328,7 +360,8 @@ const proposalAuditEventSchema = z.object({
   at: isoTimestamp,
   action: z.enum([
     "created", "approved", "rejected", "expired", "evidence_merged", "snoozed", "snooze_elapsed",
-    "trial_completed", "enabled",
+    "prepared", "info_requested", "changes_requested",
+    "deployment_verified", "deployment_failed", "paused", "resumed", "closed",
   ]),
   actor: boundedId,
   revision: z.number().int().positive(),
@@ -356,7 +389,7 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   id: boundedId,
   revision: z.number().int().positive(),
   status: z.enum(["pending_review", "approved", "rejected", "expired"]),
-  applicationStatus: z.literal("not_available"),
+  applicationStatus: z.enum(["not_available", "deploying", "running", "failed", "withdrawn"]),
   createdAt: isoTimestamp,
   updatedAt: isoTimestamp,
   dedupKey: boundedId.optional(),
@@ -364,12 +397,20 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   snoozeCount: z.number().int().nonnegative().max(MAX_PROPOSAL_SNOOZES).optional(),
   snoozedUntil: isoTimestamp.optional(),
   newEvidence: z.boolean().optional(),
-  rolloutState: z.enum(["direction_pending", "trial_active", "enable_pending", "enabled"]).optional(),
-  trial: z.object({
-    durationDays: z.literal(7),
-    startedAt: isoTimestamp,
-    endsAt: isoTimestamp,
+  lifecycle: z.enum([
+    "preparing", "needs_info", "ready", "enabling", "active", "paused", "closed", "enable_failed",
+  ]).optional(),
+  deployment: z.object({
+    status: z.enum(["pending", "verified", "failed", "rolled_back"]),
+    requestedAt: isoTimestamp,
+    deploymentId: boundedId.optional(),
+    target: boundedId.optional(),
+    verifiedAt: isoTimestamp.optional(),
+    failedAt: isoTimestamp.optional(),
+    restoredAt: isoTimestamp.optional(),
+    reason: z.string().trim().min(1).max(1_000).optional(),
   }).strict().optional(),
+  openQuestion: z.string().trim().min(1).max(1_000).optional(),
   enablement: z.object({
     enabledAt: isoTimestamp,
     reviewer: boundedId,
@@ -444,17 +485,30 @@ export interface ProposalClearDedupLatchInput {
   readonly note?: string;
 }
 
-export interface ProposalTrialAdvanceInput {
+export interface ProposalLifecycleInput {
   readonly proposalId: string;
   readonly expectedRevision?: number;
-  readonly reviewer?: string;
+  readonly actor?: string;
+  readonly note?: string;
 }
 
-export interface ProposalEnableInput {
-  readonly proposalId: string;
-  readonly expectedRevision?: number;
-  readonly reviewer: string;
-  readonly note?: string;
+export interface ProposalInfoRequestInput extends ProposalLifecycleInput {
+  readonly question: string;
+}
+
+export interface ProposalDeploymentOutcome {
+  readonly status: "verified" | "failed";
+  readonly deploymentId?: string;
+  readonly target?: string;
+  readonly reason?: string;
+}
+
+export interface ProposalDeploymentRecordInput extends ProposalLifecycleInput {
+  readonly outcome: ProposalDeploymentOutcome;
+}
+
+export interface ProposalCloseInput extends ProposalLifecycleInput {
+  readonly restored: boolean;
 }
 
 export type ProposalCreationResult =
@@ -475,7 +529,7 @@ export type ProposalStoreErrorCode =
   | "dedup_latch_not_found"
   | "snooze_limit_reached"
   | "snooze_target_invalid"
-  | "trial_not_complete"
+  | "lifecycle_invalid"
   | "rollout_state_invalid"
   | "job_transition_conflict"
   | "source_unavailable"
@@ -541,7 +595,6 @@ interface ArtifactPreparationJobMutation {
 }
 
 const MAX_ARTIFACT_PREPARATION_ATTEMPTS = 5;
-const MAX_PENDING_REVIEW_PROPOSALS = MAX_PROPOSAL_CAPACITY;
 const PROPOSAL_IDEMPOTENCY_ALIASES_TABLE = "proposal_idempotency_aliases";
 
 /** Durable local store for review-only proposal envelopes and their audit trail. */
@@ -702,14 +755,9 @@ export class SqliteProposalStore {
           mergedEvidenceCount: merged.mergedEvidenceCount,
         };
       }
-      const pendingRow = this.db.prepare(
-        "SELECT COUNT(*) AS count FROM proposals WHERE status = 'pending_review'",
-      ).get() as { count?: unknown } | undefined;
-      const pendingCount = Number(pendingRow?.count);
-      if (!Number.isSafeInteger(pendingCount) || pendingCount < 0) {
-        throw new ProposalStoreError("corrupt_store", "Proposal review capacity is unavailable");
-      }
-      if (pendingCount >= MAX_PENDING_REVIEW_PROPOSALS) {
+      const inboxFull = this.readyCountInTransaction() >= MAX_PROPOSAL_CAPACITY;
+      if (inboxFull
+        && (!requiresPreparation(input) || this.preparingCountInTransaction() >= MAX_PREPARING_PROPOSALS)) {
         this.db.exec("COMMIT");
         return { kind: "capacity_full" };
       }
@@ -744,11 +792,13 @@ export class SqliteProposalStore {
       revision: 1,
       status: "pending_review",
       applicationStatus: "not_available",
+      // A plan with an artifact to compile prepares first; anything else is
+      // already as complete as it will get and can reach the household now.
+      lifecycle: requiresPreparation(input) ? "preparing" : "ready",
       createdAt: at,
       updatedAt: at,
       snoozeCount: 0,
       newEvidence: false,
-      rolloutState: "direction_pending",
       audit: [{
         id: `audit-${this.id()}`,
         at,
@@ -757,6 +807,7 @@ export class SqliteProposalStore {
         revision: 1,
       }],
     };
+    this.enqueuePreparationJob(proposal, at);
     this.db.prepare(`INSERT INTO proposals
       (proposal_id, producer, idempotency_key, status, revision, created_at, updated_at, payload_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
@@ -807,13 +858,11 @@ export class SqliteProposalStore {
       || Date.parse(proposal.snoozedUntil) <= Date.parse(proposal.updatedAt));
   }
 
+  /** Capacity limits household attention, so it counts prepared plans only. */
   proposalCapacity(): { readonly used: number; readonly max: 5; readonly available: number } {
     this.expireDue();
-    const row = this.db.prepare(
-      "SELECT COUNT(*) AS count FROM proposals WHERE status = 'pending_review'",
-    ).get() as { count?: unknown } | undefined;
-    const used = Number(row?.count);
-    if (!Number.isSafeInteger(used) || used < 0 || used > MAX_PROPOSAL_CAPACITY) {
+    const used = this.readyCountInTransaction();
+    if (used > MAX_PROPOSAL_CAPACITY) {
       throw new ProposalStoreError("corrupt_store", "Proposal review capacity is corrupt");
     }
     return { used, max: MAX_PROPOSAL_CAPACITY, available: MAX_PROPOSAL_CAPACITY - used };
@@ -862,102 +911,206 @@ export class SqliteProposalStore {
     }
   }
 
-  advanceProposalTrial(input: ProposalTrialAdvanceInput): ProposalEnvelope {
-    validateTrialAdvanceInput(input);
+  /** Preparation carries no side effect; only a prepared plan may spend household attention. */
+  markProposalReady(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.transition(input, "ready transition", (current, at, revision) => {
+      // A prepared plan is already ready; repeating the signal changes nothing,
+      // so a retried preparation run stays safe.
+      if (current.lifecycle === "ready") return current;
+      if (current.lifecycle !== "preparing" && current.lifecycle !== "needs_info") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a preparing proposal can become ready");
+      }
+      if (this.readyCountInTransaction() >= MAX_PROPOSAL_CAPACITY) {
+        throw new ProposalStoreError("capacity_full", "Household review capacity is full");
+      }
+      const { openQuestion: _open, ...base } = current;
+      return {
+        ...base,
+        revision,
+        lifecycle: "ready",
+        updatedAt: at,
+        audit: [...current.audit, this.auditEvent(at, "prepared", input.actor ?? "system", revision)],
+      };
+    });
+  }
+
+  /** Preparation may need one household answer; the question stays out of the inbox. */
+  requestProposalInfo(input: ProposalInfoRequestInput): ProposalEnvelope {
+    const question = input.question?.trim();
+    if (typeof question !== "string" || question.length === 0 || question.length > 1_000) {
+      throw new TypeError("proposal information question is invalid");
+    }
+    return this.transition(input, "information request", (current, at, revision) => {
+      if (current.lifecycle !== "preparing") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a preparing proposal can ask for information");
+      }
+      return {
+        ...current,
+        revision,
+        lifecycle: "needs_info",
+        openQuestion: question,
+        updatedAt: at,
+        audit: [...current.audit, this.auditEvent(at, "info_requested", input.actor ?? "system", revision)],
+      };
+    });
+  }
+
+  /** A change request returns the plan to preparation without spending the one decision. */
+  requestProposalChanges(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.transition(input, "change request", (current, at, revision) => {
+      if (current.lifecycle !== "ready") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a prepared plan can receive changes");
+      }
+      const note = input.note?.trim();
+      return {
+        ...current,
+        revision,
+        lifecycle: "preparing",
+        updatedAt: at,
+        audit: [...current.audit, {
+          ...this.auditEvent(at, "changes_requested", input.actor ?? "household-owner", revision),
+          ...(note ? { note } : {}),
+        }],
+      };
+    });
+  }
+
+  /** Records the deployment result. A running automation requires a verified deployment. */
+  recordProposalDeployment(input: ProposalDeploymentRecordInput): ProposalEnvelope {
+    const outcome = input.outcome;
+    if (!outcome || (outcome.status !== "verified" && outcome.status !== "failed")) {
+      throw new TypeError("proposal deployment outcome is invalid");
+    }
+    return this.transition(input, "deployment record", (current, at, revision) => {
+      if (current.lifecycle !== "enabling") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only an enabling proposal records a deployment");
+      }
+      const requestedAt = current.deployment?.requestedAt ?? at;
+      const reason = outcome.reason?.trim();
+      const verified = outcome.status === "verified";
+      return {
+        ...current,
+        revision,
+        lifecycle: verified ? "active" : "enable_failed",
+        applicationStatus: verified ? "running" : "failed",
+        updatedAt: at,
+        deployment: {
+          status: verified ? "verified" : "failed",
+          requestedAt,
+          ...(outcome.deploymentId ? { deploymentId: outcome.deploymentId } : {}),
+          ...(outcome.target ? { target: outcome.target } : {}),
+          ...(verified ? { verifiedAt: at } : { failedAt: at }),
+          ...(reason ? { reason } : {}),
+        },
+        audit: [...current.audit, {
+          ...this.auditEvent(at, verified ? "deployment_verified" : "deployment_failed", input.actor ?? "system", revision),
+          ...(reason ? { note: reason } : {}),
+        }],
+      };
+    });
+  }
+
+  pauseAutomation(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.transition(input, "pause", (current, at, revision) => {
+      if (current.lifecycle !== "active") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a running automation can pause");
+      }
+      return {
+        ...current,
+        revision,
+        lifecycle: "paused",
+        updatedAt: at,
+        audit: [...current.audit, this.auditEvent(at, "paused", input.actor ?? "household-owner", revision)],
+      };
+    });
+  }
+
+  resumeAutomation(input: ProposalLifecycleInput): ProposalEnvelope {
+    return this.transition(input, "resume", (current, at, revision) => {
+      if (current.lifecycle !== "paused") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a paused automation can resume");
+      }
+      return {
+        ...current,
+        revision,
+        lifecycle: "active",
+        updatedAt: at,
+        audit: [...current.audit, this.auditEvent(at, "resumed", input.actor ?? "household-owner", revision)],
+      };
+    });
+  }
+
+  /** Closing withdraws the automation and records whether the original configuration returned. */
+  closeAutomation(input: ProposalCloseInput): ProposalEnvelope {
+    if (typeof input?.restored !== "boolean") throw new TypeError("proposal close restored flag is invalid");
+    return this.transition(input, "close", (current, at, revision) => {
+      if (current.lifecycle !== "active" && current.lifecycle !== "paused" && current.lifecycle !== "enable_failed") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a deployed automation can close");
+      }
+      return {
+        ...current,
+        revision,
+        lifecycle: "closed",
+        applicationStatus: "withdrawn",
+        updatedAt: at,
+        ...(current.deployment === undefined ? {} : {
+          deployment: {
+            ...current.deployment,
+            status: "rolled_back",
+            ...(input.restored ? { restoredAt: at } : {}),
+          },
+        }),
+        audit: [...current.audit, this.auditEvent(at, "closed", input.actor ?? "household-owner", revision)],
+      };
+    });
+  }
+
+  private auditEvent(at: string, action: ProposalAuditEvent["action"], actor: string, revision: number): ProposalAuditEvent {
+    return { id: `audit-${this.id()}`, at, action, actor, revision };
+  }
+
+  private preparingCountInTransaction(): number {
+    return this.countPendingByLifecycle((value) => value === "preparing" || value === "needs_info");
+  }
+
+  private readyCountInTransaction(): number {
+    return this.countPendingByLifecycle((value) => value === "ready");
+  }
+
+  private countPendingByLifecycle(match: (lifecycle: unknown) => boolean): number {
+    const rows = this.db.prepare(
+      "SELECT payload_json FROM proposals WHERE status = 'pending_review'",
+    ).all() as Array<{ payload_json?: unknown }>;
+    let matched = 0;
+    for (const row of rows) {
+      if (typeof row.payload_json !== "string") continue;
+      try {
+        if (match((JSON.parse(row.payload_json) as { lifecycle?: unknown }).lifecycle)) matched += 1;
+      } catch {
+        throw new ProposalStoreError("corrupt_store", "Proposal review capacity is unavailable");
+      }
+    }
+    return matched;
+  }
+
+  private transition(
+    input: ProposalLifecycleInput,
+    label: string,
+    apply: (current: ProposalEnvelope, at: string, revision: number) => ProposalEnvelope,
+  ): ProposalEnvelope {
+    validateLifecycleInput(input, label);
     const at = this.timestamp();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.findById(input.proposalId);
       if (current === undefined) throw new ProposalStoreError("not_found", "Proposal was not found");
-      if (current.rolloutState !== "trial_active" || current.trial === undefined) {
-        throw new ProposalStoreError("rollout_state_invalid", "The proposal is not in an active trial");
-      }
       if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
         throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
       }
-      if (Date.parse(current.trial.endsAt) > Date.parse(at)) {
-        throw new ProposalStoreError("trial_not_complete", "The seven-day trial is still running");
-      }
-      const revision = current.revision + 1;
-      const completed: ProposalEnvelope = {
-        ...current,
-        revision,
-        rolloutState: "enable_pending",
-        updatedAt: at,
-        audit: [...current.audit, {
-          id: `audit-${this.id()}`,
-          at,
-          action: "trial_completed",
-          actor: input.reviewer ?? "system",
-          revision,
-        }],
-      };
-      this.updateProposal(completed, current.revision);
+      const next = apply(current, at, current.revision + 1);
+      this.updateProposal(next, current.revision);
       this.db.exec("COMMIT");
-      return clone(completed);
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    } finally {
-      this.ensurePrivateFiles();
-    }
-  }
-
-  enableProposal(input: ProposalEnableInput): ProposalEnvelope {
-    validateEnableInput(input);
-    const at = this.timestamp();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      let current = this.findById(input.proposalId);
-      if (current === undefined) throw new ProposalStoreError("not_found", "Proposal was not found");
-      if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
-        throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
-      }
-      if (current.rolloutState === "trial_active" && current.trial !== undefined
-        && Date.parse(current.trial.endsAt) <= Date.parse(at)) {
-        const revision = current.revision + 1;
-        current = {
-          ...current,
-          revision,
-          rolloutState: "enable_pending",
-          updatedAt: at,
-          audit: [...current.audit, {
-            id: `audit-${this.id()}`,
-            at,
-            action: "trial_completed",
-            actor: "system",
-            revision,
-          }],
-        };
-        this.updateProposal(current, revision - 1);
-      }
-      if (current.rolloutState !== "enable_pending") {
-        throw new ProposalStoreError("trial_not_complete", "The seven-day trial must complete before enablement");
-      }
-      const revision = current.revision + 1;
-      const note = input.note?.trim();
-      const enabled: ProposalEnvelope = {
-        ...current,
-        revision,
-        rolloutState: "enabled",
-        updatedAt: at,
-        enablement: {
-          enabledAt: at,
-          reviewer: input.reviewer,
-          ...(note ? { note } : {}),
-        },
-        audit: [...current.audit, {
-          id: `audit-${this.id()}`,
-          at,
-          action: "enabled",
-          actor: input.reviewer,
-          revision,
-          ...(note ? { note } : {}),
-        }],
-      };
-      this.updateProposal(enabled, current.revision);
-      this.db.exec("COMMIT");
-      return clone(enabled);
+      return clone(next);
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -1029,6 +1182,9 @@ export class SqliteProposalStore {
       if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
         throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
       }
+      if (current.lifecycle !== "ready") {
+        throw new ProposalStoreError("lifecycle_invalid", "The household decides on a prepared plan");
+      }
       const reviewer = (input.reviewer ?? input.reviewerId ?? "household-owner").trim();
       const feedbackCode = input.decision === "approve"
         ? "useful_as_is" as const
@@ -1046,7 +1202,11 @@ export class SqliteProposalStore {
         updatedAt: at,
         newEvidence: false,
         ...(status === "approved"
-          ? { rolloutState: "trial_active" as const, trial: createProposalTrial(at) }
+          ? {
+              lifecycle: "enabling" as const,
+              applicationStatus: "deploying" as const,
+              deployment: { status: "pending" as const, requestedAt: at },
+            }
           : {}),
         decision: {
           kind: input.decision,
@@ -1099,7 +1259,7 @@ export class SqliteProposalStore {
       if (decided.status === "approved"
         && decided.kind === "automation-draft"
         && decided.artifactCandidate !== undefined) {
-        this.enqueuePreparationJob(decided, at);
+
       }
       this.db.exec("COMMIT");
       return clone(decided);
@@ -1165,14 +1325,12 @@ export class SqliteProposalStore {
         throw new ProposalStoreError("revision_conflict", "Proposal source revision is not current");
       }
       if (proposal.kind !== "automation-draft"
-        || proposal.status !== "approved"
+        || proposal.status !== "pending_review"
         || proposal.applicationStatus !== "not_available"
-        || proposal.review?.decision !== "approved"
-        || proposal.review.feedbackCode !== "useful_as_is"
+        || !PREPARABLE_LIFECYCLES.includes(proposal.lifecycle)
         || proposal.artifactCandidate === undefined) {
-        throw new ProposalStoreError("source_unavailable", "Proposal is not an approved automation source");
+        throw new ProposalStoreError("source_unavailable", "Proposal is not a preparable automation source");
       }
-      validateApprovedAuditChain(proposal);
       const source = freezeSource({
         proposalId: proposal.id,
         revision: proposal.revision,
@@ -1344,6 +1502,9 @@ export class SqliteProposalStore {
       if (current.status !== "pending_review") {
         throw new ProposalStoreError("terminal_status", "A terminal review decision cannot be changed");
       }
+      if (current.lifecycle !== "ready") {
+        throw new ProposalStoreError("lifecycle_invalid", "The household decides on a prepared plan");
+      }
       const revision = current.revision + 1;
       const note = input.note?.trim();
       const feedbackCode = input.decision === "expired" ? undefined : input.feedbackCode;
@@ -1360,7 +1521,11 @@ export class SqliteProposalStore {
         updatedAt: at,
         newEvidence: false,
         ...(input.decision === "approved"
-          ? { rolloutState: "trial_active" as const, trial: createProposalTrial(at) }
+          ? {
+              lifecycle: "enabling" as const,
+              applicationStatus: "deploying" as const,
+              deployment: { status: "pending" as const, requestedAt: at },
+            }
           : {}),
         ...(governanceDecision === undefined ? {} : { decision: governanceDecision }),
         review: {
@@ -1384,7 +1549,7 @@ export class SqliteProposalStore {
       if (reviewed.status === "approved"
         && reviewed.kind === "automation-draft"
         && reviewed.artifactCandidate !== undefined) {
-        this.enqueuePreparationJob(reviewed, at);
+
       }
       this.db.exec("COMMIT");
       return clone(reviewed);
@@ -1530,7 +1695,9 @@ export class SqliteProposalStore {
     }
   }
 
+  /** Preparation begins at admission; it has no side effect and no household cost. */
   private enqueuePreparationJob(proposal: ProposalEnvelope, at: string): void {
+    if (proposal.kind !== "automation-draft" || proposal.artifactCandidate === undefined) return;
     const material = `approved-proposal-preparation-v1\n${proposal.id.length}:${proposal.id}\n${proposal.revision}`;
     const digest = createHash("sha256").update(material).digest("hex");
     this.db.prepare(`INSERT INTO approved_proposal_preparation_jobs
@@ -1907,6 +2074,20 @@ function fromDedupLatchRow(row: ProposalDedupLatchRow): ProposalDedupLatch {
   };
 }
 
+function requiresPreparation(input: Pick<CreateProposalInput, "kind" | "artifactCandidate">): boolean {
+  return input.kind === "automation-draft" && input.artifactCandidate !== undefined;
+}
+
+const PREPARABLE_LIFECYCLES: readonly ProposalLifecycle[] = ["preparing", "needs_info", "ready"];
+const PENDING_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
+  "created", "evidence_merged", "snoozed", "snooze_elapsed",
+  "prepared", "info_requested", "changes_requested",
+];
+const APPROVED_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
+  "approved", "deployment_verified", "deployment_failed", "paused", "resumed", "closed",
+];
+const DEPLOYED_LIFECYCLES: readonly ProposalLifecycle[] = ["enabling", "active", "paused", "enable_failed", "closed"];
+
 function fromDedupLatchAuditRow(row: Record<string, unknown>): ProposalDedupLatchAuditEvent {
   if (typeof row.event_id !== "string"
     || typeof row.dedup_key !== "string"
@@ -1982,26 +2163,16 @@ function validateClearDedupLatchInput(input: ProposalClearDedupLatchInput): void
   }
 }
 
-function validateTrialAdvanceInput(input: ProposalTrialAdvanceInput): void {
-  if (!input || typeof input !== "object") throw new TypeError("proposal trial advance is required");
-  validateBoundedKey(input.proposalId, "proposal trial id");
+function validateLifecycleInput(input: ProposalLifecycleInput, label: string): void {
+  if (!input || typeof input !== "object") throw new TypeError(`proposal ${label} is required`);
+  validateBoundedKey(input.proposalId, `proposal ${label} id`);
   if (input.expectedRevision !== undefined
     && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) {
-    throw new TypeError("proposal trial expectedRevision is invalid");
+    throw new TypeError(`proposal ${label} expectedRevision is invalid`);
   }
-  if (input.reviewer !== undefined) validateBoundedKey(input.reviewer, "proposal trial reviewer");
-}
-
-function validateEnableInput(input: ProposalEnableInput): void {
-  if (!input || typeof input !== "object") throw new TypeError("proposal enablement is required");
-  validateBoundedKey(input.proposalId, "proposal enablement id");
-  validateBoundedKey(input.reviewer, "proposal enablement reviewer");
-  if (input.expectedRevision !== undefined
-    && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) {
-    throw new TypeError("proposal enablement expectedRevision is invalid");
-  }
+  if (input.actor !== undefined) validateBoundedKey(input.actor, `proposal ${label} actor`);
   if (input.note !== undefined && (typeof input.note !== "string" || input.note.trim().length === 0 || input.note.length > 1_000)) {
-    throw new TypeError("proposal enablement note is invalid");
+    throw new TypeError(`proposal ${label} note is invalid`);
   }
 }
 
@@ -2019,12 +2190,6 @@ function calculateProposalSnoozeAt(at: string, target: ProposalSnoozeTarget): st
   date.setUTCHours(9, 0, 0, 0);
   if (Date.parse(date.toISOString()) <= Date.parse(at)) date.setUTCDate(date.getUTCDate() + 7);
   return date.toISOString();
-}
-
-function createProposalTrial(startedAt: string): ProposalTrial {
-  const endsAt = new Date(Date.parse(startedAt));
-  endsAt.setUTCDate(endsAt.getUTCDate() + 7);
-  return { durationDays: 7, startedAt, endsAt: endsAt.toISOString() };
 }
 
 function validateReviewInput(input: ReviewProposalInput): void {
@@ -2182,35 +2347,6 @@ function validateProposalSourceQuery(
   }
 }
 
-function validateApprovedAuditChain(proposal: ProposalEnvelope): void {
-  const created = proposal.audit[0];
-  const approved = proposal.audit[1];
-  const review = proposal.review;
-  const createdValid = proposal.revision === 2
-    && proposal.audit.length === 2
-    && created !== undefined
-    && created.action === "created"
-    && created.revision === 1
-    && created.actor === proposal.provenance.producer
-    && created.at === proposal.createdAt
-    && created.feedbackCode === undefined
-    && created.note === undefined;
-  const approvedValid = approved !== undefined
-    && review !== undefined
-    && review.decision === "approved"
-    && approved.action === "approved"
-    && approved.revision === proposal.revision
-    && approved.actor === review.reviewer
-    && approved.at === review.reviewedAt
-    && approved.at === proposal.updatedAt
-    && approved.feedbackCode === review.feedbackCode
-    && approved.note === review.note
-    && created?.id !== approved.id
-    && Date.parse(proposal.createdAt) <= Date.parse(proposal.updatedAt);
-  if (!createdValid || !approvedValid) {
-    throw new ProposalStoreError("corrupt_store", "Approved proposal audit chain is invalid");
-  }
-}
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") return false;
@@ -2225,23 +2361,15 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
     const raw = parsed.data;
     const dedupKey = raw.dedupKey ?? raw.idempotencyKey;
     const expiresAt = raw.expiresAt ?? new Date(Date.parse(raw.createdAt) + PROPOSAL_EXPIRY_MS).toISOString();
-    const legacyApprovedState = raw.status === "approved"
-      && raw.trial === undefined
-      && (raw.rolloutState === undefined || raw.rolloutState === "direction_pending");
-    const rolloutState = legacyApprovedState
-      ? "trial_active" as const
-      : raw.rolloutState
-        ?? (raw.status === "approved" ? "trial_active" as const : "direction_pending" as const);
-    const trial = raw.trial
-      ?? (raw.status === "approved" ? createProposalTrial(raw.updatedAt) : undefined);
+    const lifecycle = raw.lifecycle
+      ?? (raw.status === "approved" ? "enabling" as const : "preparing" as const);
     const proposal: ProposalEnvelope = {
       ...raw,
       dedupKey,
       expiresAt,
       snoozeCount: raw.snoozeCount ?? 0,
       newEvidence: raw.newEvidence ?? false,
-      rolloutState,
-      ...(trial === undefined ? {} : { trial }),
+      lifecycle,
     };
     if (row.proposal_id !== proposal.id
       || row.producer !== proposal.provenance.producer
@@ -2258,13 +2386,10 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
       && (proposal.status === "pending_review"
         ? proposal.review === undefined
           && proposal.decision === undefined
-          && (lastAudit.action === "created"
-            || lastAudit.action === "evidence_merged"
-            || lastAudit.action === "snoozed"
-            || lastAudit.action === "snooze_elapsed")
+          && PENDING_TAIL_AUDIT_ACTIONS.includes(lastAudit.action)
         : proposal.review?.decision === proposal.status
           && (proposal.status === "approved"
-            ? (lastAudit.action === "approved" || lastAudit.action === "trial_completed" || lastAudit.action === "enabled")
+            ? APPROVED_TAIL_AUDIT_ACTIONS.includes(lastAudit.action)
             : lastAudit.action === proposal.status)
           && persistedFeedbackIsConsistent(proposal.status, proposal.review.feedbackCode, decisionAudit?.feedbackCode)
           && governanceDecisionIsConsistent(proposal));
@@ -2277,20 +2402,14 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
         && (proposal.status !== "pending_review" || Date.parse(proposal.snoozedUntil) <= Date.parse(proposal.updatedAt)))) {
       throw new Error("invalid governance metadata");
     }
-    if (proposal.rolloutState === "direction_pending" && proposal.status === "approved") {
-      throw new Error("approved proposal has no trial state");
+    if (DEPLOYED_LIFECYCLES.includes(proposal.lifecycle) && proposal.status !== "approved") {
+      throw new Error("a deployed automation requires an approved decision");
     }
-    if ((proposal.rolloutState === "trial_active" || proposal.rolloutState === "enable_pending" || proposal.rolloutState === "enabled")
-      && (proposal.status !== "approved" || proposal.trial === undefined
-        || Date.parse(proposal.trial.endsAt) <= Date.parse(proposal.trial.startedAt)
-        || proposal.trial.durationDays !== 7)) {
-      throw new Error("proposal trial state is invalid");
+    if (proposal.lifecycle === "active" && proposal.deployment?.status !== "verified") {
+      throw new Error("a running automation requires a verified deployment");
     }
-    if (proposal.rolloutState === "enabled" && proposal.enablement === undefined) {
-      throw new Error("enabled proposal has no enablement record");
-    }
-    if (proposal.rolloutState !== "enabled" && proposal.enablement !== undefined) {
-      throw new Error("proposal enablement record is premature");
+    if (proposal.applicationStatus === "running" && proposal.lifecycle !== "active" && proposal.lifecycle !== "paused") {
+      throw new Error("application status contradicts the lifecycle");
     }
     if (!lifecycleValid) throw new Error("invalid lifecycle");
     return proposal as ProposalEnvelope;

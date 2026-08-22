@@ -68,7 +68,7 @@ interface HomeProposalPort {
     id: string;
     revision: number;
     status: "pending_review";
-    applicationStatus: "not_available";
+    applicationStatus: string;
     conflictCheck: { existingAutomationCount: number; matches: readonly unknown[] };
     spaceCoverage: {
       selectedDevices: number;
@@ -95,7 +95,7 @@ const OUTPUT_SCHEMA = {
     proposalId: { type: "string", required: true },
     status: { type: "string", required: true, enum: ["pending_review"] },
     revision: { type: "number", required: true },
-    applicationStatus: { type: "string", required: true, enum: ["not_available"] },
+    applicationStatus: { type: "string", required: true, enum: ["not_available", "deploying", "running", "failed", "withdrawn"] },
     conflictSummary: {
       type: "object",
       required: true,

@@ -606,23 +606,24 @@ test("wakes the private durable runner after an approved automation job commits"
         },
       },
     });
+    const prepared = runtime.context.homeProposals.markProposalReady({ proposalId: pending.id });
     const approved = runtime.context.homeProposals.review({
-      proposalId: pending.id,
-      expectedRevision: pending.revision,
+      proposalId: prepared.id,
+      expectedRevision: prepared.revision,
       decision: "approved",
       reviewer: "household-owner",
       feedbackCode: "useful_as_is",
     });
 
     const observer = new SqliteProposalStore({ path: proposalPath });
-    let job = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    let job = observer.getPreparationJobForProposal(pending.id, pending.revision);
     for (let attempts = 0; job !== undefined && !["succeeded", "failed"].includes(job.status) && attempts < 50; attempts += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
-      job = observer.getPreparationJobForProposal(approved.id, approved.revision);
+      job = observer.getPreparationJobForProposal(pending.id, pending.revision);
     }
     assert.equal(job?.status, "failed");
     assert.equal(job?.error?.code, "unavailable");
-    const review = runtime.context.homeArtifacts.reviewForProposal(approved.id, approved.revision);
+    const review = runtime.context.homeArtifacts.reviewForProposal(pending.id, pending.revision);
     assert.equal(review?.compile.status, "not_run");
     assert.equal(review?.dryRun.status, "not_run");
     assert.equal(review?.writesPerformed, false);
@@ -695,18 +696,19 @@ test("retries one failed exact preparation through the full Inbox facade and wak
         },
       },
     });
+    const prepared = runtime.context.homeProposals.markProposalReady({ proposalId: pending.id });
     const approved = runtime.context.homeProposals.review({
-      proposalId: pending.id,
-      expectedRevision: pending.revision,
+      proposalId: prepared.id,
+      expectedRevision: prepared.revision,
       decision: "approved",
       reviewer: "household-owner",
       feedbackCode: "useful_as_is",
     });
 
-    let failed = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    let failed = observer.getPreparationJobForProposal(pending.id, pending.revision);
     for (let attempts = 0; failed !== undefined && failed.status !== "failed" && attempts < 50; attempts += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
-      failed = observer.getPreparationJobForProposal(approved.id, approved.revision);
+      failed = observer.getPreparationJobForProposal(pending.id, pending.revision);
     }
     assert.equal(failed?.status, "failed");
     assert.equal(failed?.attempt, 1);
@@ -736,29 +738,29 @@ test("retries one failed exact preparation through the full Inbox facade and wak
     }
 
     await assert.doesNotReject(() => inbox.retryPreparation({
-      proposalId: approved.id,
-      expectedRevision: approved.revision,
+      proposalId: pending.id,
+      expectedRevision: pending.revision,
       expectedVersion: failedVersion,
     }));
 
-    let retried = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    let retried = observer.getPreparationJobForProposal(pending.id, pending.revision);
     for (let attempts = 0; retried !== undefined && !(retried.status === "failed" && retried.attempt === 2) && attempts < 50; attempts += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
-      retried = observer.getPreparationJobForProposal(approved.id, approved.revision);
+      retried = observer.getPreparationJobForProposal(pending.id, pending.revision);
     }
-    assert.equal(retried?.proposalId, approved.id);
-    assert.equal(retried?.proposalRevision, approved.revision);
+    assert.equal(retried?.proposalId, pending.id);
+    assert.equal(retried?.proposalRevision, pending.revision);
     assert.equal(retried?.status, "failed");
     assert.equal(retried?.attempt, 2);
     assert.equal(retried?.error?.code, "unavailable");
     assert.ok(retried!.version > failedVersion);
 
     await assert.rejects(() => inbox.retryPreparation({
-      proposalId: approved.id,
-      expectedRevision: approved.revision,
+      proposalId: pending.id,
+      expectedRevision: pending.revision,
       expectedVersion: failedVersion,
     }), /conflict|version|transition/i);
-    assert.deepEqual(observer.getPreparationJobForProposal(approved.id, approved.revision), retried);
+    assert.deepEqual(observer.getPreparationJobForProposal(pending.id, pending.revision), retried);
   } finally {
     observer.close();
     await runtime.stop();

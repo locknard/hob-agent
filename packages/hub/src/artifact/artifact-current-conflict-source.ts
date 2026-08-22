@@ -435,7 +435,7 @@ function translateApprovedProposal(
     || source.proposalId !== artifact.sourceProposal.proposalId
     || source.revision !== artifact.sourceProposal.proposalRevision
     || source.kind !== "automation-draft"
-    || source.status !== "approved"
+    || source.status !== "pending_review"
     || source.applicationStatus !== "not_available"
     || !isPlainObject(source.artifactCandidate)
     || !hasExactKeys(source.artifactCandidate, ["schemaVersion", "content"])

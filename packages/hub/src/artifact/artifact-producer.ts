@@ -149,7 +149,7 @@ function assertApprovedSource(
     || source.proposalId !== request.proposalId
     || source.revision !== request.proposalRevision
     || source.kind !== "automation-draft"
-    || source.status !== "approved"
+    || source.status !== "pending_review"
     || source.applicationStatus !== "not_available"
     || source.artifactCandidate === undefined
     || source.artifactCandidate === null

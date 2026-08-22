@@ -110,7 +110,7 @@ test("persists a bounded pending proposal and append-only creation audit across 
 
 test("persists a strict review-only artifact candidate without treating it as an artifact", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
-  const proposal = store.create(input({ artifactCandidate }));
+  const proposal = store.markProposalReady({ proposalId: store.create(input({ artifactCandidate })).id });
   assert.deepEqual(proposal.artifactCandidate, artifactCandidate);
   assert.equal("artifactId" in proposal.artifactCandidate!, false);
   assert.equal("contentHash" in proposal.artifactCandidate!, false);
@@ -145,10 +145,13 @@ test("returns capacity_full without persisting or later admitting a sixth propos
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
   try {
-    const proposals = Array.from({ length: 5 }, (_, index) => store.create(input({
-      dedupKey: `capacity-behavior:${index}`,
-      idempotencyKey: `capacity-idempotency:${index}`,
-    })));
+    const proposals = Array.from({ length: 5 }, (_, index) => {
+      const created = store.create(input({
+        dedupKey: `capacity-behavior:${index}`,
+        idempotencyKey: `capacity-idempotency:${index}`,
+      }));
+      return store.markProposalReady({ proposalId: created.id });
+    });
     const snoozed = store.snoozeProposal({
       proposalId: proposals[0]!.id,
       expectedRevision: proposals[0]!.revision,
@@ -228,10 +231,12 @@ test("merges new evidence into an existing behavior identity while capacity is f
 test("keeps a dedup latch suppressing a proposal while review capacity is full", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {
-    const latched = store.create(input({
-      dedupKey: "latched-at-capacity",
-      idempotencyKey: "latched-at-capacity:v1",
-    }));
+    const latched = store.markProposalReady({
+      proposalId: store.create(input({
+        dedupKey: "latched-at-capacity",
+        idempotencyKey: "latched-at-capacity:v1",
+      })).id,
+    });
     const decision = store.decideProposal({
       proposalId: latched.id,
       expectedRevision: latched.revision,
@@ -265,10 +270,12 @@ test("does not admit a capacity rejection after a store restart", async () => {
   const path = join(directory, "proposals.sqlite");
   const firstStore = new SqliteProposalStore({ path, now: () => createdAt });
   try {
-    const full = Array.from({ length: 5 }, (_, index) => firstStore.create(input({
-      dedupKey: `restart-capacity:${index}`,
-      idempotencyKey: `restart-capacity:${index}`,
-    })));
+    const full = Array.from({ length: 5 }, (_, index) => firstStore.markProposalReady({
+      proposalId: firstStore.create(input({
+        dedupKey: `restart-capacity:${index}`,
+        idempotencyKey: `restart-capacity:${index}`,
+      })).id,
+    }));
     assert.deepEqual(firstStore.createGoverned(input({
       dedupKey: "restart-overflow",
       idempotencyKey: "restart-overflow:v1",
@@ -374,52 +381,126 @@ test("clears a do-not-suggest latch only through an explicit audited governance 
   }
 });
 
-test("requires a completed seven-day trial and a second explicit approval before enablement", () => {
-  let now = createdAt;
+test("prepares before the inbox and turns one decision into a verified automation", () => {
+  const now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
   try {
-    const proposal = store.create(input({ dedupKey: "two-thumbs", idempotencyKey: "two-thumbs-1" }));
-    const direction = store.review({
-      proposalId: proposal.id,
-      expectedRevision: proposal.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
-    });
-    assert.equal(direction.rolloutState, "trial_active");
-    assert.equal(direction.trial?.durationDays, 7);
-    assert.equal(direction.applicationStatus, "not_available");
-    assert.throws(() => store.enableProposal({
-      proposalId: direction.id,
-      expectedRevision: direction.revision,
-      reviewer: "household-owner",
-    }), /trial/i);
+    const proposal = store.create(input({ artifactCandidate, dedupKey: "one-decision", idempotencyKey: "one-decision-1" }));
+    assert.equal(proposal.lifecycle, "preparing");
+    assert.equal(proposal.applicationStatus, "not_available");
+    assert.equal(store.proposalCapacity().used, 0, "preparation must not spend household attention");
+    assert.equal(store.listPreparationJobs().length, 1, "preparation starts without a household decision");
 
-    now = direction.trial!.endsAt;
-    const ready = store.advanceProposalTrial({
-      proposalId: direction.id,
-      expectedRevision: direction.revision,
-    });
-    assert.equal(ready.rolloutState, "enable_pending");
-    const enabled = store.enableProposal({
+    assert.throws(() => store.decideProposal({
+      proposalId: proposal.id,
+      decision: "approve",
+      reviewer: "household-owner",
+    }), /prepared/i);
+
+    const ready = store.markProposalReady({ proposalId: proposal.id, expectedRevision: proposal.revision });
+    assert.equal(ready.lifecycle, "ready");
+    assert.equal(store.proposalCapacity().used, 1);
+
+    const enabling = store.decideProposal({
       proposalId: ready.id,
       expectedRevision: ready.revision,
+      decision: "approve",
       reviewer: "household-owner",
-      note: "The seven-day trial met the household criteria.",
     });
-    assert.equal(enabled.rolloutState, "enabled");
-    assert.equal(enabled.applicationStatus, "not_available");
-    assert.deepEqual(enabled.audit.map((event) => event.action), [
-      "created",
-      "approved",
-      "trial_completed",
-      "enabled",
+    assert.equal(enabling.lifecycle, "enabling");
+    assert.equal(enabling.status, "approved");
+    assert.equal(enabling.applicationStatus, "deploying");
+    assert.equal(enabling.deployment?.status, "pending");
+
+    const active = store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      outcome: { status: "verified", deploymentId: "ha-automation-41", target: "home-assistant" },
+    });
+    assert.equal(active.lifecycle, "active");
+    assert.equal(active.applicationStatus, "running");
+    assert.equal(active.deployment?.verifiedAt, now);
+    assert.equal(store.proposalCapacity().used, 0, "a running automation leaves the inbox");
+
+    const paused = store.pauseAutomation({ proposalId: active.id, actor: "household-owner" });
+    assert.equal(paused.lifecycle, "paused");
+    assert.equal(store.resumeAutomation({ proposalId: paused.id, actor: "household-owner" }).lifecycle, "active");
+
+    const closed = store.closeAutomation({ proposalId: active.id, actor: "household-owner", restored: true });
+    assert.equal(closed.lifecycle, "closed");
+    assert.equal(closed.applicationStatus, "withdrawn");
+    assert.equal(closed.deployment?.status, "rolled_back");
+    assert.deepEqual(closed.audit.map((event) => event.action), [
+      "created", "prepared", "approved", "deployment_verified", "paused", "resumed", "closed",
     ]);
   } finally {
     store.close();
   }
 });
 
+test("reports an explicit failure instead of a running automation when deployment fails", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const proposal = store.create(input({ artifactCandidate, dedupKey: "deploy-fails", idempotencyKey: "deploy-fails-1" }));
+    const ready = store.markProposalReady({ proposalId: proposal.id });
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+    });
+    const failed = store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      outcome: { status: "failed", reason: "这个家还没有可用的部署通道" },
+    });
+    assert.equal(failed.lifecycle, "enable_failed");
+    assert.equal(failed.applicationStatus, "failed");
+    assert.equal(failed.deployment?.reason, "这个家还没有可用的部署通道");
+    assert.equal(store.get(failed.id)?.lifecycle, "enable_failed");
+
+    const closed = store.closeAutomation({ proposalId: failed.id, actor: "household-owner", restored: true });
+    assert.equal(closed.lifecycle, "closed");
+  } finally {
+    store.close();
+  }
+});
+
+test("sends a change request back to preparation without spending the decision", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const proposal = store.create(input({ artifactCandidate, dedupKey: "modify-me", idempotencyKey: "modify-me-1" }));
+    const ready = store.markProposalReady({ proposalId: proposal.id });
+    const revised = store.requestProposalChanges({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      actor: "household-owner",
+      note: "周末不要动。",
+    });
+    assert.equal(revised.lifecycle, "preparing");
+    assert.equal(revised.status, "pending_review");
+    assert.equal(store.proposalCapacity().used, 0);
+    assert.equal(revised.audit.at(-1)?.action, "changes_requested");
+  } finally {
+    store.close();
+  }
+});
+
+test("holds a prepared proposal out of the inbox while household attention is full", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      const filler = store.create(input({ artifactCandidate, dedupKey: `filler-${index}`, idempotencyKey: `filler-${index}` }));
+      store.markProposalReady({ proposalId: filler.id });
+    }
+    assert.equal(store.proposalCapacity().used, 5);
+    const extra = store.create(input({ artifactCandidate, dedupKey: "waiting", idempotencyKey: "waiting-1" }));
+    assert.throws(() => store.markProposalReady({ proposalId: extra.id }), /capacity/i);
+    assert.equal(store.get(extra.id)?.lifecycle, "preparing");
+  } finally {
+    store.close();
+  }
+});
 test("merges new evidence for an unresolved behavior without creating a second proposal", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {
@@ -525,12 +606,12 @@ test("rejects an asynchronous retention evidence callback before committing", ()
 test("reviews with optimistic concurrency and never treats approval as application", () => {
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
-  const proposal = store.create(input({ artifactCandidate }));
+  const proposal = store.markProposalReady({ proposalId: store.create(input({ artifactCandidate })).id });
   now = "2026-08-19T01:05:00.000Z";
 
   const approved = store.review({
     proposalId: proposal.id,
-    expectedRevision: 1,
+    expectedRevision: proposal.revision,
     decision: "approved",
     reviewer: "household-owner",
     feedbackCode: "useful_as_is",
@@ -538,16 +619,16 @@ test("reviews with optimistic concurrency and never treats approval as applicati
   });
 
   assert.equal(approved.status, "approved");
-  assert.equal(approved.revision, 2);
-  assert.equal(approved.applicationStatus, "not_available");
+  assert.equal(approved.revision, 3);
+  assert.equal(approved.applicationStatus, "deploying");
   assert.equal(approved.review?.reviewer, "household-owner");
   assert.equal(approved.review?.feedbackCode, "useful_as_is");
   assert.equal(approved.audit.at(-1)?.feedbackCode, "useful_as_is");
-  assert.deepEqual(approved.audit.map((event) => event.action), ["created", "approved"]);
+  assert.deepEqual(approved.audit.map((event) => event.action), ["created", "prepared", "approved"]);
   assert.throws(
     () => store.review({
       proposalId: proposal.id,
-      expectedRevision: 1,
+      expectedRevision: proposal.revision,
       decision: "rejected",
       reviewer: "stale-reviewer",
       feedbackCode: "already_covered",
@@ -557,7 +638,7 @@ test("reviews with optimistic concurrency and never treats approval as applicati
   assert.throws(
     () => store.review({
       proposalId: proposal.id,
-      expectedRevision: 2,
+      expectedRevision: 3,
       decision: "rejected",
       reviewer: "second-reviewer",
       feedbackCode: "not_useful",
@@ -570,21 +651,14 @@ test("reviews with optimistic concurrency and never treats approval as applicati
 test("projects a deeply frozen Hub-verified source only for the current approved automation revision", () => {
   let now = createdAt;
   const store = new SqliteProposalStore({ path: ":memory:", now: () => now });
-  const proposal = store.create(input({ artifactCandidate }));
+  const approved = store.markProposalReady({ proposalId: store.create(input({ artifactCandidate })).id });
   now = "2026-08-19T01:05:00.000Z";
-  const approved = store.review({
-    proposalId: proposal.id,
-    expectedRevision: 1,
-    decision: "approved",
-    reviewer: "household-owner",
-    feedbackCode: "useful_as_is",
-  });
 
   const source = store.withApprovedProposalAtRevision(approved.id, approved.revision, (value) => {
     assert.equal(value.proposalId, approved.id);
     assert.equal(value.revision, 2);
     assert.equal(value.kind, "automation-draft");
-    assert.equal(value.status, "approved");
+    assert.equal(value.status, "pending_review");
     assert.equal(value.applicationStatus, "not_available");
     assert.equal(value.title, approved.title);
     assert.equal(value.summary, approved.summary);
@@ -610,9 +684,15 @@ test("projects a deeply frozen Hub-verified source only for the current approved
 
 test("fails closed for missing, non-current, pending, and non-approved source revisions", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
-  const pending = store.create(input({ idempotencyKey: "source-pending", artifactCandidate }));
+  const prepared = store.markProposalReady({ proposalId: store.create(input({ idempotencyKey: "source-pending", artifactCandidate })).id });
+  const decided = store.decideProposal({
+    proposalId: prepared.id,
+    expectedRevision: prepared.revision,
+    decision: "approve",
+    reviewer: "household-owner",
+  });
   assert.throws(
-    () => store.withApprovedProposalAtRevision(pending.id, pending.revision, () => undefined),
+    () => store.withApprovedProposalAtRevision(decided.id, decided.revision, () => undefined),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "source_unavailable",
   );
   assert.throws(
@@ -620,22 +700,15 @@ test("fails closed for missing, non-current, pending, and non-approved source re
     (error: unknown) => error instanceof ProposalStoreError && error.code === "not_found",
   );
 
-  const approved = store.review({
-    proposalId: pending.id,
-    expectedRevision: 1,
-    decision: "approved",
-    reviewer: "household-owner",
-    feedbackCode: "useful_as_is",
-  });
   assert.throws(
-    () => store.withApprovedProposalAtRevision(approved.id, 1, () => undefined),
+    () => store.withApprovedProposalAtRevision(prepared.id, 1, () => undefined),
     (error: unknown) => error instanceof ProposalStoreError && error.code === "revision_conflict",
   );
 
   const rejected = store.create(input({ idempotencyKey: "source-rejected" }));
   const rejectedRevision = store.review({
     proposalId: rejected.id,
-    expectedRevision: 1,
+    expectedRevision: rejected.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "not_useful",
@@ -647,7 +720,7 @@ test("fails closed for missing, non-current, pending, and non-approved source re
   const legacy = store.create(input({ idempotencyKey: "source-legacy-without-candidate" }));
   const legacyApproved = store.review({
     proposalId: legacy.id,
-    expectedRevision: 1,
+    expectedRevision: legacy.revision,
     decision: "approved",
     reviewer: "household-owner",
     feedbackCode: "useful_as_is",
@@ -666,7 +739,7 @@ test("cross-checks SQL proposal metadata and the complete approved audit chain",
   const proposal = store.create(input());
   const approved = store.review({
     proposalId: proposal.id,
-    expectedRevision: 1,
+    expectedRevision: proposal.revision,
     decision: "approved",
     reviewer: "household-owner",
     feedbackCode: "useful_as_is",
@@ -759,7 +832,7 @@ test("summarizes proposal quality without returning household content", () => {
   const approved = store.create(input({ idempotencyKey: "quality:approved" }));
   store.review({
     proposalId: approved.id,
-    expectedRevision: 1,
+    expectedRevision: approved.revision,
     decision: "approved",
     reviewer: "household-owner",
     feedbackCode: "useful_as_is",
@@ -767,7 +840,7 @@ test("summarizes proposal quality without returning household content", () => {
   const rejected = store.create(input({ idempotencyKey: "quality:rejected" }));
   store.review({
     proposalId: rejected.id,
-    expectedRevision: 1,
+    expectedRevision: rejected.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "incorrect_assumption",
@@ -801,7 +874,7 @@ test("projects recent structured calibration without reviewer identity or notes"
   now = "2026-08-19T01:01:00.000Z";
   store.review({
     proposalId: approved.id,
-    expectedRevision: 1,
+    expectedRevision: approved.revision,
     decision: "approved",
     reviewer: "private-reviewer",
     feedbackCode: "useful_as_is",
@@ -840,7 +913,7 @@ test("requires bounded decision-specific feedback for new household reviews", ()
   const wrongDecision = store.create(input({ idempotencyKey: "feedback:wrong-decision" }));
   assert.throws(() => store.review({
     proposalId: wrongDecision.id,
-    expectedRevision: 1,
+    expectedRevision: wrongDecision.revision,
     decision: "approved",
     reviewer: "household-owner",
     feedbackCode: "too_risky",
@@ -849,7 +922,7 @@ test("requires bounded decision-specific feedback for new household reviews", ()
   const unexplainedOther = store.create(input({ idempotencyKey: "feedback:other" }));
   assert.throws(() => store.review({
     proposalId: unexplainedOther.id,
-    expectedRevision: 1,
+    expectedRevision: unexplainedOther.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "other",
@@ -858,7 +931,7 @@ test("requires bounded decision-specific feedback for new household reviews", ()
   const rejected = store.create(input({ idempotencyKey: "feedback:preference" }));
   const reviewed = store.review({
     proposalId: rejected.id,
-    expectedRevision: 1,
+    expectedRevision: rejected.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "household_preference",
@@ -921,7 +994,7 @@ test("fails closed when persisted review feedback disagrees with its audit event
   const proposal = store.create(input());
   const approved = store.review({
     proposalId: proposal.id,
-    expectedRevision: 1,
+    expectedRevision: proposal.revision,
     decision: "approved",
     reviewer: "household-owner",
     feedbackCode: "useful_as_is",
@@ -1079,7 +1152,7 @@ function preparationJobs(store: SqliteProposalStore): PreparationJobStoreApi {
 }
 
 function approvedPreparationJob(store: SqliteProposalStore, idempotencyKey: string): PreparationJob {
-  const proposal = store.create(input({ idempotencyKey, artifactCandidate }));
+  const proposal = store.markProposalReady({ proposalId: store.create(input({ idempotencyKey, artifactCandidate })).id });
   const approved = store.review({
     proposalId: proposal.id,
     expectedRevision: proposal.revision,
@@ -1097,12 +1170,12 @@ function assertJobTransitionConflict(action: () => unknown): void {
   assert.throws(action, (error: unknown) => error instanceof ProposalStoreError);
 }
 
-test("approving one qualifying revision durably enqueues exactly one bounded job, while other reviews do not", async () => {
+test("admitting one qualifying proposal durably enqueues exactly one bounded preparation job", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-proposal-preparation-enqueue-"));
   const path = join(directory, "proposals.sqlite");
   const store = new SqliteProposalStore({ path, now: () => createdAt });
   try {
-    const proposal = store.create(input({ idempotencyKey: "preparation:approved", artifactCandidate }));
+    const proposal = store.markProposalReady({ proposalId: store.create(input({ idempotencyKey: "preparation:approved", artifactCandidate })).id });
     const approved = store.review({
       proposalId: proposal.id,
       expectedRevision: proposal.revision,
@@ -1118,7 +1191,7 @@ test("approving one qualifying revision durably enqueues exactly one bounded job
       kind: "approved-proposal-preparation",
       jobId: jobs[0]!.jobId,
       proposalId: approved.id,
-      proposalRevision: approved.revision,
+      proposalRevision: 1,
       idempotencyKey: jobs[0]!.idempotencyKey,
       status: "queued",
       attempt: 1,
@@ -1126,11 +1199,11 @@ test("approving one qualifying revision durably enqueues exactly one bounded job
       createdAt,
       updatedAt: createdAt,
     });
-    assert.equal(jobs[0]!.proposalRevision, 2);
+    assert.equal(jobs[0]!.proposalRevision, 1);
     assert.equal(JSON.stringify(jobs[0]).includes(proposal.title), false);
     assert.equal(JSON.stringify(jobs[0]).includes("restore_previous_state"), false);
 
-    const rejected = store.create(input({ idempotencyKey: "preparation:rejected", artifactCandidate }));
+    const rejected = store.markProposalReady({ proposalId: store.create(input({ idempotencyKey: "preparation:rejected", artifactCandidate })).id });
     store.review({
       proposalId: rejected.id,
       expectedRevision: rejected.revision,
@@ -1138,7 +1211,7 @@ test("approving one qualifying revision durably enqueues exactly one bounded job
       reviewer: "household-owner",
       feedbackCode: "not_useful",
     });
-    const expired = store.create(input({ idempotencyKey: "preparation:expired", artifactCandidate }));
+    const expired = store.markProposalReady({ proposalId: store.create(input({ idempotencyKey: "preparation:expired", artifactCandidate })).id });
     store.review({
       proposalId: expired.id,
       expectedRevision: expired.revision,
@@ -1153,12 +1226,12 @@ test("approving one qualifying revision durably enqueues exactly one bounded job
       reviewer: "household-owner",
       feedbackCode: "useful_as_is",
     });
-    assert.equal(preparationJobs(store).listPreparationJobs().length, 1);
+    assert.equal(preparationJobs(store).listPreparationJobs().length, 3, "each admitted automation draft prepares once; an insight never does");
 
     store.close();
     const reopened = new SqliteProposalStore({ path, now: () => createdAt });
     try {
-      assert.equal(preparationJobs(reopened).listPreparationJobs().length, 1);
+      assert.equal(preparationJobs(reopened).listPreparationJobs().length, 3);
       assert.equal(preparationJobs(reopened).listPreparationJobs()[0]?.status, "queued");
       assert.equal(reopened.get(approved.id)?.status, "approved");
     } finally {

@@ -55,7 +55,7 @@ function source(overrides: Partial<HubVerifiedProposalSource> = {}): HubVerified
     proposalId: "proposal-approved-1",
     revision: 2,
     kind: "automation-draft",
-    status: "approved",
+    status: "pending_review",
     applicationStatus: "not_available",
     title: "Morning comfort",
     summary: "Review a bounded morning comfort behavior.",
@@ -120,7 +120,7 @@ class StubArtifactRegistry implements ArtifactDraftRegistry {
   }
 }
 
-test("creates revision one from the exact approved candidate and excludes dynamic authority inputs", () => {
+test("creates revision one from the exact pending candidate and excludes dynamic authority inputs", () => {
   const proposals = new StubProposalSource(source());
   const registry = new StubArtifactRegistry();
   const producer = new ArtifactProducer({
@@ -152,7 +152,7 @@ test("creates revision one from the exact approved candidate and excludes dynami
   assert.equal(registry.calls[0]?.actor, undefined);
 });
 
-test("composes the real approved Proposal gate with the real immutable Registry", () => {
+test("composes the real prepared Proposal gate with the real immutable Registry", () => {
   const proposals = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   const registry = new ArtifactRegistry({ path: ":memory:", now: () => createdAt });
   try {
@@ -169,22 +169,15 @@ test("composes the real approved Proposal gate with the real immutable Registry"
       intent: source().intent,
       artifactCandidate: source().artifactCandidate,
     });
-    const approved = proposals.review({
-      proposalId: pending.id,
-      expectedRevision: pending.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
-    });
     const producer = new ArtifactProducer({ proposals, registry, now: () => createdAt });
 
     const entry = producer.produce({
-      proposalId: approved.id,
-      proposalRevision: approved.revision,
+      proposalId: pending.id,
+      proposalRevision: pending.revision,
     });
 
-    assert.equal(entry.artifact.sourceProposal.proposalId, approved.id);
-    assert.equal(entry.artifact.sourceProposal.proposalRevision, approved.revision);
+    assert.equal(entry.artifact.sourceProposal.proposalId, pending.id);
+    assert.equal(entry.artifact.sourceProposal.proposalRevision, pending.revision);
     assert.deepEqual(entry.artifact.content, candidateContent);
     assert.deepEqual(registry.getRevision(entry.artifact.artifactId, 1), entry);
   } finally {
@@ -246,7 +239,7 @@ test("replays the same generated artifact idempotently after registry restart", 
   }
 });
 
-test("fails closed when the source gate does not return the requested approved revision", () => {
+test("fails closed when the source gate does not return the requested pending revision", () => {
   const proposals = new StubProposalSource(source({ proposalId: "other", revision: 3 }));
   const registry = new StubArtifactRegistry();
   const producer = new ArtifactProducer({ proposals, registry, now: () => createdAt });
