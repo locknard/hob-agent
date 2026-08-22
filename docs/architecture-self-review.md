@@ -112,7 +112,9 @@ The follow-up now establishes a directed production graph through narrow ports:
     Its owner-only atomic file carries model reference, optional custom endpoint,
     bridge config and canonical credential references. The production `main` uses
     the activated generation as its configuration source while explicit deployment
-    values retain field-level precedence.
+    values retain field-level precedence. Activation concurrency uses owner-token
+    locking: live work stays exclusive and abandoned locks become recoverable after
+    a bounded lease.
 
 Each follow-up changed one seam at a time with contract tests. The neutral bridge
 package remains the ecosystem/process boundary; Hub-internal ports stay in Hub and

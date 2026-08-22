@@ -40,7 +40,9 @@ can therefore open the product and complete setup before the Agent becomes activ
 - Hub owns a versioned non-secret configuration document under `HOB_DATA_DIR`.
   The file uses owner-only permissions and contains model references, custom
   endpoint metadata, bridge registrations, credential references, and the active
-  generation.
+  generation. Commits use an owner-token lock; a fresh owner preserves exclusive
+  activation, while an abandoned lock is atomically isolated and recovered after
+  a bounded 30-second lease.
 - The operating-system credential vault owns model and bridge secret material.
   Browser responses contain availability and probe status only.
 - A setup draft has an opaque id, owner principal, revision, expiry, and bounded
@@ -86,10 +88,10 @@ the change.
 
 1. **Implemented:** the versioned non-secret configuration store commits an
    owner-only, bounded, atomically replaced generation with optimistic revision,
-   canonical credential references, secret-shaped field rejection, and
-   deterministic tests. The single production `main` reads this activated
-   generation whenever deployment environment values leave model or bridges
-   unspecified.
+   canonical credential references, secret-shaped field rejection, crash-resilient
+   lock recovery, and deterministic tests. The single production `main` reads
+   this activated generation whenever deployment environment values leave model
+   or bridges unspecified.
 2. Split launch parsing into bootstrap minimum and activated generation while
    retaining one `main` and one `HomeAgentRuntime` composition root.
 3. Add pairing/session ownership and the `/setup` Host workspace.

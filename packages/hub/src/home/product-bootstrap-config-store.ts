@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 const CONFIG_VERSION = "hob.product-config/v1" as const;
 const SECRET_KEY = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const MAX_FILE_BYTES = 65_536;
+const LOCK_STALE_AFTER_MS = 30_000;
 
 export interface ProductBootstrapBridgeConfig {
   readonly bridgeId: string;
@@ -53,13 +54,7 @@ export class ProductBootstrapConfigStore {
     const validated = validateDraft(draft);
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     await chmod(this.directory, 0o700);
-    let lock;
-    try {
-      lock = await open(this.lockPath, "wx", 0o600);
-    } catch (error) {
-      if (isErrno(error, "EEXIST")) throw new Error("Product configuration is busy");
-      throw error;
-    }
+    const lock = await acquireConfigurationLock(this.lockPath);
     const temporaryPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       const current = await this.load();
@@ -86,10 +81,66 @@ export class ProductBootstrapConfigStore {
       return configuration;
     } finally {
       await unlink(temporaryPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
-      await lock.close();
-      await unlink(this.lockPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
+      await releaseConfigurationLock(this.lockPath, lock);
     }
   }
+}
+
+interface ConfigurationLock {
+  readonly file: Awaited<ReturnType<typeof open>>;
+  readonly owner: string;
+}
+
+async function acquireConfigurationLock(lockPath: string): Promise<ConfigurationLock> {
+  const owner = `${process.pid}:${randomUUID()}`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const file = await open(lockPath, "wx", 0o600);
+      try {
+        await file.writeFile(owner, "utf8");
+        await file.sync();
+        return { file, owner };
+      } catch (error) {
+        await file.close();
+        await unlink(lockPath).catch(() => undefined);
+        throw error;
+      }
+    } catch (error) {
+      if (!isErrno(error, "EEXIST")) throw error;
+    }
+
+    let lockAge: number;
+    try {
+      lockAge = Date.now() - (await stat(lockPath)).mtimeMs;
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) continue;
+      throw error;
+    }
+    if (lockAge <= LOCK_STALE_AFTER_MS) throw new Error("Product configuration is busy");
+
+    const abandonedPath = `${lockPath}.${randomUUID()}.abandoned`;
+    try {
+      await rename(lockPath, abandonedPath);
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) continue;
+      throw error;
+    }
+    await unlink(abandonedPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
+  }
+  throw new Error("Product configuration is busy");
+}
+
+async function releaseConfigurationLock(lockPath: string, lock: ConfigurationLock): Promise<void> {
+  await lock.file.close();
+  let owner: string;
+  try {
+    owner = await readFile(lockPath, "utf8");
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return;
+    throw error;
+  }
+  if (owner !== lock.owner) return;
+  await unlink(lockPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
 }
 
 function validateConfiguration(value: unknown): ProductBootstrapConfiguration {

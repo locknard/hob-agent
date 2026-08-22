@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -57,6 +57,27 @@ test("preserves the active generation across stale writes and secret-shaped brid
       /secret-shaped field/,
     );
     assert.equal((await store.load())?.generation, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovers an abandoned configuration lock while preserving a fresh owner", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-lock-"));
+  try {
+    const lockPath = join(directory, "product-config.lock");
+    const store = new ProductBootstrapConfigStore(directory);
+    await writeFile(lockPath, "abandoned-lock", { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockPath, old, old);
+    assert.equal((await store.commit(0, { modelReference: "gpt/gpt-5.4", bridges: [] })).generation, 1);
+
+    await writeFile(lockPath, "active-owner", { mode: 0o600 });
+    await assert.rejects(
+      store.commit(1, { modelReference: "gpt/gpt-5.4", bridges: [] }),
+      /configuration is busy/,
+    );
+    assert.equal(await readFile(lockPath, "utf8"), "active-owner");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
