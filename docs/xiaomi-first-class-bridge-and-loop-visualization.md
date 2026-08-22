@@ -158,12 +158,11 @@ Web UI:
 - allow a local, explicitly authorized details view later; never export
   telemetry by default.
 
-The first deliverable is a neutral `AgentLoopTraceService` projection with a
-serializable snapshot and deterministic tests. `inbox-web` owns a pure,
-accessible timeline fragment renderer for that snapshot; mounting it into the
-proposal page remains a review-surface composition task, not a second server or
-runtime. The projection is not an agent tool and never feeds its own trace back
-into model context.
+The neutral `AgentLoopTraceService` projection has a serializable snapshot and
+deterministic tests. `inbox-web` owns a pure, accessible timeline fragment
+renderer and mounts the bounded slice only on the selected proposal. The
+projection is a review-only read model. Model context stays sourced from the
+governed household evidence path.
 
 ## Implemented first slice
 
@@ -176,13 +175,14 @@ into model context.
   until a live authorized transport is installed.
 - `AgentLoopTraceService` subscribes to DSH session lifecycle/events and exposes
   bounded metadata-only traces through the sole `DshHomeAgentService`.
-- `renderAgentLoopTimeline` renders turns, steps, tools, timing and aggregate
-  token usage without prompts, reasoning, arguments, results or home state.
+- `renderAgentLoopTimeline` renders turns, steps, household-readable checks,
+  timing and progressively disclosed aggregate token usage. Its public shape is
+  limited to bounded operational metadata.
 - Proposal detail resolves its stored DSH root tool-call ID to one exact turn
-  and renders only that turn's steps, tools, timing, and model-token usage. It
-  no longer presents cumulative session cost as the cost of one proposal.
-- No Xiaomi cloud/gateway protocol implementation or Xiaomi-derived source was
-  added. That transport slot remains deliberately unfilled pending permission.
+  and renders only that turn's steps, checks, timing, and model-token usage under
+  “这条建议怎么得来的”. Each proposal therefore shows its exact bounded cost.
+- The Xiaomi cloud/gateway transport slot remains reserved for an authorized
+  implementation with an explicit source license and permission record.
 
 ## Acceptance gates
 

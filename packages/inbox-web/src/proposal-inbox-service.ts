@@ -461,14 +461,17 @@ export class ProposalInboxService extends Service {
     const selectedProposal = selectedProposalId === undefined
       ? undefined
       : this.proposals.get(selectedProposalId);
+    const selectedDetail = selectedProposalId === undefined ? undefined : this.controller.detail(selectedProposalId);
     return {
       runtimeConfirmations: runtimeConfirmations.map((confirmation) => projectRuntimeConfirmation(
         confirmation,
         actor !== undefined && this.runtime?.canApproveRuntimeConfirmation(confirmation.id, actor) === true,
         this.now(),
       )),
-      proposals: proposals.map(projectProductProposal),
-      ...(selectedProposal === undefined ? {} : { selectedProposal: projectProductProposal(selectedProposal) }),
+      proposals: proposals.map((proposal) => projectProductProposal(proposal)),
+      ...(selectedProposal === undefined
+        ? {}
+        : { selectedProposal: projectProductProposal(selectedProposal, selectedDetail?.trace) }),
       proposalCapacityUsed: proposalCapacity?.used ?? proposals.length,
       proposalCapacity: proposalCapacity?.max ?? 5,
       ...(expiredSummary === undefined || expiredSummary.count < 1
@@ -1130,7 +1133,7 @@ function formatRuntimeExpiryLabel(expiresAt: string, now: Date): string {
   }).format(expiry);
 }
 
-function projectProductProposal(proposal: InboxProposal): ProductProposal {
+function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDetail["trace"]): ProductProposal {
   const rationale = proposal.rationale;
   const why = rationale === undefined
     ? undefined
@@ -1159,6 +1162,7 @@ function projectProductProposal(proposal: InboxProposal): ProductProposal {
         : proposal.rolloutState === "enabled" ? "complete" : "direction",
     snoozeCount: proposal.snoozeCount ?? 0,
     newEvidence: proposal.newEvidence ?? false,
+    ...(trace === undefined ? {} : { trace }),
   };
 }
 

@@ -48,7 +48,7 @@ const reviewProposal = {
   summary: "A bounded candidate needs household review.",
   createdAt: "2026-08-20T01:00:00.000Z",
   updatedAt: "2026-08-20T01:00:00.000Z",
-  provenance: { producer: "test" },
+  provenance: { producer: "test", sessionId: "home-main", toolCallId: "call-7" },
   evidence: { references: [], watermarks: [] },
   conflictCheck: { status: "checked" as const, existingAutomationCount: 0, matches: [] },
   dryRun: { status: "passed", summary: "No writes." },
@@ -675,6 +675,33 @@ test("composes the product review projection from the runtime center and pending
   assert.equal(projection.proposals[0]?.title, reviewProposal.title);
   assert.equal(projection.proposalCapacityUsed, 1);
   assert.equal(projection.proposalCapacity, 5);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("projects the bounded proposal trace only onto the selected proposal", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  ctx.provide("homeAgent", {
+    traceSnapshot: () => ({
+      sessionId: "home-main",
+      asOfSeq: 6,
+      turns: [{ turn: 1, status: "completed" as const, startedAt: 1, endedAt: 4, durationMs: 3 }],
+      steps: [{ turn: 1, step: 1, status: "completed" as const, startedAt: 2, endedAt: 3, durationMs: 1 }],
+      tools: [{ id: "call-7", turn: 1, step: 1, name: "create_home_proposal", status: "completed" as const, startedAt: 2, endedAt: 3, durationMs: 1 }],
+      compactions: [],
+      prunes: [],
+      usage: { inputTokens: 10, outputTokens: 5, reasoningTokens: 2 },
+    }),
+  });
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const unselected = ctx.homeInbox.getProductReviewProjection(runtimeAdminActor);
+  assert.equal("trace" in unselected.proposals[0]!, false);
+  const selected = ctx.homeInbox.getProductReviewProjection(runtimeAdminActor, reviewProposal.id).selectedProposal;
+  assert.equal(selected?.trace?.sessionId, "home-main");
+  assert.deepEqual(selected?.trace?.tools.map((tool) => tool.name), ["create_home_proposal"]);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

@@ -24,13 +24,14 @@ test("renders an accessible metadata-only DSH loop timeline", () => {
     usage: { inputTokens: 12, outputTokens: 4, reasoningTokens: 3 },
   });
 
-  assert.match(html, /aria-label="Agent loop timeline"/);
-  assert.match(html, /Turn 1/);
-  assert.match(html, /get_home_snapshot/);
-  assert.match(html, /80 ms/);
-  assert.match(html, /12 input · 4 output · 3 reasoning/);
-  assert.match(html, /Context maintenance/);
-  assert.match(html, /420 tokens compacted/);
-  assert.match(html, /80 input · 20 output · 10 reasoning/);
-  assert.match(html, /1 tool result pruned · 512 tokens removed/);
+  assert.match(html, /aria-label="建议形成过程"/);
+  assert.match(html, /1 轮分析 · 1 个步骤 · 1 项检查/);
+  assert.match(html, /第 1 轮分析/);
+  assert.match(html, /查看家庭概况/);
+  assert.match(html, /80 毫秒/);
+  assert.match(html, /运行信息/);
+  assert.match(html, /输入 12 · 输出 4 · 推理 3/);
+  assert.match(html, /整理过 420 个上下文单位/);
+  assert.match(html, /移除过 512 个过期上下文单位/);
+  assert.doesNotMatch(html, /home-main|get_home_snapshot|call-1/);
 });

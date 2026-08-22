@@ -384,6 +384,31 @@ test("separates proposal snooze from the two-consent detail and explains activit
   assert.match(activity, /触发场景「回家」v3/);
 });
 
+test("reveals a household-readable agent journey for the selected proposal", () => {
+  const trace = {
+    sessionId: "private-session",
+    asOfSeq: 9,
+    turns: [{ turn: 1, status: "completed" as const, startedAt: 10, endedAt: 90, durationMs: 80 }],
+    steps: [{ turn: 1, step: 1, status: "completed" as const, startedAt: 20, endedAt: 80, durationMs: 60 }],
+    tools: [{ id: "call-1", turn: 1, step: 1, name: "get_home_snapshot", status: "completed" as const, startedAt: 30, endedAt: 50, durationMs: 20 }],
+    compactions: [],
+    prunes: [],
+    usage: { inputTokens: 12, outputTokens: 4, reasoningTokens: 3 },
+  };
+  const html = renderProductShell(model({
+    route: "reviews",
+    selectedProposalId: "media-power",
+    selectedProposal: { ...model().proposals![0]!, trace },
+  }));
+
+  assert.match(html, /<details class="product-agent-journey">/);
+  assert.match(html, /这条建议怎么得来的/);
+  assert.match(html, /查看家庭概况/);
+  assert.match(html, /1 轮分析 · 1 个步骤 · 1 项检查/);
+  assert.match(html, /运行信息/);
+  assert.doesNotMatch(html, /private-session|get_home_snapshot/);
+});
+
 test("uses the household agent name for agent-attributed activity", () => {
   const activity = renderProductShell(model({
     route: "activity",

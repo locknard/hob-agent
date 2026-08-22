@@ -258,6 +258,26 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-detail-columns ul, .product-cause-chain { margin: 0; padding-inline-start: 1.1rem; }
 .product-detail-columns li { margin-block: .45rem; }
 .product-dependency { padding: .85rem 1rem; border-inline-start: .25rem solid var(--shell-amber); background: var(--shell-amber-soft); color: var(--shell-amber); }
+.product-agent-journey { overflow: clip; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); background: color-mix(in srgb, var(--shell-surface) 88%, var(--shell-blue-soft)); }
+.product-agent-journey > summary { min-height: 3rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .7rem .9rem; cursor: pointer; color: var(--shell-ink); font-weight: 760; list-style: none; }
+.product-agent-journey > summary::-webkit-details-marker { display: none; }
+.product-agent-journey > summary::after { content: "＋"; color: var(--shell-blue); font-size: 1.1rem; font-weight: 500; }
+.product-agent-journey[open] > summary::after { content: "−"; }
+.agent-loop-timeline { display: grid; gap: .8rem; padding: 0 .9rem .9rem; border-block-start: 1px solid var(--shell-rule); }
+.agent-loop-summary { margin: .8rem 0 0; color: var(--shell-muted); font-size: .84rem; font-variant-numeric: tabular-nums; }
+.agent-loop-turns, .agent-loop-turn ol, .agent-loop-step ul { display: grid; gap: .55rem; margin: 0; padding: 0; list-style: none; }
+.agent-loop-turn { padding-inline-start: .8rem; border-inline-start: 2px solid var(--shell-blue); }
+.agent-loop-turn > header, .agent-loop-step > div, .agent-loop-tool { display: flex; align-items: baseline; justify-content: space-between; gap: .8rem; }
+.agent-loop-turn time, .agent-loop-step time, .agent-loop-tool time { flex: 0 0 auto; color: var(--shell-subtle); font-size: .76rem; font-variant-numeric: tabular-nums; }
+.agent-loop-turn > ol { margin-block-start: .5rem; }
+.agent-loop-step { padding: .55rem .65rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-sm); background: var(--shell-surface); }
+.agent-loop-step > div > span { color: var(--shell-muted); font-size: .8rem; font-weight: 730; }
+.agent-loop-step ul { margin-block-start: .4rem; }
+.agent-loop-tool { color: var(--shell-ink); font-size: .86rem; }
+.agent-loop-runtime { padding-block-start: .65rem; border-block-start: 1px dashed var(--shell-rule); color: var(--shell-muted); font-size: .8rem; }
+.agent-loop-runtime summary { cursor: pointer; font-weight: 720; }
+.agent-loop-runtime p { margin: .45rem 0 0; font-variant-numeric: tabular-nums; }
+.agent-loop-runtime ul { margin: .35rem 0 0; padding-inline-start: 1.1rem; }
 .product-review-boundary { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem; justify-content: space-between; padding-top: .4rem; }
 .product-review-boundary p { margin: 0; color: var(--shell-muted); font-size: .84rem; }
 
