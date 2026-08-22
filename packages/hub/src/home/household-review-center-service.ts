@@ -518,7 +518,7 @@ function activityPresentation(
   kind: OneShotActionActivity["kind"],
   policyClass: OneShotActionTicket["policyClass"],
 ): { readonly status: string; readonly cause: readonly string[]; readonly verification?: string } {
-  const policy = policyClass === "administrator" ? "管理员权限" : policyClass === "confirmation" ? "成员确认权限" : "直接执行权限";
+  const policy = policyClass === "administrator" ? "高影响保护权限" : policyClass === "confirmation" ? "确认权限" : "直接执行权限";
   switch (kind) {
     case "action_requested": return { status: "已请求", cause: ["家庭动作已发起", `动作进入${policy}检查`] };
     case "confirmation_created": return { status: "等待放行", cause: [`${policy}要求放行`, "动作正在等待决定"] };

@@ -291,10 +291,10 @@ test("fails closed for an unclassified correction, a non-completed turn, missing
   }), (error: unknown) => (error as { code?: string }).code === "not_completed");
   await assert.rejects(() => ctx.homeCorrection.submit({
     adviceId: "advice-1",
-    actor: { ...adult, role: "child" },
+    actor: { ...adult, device: { kind: "shared" as const } },
     correctionType: "household_fact",
-    correction: "孩子设备不能修改家庭知识。",
-    idempotencyKey: "turn-child",
+    correction: "共享设备不能修改家庭知识。",
+    idempotencyKey: "turn-shared-device",
   }), (error: unknown) => (error as { code?: string }).code === "permission_denied");
 
   const noDirectoryContext = new Context();
