@@ -330,8 +330,8 @@ DSH 当前仍处于 developer preview，源码和 npm 各 package 的发布进�
 
 这些所需 npm tarball 均已发布并已写入锁文件；安装通过 pnpm supply-chain policy，官方
 adapter 的精确 rc.7 tarball 作为审阅后的单项 minimum-release-age exception 记录。
-`dsh-compatibility-set` gate 要求声明 exact versions，并在缺失、range 或混用其他 DSH
-release family 时 fail closed。传递依赖的 install scripts 默认拒绝执行。
+`dsh-dependency-alignment.test.ts` 直接验证生产依赖声明：完整官方包集合使用 exact
+versions，Cordis 与 Schemastery 使用已审核版本。传递依赖的 install scripts 维持审核门禁。
 
 ## 开放问题
 
