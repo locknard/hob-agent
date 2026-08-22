@@ -7,9 +7,9 @@ Source ownership is explicit under `src/`: `home` contains the household
 product bundle, `model` contains provider selection, model-facing facades, and
 the profile-to-DSH credential adapter, `runtime` contains DSH loop and trace
 invariants, and `prompt` contains household prompt assembly. Private credential
-infrastructure lives under `auth/{profiles,oauth,external-cli,secrets}`. Package
-exports point only to the home, model, and runtime seams; auth modules remain
-package-private.
+infrastructure lives under `auth/{profiles,oauth,external-cli,secrets}`. Auth
+module paths remain package-private; the stable credential APIs required by the
+Hub are re-exported through the public `model-credentials` facade.
 
 DSH is the only Agent Runtime in this package. It owns the LLM seam, session,
 prompt, tool, agent, loop, token-meter, and compaction services. The official
