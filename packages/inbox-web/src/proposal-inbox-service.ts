@@ -299,7 +299,7 @@ export type ProposalInboxSnoozeTarget = "tomorrow" | "weekend" | "next_week";
 
 /** Proposal-owner commands used by the review surface. */
 export interface ProposalInboxProposalGovernancePort {
-  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget }): void | Promise<void>;
+  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number }): void | Promise<void>;
   decideProposal?(input: {
     readonly proposalId: string;
     readonly expectedRevision: number;
@@ -768,7 +768,7 @@ export class ProposalInboxService extends Service {
     return typeof this.proposalGovernance?.snoozeProposal === "function";
   }
 
-  async snoozeProposal(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget }): Promise<void> {
+  async snoozeProposal(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number }): Promise<void> {
     const snooze = this.proposalGovernance?.snoozeProposal;
     if (snooze === undefined) throw new Error("proposal_snooze_unavailable");
     await snooze.call(this.proposalGovernance, input);
@@ -1269,7 +1269,12 @@ function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDe
       ? { kind: proposal.kind }
       : {}),
     ...(Array.isArray(proposal.actionPolicyClasses) && proposal.actionPolicyClasses.includes("confirmation")
-      ? { gateClasses: ["confirmation" as const] }
+      ? {
+          gateClasses: ["confirmation" as const],
+          ...(Array.isArray(proposal.confirmationDeviceNames) && proposal.confirmationDeviceNames.length > 0
+            ? { confirmationDeviceNames: proposal.confirmationDeviceNames.slice(0, 8) }
+            : {}),
+        }
       : {}),
     ...(proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info" || proposal.lifecycle === "ready"
       ? { lifecycle: proposal.lifecycle }

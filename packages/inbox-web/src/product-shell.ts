@@ -97,6 +97,8 @@ export interface ProductProposal {
   readonly dependency?: string;
   /** Present when the plan touches confirmation-class devices (DR-015 disclosure). */
   readonly gateClasses?: readonly ("direct" | "confirmation")[];
+  /** Household names of the confirmation-class devices, for concrete disclosure. */
+  readonly confirmationDeviceNames?: readonly string[];
   readonly risk?: string;
   readonly afterEnable?: string;
   readonly snoozeCount?: number;
@@ -944,8 +946,7 @@ function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
 
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
   const statusLabel = proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
-  const snoozedTwice = (proposal.snoozeCount ?? 0) >= 2;
-  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${snoozedTwice ? `<span class="product-subtle">下次请做决定</span>` : renderLaterForm(proposal)}</div></article>`;
+  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${renderLaterForm(proposal)}</div></article>`;
 }
 
 function renderInsightCardActions(proposal: ProductProposal): string {
@@ -966,7 +967,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
   ].join("");
   const risk = proposal.risk === undefined ? "" : `<p class="product-detail-risk">风险与权限：${escapeHtml(proposal.risk)}</p>`;
   const gateDisclosure = proposal.gateClasses?.includes("confirmation")
-    ? `<p class="product-gate-disclosure">包含需要确认的设备：这次启用就是你的授权，之后由自动化直接执行；随时可以暂停或关闭。</p>`
+    ? `<p class="product-gate-disclosure">需要确认的设备${proposal.confirmationDeviceNames?.length ? `（${proposal.confirmationDeviceNames.map(escapeHtml).join("、")}）` : ""}：这次启用就是你的授权，之后由自动化直接执行；随时可以暂停或关闭。</p>`
     : "";
   const dependency = proposal.dependency === undefined
     ? ""
@@ -990,7 +991,7 @@ function enableForm(proposal: ProductProposal): string {
 
 /** Changing a plan happens in conversation, where suggestions are born. */
 function conversationEntry(proposal: ProductProposal): string {
-  return `<form class="product-action-form" method="post" action="/conversation"><button class="product-quiet-action" type="submit" name="question" value="${escapeHtml(`我想调整建议「${proposal.title}」：`)}">在对话里改</button></form>`;
+  return `<form class="product-action-form" method="post" action="/conversation"><button class="product-quiet-action" type="submit" name="question" value="${escapeHtml(`【建议 ${proposal.id}】我想调整「${proposal.title}」：`)}">在对话里改</button></form>`;
 }
 
 /** "不用了" opens the honest pair: dismiss once, or never suggest this again. */
@@ -1005,8 +1006,8 @@ function renderInsightActions(proposal: ProductProposal): string {
   return `<div class="product-card-actions"><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/helpful"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-primary-action" type="submit">有帮助</button></form><form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/reject"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit">不需要</button></form></div><p>这类建议只是让你知道；要不要动手由你决定。</p>`;
 }
 
-function renderLaterForm(proposal: Pick<ProductProposal, "id">): string {
-  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><button class="product-secondary-action" type="submit" name="until" value="later">以后再说</button></form>`;
+function renderLaterForm(proposal: Pick<ProductProposal, "id" | "revision">): string {
+  return `<form class="product-action-form" method="post" action="/review-center/proposals/${encodedPathSegment(proposal.id)}/snooze"><input type="hidden" name="expectedRevision" value="${escapeHtml(proposal.revision)}"><button class="product-secondary-action" type="submit" name="until" value="later">以后再说</button></form>`;
 }
 
 const AUTOMATION_PRESENTATION = {

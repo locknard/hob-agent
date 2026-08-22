@@ -13,6 +13,7 @@ import {
   type ProposalRetentionEvidenceReference,
   type ProposalClearDedupLatchInput,
   type ProposalCloseInput,
+  type ProposalDeploymentIntent,
   type ProposalDeploymentOutcome,
   type ProposalLifecycleInput,
   type ProposalInfoRequestInput,
@@ -35,6 +36,16 @@ import {
  * from callers.
  */
 export interface ProposalDeploymentPort {
+  /**
+   * Resolves the deterministic native id and target execution domain for a
+   * plan without writing anything, so the approval can persist the intent
+   * before the external write happens.
+   */
+  resolveIntent?(request: {
+    readonly proposalId: string;
+    readonly kind: CreateProposalInput["kind"];
+    readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
+  }): ProposalDeploymentIntent | { readonly reason: string };
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
@@ -150,6 +161,7 @@ export class HomeProposalService extends Service {
       : artifactCapabilityIds(artifactCandidate.content);
     const candidateCapabilityIdSet = new Set(candidateCapabilityIds);
     const actionPolicyClasses = new Set<"direct" | "confirmation">();
+    const confirmationDeviceNames = new Set<string>();
     if (artifactCandidate !== undefined) {
       if (candidateCapabilityIds.some((id) => !selectedCapabilities.has(id))) {
         throw new TypeError("home proposal artifact candidate capabilities must belong to selected devices");
@@ -167,6 +179,11 @@ export class HomeProposalService extends Service {
           throw new TypeError("home proposal artifact candidate cannot target an administrator policy capability");
         }
         actionPolicyClasses.add(authority.policyClass === "confirmation" ? "confirmation" : "direct");
+        if (authority.policyClass === "confirmation") {
+          const device = selectedDevices.find((candidateDevice) =>
+            candidateDevice.capabilities.some((capability) => capability.hwCapabilityId === action.target.hwCapabilityId));
+          if (device?.name !== undefined) confirmationDeviceNames.add(device.name);
+        }
       }
       if (input.selectedHwCapabilityIds !== undefined
         && candidateCapabilityIds.some((id) => !input.selectedHwCapabilityIds!.includes(id))) {
@@ -282,6 +299,7 @@ export class HomeProposalService extends Service {
       title: input.title,
       summary: input.summary,
       ...(actionPolicyClasses.size === 0 ? {} : { actionPolicyClasses: [...actionPolicyClasses].sort() }),
+      ...(confirmationDeviceNames.size === 0 ? {} : { confirmationDeviceNames: [...confirmationDeviceNames].sort().slice(0, 8) }),
       ...(input.dedupKey === undefined ? {} : { dedupKey: input.dedupKey }),
       idempotencyKey: input.idempotencyKey,
       provenance: input.provenance,
@@ -370,13 +388,31 @@ export class HomeProposalService extends Service {
    * deployment path the proposal fails explicitly instead of appearing to run.
    */
   async enableProposal(input: ProposalLifecycleInput & { readonly reviewer: string }): Promise<ProposalEnvelope> {
+    const current = this.store.get(input.proposalId);
+    const resolved = current === undefined || this.deployment?.resolveIntent === undefined
+      ? undefined
+      : this.deployment.resolveIntent({
+          proposalId: current.id,
+          kind: current.kind,
+          ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
+        });
+    const intent = resolved !== undefined && !("reason" in resolved) ? resolved : undefined;
     const enabling = this.store.decideProposal({
       proposalId: input.proposalId,
       ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
       decision: "approve",
       reviewer: input.reviewer,
       ...(input.note === undefined ? {} : { note: input.note }),
+      ...(intent === undefined ? {} : { deploymentIntent: intent }),
     });
+    if (resolved !== undefined && "reason" in resolved) {
+      return this.store.recordProposalDeployment({
+        proposalId: enabling.id,
+        expectedRevision: enabling.revision,
+        actor: input.reviewer,
+        outcome: { status: "failed", reason: resolved.reason },
+      });
+    }
     const outcome = await this.deploy(enabling);
     return this.store.recordProposalDeployment({
       proposalId: enabling.id,

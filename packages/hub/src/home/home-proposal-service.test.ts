@@ -1095,7 +1095,7 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
 });
 
 
-test("reconciliation converges local lifecycles with the target bridge's truth", async () => {
+test("recovers the crash window between external deployment and the local record", async () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T01:00:00.000Z" });
   const statuses = new Map<string, "running" | "paused" | "missing" | "unknown">();
   const ctx = new Context();
@@ -1109,43 +1109,41 @@ test("reconciliation converges local lifecycles with the target bridge's truth",
       },
     } as never);
 
-    const make = (key: string) => {
-      const created = store.create({
-        ...candidate,
-        kind: "automation-draft",
-        idempotencyKey: `reconcile:${key}:v1`,
-        dedupKey: `reconcile:${key}`,
-        intent: { ...candidate.intent, type: "automation-draft" },
-        artifactCandidate: automationCandidate,
-      });
-      const ready = store.markProposalReady({ proposalId: created.id });
-      return store.decideProposal({
-        proposalId: ready.id,
-        expectedRevision: ready.revision,
-        decision: "approve",
-        reviewer: "household-owner",
-      });
-    };
-
-    const crashed = make("crashed");
-    statuses.set(`hob_${crashed.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`, "running");
-    // A crash after deployment but before recording leaves `enabling` with a
-    // pending record; reconciliation must recover it from bridge truth.
-    store.recordProposalDeployment({
-      proposalId: crashed.id,
-      expectedRevision: crashed.revision,
-      outcome: { status: "verified", deploymentId: "hob_crashed", target: "ha-main" },
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "reconcile:crashed:v1",
+      dedupKey: "reconcile:crashed",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
     });
-    const crashedBack = store.pauseAutomation({ proposalId: crashed.id, actor: "test" });
-    statuses.set("hob_crashed", "running");
+    const ready = store.markProposalReady({ proposalId: created.id });
+    // The approval persists the deployment intent; the process dies before the
+    // external result is recorded.
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_crashed", target: "ha-main" },
+    });
+    assert.equal(enabling.lifecycle, "enabling");
+    assert.equal(enabling.deployment?.deploymentId, "hob_crashed");
+    assert.equal(enabling.deployment?.target, "ha-main");
 
+    statuses.set("hob_crashed", "running");
     await ctx.homeProposals.reconcileAutomations();
-    assert.equal(store.get(crashedBack.id)?.lifecycle, "active", "a natively running automation resumes locally");
+    const recovered = store.get(enabling.id);
+    assert.equal(recovered?.lifecycle, "active", "a deployed-but-unrecorded enablement heals from bridge truth");
+    assert.equal(recovered?.applicationStatus, "running");
+
+    statuses.set("hob_crashed", "paused");
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(enabling.id)?.lifecycle, "paused", "a natively paused automation is reflected");
 
     statuses.set("hob_crashed", "missing");
     await ctx.homeProposals.reconcileAutomations();
-    assert.equal(store.get(crashedBack.id)?.lifecycle, "closed", "a natively deleted automation closes locally");
-    assert.equal(store.get(crashedBack.id)?.applicationStatus, "withdrawn");
+    assert.equal(store.get(enabling.id)?.lifecycle, "closed", "a natively deleted automation closes locally");
   } finally {
     await fiber?.dispose();
     await ctx.fiber.dispose();

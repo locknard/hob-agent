@@ -1085,6 +1085,7 @@ test("presents a prepared plan as one decision with three honest choices", () =>
       willDo: ["每天 23:30，若 30 分钟无人且没在播放，断开插线板"],
       willNotDo: ["不碰路由器和 NAS 所在插座"],
       gateClasses: ["confirmation"],
+      confirmationDeviceNames: ["空调（客厅）"],
       risk: "低 · 可逆",
       afterEnable: "随时可以暂停或关闭并恢复原来的设置。",
     },
@@ -1096,7 +1097,7 @@ test("presents a prepared plan as one decision with three honest choices", () =>
   assert.match(html, /仅这次不要/);
   assert.match(html, /不再提这件事/);
   assert.match(html, /在对话里改/);
-  assert.match(html, /包含需要确认的设备：这次启用就是你的授权/);
+  assert.match(html, /需要确认的设备（空调（客厅））：这次启用就是你的授权/);
   assert.doesNotMatch(html, /修改…|试运行|两次确认|同意方向|确认方向/);
 });
 

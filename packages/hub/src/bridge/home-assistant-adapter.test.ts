@@ -1110,6 +1110,9 @@ function automationFetchFake() {
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
+    if (url.endsWith("/api/config")) {
+      return new Response(JSON.stringify({ time_zone: "Asia/Shanghai" }), { status: 200 });
+    }
     const id = url.split("/").at(-1)!;
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
     requests.push({ method, url, headers: { ...(init?.headers as Record<string, string>) }, body });
@@ -1172,7 +1175,7 @@ test("deploys a hub automation through the config API and verifies by read-back"
     action: [{ service: "homeassistant.turn_off", target: { entity_id: "light.kitchen" } }],
     mode: "single",
   });
-  assert.equal(fake.requests.filter((request) => request.method === "GET").length, 1);
+  assert.equal(fake.requests.filter((request) => request.method === "GET" && !request.url.endsWith("/api/config")).length, 1);
   await adapter.control.dispose();
 });
 
@@ -1215,5 +1218,31 @@ test("rejects unbound targets and reports withdrawal of a missing automation as 
   assert.deepEqual(command.target, { entity_id: "automation.hob_media_power" });
   socket.receive({ id: command.id, type: "result", success: true, result: null });
   assert.deepEqual(await toggle, { status: "acknowledged" });
+  await adapter.control.dispose();
+});
+
+
+test("rejects a schedule whose timezone differs from the Home Assistant instance", async () => {
+  const socket = new FakeSocket();
+  const fake = automationFetchFake();
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("automations@1") as AutomationsExtension | undefined;
+  const result = await handle!.deploy({
+    automationId: "hob_shifted",
+    title: "错时区方案",
+    trigger: { kind: "schedule", timezone: "Europe/Berlin", daysOfWeek: [1], at: "07:00" },
+    conditions: [],
+    actions: [{ kind: "set_boolean", target: automationTarget, value: true }],
+  }, { signal: new AbortController().signal });
+  assert.equal(result.status, "rejected");
+  assert.equal((result as { reason: string }).reason, "unsupported");
+  assert.equal(fake.requests.some((request) => request.method === "POST"), false, "a shifted schedule never reaches the config API");
   await adapter.control.dispose();
 });

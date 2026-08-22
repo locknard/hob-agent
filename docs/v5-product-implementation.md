@@ -50,8 +50,11 @@ variants. Providers inherit these semantics through the shared presentation laye
    ten-second undo when the inverse action is still safe.
 2. **Confirmation** — broad-impact but reversible actions initiated by a present
    person. A spoken or tapped confirmation is equivalent. No response within ten
-   seconds fails closed. A rule, system task, or proposal without a present
-   initiator becomes a longer-lived runtime confirmation instead.
+   seconds fails closed. A Hub-mediated action without a present initiator (a
+   rule the Hub executes, a system task) becomes a longer-lived runtime
+   confirmation instead. Actions inside a deployed native automation are a
+   different object: their consent is the enable decision on the named plan
+   (DR-015), and the plan card disclosed the concrete devices.
 3. **Administrator** — locks, water valves, security, or irreversible effects.
    Approval must come from an authenticated private device belonging to any adult
    administrator. Voice and shared displays are not identity.
@@ -94,9 +97,11 @@ once in its owning store.
   stays out of the household inbox. Only a prepared plan spends household
   attention, so `ready + snoozed <= 5` while preparation holds its own small
   budget. A proposal with nothing to compile reaches the inbox directly.
-- "以后再说" sleeps the card: it returns once before natural expiry and new
-  evidence wakes it. There is no attempt cap and no forced decision, and a
-  sleeping card frees household attention.
+- "以后再说" sleeps the card: it returns once before natural expiry, and new
+  evidence or a revised plan wakes it and sends it back through preparation.
+  There is no attempt cap and no forced decision. A sleeping card still counts
+  toward `ready + snoozed <= 5`: sleeping hides a card, it never hands the
+  Agent a fresh slot.
 - Natural expiry is normally fourteen days and is not a rejection latch.
 - The household makes one decision on a prepared plan with three choices:
   enable starts a running automation, "以后再说" sleeps the card, and "不用了"

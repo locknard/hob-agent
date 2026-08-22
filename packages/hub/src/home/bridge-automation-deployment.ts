@@ -10,6 +10,7 @@ import type {
 
 import { parseArtifactContent } from "../artifact/neutral-artifact.js";
 import type { ProposalDeploymentPort } from "./home-proposal-service.js";
+import type { ProposalDeploymentIntent } from "./proposal-store.js";
 import type { ProposalDeploymentOutcome } from "./proposal-store.js";
 
 /**
@@ -32,6 +33,24 @@ const NO_BRIDGE_REASON = "这个家还没有可用的自动化部署通道，方
 
 export class BridgeAutomationDeployment implements ProposalDeploymentPort {
   constructor(private readonly world: AutomationBridgeSource) {}
+
+  /** Resolves the target domain and deterministic id without writing anything. */
+  resolveIntent(request: {
+    readonly proposalId: string;
+    readonly kind: string;
+    readonly artifactCandidate?: { readonly schemaVersion: "1"; readonly content: unknown };
+  }): ProposalDeploymentIntent | { readonly reason: string } {
+    if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
+      return { reason: "这条建议不包含可部署的自动化方案。" };
+    }
+    const capabilityIds = deviceCapabilityIdsOf(request.artifactCandidate.content);
+    if (capabilityIds === undefined) {
+      return { reason: "自动化方案的内容没有通过校验，家里的设置保持原样。" };
+    }
+    const bridge = this.world.automationBridgeForTargets(capabilityIds);
+    if (bridge === undefined) return { reason: NO_BRIDGE_REASON };
+    return { deploymentId: automationIdForProposal(request.proposalId), target: bridge.bridgeId };
+  }
 
   async deploy(request: {
     readonly proposalId: string;

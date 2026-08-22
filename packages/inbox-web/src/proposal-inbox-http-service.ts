@@ -508,7 +508,7 @@ interface InboxHttpPort {
   approveRuntimeConfirmation?(request: InboxRuntimeDecisionRequest): unknown | Promise<unknown>;
   rejectRuntimeConfirmation?(request: InboxRuntimeDecisionRequest): unknown | Promise<unknown>;
   canSnoozeProposal?(): boolean;
-  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget }): unknown | Promise<unknown>;
+  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number }): unknown | Promise<unknown>;
   canRejectProposal?(): boolean;
   rejectProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
   canLatchProposal?(): boolean;
@@ -1287,10 +1287,10 @@ export class ProposalInboxHttpService extends Service {
         } catch (error) {
           return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid proposal snooze");
         }
-        const until = proposalSnoozeInput(body);
-        if (until === undefined) return send(response, 400, "Invalid proposal snooze");
+        const snoozeInput = proposalSnoozeInput(body);
+        if (snoozeInput === undefined) return send(response, 400, "Invalid proposal snooze");
         try {
-          await this.inbox.snoozeProposal({ proposalId, until });
+          await this.inbox.snoozeProposal({ proposalId, ...snoozeInput });
         } catch (error) {
           return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
         }
@@ -3013,12 +3013,17 @@ function preparationRetryInput(
     : { proposalId, expectedRevision, expectedVersion };
 }
 
-function proposalSnoozeInput(body: string): ProposalInboxSnoozeTarget | undefined {
+function proposalSnoozeInput(body: string): { readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number } | undefined {
   const form = new URLSearchParams(body);
-  if (form.getAll("until").length !== 1 || [...form.keys()].some((key) => key !== "until")) return undefined;
+  if (form.getAll("until").length !== 1
+    || [...form.keys()].some((key) => key !== "until" && key !== "expectedRevision")) return undefined;
   const until = form.get("until");
-  if (until === "tomorrow" || until === "weekend" || until === "next_week") return until;
-  return undefined;
+  if (until !== "later" && until !== "tomorrow" && until !== "weekend" && until !== "next_week") return undefined;
+  const revisionRaw = form.get("expectedRevision");
+  if (revisionRaw === null) return { until };
+  const expectedRevision = Number.parseInt(revisionRaw, 10);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) return undefined;
+  return { until, expectedRevision };
 }
 
 function proposalDecisionInput(body: string): number | undefined {

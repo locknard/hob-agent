@@ -162,7 +162,7 @@ test("returns capacity_full without persisting or later admitting a sixth propos
       expectedRevision: proposals[0]!.revision,
     });
     assert.ok(snoozed.snoozedUntil);
-    assert.equal(store.proposalCapacity().used, 4, "a sleeping card frees household attention");
+    assert.equal(store.proposalCapacity().used, 5, "a sleeping card still counts as unresolved household business");
 
     const rejected = store.review({
       proposalId: proposals[1]!.id,
@@ -1475,6 +1475,71 @@ test("a succeeded preparation promotes the proposal into the inbox, deferring wh
     });
     assert.equal(store.get(preparing.id)?.lifecycle, "ready", "a freed slot promotes the prepared plan");
     assert.equal(store.get(preparing.id)?.audit.at(-1)?.action, "prepared");
+  } finally {
+    store.close();
+  }
+});
+
+
+test("new evidence sends a ready plan back through preparation and wakes a sleeping card", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const created = store.create(input({ artifactCandidate, dedupKey: "re-verify", idempotencyKey: "re-verify-1" }));
+    const ready = store.markProposalReady({ proposalId: created.id });
+    assert.ok(ready.preparedContentHash, "ready pins the plan content the household saw");
+    const sleeping = store.snoozeProposal({ proposalId: ready.id, expectedRevision: ready.revision });
+    assert.ok(sleeping.snoozedUntil);
+
+    const merged = store.createGoverned(input({
+      artifactCandidate,
+      dedupKey: "re-verify",
+      idempotencyKey: "re-verify-2",
+      evidence: {
+        ...input().evidence,
+        references: [{ bridgeId: "ha-main", hwId: "hw-8", capabilityId: "hwc-8", observedAt: "2026-08-19T02:00:00.000Z" }],
+      },
+    }));
+    assert.equal(merged.kind, "merged");
+    if (merged.kind !== "merged") throw new Error("expected merge");
+    assert.equal(merged.proposal.snoozedUntil, undefined, "new evidence wakes the sleeping card");
+    assert.equal(merged.proposal.lifecycle, "preparing", "the plan re-verifies before it can be decided");
+    assert.throws(() => store.decideProposal({
+      proposalId: merged.proposal.id,
+      expectedRevision: merged.proposal.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+    }), /prepared/i, "an un-reverified plan cannot be enabled");
+    assert.equal(store.listPreparationJobs().some((job) =>
+      job.proposalId === merged.proposal.id && job.proposalRevision === merged.proposal.revision), true,
+      "the merge enqueues preparation for the new revision");
+  } finally {
+    store.close();
+  }
+});
+
+test("a revised plan from conversation replaces the content instead of being discarded", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const created = store.create(input({ artifactCandidate, dedupKey: "revise-plan", idempotencyKey: "revise-plan-1" }));
+    store.markProposalReady({ proposalId: created.id });
+    const revisedCandidate = {
+      ...artifactCandidate,
+      content: {
+        ...artifactCandidate.content,
+        trigger: { kind: "schedule" as const, timezone: "Asia/Shanghai", daysOfWeek: [1, 2, 3, 4, 5], at: "23:00" },
+      },
+    };
+    const merged = store.createGoverned(input({
+      artifactCandidate: revisedCandidate,
+      dedupKey: "revise-plan",
+      idempotencyKey: "revise-plan-2",
+      summary: "改到 23:00 的新方案。",
+    }));
+    assert.equal(merged.kind, "merged");
+    if (merged.kind !== "merged") throw new Error("expected merge");
+    assert.deepEqual(merged.proposal.artifactCandidate, revisedCandidate, "the household's revision lands");
+    assert.equal(merged.proposal.summary, "改到 23:00 的新方案。");
+    assert.equal(merged.proposal.lifecycle, "preparing");
   } finally {
     store.close();
   }

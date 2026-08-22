@@ -718,17 +718,46 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     const config = this.compileAutomationConfig(spec);
     if ("reason" in config) return { status: "rejected", reason: config.reason, detail: config.detail };
     try {
+      if (spec.trigger.kind === "schedule") {
+        const instanceTimezone = await this.instanceTimezone(signal);
+        if (instanceTimezone === undefined) {
+          return { status: "rejected", reason: "unavailable", detail: "Home Assistant timezone is unavailable" };
+        }
+        // A time trigger runs in the instance timezone; deploying a schedule
+        // into a different clock would silently shift the household's plan.
+        if (instanceTimezone !== spec.trigger.timezone) {
+          return { status: "rejected", reason: "unsupported", detail: `Home Assistant runs in ${instanceTimezone}, not ${spec.trigger.timezone}` };
+        }
+      }
       const written = await this.automationConfigRequest("POST", spec.automationId, signal, config.value);
       if (!written.ok) {
         return { status: "rejected", reason: "failed", detail: `Home Assistant rejected the automation (${written.statusCode})` };
       }
       const readBack = await this.automationConfigRequest("GET", spec.automationId, signal);
-      if (!readBack.ok || !isRecord(readBack.body) || readBack.body.alias !== spec.automationId) {
-        return { status: "rejected", reason: "failed", detail: "Home Assistant did not store the automation" };
+      // Verified means the stored behavior equals the compiled behavior, not
+      // merely that an automation with our alias exists.
+      if (!readBack.ok || !isRecord(readBack.body) || !storedAutomationMatches(config.value, readBack.body)) {
+        return { status: "rejected", reason: "failed", detail: "Home Assistant did not store the compiled automation" };
       }
       return { status: "deployed", nativeAutomationId: spec.automationId };
     } catch {
       return { status: "rejected", reason: "unavailable", detail: "Home Assistant configuration API is unreachable" };
+    }
+  }
+
+  private async instanceTimezone(signal: AbortSignal): Promise<string | undefined> {
+    try {
+      const accessToken = await this.resolveAccessToken();
+      const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+      const response = await fetchImpl(new URL("/api/config", this.context.config.baseUrl), {
+        signal,
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      if (!response.ok) return undefined;
+      const body = await response.json() as { time_zone?: unknown };
+      return typeof body?.time_zone === "string" && body.time_zone.length > 0 ? body.time_zone : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -1685,6 +1714,26 @@ type NativeQueueItem =
   | { kind: "state"; event: HomeAssistantNativeStateEvent }
   | { kind: "resync"; snapshot: HomeAssistantSnapshot }
   | { kind: "heartbeat" };
+
+/** Deep equality on the behavioral fields; storage may add bookkeeping keys. */
+function storedAutomationMatches(sent: Record<string, unknown>, stored: Record<string, unknown>): boolean {
+  return stored.alias === sent.alias
+    && stableJson(stored.trigger) === stableJson(sent.trigger)
+    && stableJson(stored.condition) === stableJson(sent.condition)
+    && stableJson(stored.action) === stableJson(sent.action)
+    && stored.mode === sent.mode;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
 
 function automationStateText(value: string | number | boolean | null): string {
   if (value === null) return "unknown";

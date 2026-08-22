@@ -174,6 +174,8 @@ const createProposalInputSchema = z.object({
   summary: boundedText,
   /** Gate classes of the plan's device actions, recorded for household disclosure. */
   actionPolicyClasses: z.array(z.enum(["direct", "confirmation"])).max(2).optional(),
+  /** Household names of the confirmation-class devices this plan touches. */
+  confirmationDeviceNames: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
   /** Stable identity of the behavior being discussed, independent of one producer attempt. */
   dedupKey: boundedId.optional(),
   idempotencyKey: boundedId,
@@ -347,6 +349,8 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly snoozedUntil?: string;
   readonly newEvidence: boolean;
   readonly lifecycle: ProposalLifecycle;
+  /** Hash of the plan content the household saw when it became ready. */
+  readonly preparedContentHash?: string;
   readonly deployment?: ProposalDeployment;
   readonly enablement?: ProposalEnablement;
   /** Present while preparation waits for one household answer. */
@@ -412,6 +416,7 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
     reason: z.string().trim().min(1).max(1_000).optional(),
   }).strict().optional(),
   openQuestion: z.string().trim().min(1).max(1_000).optional(),
+  preparedContentHash: z.string().trim().min(1).max(128).optional(),
   enablement: z.object({
     enabledAt: isoTimestamp,
     reviewer: boundedId,
@@ -451,6 +456,11 @@ export interface ProposalSnoozeInput {
   readonly reviewer?: string;
 }
 
+export interface ProposalDeploymentIntent {
+  readonly deploymentId: string;
+  readonly target: string;
+}
+
 export interface ProposalDecideInput {
   readonly proposalId: string;
   readonly expectedRevision?: number;
@@ -458,7 +468,8 @@ export interface ProposalDecideInput {
   readonly reviewer?: string;
   readonly reviewerId?: string;
   readonly note?: string;
-  readonly feedbackCode?: ProposalReviewFeedbackCode;
+  readonly feedbackCode?: ProposalReviewFeedbackCode;  /** Persisted with the approval, before any external write happens. */
+  readonly deploymentIntent?: ProposalDeploymentIntent;
 }
 
 export interface ProposalDedupLatch {
@@ -932,6 +943,9 @@ export class SqliteProposalStore {
         ...base,
         revision,
         lifecycle: "ready",
+        ...(current.artifactCandidate === undefined
+          ? {}
+          : { preparedContentHash: proposalContentHash(current.artifactCandidate) }),
         updatedAt: at,
         audit: [...current.audit, this.auditEvent(at, "prepared", input.actor ?? "system", revision)],
       };
@@ -1077,9 +1091,10 @@ export class SqliteProposalStore {
 
 
   private readyCountInTransaction(): number {
-    const now = Date.parse(this.timestamp());
-    return this.countPendingByLifecycle((value, payload) => value === "ready"
-      && (payload.snoozedUntil === undefined || Date.parse(String(payload.snoozedUntil)) <= now));
+    // ready + snoozed together bound how much unresolved business the Agent
+    // may hold open with the household; sleeping hides a card, it does not
+    // hand the Agent a fresh slot.
+    return this.countPendingByLifecycle((value) => value === "ready");
   }
 
   private countPendingByLifecycle(match: (lifecycle: unknown, payload: { snoozedUntil?: unknown }) => boolean): number {
@@ -1186,6 +1201,10 @@ export class SqliteProposalStore {
       if (current.lifecycle !== "ready") {
         throw new ProposalStoreError("lifecycle_invalid", "The household decides on a prepared plan");
       }
+      if (current.kind === "automation-draft" && current.artifactCandidate !== undefined
+        && current.preparedContentHash !== proposalContentHash(current.artifactCandidate)) {
+        throw new ProposalStoreError("lifecycle_invalid", "The plan changed after preparation; it must prepare again");
+      }
       const reviewer = (input.reviewer ?? input.reviewerId ?? "household-owner").trim();
       const feedbackCode = input.decision === "approve"
         ? "useful_as_is" as const
@@ -1206,7 +1225,14 @@ export class SqliteProposalStore {
           ? {
               lifecycle: "enabling" as const,
               applicationStatus: "deploying" as const,
-              deployment: { status: "pending" as const, requestedAt: at },
+              deployment: {
+                status: "pending" as const,
+                requestedAt: at,
+                ...(input.deploymentIntent === undefined ? {} : {
+                  deploymentId: input.deploymentIntent.deploymentId,
+                  target: input.deploymentIntent.target,
+                }),
+              },
             }
           : {}),
         decision: {
@@ -1506,6 +1532,10 @@ export class SqliteProposalStore {
       }
       if (current.lifecycle !== "ready") {
         throw new ProposalStoreError("lifecycle_invalid", "The household decides on a prepared plan");
+      }
+      if (current.kind === "automation-draft" && current.artifactCandidate !== undefined
+        && current.preparedContentHash !== proposalContentHash(current.artifactCandidate)) {
+        throw new ProposalStoreError("lifecycle_invalid", "The plan changed after preparation; it must prepare again");
       }
       const revision = current.revision + 1;
       const note = input.note?.trim();
@@ -1834,6 +1864,9 @@ export class SqliteProposalStore {
         ...base,
         revision,
         lifecycle: "ready",
+        ...(current.artifactCandidate === undefined
+          ? {}
+          : { preparedContentHash: proposalContentHash(current.artifactCandidate) }),
         updatedAt: at,
         audit: [...current.audit, this.auditEvent(at, "prepared", "system", revision)],
       };
@@ -2014,15 +2047,33 @@ function mergeProposalEvidence(
       ? { temporal: input.evidence.temporal ?? current.evidence.temporal }
       : {}),
   };
-  if (mergedEvidenceCount === 0) return { proposal: current, mergedEvidenceCount: 0 };
+  const revisedPlan = input.artifactCandidate !== undefined
+    && JSON.stringify(input.artifactCandidate) !== JSON.stringify(current.artifactCandidate);
+  if (mergedEvidenceCount === 0 && !revisedPlan) return { proposal: current, mergedEvidenceCount: 0 };
   const revision = current.revision + 1;
+  const requiresPreparationAfterMerge = current.kind === "automation-draft"
+    && (revisedPlan ? input.artifactCandidate !== undefined : current.artifactCandidate !== undefined);
+  const {
+    snoozedUntil: _sleep,
+    preparedContentHash: _preparedHash,
+    ...base
+  } = current;
   return {
     proposal: {
-      ...current,
+      ...base,
       revision,
       updatedAt: at,
       evidence: mergedEvidence,
       newEvidence: true,
+      // New evidence or a revised plan wakes the card and sends it back through
+      // preparation; the household only ever decides on a re-verified plan.
+      ...(revisedPlan ? {
+        artifactCandidate: input.artifactCandidate,
+        summary: input.summary,
+        ...(input.actionPolicyClasses === undefined ? {} : { actionPolicyClasses: input.actionPolicyClasses }),
+        ...(input.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: input.confirmationDeviceNames }),
+      } : {}),
+      ...(requiresPreparationAfterMerge ? { lifecycle: "preparing" as const } : {}),
       audit: [...current.audit, {
         id: `audit-${id()}`,
         at,
@@ -2105,6 +2156,11 @@ function fromDedupLatchRow(row: ProposalDedupLatchRow): ProposalDedupLatch {
     proposalId: row.proposal_id,
     createdAt: row.created_at,
   };
+}
+
+/** Stable identity of the plan content itself, independent of envelope bookkeeping. */
+function proposalContentHash(candidate: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(candidate)).digest("hex")}`;
 }
 
 function requiresPreparation(input: Pick<CreateProposalInput, "kind" | "artifactCandidate">): boolean {

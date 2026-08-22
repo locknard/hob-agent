@@ -17,6 +17,11 @@ export const AUTOMATIONS_EXTENSION = Object.freeze({
  * never interprets neutral identity. The Hub owns the automation id and the
  * adapter deploys only automations the Hub created; foreign rules are never
  * modified or withdrawn through this extension.
+ *
+ * The artifact's rollback and postconditions deliberately stay out of this
+ * spec: they govern Hub-side verification and the close-with-restore path, and
+ * no ecosystem runtime is trusted to enforce them. The deployed behavior is
+ * exactly trigger, conditions and actions.
  */
 export const bridgeAutomationTriggerSchema = z.discriminatedUnion("kind", [
   z.object({
