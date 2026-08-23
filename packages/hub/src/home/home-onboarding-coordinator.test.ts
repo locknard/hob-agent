@@ -16,7 +16,7 @@ import {
   type OnboardingObservationPort,
   type OnboardingWorldPort,
 } from "./home-onboarding-coordinator.js";
-import { InMemoryHomeOnboardingStore } from "./home-onboarding-store.js";
+import { InMemoryHomeOnboardingStore, initialHomeOnboardingState } from "./home-onboarding-store.js";
 
 class StubWorld extends Service {
   constructor(ctx: Context, private readonly source: OnboardingWorldPort) { super(ctx, "homeWorld"); }
@@ -427,6 +427,56 @@ test("persists names into the household source when a household directory is con
     context.homeOnboarding.submit({ step: 1, kind: "name_household", householdName: "小海的家", agentName: "阿灶" });
     assert.match(await readFile(soul, "utf8"), /家庭助手：阿灶/);
     assert.match(await readFile(home, "utf8"), /家庭名称：小海的家/);
+  } finally {
+    await fiber.dispose();
+    await context.fiber.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("starts a new operational onboarding with the names accepted during paired setup", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-onboarding-bootstrap-"));
+  const soul = join(directory, "SOUL.md");
+  const home = join(directory, "HOME.md");
+  const context = new Context();
+  const fiber = await context.plugin(HomeOnboardingCoordinatorService, {
+    store: new InMemoryHomeOnboardingStore(),
+    householdDirectory: directory,
+    bootstrapHousehold: { householdName: "小海的家", agentName: "阿灶" },
+    now: () => "2026-08-22T00:00:00.000Z",
+  });
+  try {
+    assert.equal(context.homeOnboarding.getState().step, 2);
+    assert.deepEqual(context.homeOnboarding.getState().household, { householdName: "小海的家", agentName: "阿灶" });
+    assert.equal(context.homeOnboarding.snapshot().steps[1].status, "completed");
+    assert.match(await readFile(home, "utf8"), /家庭名称：小海的家/);
+    assert.match(await readFile(soul, "utf8"), /家庭助手：阿灶/);
+  } finally {
+    await fiber.dispose();
+    await context.fiber.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps an existing onboarding state and household source unchanged during operational startup", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-onboarding-existing-"));
+  const soul = join(directory, "SOUL.md");
+  const home = join(directory, "HOME.md");
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(soul, "<!-- hob-onboarding:agent-name -->\n家庭助手：已有助手\n", { mode: 0o600 });
+  await writeFile(home, "<!-- hob-onboarding:household-name -->\n家庭名称：已有的家\n", { mode: 0o600 });
+  const context = new Context();
+  const fiber = await context.plugin(HomeOnboardingCoordinatorService, {
+    store: new InMemoryHomeOnboardingStore(initialHomeOnboardingState("2026-08-20T00:00:00.000Z")),
+    householdDirectory: directory,
+    bootstrapHousehold: { householdName: "新的家", agentName: "新的助手" },
+    now: () => "2026-08-22T00:00:00.000Z",
+  });
+  try {
+    assert.equal(context.homeOnboarding.getState().step, 1);
+    assert.equal(context.homeOnboarding.getState().household, undefined);
+    assert.equal(await readFile(home, "utf8"), "<!-- hob-onboarding:household-name -->\n家庭名称：已有的家\n");
+    assert.equal(await readFile(soul, "utf8"), "<!-- hob-onboarding:agent-name -->\n家庭助手：已有助手\n");
   } finally {
     await fiber.dispose();
     await context.fiber.dispose();

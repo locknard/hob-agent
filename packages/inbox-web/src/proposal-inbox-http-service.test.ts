@@ -649,6 +649,50 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   await ctx.fiber.dispose();
 });
 
+test("uses an async product-session authenticator without Basic challenges and preserves the configured principal", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const authenticatedRequests: unknown[] = [];
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    principal: adminPrincipal,
+    requestAuthenticator: async (request) => {
+      authenticatedRequests.push(request);
+      return request.cookie === "hob_product_session=supervisor-session";
+    },
+  });
+
+  try {
+    const denied = await fetch(`${ctx.homeInboxHttp.origin}/home`);
+    assert.equal(denied.status, 401);
+    assert.equal(denied.headers.get("www-authenticate"), null);
+    assert.match(await denied.text(), /恢复本地会话/);
+    assert.deepEqual(authenticatedRequests, [{ authorization: undefined, cookie: undefined, origin: undefined }]);
+
+    const accepted = await fetch(`${ctx.homeInboxHttp.origin}/conversation`, {
+      method: "POST",
+      headers: {
+        cookie: "hob_product_session=supervisor-session",
+        origin: ctx.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "question=%E5%AE%A2%E5%8E%85%E7%8E%B0%E5%9C%A8%E6%80%8E%E4%B9%88%E6%A0%B7",
+      redirect: "manual",
+    });
+    assert.equal(accepted.status, 303);
+    assert.deepEqual((ctx.homeInbox as unknown as StubInbox).adviceActors, [adminPrincipal]);
+    assert.deepEqual(authenticatedRequests[1], {
+      authorization: undefined,
+      cookie: "hob_product_session=supervisor-session",
+      origin: ctx.homeInboxHttp.origin,
+    });
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("keeps safety acknowledgement on the fixed host route", async () => {
   const ctx = new Context();
   await ctx.plugin(SafetyHttpInbox);

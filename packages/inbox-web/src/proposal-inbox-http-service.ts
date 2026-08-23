@@ -75,6 +75,16 @@ const SECURITY_HEADERS = Object.freeze({
 
 export type InboxAuthenticator = (authorization: string | undefined) => boolean;
 
+/** Narrow request metadata a product-session owner may use to restore a local session. */
+export interface InboxAuthenticationRequest {
+  readonly authorization: string | undefined;
+  readonly cookie: string | undefined;
+  readonly origin: string | undefined;
+}
+
+/** Optional asynchronous authentication seam for a supervisor-owned product session. */
+export type InboxRequestAuthenticator = (request: InboxAuthenticationRequest) => boolean | Promise<boolean>;
+
 /** Stable V4 destinations owned by the product shell. */
 export type ProductRoute =
   | "home"
@@ -421,7 +431,10 @@ export interface ProposalInboxHttpOptions {
   readonly port?: number;
   /** An already-listening product host whose active surface is selected explicitly. */
   readonly host?: ProductHttpHost;
-  readonly authenticate: InboxAuthenticator;
+  /** Legacy HTTP Basic authenticator retained for local embedding compatibility. */
+  readonly authenticate?: InboxAuthenticator;
+  /** Supervisor-owned product session authenticator, evaluated instead of HTTP Basic when configured. */
+  readonly requestAuthenticator?: InboxRequestAuthenticator;
   /** Explicit household identity for every review mutation. */
   readonly principal?: InboxReviewActor;
   readonly reviewer?: string;
@@ -591,7 +604,15 @@ export class ProposalInboxHttpService extends Service {
     if (options.host !== undefined && options.port !== undefined) {
       throw new TypeError("Inbox HTTP accepts either a port or an external product host");
     }
-    if (typeof options.authenticate !== "function") throw new TypeError("Inbox HTTP authenticator is required");
+    if (options.authenticate !== undefined && typeof options.authenticate !== "function") {
+      throw new TypeError("Inbox HTTP authenticator is required");
+    }
+    if (options.requestAuthenticator !== undefined && typeof options.requestAuthenticator !== "function") {
+      throw new TypeError("Inbox HTTP request authenticator is invalid");
+    }
+    if (options.authenticate === undefined && options.requestAuthenticator === undefined) {
+      throw new TypeError("Inbox HTTP authenticator is required");
+    }
     this.principal = options.principal === undefined ? undefined : normalizeReviewActor(options.principal);
     this.reviewer = this.principal?.principalId ?? (options.reviewer?.trim() || "local-household-reviewer");
     if (this.reviewer.length > 200) throw new TypeError("Inbox reviewer identity is too long");
@@ -670,9 +691,12 @@ export class ProposalInboxHttpService extends Service {
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
-      if (!this.options.authenticate(request.headers.authorization)) {
-        response.setHeader("www-authenticate", 'Basic realm="hob-agent Inbox", charset="UTF-8"');
-        return send(response, 401, "Authentication required");
+      if (!(await this.authenticateRequest(request))) {
+        if (this.options.requestAuthenticator === undefined) {
+          response.setHeader("www-authenticate", 'Basic realm="hob-agent Inbox", charset="UTF-8"');
+          return send(response, 401, "Authentication required");
+        }
+        return send(response, 401, "请重新打开家庭控制台以恢复本地会话");
       }
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", this.origin);
@@ -1597,6 +1621,20 @@ export class ProposalInboxHttpService extends Service {
       return send(response, 404, "Not found");
     } catch {
       return send(response, 500, "Inbox request failed");
+    }
+  }
+
+  private async authenticateRequest(request: IncomingMessage): Promise<boolean> {
+    const requestAuthenticator = this.options.requestAuthenticator;
+    if (requestAuthenticator === undefined) return this.options.authenticate!(request.headers.authorization);
+    try {
+      return (await requestAuthenticator(Object.freeze({
+        authorization: request.headers.authorization,
+        cookie: request.headers.cookie,
+        origin: request.headers.origin,
+      }))) === true;
+    } catch {
+      return false;
     }
   }
 

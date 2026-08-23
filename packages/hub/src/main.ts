@@ -16,6 +16,7 @@ import {
   type SignalProcess,
   type StartHomeHubProcessOptions,
 } from "./process-entry.js";
+import { mountHomeAgentProductBundle } from "./home-agent-runtime.js";
 import {
   readProductBootstrapLaunchConfig,
   readHomeHubLaunchConfig,
@@ -29,12 +30,15 @@ import {
 } from "./model-credential-profile.js";
 import { MusicAssistantMediaCatalogProvider } from "./media/music-assistant-media-provider.js";
 import { MusicAssistantWebSocketSearchClient } from "./media/music-assistant-websocket-client.js";
-import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
+import {
+  ProductBootstrapConfigStore,
+  type ProductBootstrapConfigDraft,
+} from "./product-bootstrap-config-store.js";
 import {
   DEFAULT_PRODUCT_SETUP_PORT,
-  startProductSetupRuntime,
-  type ProductSetupRuntimeOptions,
-} from "./product-setup-runtime.js";
+  startProductRuntimeSupervisor,
+  type ProductRuntimeSupervisorOptions,
+} from "./product-runtime-supervisor.js";
 
 type ActionAuthorityConfig = Readonly<Record<string, ActionAuthorityConfiguration>>;
 
@@ -46,8 +50,8 @@ export interface HomeHubMainOptions {
   readonly shutdownTimeoutMs?: number;
   /** Test seam; production uses the repository's DSH composition root. */
   readonly createRuntime?: StartHomeHubProcessOptions["createRuntime"];
-  /** Test seam for the pre-operational setup composition root. */
-  readonly createSetupRuntime?: (options: ProductSetupRuntimeOptions) => Promise<HomeHubRuntime> | HomeHubRuntime;
+  /** Test seam for the unified setup and operational product composition root. */
+  readonly createProductRuntime?: (options: ProductRuntimeSupervisorOptions) => Promise<HomeHubRuntime> | HomeHubRuntime;
   /** Test seam; production resolves selected profiles from macOS Keychain. */
   readonly modelCredentialVault?: SecretVault;
 }
@@ -191,6 +195,29 @@ export async function resolveHomeHubProcessOptions(
   return createHomeHubProcessOptions(effectiveEnvironment, selectedCredential, actionAuthorityConfig, vault);
 }
 
+/** Builds an operational candidate from the exact map revision that setup verified. */
+async function resolveCandidateHomeHubProcessOptions(
+  environment: LaunchEnvironment,
+  dataDirectory: string,
+  candidate: ProductBootstrapConfigDraft,
+  vault?: SecretVault,
+): Promise<HomeHubProcessOptions> {
+  const effectiveEnvironment: LaunchEnvironment = {
+    ...environment,
+    HOB_MODEL: candidate.modelReference,
+    HOB_MODEL_BASE_URL: candidate.modelBaseURL,
+    HOB_BRIDGES: JSON.stringify(candidate.bridges),
+  };
+  const secretVault = vault ?? new MacOSKeychainSecretVault();
+  const selectedCredential: SelectedModelCredential = {
+    profile: candidate.modelProfile,
+    vault: secretVault,
+  };
+  readHomeHubLaunchConfig(effectiveEnvironment, selectedCredential, secretVault);
+  const actionAuthorityConfig = await loadActionAuthorityConfigurationIfConfigured(dataDirectory);
+  return createHomeHubProcessOptions(effectiveEnvironment, selectedCredential, actionAuthorityConfig, secretVault);
+}
+
 async function prepareProductLaunch(environment: LaunchEnvironment): Promise<PreparedProductLaunch> {
   const { dataDirectory } = readProductBootstrapLaunchConfig(environment);
   const activated = await new ProductBootstrapConfigStore(dataDirectory).load();
@@ -238,15 +265,44 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
     complete: options.complete,
     shutdownTimeoutMs: options.shutdownTimeoutMs,
   };
-  if (prepared.selection.state === "setup") {
-    const setupOptions: ProductSetupRuntimeOptions = {
-      dataDirectory: prepared.selection.dataDirectory,
+  if (prepared.selection.state === "setup" || prepared.activated !== undefined) {
+    const dataDirectory = prepared.selection.dataDirectory;
+    const productOptions: ProductRuntimeSupervisorOptions = {
+      dataDirectory,
       port: productSetupPort(environment.HOB_SETUP_PORT),
+      mountOperational: async (input) => {
+        const processOptions = await resolveCandidateHomeHubProcessOptions(
+          environment,
+          dataDirectory,
+          input.candidate,
+          options.modelCredentialVault,
+        );
+        const bundle = await mountHomeAgentProductBundle(input.context, {
+          ...processOptions.runtime,
+          inboxHttp: {
+            host: input.host,
+            requestAuthenticator: input.authenticateProductSession,
+            principal: PRODUCT_HOUSEHOLD_ACTOR,
+          },
+          homeViewRecipeDrafts: { path: join(dataDirectory, "layout-drafts.sqlite") },
+          homeOnboarding: {
+            ...processOptions.runtime.homeOnboarding,
+            bootstrapHousehold: {
+              householdName: input.candidate.householdName,
+              agentName: input.candidate.agentName,
+            },
+          },
+        });
+        return {
+          attach: () => bundle.context.homeInboxHttp.attach(),
+          dispose: () => bundle.dispose(),
+        };
+      },
     };
     return startHomeHubProcess({
       ...lifecycle,
-      createRuntime: () => options.createSetupRuntime?.(setupOptions)
-        ?? startProductSetupRuntime(setupOptions),
+      createRuntime: () => options.createProductRuntime?.(productOptions)
+        ?? startProductRuntimeSupervisor(productOptions),
     });
   }
   const processOptions = await resolveHomeHubProcessOptions(environment, options.modelCredentialVault);
@@ -259,6 +315,16 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
   }
   return startHomeAgentProcess({ ...processOptions, ...lifecycle });
 }
+
+const PRODUCT_HOUSEHOLD_ACTOR = Object.freeze({
+  principalId: "household-owner",
+  role: "adult_member" as const,
+  present: true,
+  device: {
+    kind: "private" as const,
+    boundPrincipalId: "household-owner",
+  },
+});
 
 function productSetupPort(value: string | undefined): number {
   if (value === undefined || value.trim() === "") return DEFAULT_PRODUCT_SETUP_PORT;

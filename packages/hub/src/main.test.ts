@@ -329,10 +329,10 @@ test("main fails closed before creating a Cordis runtime when neutral bridge con
   );
 });
 
-test("main starts the first-run setup runtime without parsing operational configuration", async () => {
+test("main starts the unified first-run product runtime without parsing operational configuration", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-first-run-"));
   let operationalStarts = 0;
-  let setupStarts = 0;
+  let productStarts = 0;
   try {
     const running = await main({
       env: { HOB_DATA_DIR: dataDirectory },
@@ -340,15 +340,54 @@ test("main starts the first-run setup runtime without parsing operational config
         operationalStarts += 1;
         return { context: new Context(), stop: async () => undefined };
       },
-      createSetupRuntime: async (input) => {
-        setupStarts += 1;
+      createProductRuntime: async (input) => {
+        productStarts += 1;
         assert.equal(input.dataDirectory, dataDirectory);
+        assert.equal(input.port, 8787);
         return { context: new Context(), stop: async () => undefined };
       },
     });
 
-    assert.equal(setupStarts, 1);
+    assert.equal(productStarts, 1);
     assert.equal(operationalStarts, 0);
+    await running.shutdown.shutdown(0);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test("main restores an activated product through the same supervisor instead of the legacy runtime", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-activated-product-"));
+  await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
+    householdName: "梧桐家",
+    agentName: "小满",
+    modelReference: "custom/home-model",
+    modelBaseURL: "https://model.example.test/v1",
+    modelProfile: {
+      id: "custom:setup:activated-main",
+      provider: "custom",
+      kind: "api_key",
+      secretRef: "keychain:hob-agent/setup-model:activated-main:stage-a",
+    },
+    bridges: [],
+  });
+  let legacyStarts = 0;
+  let productStarts = 0;
+  try {
+    const running = await main({
+      env: { HOB_DATA_DIR: dataDirectory },
+      createRuntime: async () => {
+        legacyStarts += 1;
+        return { context: new Context(), stop: async () => undefined };
+      },
+      createProductRuntime: async (input) => {
+        productStarts += 1;
+        assert.equal(input.dataDirectory, dataDirectory);
+        return { context: new Context(), stop: async () => undefined };
+      },
+    });
+    assert.equal(productStarts, 1);
+    assert.equal(legacyStarts, 0);
     await running.shutdown.shutdown(0);
   } finally {
     await rm(dataDirectory, { recursive: true, force: true });

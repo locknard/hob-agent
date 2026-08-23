@@ -21,7 +21,19 @@ export interface ProductSetupHttpOptions {
   readonly now?: () => Date;
   readonly createSessionToken: () => string;
   readonly setupDrafts: ProductSetupDraftPort;
+  readonly activation?: ProductSetupActivationPort;
   readonly sessionTtlMs?: number;
+}
+
+export type ProductSetupActivationResult =
+  | { readonly status: "activated" }
+  | { readonly status: "busy" | "conflict" | "unavailable" };
+
+export interface ProductSetupActivationPort {
+  activate(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+  }): Promise<ProductSetupActivationResult>;
 }
 
 export interface ProductSetupDraftProjection {
@@ -157,6 +169,11 @@ export class ProductSetupHttpService extends Service {
     this.host.switchTo(this.hostHandler);
   }
 
+  /** Removes this setup surface when a product runtime takes over the shared host. */
+  detach(): void {
+    this.host?.detach(this.hostHandler);
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     applyResponseHeaders(response);
     try {
@@ -179,7 +196,7 @@ export class ProductSetupHttpService extends Service {
         const draft = sessionToken === undefined ? undefined : await this.options.setupDrafts.loadForSession(sessionToken);
         const html = draft === undefined
           ? renderPairingPage(this.pairingState())
-          : renderSetupWorkspace(draft);
+          : renderSetupWorkspace(draft, undefined, this.options.activation !== undefined);
         return sendHtml(response, 200, method === "HEAD" ? "" : html);
       }
       if (method === "POST" && url.pathname === "/setup/pair") {
@@ -193,6 +210,9 @@ export class ProductSetupHttpService extends Service {
       }
       if (method === "POST" && url.pathname === "/setup/bridge/probe") {
         return await this.probeBridge(request, response);
+      }
+      if (method === "POST" && url.pathname === "/setup/activate") {
+        return await this.activate(request, response);
       }
       sendText(response, 404, "页面不存在");
     } catch (error) {
@@ -390,6 +410,46 @@ export class ProductSetupHttpService extends Service {
     return sendHtml(response, result.status === "credential_rejected" || result.status === "missing" || result.status === "incompatible" ? 400 : 503, renderSetupWorkspace(current, notice));
   }
 
+  private async activate(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (request.headers.origin !== this.origin) {
+      return sendText(response, 403, "请从这台设备上的设置页面继续。");
+    }
+    const activation = this.options.activation;
+    if (activation === undefined) return sendText(response, 404, "家庭启用入口尚未配置。");
+    const sessionToken = cookieValue(request.headers.cookie, SESSION_COOKIE);
+    const current = sessionToken === undefined ? undefined : await this.options.setupDrafts.loadForSession(sessionToken);
+    if (sessionToken === undefined || current === undefined) {
+      return sendHtml(response, 401, renderPairingPage(this.pairingState()));
+    }
+    if (current.stage !== "map") {
+      return sendHtml(response, 409, renderSetupWorkspace(current, "家庭设置已经更新，请核对当前步骤。", true));
+    }
+    if (!isFormContentType(request.headers["content-type"])) {
+      return sendHtml(response, 415, renderSetupWorkspace(current, "请从家庭地图页面继续。", true));
+    }
+    const form = new URLSearchParams(await readBoundedBody(request));
+    const result = await activation.activate({
+      sessionToken,
+      expectedRevision: boundedRevision(form.get("revision")),
+    });
+    if (result.status === "activated") {
+      response.statusCode = 303;
+      response.setHeader("location", "/onboarding");
+      response.end();
+      return;
+    }
+    const notice = result.status === "busy"
+      ? "家庭正在启动，请稍等片刻。"
+      : result.status === "conflict"
+        ? "家庭设置已经更新，请核对后继续。"
+        : "这次没有启动完成，已验证的设置仍然保留，可以直接再试。";
+    return sendHtml(
+      response,
+      result.status === "unavailable" ? 503 : 409,
+      renderSetupWorkspace(current, notice, true),
+    );
+  }
+
   private pairingState(): "ready" | "expired" | "used" {
     if (this.pairingConsumed) return "used";
     return this.now().getTime() >= this.options.pairingExpiresAt.getTime() ? "expired" : "ready";
@@ -548,8 +608,8 @@ function renderSetupProblem(message: string): string {
     </section>`);
 }
 
-function renderSetupWorkspace(draft: ProductSetupDraftProjection, notice?: string): string {
-  if (draft.stage === "map") return renderMapStep(draft, notice);
+function renderSetupWorkspace(draft: ProductSetupDraftProjection, notice?: string, canActivate = false): string {
+  if (draft.stage === "map") return renderMapStep(draft, notice, canActivate);
   if (draft.stage === "bridge") return renderBridgeStep(draft, notice);
   if (draft.stage === "model") return renderModelStep(draft, notice);
   return documentShell("给家起名字", `
@@ -628,7 +688,7 @@ function renderBridgeStep(draft: ProductSetupDraftProjection, notice?: string): 
     </section>`);
 }
 
-function renderMapStep(draft: ProductSetupDraftProjection, notice?: string): string {
+function renderMapStep(draft: ProductSetupDraftProjection, notice?: string, canActivate = false): string {
   const summary = draft.bridge?.summary;
   return documentShell("确认家庭地图", `
     <section class="workspace" aria-labelledby="workspace-title">
@@ -643,7 +703,12 @@ function renderMapStep(draft: ProductSetupDraftProjection, notice?: string): str
         <div><strong>${summary?.areas ?? 0}</strong><span>个空间</span></div>
         <div><strong>${summary?.states ?? 0}</strong><span>条当前状态</span></div>
       </div>
-      <p class="privacy-note">这只是连接摘要。下一步会用真实设备与空间生成可核对的家庭地图，再由你决定是否启用。</p>
+      <p class="privacy-note">这只是连接摘要。接下来会用真实设备与空间生成可核对的家庭地图，再由你选择动作确认方式。</p>
+      ${canActivate ? `<form method="post" action="/setup/activate" class="pairing-form" data-activation>
+        <input type="hidden" name="revision" value="${draft.revision}">
+        <p class="probe-status" data-activation-status aria-live="polite"></p>
+        <button type="submit">继续设置家庭</button>
+      </form>` : ""}
     </section>`);
 }
 
@@ -655,7 +720,7 @@ function escapeHtml(value: string): string {
 
 const SETUP_CSS = `
 :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;background:#f5f5f7;color:#1d1d1f;font-synthesis:none}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f5f5f7}.setup-shell{min-height:100vh;display:grid;place-items:center;padding:clamp(1rem,4vw,3rem)}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f5f5f7}.setup-shell{width:100%;min-height:100vh;display:grid;place-items:center;padding:clamp(1rem,4vw,3rem)}
 .welcome-card,.workspace{width:min(100%,46rem);background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:2rem;padding:clamp(1.5rem,5vw,3.5rem);box-shadow:0 1.5rem 4rem rgba(0,0,0,.08)}
 .hob-mark{display:grid;place-items:center;width:3rem;height:3rem;border-radius:1rem;background:#1d1d1f;color:#fff;font-size:1.6rem;font-weight:650;letter-spacing:-.06em;margin-bottom:2rem}
 .workspace header{display:flex;gap:1rem;align-items:center}.workspace header .hob-mark{margin:0}.eyebrow{margin:0 0 .45rem;font-size:.82rem;font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:#6e6e73}.eyebrow.success{color:#237a45}
@@ -681,6 +746,14 @@ for (const form of document.querySelectorAll('[data-model-probe], [data-bridge-p
     const status = form.querySelector('[data-probe-status]');
     if (button) { button.disabled = true; button.textContent = '正在验证…'; }
     if (status) status.textContent = '正在进行一次真实连接检查，通常只需要几秒。';
+  });
+}
+for (const form of document.querySelectorAll('[data-activation]')) {
+  form.addEventListener('submit', () => {
+    const button = form.querySelector('button[type="submit"]');
+    const status = form.querySelector('[data-activation-status]');
+    if (button) { button.disabled = true; button.textContent = '正在准备家庭…'; }
+    if (status) status.textContent = '正在连接真实家庭状态并准备对话。';
   });
 }
 `;

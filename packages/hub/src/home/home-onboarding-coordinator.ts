@@ -126,6 +126,15 @@ export interface OnboardingAdvicePort {
   ask(question: string, actor?: OnboardingActor): Promise<OnboardingAdviceStart>;
 }
 
+/**
+ * Household names accepted in the paired product setup before the Hub is
+ * mounted. They advance only a brand-new onboarding record past its naming step.
+ */
+export interface OnboardingBootstrapHousehold {
+  readonly householdName: string;
+  readonly agentName: string;
+}
+
 export type OnboardingCommand =
   | { readonly step: 1; readonly kind: "name_household"; readonly householdName: string; readonly agentName: string }
   | { readonly step: 2; readonly kind: "preflight_bridge"; readonly bridgeId: string }
@@ -168,6 +177,7 @@ export interface HomeOnboardingCoordinatorOptions {
   readonly path?: string;
   readonly store?: HomeOnboardingStore & { close?: () => void };
   readonly householdDirectory?: string;
+  readonly bootstrapHousehold?: OnboardingBootstrapHousehold;
   readonly world?: OnboardingWorldPort;
   readonly actionAuthority?: OnboardingActionAuthorityPort;
   readonly observation?: OnboardingObservationPort;
@@ -234,7 +244,11 @@ export class HomeOnboardingCoordinatorService extends Service {
     this.observation = options.observation;
     this.advice = options.advice ?? asAdvice(ctx.get("homeAdvice"));
     this.now = options.now ?? (() => new Date().toISOString());
-    this.state = this.store.load() ?? initialHomeOnboardingState(this.timestamp());
+    const persisted = this.store.load();
+    this.state = persisted ?? initialHomeOnboardingState(this.timestamp());
+    if (persisted === undefined && options.bootstrapHousehold !== undefined) {
+      this.completeBootstrapHousehold(options.bootstrapHousehold);
+    }
   }
 
   protected [Service.init](): void {
@@ -594,6 +608,24 @@ export class HomeOnboardingCoordinatorService extends Service {
   private persistHouseholdNames(householdDirectory: string, householdName: string, agentName: string): void {
     writeMarkedFact(join(householdDirectory, "HOME.md"), "household-name", `家庭名称：${householdName}`);
     writeMarkedFact(join(householdDirectory, "SOUL.md"), "agent-name", `家庭助手：${agentName}`);
+  }
+
+  private completeBootstrapHousehold(household: OnboardingBootstrapHousehold): void {
+    const command: Extract<OnboardingCommand, { readonly step: 1 }> = {
+      step: 1,
+      kind: "name_household",
+      householdName: household.householdName,
+      agentName: household.agentName,
+    };
+    validateCommand(command);
+    const householdDirectory = this.householdDirectory;
+    if (householdDirectory === undefined) {
+      throw new TypeError("Household bootstrap requires a household directory");
+    }
+    this.persistHouseholdNames(householdDirectory, command.householdName, command.agentName);
+    this.completeStep(command, this.timestamp(), {
+      household: { householdName: command.householdName, agentName: command.agentName },
+    });
   }
 
   private timestamp(): string {

@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
+import {
+  ProductBootstrapConfigStore,
+  ProductBootstrapConfigurationConflictError,
+} from "./product-bootstrap-config-store.js";
 
 test("commits and reloads one composition-root product configuration generation", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-product-config-"));
@@ -62,7 +65,7 @@ test("preserves the active generation across stale writes and secret-shaped brid
         modelProfile: { id: "deepseek:setup:draft-a", provider: "deepseek", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:draft-a:stage-a" },
         bridges: [],
       }),
-      /generation conflict/,
+      ProductBootstrapConfigurationConflictError,
     );
     await assert.rejects(
       store.commit(1, {

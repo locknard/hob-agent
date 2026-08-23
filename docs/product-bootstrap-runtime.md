@@ -1,9 +1,9 @@
 # Product bootstrap runtime
 
 Date: 2026-08-22
-Status: accepted target; the current branch implements setup through a verified
-connection summary, while activation and the in-process handoff remain the next
-milestone
+Status: accepted target; setup, exact-generation activation, and the in-process
+Product Host handoff are implemented. Continuous starting and recovery feedback
+remain the next milestone.
 
 ## Decision
 
@@ -32,13 +32,14 @@ can therefore open the product and complete setup before the Agent becomes activ
    Xiaomi joins the same choice list when an authorized production transport and its
    setup registration are present. Each adapter supplies its own normalized config,
    display endpoint and scoped credential references.
-5. The current read-only bridge probe returns a verified connection summary. The
-   next milestone mounts HomeWorld from that exact staged configuration to generate
-   the real household map and continue the action-policy, observation-consent and
-   first-question checkpoints.
-6. The target activation flow mounts the selected generation, commits it, and enters
-   `starting`. The page then streams named stages until the operational Product Shell
-   is ready.
+5. The read-only bridge probe returns a verified connection summary. Activation
+   mounts HomeWorld from that exact staged revision, then continues in the real
+   onboarding flow at bridge preflight, household map, action policy,
+   observation consent, and the first question. The household and assistant names
+   already accepted during setup are carried forward once and are not requested again.
+6. Activation mounts the selected generation, commits it, and switches the same
+   Product Host to the operational Product Shell. Named `starting` and `recovery`
+   progress remain the next product slice.
 
 ## Configuration ownership
 
@@ -62,8 +63,8 @@ can therefore open the product and complete setup before the Agent becomes activ
 ## Target runtime composition
 
 The following table defines the accepted end state. The current branch owns the
-`pairing` and `setup` rows through the verified connection summary. The persistent
-Host handoff and the remaining rows are the next implementation slice.
+`pairing`, `setup`, and operational handoff rows. Continuous `starting` and
+`recovery` presentation remains the next implementation slice.
 
 | State | Mounted ownership |
 | --- | --- |
@@ -81,7 +82,7 @@ then commits it as active, then switches the Host surface. A failed mount dispos
 the candidate child and leaves the previous active generation unchanged. The Host
 keeps the same origin and authenticated device session throughout the change.
 
-The current setup cookie is already scoped to `/`. The target runtime treats it as
+The setup cookie is scoped to `/` and the runtime treats it as
 the product session; its
 durable record contains only a digest, expiry, and the bound local principal. The
 operational Product Shell accepts that session directly; the product journey does
@@ -130,13 +131,14 @@ HomeWorld.
 5. **Implemented on the product-bootstrap branch:** a neutral bridge setup catalog
    stages bridge-scoped credentials and runs a Home Assistant authenticated,
    read-only map probe without subscribing or writing.
-6. **Foundation implemented on the product-bootstrap branch:** one reusable
-   `ProductHttpHost`, an exact activation candidate, and a mountable Home Agent child
-   bundle. Next, compose them into the persistent Host, mount-before-commit
-   transition, product-session authentication, and continuous
-   `starting`/`recovery` feedback.
-7. Run browser, restart, credential-rotation, failed-probe, and real HA/custom-model
-   acceptance suites before declaring the milestone complete.
+6. **Implemented on the product-activation branch:** one `ProductRuntimeSupervisor`
+   owns the Cordis root and loopback listener. It mounts the exact map revision before
+   committing it, atomically hands the Host to the Product Shell, reuses the paired
+   product session without Basic authentication, disposes the setup surface, restores
+   an active generation after restart, and carries household identity into onboarding.
+   The retired standalone setup runtime has been removed.
+7. Add continuous `starting`/`recovery` events, credential rotation, and real
+   HA/custom-model acceptance before declaring the complete bootstrap milestone.
 
 ## Acceptance gates
 

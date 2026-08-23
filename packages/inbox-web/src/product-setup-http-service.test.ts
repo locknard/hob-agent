@@ -19,6 +19,11 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
     readonly credential: string;
   }> = [];
 
+  seed(sessionToken: string, projection: ProductSetupDraftProjection): void {
+    this.token = sessionToken;
+    this.projection = projection;
+  }
+
   establishSession(input: { readonly sessionToken: string; readonly sessionExpiresAt: Date }) {
     this.token = input.sessionToken;
     this.projection ??= { draftId: "draft-1", revision: 1, stage: "identity" };
@@ -104,6 +109,108 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
   }
 }
 
+test("activates the exact map revision through the paired product session", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "activation-private-product-session-token";
+  setupDrafts.seed(sessionToken, {
+    draftId: "draft-activation",
+    revision: 4,
+    stage: "map",
+    householdName: "梧桐家",
+    agentName: "小满",
+    bridge: {
+      adapterType: "fixture-peer",
+      label: "家庭桥",
+      endpoint: "fixture://home",
+      summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+    },
+  });
+  const calls: unknown[] = [];
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "START-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-product-session-token",
+    setupDrafts,
+    activation: {
+      activate: async (input) => { calls.push(input); return { status: "activated" as const }; },
+    },
+  });
+  const cookie = `hob_product_session=${sessionToken}`;
+  try {
+    const map = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie } });
+    const mapHtml = await map.text();
+    assert.match(mapHtml, /action="\/setup\/activate"/);
+    assert.match(mapHtml, />继续设置家庭</);
+
+    const activated = await fetch(`${ctx.productSetupHttp.origin}/setup/activate`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        origin: ctx.productSetupHttp.origin,
+        cookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ revision: "4" }),
+    });
+    assert.equal(activated.status, 303);
+    assert.equal(activated.headers.get("location"), "/onboarding");
+    assert.deepEqual(calls, [{ sessionToken, expectedRevision: 4 }]);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps the verified map actionable when product activation is temporarily unavailable", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "activation-retry-product-session-token";
+  setupDrafts.seed(sessionToken, {
+    draftId: "draft-retry",
+    revision: 7,
+    stage: "map",
+    householdName: "梧桐家",
+    agentName: "小满",
+    bridge: {
+      adapterType: "fixture-peer",
+      label: "家庭桥",
+      endpoint: "fixture://home",
+      summary: { states: 3, entities: 3, devices: 2, areas: 1 },
+    },
+  });
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "START-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-product-session-token",
+    setupDrafts,
+    activation: { activate: async () => ({ status: "unavailable" as const }) },
+  });
+  try {
+    const response = await fetch(`${ctx.productSetupHttp.origin}/setup/activate`, {
+      method: "POST",
+      headers: {
+        origin: ctx.productSetupHttp.origin,
+        cookie: `hob_product_session=${sessionToken}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ revision: "7" }),
+    });
+    const html = await response.text();
+    assert.equal(response.status, 503);
+    assert.match(html, /已验证的设置仍然保留，可以直接再试/);
+    assert.match(html, /action="\/setup\/activate"/);
+    assert.match(html, />继续设置家庭</);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("waits for an explicit attachment before setup serves through an external product host", async () => {
   const host = new ProductHttpHost({ port: 0 });
   await host.listen();
@@ -130,6 +237,26 @@ test("waits for an explicit attachment before setup serves through an external p
     await fiber?.dispose();
     await ctx.fiber.dispose();
     await host.dispose();
+  }
+});
+
+test("gives the setup grid a definite width so the product card cannot collapse to one character", async () => {
+  const context = new Context();
+  const fiber = await context.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "WIDE-HOME",
+    pairingExpiresAt: new Date("2026-08-23T03:00:00.000Z"),
+    now: () => new Date("2026-08-23T02:00:00.000Z"),
+    createSessionToken: () => "layout-review-session-token-with-enough-entropy",
+    setupDrafts: new MemorySetupDrafts(),
+  });
+  try {
+    const css = await (await fetch(`${context.productSetupHttp.origin}/setup/assets/setup.css`)).text();
+    assert.match(css, /\.setup-shell\{width:100%;min-height:100vh/);
+    assert.match(css, /\.welcome-card,\.workspace\{width:min\(100%,46rem\)/);
+  } finally {
+    await fiber.dispose();
+    await context.fiber.dispose();
   }
 });
 

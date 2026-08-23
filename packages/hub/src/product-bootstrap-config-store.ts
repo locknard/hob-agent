@@ -32,6 +32,13 @@ export interface ProductBootstrapConfiguration extends ProductBootstrapConfigDra
   readonly activatedAt: string;
 }
 
+export class ProductBootstrapConfigurationConflictError extends Error {
+  constructor() {
+    super("Product configuration generation conflict");
+    this.name = "ProductBootstrapConfigurationConflictError";
+  }
+}
+
 /** Durable non-secret generation owned by the single production composition root. */
 export class ProductBootstrapConfigStore {
   private readonly path: string;
@@ -63,7 +70,7 @@ export class ProductBootstrapConfigStore {
     const temporaryPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       const current = await this.load();
-      if ((current?.generation ?? 0) !== expectedGeneration) throw new Error("Product configuration generation conflict");
+      if ((current?.generation ?? 0) !== expectedGeneration) throw new ProductBootstrapConfigurationConflictError();
       const configuration: ProductBootstrapConfiguration = Object.freeze({
         version: CONFIG_VERSION,
         generation: expectedGeneration + 1,
