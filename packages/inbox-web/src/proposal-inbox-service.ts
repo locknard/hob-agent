@@ -1292,7 +1292,13 @@ function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDe
       ? { lifecycle: proposal.lifecycle }
       : {}),
     ...(typeof proposal.enableBlockedReason === "string" && proposal.enableBlockedReason.length > 0
-      ? { enableBlockedReason: proposal.enableBlockedReason.slice(0, 1_000) }
+      ? {
+          enableBlockedReason: proposal.enableBlockedReason.slice(0, 1_000),
+          ...(proposal.enableBlockedKind === "not_configured" || proposal.enableBlockedKind === "not_approved"
+            || proposal.enableBlockedKind === "unknown_capability" || proposal.enableBlockedKind === "protected"
+            ? { enableBlockedKind: proposal.enableBlockedKind }
+            : {}),
+        }
       : {}),
     snoozeCount: proposal.snoozeCount ?? 0,
     newEvidence: proposal.newEvidence ?? false,

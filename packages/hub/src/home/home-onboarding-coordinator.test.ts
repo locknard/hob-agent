@@ -21,6 +21,9 @@ import { InMemoryHomeOnboardingStore } from "./home-onboarding-store.js";
 class StubWorld extends Service {
   constructor(ctx: Context, private readonly source: OnboardingWorldPort) { super(ctx, "homeWorld"); }
   snapshot(): ReturnType<OnboardingWorldPort["snapshot"]> { return this.source.snapshot(); }
+  resolveActionAuthority(hwCapabilityId: string) {
+    return this.source.resolveActionAuthority?.(hwCapabilityId) ?? { status: "unavailable" as const, reason: "not_configured" };
+  }
 }
 
 const adultPrivate: OnboardingActor = {
@@ -34,6 +37,8 @@ const testHouseholdDirectory = mkdtempSync(join(tmpdir(), "hob-home-onboarding-c
 
 function world(ready = true): OnboardingWorldPort {
   return {
+    // Nothing configured yet: the settings merge starts from a clean slate.
+    resolveActionAuthority: () => ({ status: "unavailable" as const, reason: "not_configured" }),
     snapshot: () => ({
       generatedAt: "2026-08-22T00:00:00.000Z",
       bridges: {
@@ -117,6 +122,49 @@ test("the settings confirmation editor re-decides methods under step-5 rules", a
     );
     assert.equal(saved.status, "configured");
     assert.deepEqual(configured, [{ directCapabilityIds: [], confirmationCapabilityIds: ["cap-light"], administratorCapabilityIds: [] }]);
+  } finally {
+    await fiber.dispose();
+    await context.fiber.dispose();
+  }
+});
+
+test("a partial settings save merges the delta and never erases unseen configuration", async () => {
+  const configured: unknown[] = [];
+  const source: OnboardingWorldPort = {
+    resolveActionAuthority: (hwCapabilityId: string) => hwCapabilityId === "cap-lock"
+      ? { status: "available" as const, policyClass: "administrator" as const }
+      : { status: "unavailable" as const, reason: "not_configured" },
+    snapshot: () => ({
+      generatedAt: "2026-08-23T00:00:00.000Z",
+      bridges: {},
+      spaces: [],
+      devices: [{
+        hwId: "hw-1",
+        validity: "valid",
+        capabilities: [
+          { hwCapabilityId: "cap-light", bindings: [], schema: "boolean", schemaVersion: "1" },
+          { hwCapabilityId: "cap-lock", bindings: [], schema: "boolean", schemaVersion: "1" },
+        ],
+      }],
+    }),
+  } as OnboardingWorldPort;
+  const { context, fiber, service } = await coordinator(source, {
+    configure: (input) => {
+      configured.push(input);
+      return { status: "configured", configurationRevision: 1 };
+    },
+  });
+  try {
+    const saved = service.configureActionPolicy(
+      { directCapabilityIds: [], confirmationCapabilityIds: ["cap-light"], administratorCapabilityIds: [] },
+      adultPrivate,
+    );
+    assert.equal(saved.status, "configured");
+    assert.deepEqual(configured, [{
+      directCapabilityIds: [],
+      confirmationCapabilityIds: ["cap-light"],
+      administratorCapabilityIds: ["cap-lock"],
+    }], "the unseen configured lock survives a save that never displayed it");
   } finally {
     await fiber.dispose();
     await context.fiber.dispose();

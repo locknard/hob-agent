@@ -230,6 +230,7 @@ export interface InboxProposal {
   readonly confirmationDeviceNames?: readonly string[];
   /** The world no longer allows this prepared plan to enable; the card says so. */
   readonly enableBlockedReason?: string;
+  readonly enableBlockedKind?: "not_configured" | "not_approved" | "unknown_capability" | "protected";
   readonly trial?: {
     readonly durationDays: 7;
     readonly startedAt: string;

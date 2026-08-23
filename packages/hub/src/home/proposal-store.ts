@@ -378,6 +378,8 @@ export interface ProposalEnvelope extends CreateProposalInput {
   readonly openQuestion?: string;
   /** The world no longer allows this plan to enable; the card says so instead of looping. */
   readonly enableBlockedReason?: string;
+  /** Closed cause behind the block, so the card offers the right exit. */
+  readonly enableBlockedKind?: "not_configured" | "not_approved" | "unknown_capability" | "protected";
   readonly decision?: ProposalGovernanceDecisionRecord;
   readonly review?: ProposalReview;
   readonly audit: readonly ProposalAuditEvent[];
@@ -451,6 +453,7 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   openQuestion: z.string().trim().min(1).max(1_000).optional(),
   preparedContentHash: z.string().trim().min(1).max(128).optional(),
   enableBlockedReason: z.string().trim().min(1).max(1_000).optional(),
+  enableBlockedKind: z.enum(["not_configured", "not_approved", "unknown_capability", "protected"]).optional(),
   preparedArtifact: z.object({
     artifactId: boundedId,
     revision: z.number().int().positive(),
@@ -1170,7 +1173,7 @@ export class SqliteProposalStore {
    * or a lost authority). The card stays visible with an honest notice; the
    * household keeps the revise and decline entries and is never sent in a loop.
    */
-  markEnableBlocked(input: ProposalLifecycleInput & { readonly reason: string }): ProposalEnvelope {
+  markEnableBlocked(input: ProposalLifecycleInput & { readonly reason: string; readonly kind?: "not_configured" | "not_approved" | "unknown_capability" | "protected" }): ProposalEnvelope {
     const reason = input.reason?.trim();
     if (typeof reason !== "string" || reason.length === 0 || reason.length > 1_000) {
       throw new TypeError("proposal enable block reason is invalid");
@@ -1179,11 +1182,12 @@ export class SqliteProposalStore {
       if (current.lifecycle !== "ready") {
         throw new ProposalStoreError("lifecycle_invalid", "Only a prepared plan records an enable block");
       }
-      if (current.enableBlockedReason === reason) return current;
+      if (current.enableBlockedReason === reason && current.enableBlockedKind === input.kind) return current;
       return {
         ...current,
         revision,
         enableBlockedReason: reason,
+        ...(input.kind === undefined ? {} : { enableBlockedKind: input.kind }),
         updatedAt: at,
         audit: [...current.audit, {
           ...this.auditEvent(at, "revalidation_required", input.actor ?? "system", revision),
@@ -1202,7 +1206,7 @@ export class SqliteProposalStore {
       if (current.lifecycle !== "ready" || current.enableBlockedReason === undefined) {
         throw new ProposalStoreError("lifecycle_invalid", "Only a blocked prepared plan clears an enable block");
       }
-      const { enableBlockedReason: _cleared, ...rest } = current;
+      const { enableBlockedReason: _cleared, enableBlockedKind: _clearedKind, ...rest } = current;
       return {
         ...rest,
         revision,
@@ -1249,6 +1253,7 @@ export class SqliteProposalStore {
         actionPolicyClasses: _staleClasses,
         confirmationDeviceNames: _staleNames,
         enableBlockedReason: _staleBlock,
+        enableBlockedKind: _staleBlockKind,
         ...basePlan
       } = current;
       const disclosure = input.updatedGateDisclosure;
@@ -2365,6 +2370,7 @@ function mergeProposalEvidence(
     preparedContentHash: _preparedHash,
     preparedArtifact: _preparedRefs,
     enableBlockedReason: _staleBlock,
+    enableBlockedKind: _staleBlockKind,
     ...base
   } = current;
   return {

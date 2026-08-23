@@ -1007,12 +1007,20 @@ test("settings saves confirmation methods and rechecks blocked proposals", async
       redirect: "manual",
     });
     assert.equal(saved.status, 303);
-    assert.equal(saved.headers.get("location"), "/settings?policy=saved#action-policy");
+    const savedLocation = saved.headers.get("location") ?? "";
+    const receipt = /^\/settings\?policy=([a-f0-9]{32})#action-policy$/.exec(savedLocation)?.[1];
+    assert.ok(receipt !== undefined, "the redirect carries an opaque single-use receipt, not a guessable literal");
     assert.deepEqual(configured, [{ directCapabilityIds: [], confirmationCapabilityIds: ["hwc-1"], administratorCapabilityIds: [] }]);
     assert.equal(rechecks, 1, "the saved configuration immediately rechecks blocked proposals");
 
-    const confirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=saved`, { headers: { authorization } });
-    assert.match(await confirmed.text(), /已保存确认方式，受影响的建议正在重新检查。/);
+    const confirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
+    assert.match(await confirmed.text(), /已保存确认方式，已重新检查 1 条受阻建议，其中 1 条已恢复可启用。/, "the notice consumes the real recheck result");
+
+    const replayed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
+    assert.doesNotMatch(await replayed.text(), /已保存确认方式/, "a receipt reads exactly once");
+
+    const forged = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=saved`, { headers: { authorization } });
+    assert.doesNotMatch(await forged.text(), /已保存确认方式/, "a crafted URL never fakes a success message");
 
     const sharedDenied = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
       method: "POST",

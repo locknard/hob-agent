@@ -404,7 +404,7 @@ test("collects only exact durable refs for the current bridge without returning 
     now: () => "2026-08-20T00:00:00.000Z",
     id: () => "durable-proposal",
   });
-  const proposal = ctx.homeProposals.create(durableProposal());
+  const proposal = (ctx.homeProposals as unknown as { store: { create(input: unknown): { id: string; revision: number } } }).store.create(durableProposal());
   const references = ctx.homeProposals.withRetentionEvidence("bridge-a", 1_000, (items) => items);
   assert.equal(references.length, 1);
   assert.equal(references[0]?.bridgeId, "bridge-a");

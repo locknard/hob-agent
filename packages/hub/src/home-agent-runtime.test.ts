@@ -571,7 +571,11 @@ test("wakes the private durable runner after an approved automation job commits"
 
   await runtime.start();
   try {
-    const pending = runtime.context.homeProposals.create({
+    const proposalIngress = runtime.context.homeProposals as unknown as {
+      store: { create(input: unknown): { id: string; revision: number; status: string } };
+      wakePreparation(proposal: { id: string; revision: number }): unknown;
+    };
+    const pending = proposalIngress.store.create({
       kind: "automation-draft",
       title: "Review a local household note",
       summary: "Prepare one local notification without a device write.",
@@ -606,6 +610,9 @@ test("wakes the private durable runner after an approved automation job commits"
         },
       },
     });
+    // The durable runner never replays on start; admission's wake is the only
+    // nudge, so the fixture wakes exactly as governed admission would.
+    proposalIngress.wakePreparation(pending);
 
     const observer = new SqliteProposalStore({ path: proposalPath });
     let job = observer.getPreparationJobForProposal(pending.id, pending.revision);
@@ -653,7 +660,11 @@ test("retries one failed exact preparation through the full Inbox facade and wak
   await runtime.start();
   const observer = new SqliteProposalStore({ path: proposalPath });
   try {
-    const pending = runtime.context.homeProposals.create({
+    const proposalIngress = runtime.context.homeProposals as unknown as {
+      store: { create(input: unknown): { id: string; revision: number; status: string } };
+      wakePreparation(proposal: { id: string; revision: number }): unknown;
+    };
+    const pending = proposalIngress.store.create({
       kind: "automation-draft",
       title: "Retry a local household note",
       summary: "Retry one local notification without a device write.",
@@ -688,6 +699,7 @@ test("retries one failed exact preparation through the full Inbox facade and wak
         },
       },
     });
+    proposalIngress.wakePreparation(pending);
 
     let failed = observer.getPreparationJobForProposal(pending.id, pending.revision);
     for (let attempts = 0; failed !== undefined && failed.status !== "failed" && attempts < 50; attempts += 1) {

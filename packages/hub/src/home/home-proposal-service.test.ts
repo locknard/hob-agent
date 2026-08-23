@@ -16,6 +16,10 @@ import {
 } from "./proposal-store.js";
 
 
+function serviceStore(service: unknown): SqliteProposalStore {
+  return (service as { store: SqliteProposalStore }).store;
+}
+
 function completePreparation(store: SqliteProposalStore, proposalId: string): void {
   const job = store.listPreparationJobs().find((candidate) =>
     candidate.proposalId === proposalId && candidate.status === "queued");
@@ -318,7 +322,7 @@ test("exposes the hub-owned proposal lifecycle as a Cordis service", async () =>
     })(),
   });
 
-  const created = ctx.homeProposals.markProposalReady({ proposalId: ctx.homeProposals.create(candidate).id });
+  const created = ctx.homeProposals.markProposalReady({ proposalId: serviceStore(ctx.homeProposals).create(candidate).id });
   assert.equal(ctx.homeProposals.get(created.id)?.id, created.id);
   assert.deepEqual(ctx.homeProposals.list(), [created]);
   assert.equal(ctx.homeProposals.review({
@@ -338,7 +342,7 @@ test("exposes the synchronous approved source gate without accepting caller evid
   const ctx = new Context();
   const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-19T01:00:00.000Z" });
   const fiber = await ctx.plugin(HomeProposalService, { store } as never);
-  const createdCreated = ctx.homeProposals.create({
+  const createdCreated = store.create({
     ...candidate,
     kind: "automation-draft",
     intent: { ...candidate.intent, type: "automation-draft" },
@@ -895,6 +899,7 @@ test("wakes exactly once with the committed queued job when a qualifying automat
   const callbackJobs: ArtifactPreparationJob[] = [];
   const callbackVisibleJobs: (ArtifactPreparationJob | undefined)[] = [];
   try {
+    await ctx.plugin(StubHomeWorld);
     fiber = await ctx.plugin(HomeProposalService, {
       store,
       onPreparationQueued: (job: ArtifactPreparationJob) => {
@@ -902,11 +907,16 @@ test("wakes exactly once with the committed queued job when a qualifying automat
         callbackVisibleJobs.push(observer.getPreparationJob(job.jobId));
       },
     } as never);
-    const proposalCreated = ctx.homeProposals.create({
-      ...candidate,
+    const proposalCreated = await ctx.homeProposals.createDraft({
       kind: "automation-draft",
+      title: "回家自动开客厅灯",
+      summary: "有人回家时打开客厅灯。",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low" as const, reasons: [] },
+      intent: { type: "automation-draft", description: "有人回家时打开灯。", rollback: "恢复原状态。" },
       idempotencyKey: "service-wake:approved:v1",
-      intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
     });
     const queued = observer.listPreparationJobs()[0];
@@ -999,6 +1009,7 @@ test("does not report a wake-hook failure after the proposal and queued job comm
   let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
   let calls = 0;
   try {
+    await ctx.plugin(StubHomeWorld);
     fiber = await ctx.plugin(HomeProposalService, {
       store,
       onPreparationQueued: () => {
@@ -1006,11 +1017,16 @@ test("does not report a wake-hook failure after the proposal and queued job comm
         throw new Error("worker wake failed");
       },
     } as never);
-    const proposalCreated = ctx.homeProposals.create({
-      ...candidate,
+    const proposalCreated = await ctx.homeProposals.createDraft({
       kind: "automation-draft",
+      title: "回家自动开客厅灯",
+      summary: "有人回家时打开客厅灯。",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low" as const, reasons: [] },
+      intent: { type: "automation-draft", description: "有人回家时打开灯。", rollback: "恢复原状态。" },
       idempotencyKey: "service-wake:error:v1",
-      intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
     });
     completePreparation(store, proposalCreated.id);
@@ -1205,7 +1221,7 @@ test("drift survives persistence and the fingerprint baseline reaches the record
       },
     } as never);
 
-    const created = ctx.homeProposals.create({
+    const created = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "drift:roundtrip:v1",
@@ -1326,7 +1342,7 @@ test("a passing outage keeps the plan enableable and recovery enables it", async
       },
     } as never);
 
-    const created = ctx.homeProposals.create({
+    const created = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "outage:recover:v1",
@@ -1369,7 +1385,7 @@ test("a changed world demotes a prepared plan instead of spending the decision",
       },
     } as never);
 
-    const created = ctx.homeProposals.create({
+    const created = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "revalidate:demote:v1",

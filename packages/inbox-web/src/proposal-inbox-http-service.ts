@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual , randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { Context, Service } from "@deepseek-ai/cordis";
@@ -686,7 +686,7 @@ export class ProposalInboxHttpService extends Service {
           productRoute === "settings" && url.searchParams.get("preview") === "1",
           productRoute === "settings" ? boundedLayoutDraftNotice(url.searchParams.get("layoutNotice")) : undefined,
           undefined,
-          productRoute === "settings" && url.searchParams.get("policy") === "saved",
+          productRoute === "settings" ? this.consumeActionPolicyReceipt(url.searchParams.get("policy")) : undefined,
         );
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
@@ -736,9 +736,14 @@ export class ProposalInboxHttpService extends Service {
           return send(response, onboardingErrorStatus(error), onboardingErrorText(error));
         }
         // The saved configuration immediately rechecks every blocked plan, so
-        // the card the household came from recovers without another step.
-        this.inbox.recheckBlockedProposals?.();
-        return redirect(response, "/settings?policy=saved#action-policy");
+        // the card the household came from recovers without another step. The
+        // redirect carries an opaque single-use receipt — the page can never
+        // be talked into a success message by a crafted URL.
+        const recheck = this.inbox.recheckBlockedProposals?.();
+        const receipt = randomBytes(16).toString("hex");
+        this.pruneActionPolicyReceipts();
+        this.actionPolicyReceipts.set(receipt, { at: Date.now(), ...(recheck === undefined ? {} : { recheck }) });
+        return redirect(response, `/settings?policy=${receipt}#action-policy`);
       }
       if (method === "POST" && url.pathname === "/settings/view-default") {
         if (!canManageProductViewDefault(this.principal)) {
@@ -1563,7 +1568,7 @@ export class ProposalInboxHttpService extends Service {
     previewLayoutDraft = false,
     layoutDraftNotice?: LayoutDraftNotice,
     proposalNotice?: string,
-    actionPolicySaved = false,
+    actionPolicySavedNotice?: string,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
     const reviewProjection = showsReviewSummary ? await this.productReviewProjection(proposalId) : undefined;
@@ -1594,7 +1599,7 @@ export class ProposalInboxHttpService extends Service {
       ...(controlFeedback === undefined ? {} : { controlFeedback }),
       ...(onboarding === undefined ? {} : { onboarding }),
       ...(proposalNotice === undefined ? {} : { proposalNotice }),
-      ...(route === "settings" ? this.actionPolicyEditorContext(actionPolicySaved) : {}),
+      ...(route === "settings" ? this.actionPolicyEditorContext(actionPolicySavedNotice) : {}),
       household: hostProjection.household,
     };
     const viewCurrentPath = productViewCurrentPath(path, route, proposalId, actionTicketId, batchRequestId);
@@ -1697,7 +1702,34 @@ export class ProposalInboxHttpService extends Service {
       ...(notice === undefined ? {} : { notice }),
     });
   }
-  private actionPolicyEditorContext(saved: boolean): { readonly actionPolicy?: ProductShellModel["actionPolicy"] } {
+  private readonly actionPolicyReceipts = new Map<string, { readonly at: number; readonly recheck?: { readonly rechecked: number; readonly cleared: number } }>();
+
+  private pruneActionPolicyReceipts(): void {
+    const now = Date.now();
+    for (const [key, value] of this.actionPolicyReceipts) {
+      if (now - value.at > 300_000) this.actionPolicyReceipts.delete(key);
+    }
+    while (this.actionPolicyReceipts.size > 32) {
+      const oldest = this.actionPolicyReceipts.keys().next().value;
+      if (oldest === undefined) break;
+      this.actionPolicyReceipts.delete(oldest);
+    }
+  }
+
+  /** A receipt reads exactly once; a forged or replayed token reads nothing. */
+  private consumeActionPolicyReceipt(token: string | null): string | undefined {
+    if (token === null || !/^[a-f0-9]{32}$/.test(token)) return undefined;
+    const receipt = this.actionPolicyReceipts.get(token);
+    if (receipt === undefined) return undefined;
+    this.actionPolicyReceipts.delete(token);
+    if (Date.now() - receipt.at > 300_000) return undefined;
+    if (receipt.recheck === undefined) return "已保存确认方式。";
+    return receipt.recheck.rechecked === 0
+      ? "已保存确认方式，没有受影响的建议。"
+      : `已保存确认方式，已重新检查 ${receipt.recheck.rechecked} 条受阻建议${receipt.recheck.cleared > 0 ? `，其中 ${receipt.recheck.cleared} 条已恢复可启用` : ""}。`;
+  }
+
+  private actionPolicyEditorContext(savedNotice: string | undefined): { readonly actionPolicy?: ProductShellModel["actionPolicy"] } {
     const read = this.onboarding.actionPolicyChoices?.bind(this.onboarding);
     if (read === undefined || this.onboarding.configureActionPolicy === undefined) return {};
     let choices: ReturnType<NonNullable<OnboardingPort["actionPolicyChoices"]>> | undefined;
@@ -1714,9 +1746,12 @@ export class ProposalInboxHttpService extends Service {
           id: capability.id,
           label: capability.label,
           bridgeLabel: capability.bridgeLabel,
-          policyClass: capability.suggestedPolicyClass,
+          // The saved configuration wins; the type-based suggestion only fills
+          // in for a capability the household has never configured.
+          policyClass: capability.currentPolicyClass ?? capability.suggestedPolicyClass,
+          configured: capability.currentPolicyClass !== undefined,
         })),
-        ...(saved ? { savedNotice: "已保存确认方式，受影响的建议正在重新检查。" } : {}),
+        ...(savedNotice === undefined ? {} : { savedNotice }),
       },
     };
   }

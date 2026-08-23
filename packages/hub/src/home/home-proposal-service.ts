@@ -51,7 +51,7 @@ export interface ProposalDeploymentPort {
   }): ProposalDeploymentIntent
     | { readonly reason: string }
     | { readonly revalidationReason: string; readonly updatedGateDisclosure?: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
-    | { readonly blockedReason: string };
+    | { readonly blockedKind?: "not_configured" | "not_approved" | "unknown_capability" | "protected"; readonly blockedReason: string };
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
@@ -124,21 +124,6 @@ export class HomeProposalService extends Service {
     if (this.ownedStore !== undefined) {
       this.ctx.effect(() => () => this.ownedStore?.close(), "home-proposals.close");
     }
-  }
-
-  /**
-   * Internal/test ingress accepting a pre-validated envelope. Production
-   * proposal writes walk createDraftGoverned, which validates devices,
-   * authority, and disclosure against the live world before admission.
-   */
-  create(input: CreateProposalInput): ProposalEnvelope {
-    return this.wakePreparation(this.store.create(input));
-  }
-
-  createGoverned(input: CreateProposalInput) {
-    const result = this.store.createGoverned(input);
-    if (result.kind === "created" || result.kind === "merged") this.wakePreparation(result.proposal);
-    return result;
   }
 
   async createDraft(input: CreateHomeProposalDraftInput): Promise<ProposalEnvelope> {
@@ -316,7 +301,7 @@ export class HomeProposalService extends Service {
       };
     });
 
-    return this.store.createGoverned({
+    const governed = this.store.createGoverned({
       kind: input.kind,
       title: input.title,
       summary: input.summary,
@@ -357,6 +342,10 @@ export class HomeProposalService extends Service {
         devicesWithMultipleSpaces: selectedDeviceSpaceCounts.filter((count) => count > 1).length,
       },
     });
+    // Admission wakes the preparation worker on the governed path — the only
+    // production ingress — so a new or revised plan starts preparing at once.
+    if (governed.kind === "created" || governed.kind === "merged") this.wakePreparation(governed.proposal);
+    return governed;
   }
 
   get(proposalId: string): ProposalEnvelope | undefined {
@@ -411,8 +400,13 @@ export class HomeProposalService extends Service {
         ...(proposal.confirmationDeviceNames === undefined ? {} : { confirmationDeviceNames: proposal.confirmationDeviceNames }),
       });
       if ("blockedReason" in resolved) {
-        if (resolved.blockedReason !== proposal.enableBlockedReason) {
-          this.store.markEnableBlocked({ proposalId: proposal.id, actor: "system", reason: resolved.blockedReason });
+        if (resolved.blockedReason !== proposal.enableBlockedReason || resolved.blockedKind !== proposal.enableBlockedKind) {
+          this.store.markEnableBlocked({
+            proposalId: proposal.id,
+            actor: "system",
+            reason: resolved.blockedReason,
+            ...(resolved.blockedKind === undefined ? {} : { kind: resolved.blockedKind }),
+          });
         }
         continue;
       }
@@ -491,6 +485,7 @@ export class HomeProposalService extends Service {
         ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
         actor: "system",
         reason: resolved.blockedReason,
+        ...(resolved.blockedKind === undefined ? {} : { kind: resolved.blockedKind }),
       });
     }
     if (resolved !== undefined && "revalidationReason" in resolved) {

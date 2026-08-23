@@ -33,6 +33,8 @@ export interface OnboardingCapabilityChoice {
   readonly bridgeLabel: string;
   readonly schema?: string;
   readonly suggestedPolicyClass: OnboardingPolicySuggestion;
+  /** The saved confirmation method, present only when actually configured. */
+  readonly currentPolicyClass?: OnboardingPolicySuggestion;
 }
 
 export interface OnboardingChoiceProjection {

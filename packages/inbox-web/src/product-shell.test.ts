@@ -1122,6 +1122,7 @@ test("a blocked plan stops honestly with only the revise and decline exits", () 
       gateClasses: ["confirmation"],
       confirmationDeviceNames: ["插座（多媒体室）"],
       enableBlockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。",
+      enableBlockedKind: "protected" as const,
     },
   }));
 
@@ -1130,7 +1131,22 @@ test("a blocked plan stops honestly with only the revise and decline exits", () 
   assert.match(html, /在对话里改/);
   assert.match(html, /仅这次不要/);
   assert.match(html, /不再提这件事/);
-  assert.match(html, /href="\/settings#action-policy">去设置确认方式/, "the blocked card walks straight to the confirmation settings");
+  assert.doesNotMatch(html, /去设置确认方式/, "a protected escalation never routes to the confirmation settings");
+
+  const configGap = renderProductShell(model({
+    route: "reviews",
+    proposals: [],
+    selectedProposalId: "curtain-lock",
+    selectedProposal: {
+      id: "curtain-lock",
+      revision: 2,
+      title: "起夜自动调暗走廊灯",
+      lifecycle: "ready",
+      enableBlockedReason: "方案里设备的确认方式还没有设置好，先在设置里为它选择确认方式；也可以在对话里改方案，或不用了。",
+      enableBlockedKind: "not_configured" as const,
+    },
+  }));
+  assert.match(configGap, /href="\/settings#action-policy">去设置确认方式/, "a configuration gap walks straight to the confirmation settings");
   assert.doesNotMatch(html, />启用</);
   assert.doesNotMatch(html, /以后再说/);
   assert.doesNotMatch(html, /启用后：/, "a blocked plan makes no after-enable promise");

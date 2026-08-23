@@ -41,6 +41,8 @@ export interface OnboardingCapabilityChoice {
   readonly bridgeLabel: string;
   readonly schema?: string;
   readonly suggestedPolicyClass: OnboardingPolicySuggestion;
+  /** The saved confirmation method, present only when actually configured. */
+  readonly currentPolicyClass?: OnboardingPolicySuggestion;
 }
 
 export interface OnboardingChoiceProjection {
@@ -61,6 +63,10 @@ export interface OnboardingActor {
 }
 
 export interface OnboardingWorldPort {
+  /** Current action authority, when the world owner provides it (HomeWorld does). */
+  resolveActionAuthority?(hwCapabilityId: string):
+    | { readonly status: "available"; readonly policyClass: "direct" | "confirmation" | "administrator" }
+    | { readonly status: "unavailable"; readonly reason?: string };
   snapshot(): {
     readonly generatedAt?: string;
     readonly bridges: Readonly<Record<string, {
@@ -262,10 +268,30 @@ export class HomeOnboardingCoordinatorService extends Service {
     if (this.actionAuthority === undefined) {
       return { status: "blocked", reason: "确认方式配置服务尚未就绪，家庭保持安全默认值。" };
     }
+    // The submission is a delta over what the household saw. The full set the
+    // authority receives is current configuration merged with that delta, so
+    // saving a page never erases a capability the page did not show.
+    if (world.resolveActionAuthority === undefined) {
+      return { status: "blocked", reason: "当前配置暂时读取不到，为避免覆盖已有设置没有保存。" };
+    }
+    const submitted = new Map<string, "direct" | "confirmation" | "administrator">();
+    for (const id of selection.directCapabilityIds) submitted.set(id, "direct");
+    for (const id of selection.confirmationCapabilityIds) submitted.set(id, "confirmation");
+    for (const id of selection.administratorCapabilityIds) submitted.set(id, "administrator");
+    const merged = { direct: [] as string[], confirmation: [] as string[], administrator: [] as string[] };
+    for (const id of available) {
+      const chosen = submitted.get(id);
+      if (chosen !== undefined) {
+        merged[chosen].push(id);
+        continue;
+      }
+      const current = world.resolveActionAuthority(id);
+      if (current.status === "available") merged[current.policyClass].push(id);
+    }
     const configured = this.actionAuthority.configure({
-      directCapabilityIds: selection.directCapabilityIds,
-      confirmationCapabilityIds: selection.confirmationCapabilityIds,
-      administratorCapabilityIds: selection.administratorCapabilityIds,
+      directCapabilityIds: merged.direct,
+      confirmationCapabilityIds: merged.confirmation,
+      administratorCapabilityIds: merged.administrator,
     });
     return configured.status === "configured"
       ? { status: "configured" }
@@ -335,7 +361,9 @@ export class HomeOnboardingCoordinatorService extends Service {
         const bridge = bridgeById.get(bridgeIds[0]!);
         if (bridge === undefined || !bridge.selectable) continue;
         const semanticKind = capability.semanticKind;
+        const currentAuthority = this.world?.resolveActionAuthority?.(capability.hwCapabilityId);
         capabilities.push({
+          ...(currentAuthority?.status === "available" ? { currentPolicyClass: currentAuthority.policyClass } : {}),
           id: capability.hwCapabilityId,
           label: `${boundedText(device.name) ? device.name : "设备"} · ${semanticLabel(semanticKind)}`,
           bridgeId: bridge.id,

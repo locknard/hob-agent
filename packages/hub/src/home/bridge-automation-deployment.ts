@@ -53,7 +53,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
   }): ProposalDeploymentIntent
     | { readonly reason: string }
     | { readonly revalidationReason: string; readonly updatedGateDisclosure?: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
-    | { readonly blockedReason: string } {
+    | { readonly blockedKind: "not_configured" | "not_approved" | "unknown_capability" | "protected"; readonly blockedReason: string } {
     if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
       return { reason: "这条建议不包含可部署的自动化方案。" };
     }
@@ -89,11 +89,11 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
         // a silent re-preparation would make the card vanish from the list.
         switch (authority.reason) {
           case "unknown_capability":
-            return { blockedReason: "方案里的设备已经不在家庭地图里，不能再交给自动化。可以在对话里改方案，或不用了。" };
+            return { blockedKind: "unknown_capability" as const, blockedReason: "方案里的设备已经不在家庭地图里，不能再交给自动化。可以在对话里改方案，或不用了。" };
           case "not_configured":
-            return { blockedReason: "方案里设备的确认方式还没有设置好，先在设置里为它选择确认方式；也可以在对话里改方案，或不用了。" };
+            return { blockedKind: "not_configured" as const, blockedReason: "方案里设备的确认方式还没有设置好，先在设置里为它选择确认方式；也可以在对话里改方案，或不用了。" };
           case "not_approved":
-            return { blockedReason: "家庭已撤回这个设备动作的授权，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
+            return { blockedKind: "not_approved" as const, blockedReason: "家庭已撤回这个设备动作的授权，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
           case "configured_binding_unavailable":
             return { reason: "方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。" };
           default:
@@ -104,7 +104,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
       if (authority.policyClass === "administrator") {
         // Protected escalation is a standing household fact: the plan blocks
         // honestly until the household revises or declines it.
-        return { blockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
+        return { blockedKind: "protected" as const, blockedReason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。可以在对话里改方案，或不用了。" };
       }
       const gateClass = authority.policyClass === "confirmation" ? "confirmation" as const : "direct" as const;
       recomputed.add(gateClass);

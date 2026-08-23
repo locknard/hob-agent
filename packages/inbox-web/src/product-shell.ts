@@ -101,6 +101,8 @@ export interface ProductProposal {
   readonly confirmationDeviceNames?: readonly string[];
   /** The plan cannot enable right now; the card stops honestly and says why. */
   readonly enableBlockedReason?: string;
+  /** Closed cause behind the block; each cause offers its own recovery exit. */
+  readonly enableBlockedKind?: "not_configured" | "not_approved" | "unknown_capability" | "protected";
   readonly risk?: string;
   readonly afterEnable?: string;
   readonly snoozeCount?: number;
@@ -421,6 +423,8 @@ export interface ProductShellModel {
       readonly label: string;
       readonly bridgeLabel: string;
       readonly policyClass: "direct" | "confirmation" | "administrator";
+      /** False while the value is still the type-based suggestion. */
+      readonly configured?: boolean;
     }[];
     readonly savedNotice?: string;
   };
@@ -1001,7 +1005,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
     : preparing
       ? `<p class="product-muted">正在后台准备：核对证据、检查冲突、确认权限。备好后它会来找你，现在不用做任何决定。</p>`
       : blocked
-        ? `<p class="product-blocked-reason">${escapeHtml(proposal.enableBlockedReason)}</p><div class="product-card-actions"><a class="product-secondary-action" href="/settings#action-policy">去设置确认方式</a>${conversationEntry(proposal)}${declineDisclosure(proposal)}</div>`
+        ? `<p class="product-blocked-reason">${escapeHtml(proposal.enableBlockedReason)}</p><div class="product-card-actions">${proposal.enableBlockedKind === "not_configured" || proposal.enableBlockedKind === "not_approved" ? `<a class="product-secondary-action" href="/settings#action-policy">去设置确认方式</a>` : ""}${conversationEntry(proposal)}${declineDisclosure(proposal)}</div>`
         : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停，或关闭并移除；它从不改动你原有的规则。</p>`;
   return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : blocked ? "暂时无法启用" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight || blocked ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
 }
@@ -1288,7 +1292,7 @@ function renderActionPolicyEditor(model: NormalizedProductShellModel): string {
       const label = value === "direct" ? "直接动作" : value === "confirmation" ? "每次先确认" : "高影响 · 手机确认";
       return `<label class="product-policy-option"><input type="radio" name="capability:${escapeHtml(capability.id)}" value="${value}"${capability.policyClass === value ? " checked" : ""}>${label}</label>`;
     }).join("");
-    return `<li class="product-policy-row"><span class="product-policy-device">${escapeHtml(capability.label)}<small>${escapeHtml(capability.bridgeLabel)}</small></span><span class="product-policy-options">${options}</span></li>`;
+    return `<li class="product-policy-row"><span class="product-policy-device">${escapeHtml(capability.label)}<small>${escapeHtml(capability.bridgeLabel)}${capability.configured === false ? " · 建议，尚未保存" : ""}</small></span><span class="product-policy-options">${options}</span></li>`;
   }).join("");
   return `<section class="product-settings-section product-card" id="action-policy"><div><h2>设备动作的确认方式</h2><p class="product-muted">逐项决定每个动作要不要先问你；保存后会重新检查受影响的建议。</p></div>${notice}<form class="product-policy-form" method="post" action="/settings/action-policy"><ul class="product-policy-list">${rows}</ul><button class="product-primary-action" type="submit">保存确认方式</button></form></section>`;
 }
