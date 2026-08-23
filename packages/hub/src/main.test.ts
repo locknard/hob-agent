@@ -42,7 +42,15 @@ test("classifies first-run and activated product launch without exposing secrets
       dataDirectory,
     });
     await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
+      householdName: "我的家",
+      agentName: "hob",
       modelReference: "gpt/gpt-5.4",
+      modelProfile: {
+        id: "gpt:setup:draft-launch",
+        provider: "gpt",
+        kind: "api_key",
+        secretRef: "keychain:hob-agent/setup-model:draft-launch:stage-launch",
+      },
       bridges: [],
     });
     assert.deepEqual(await resolveProductLaunchSelection({ HOB_DATA_DIR: dataDirectory }), {
@@ -63,8 +71,16 @@ test("resolves the activated product configuration through the single production
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-product-config-"));
   try {
     await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
+      householdName: "梧桐家",
+      agentName: "小满",
       modelReference: "custom/deepseek-v4-flash-0731",
       modelBaseURL: "https://model.example.test/v1",
+      modelProfile: {
+        id: "custom:setup:draft-product",
+        provider: "custom",
+        kind: "api_key",
+        secretRef: "keychain:hob-agent/setup-model:draft-product:stage-product",
+      },
       bridges: [{
         ...JSON.parse(ENV.HOB_BRIDGES)[0],
         credentialRefs: { "access-token": "env:HOB_HA_TOKEN" },
@@ -306,9 +322,35 @@ test("importing the executable module does not install process signal handlers",
 test("main fails closed before creating a Cordis runtime when neutral bridge config is missing", async () => {
   await assert.rejects(
     main({
-      env: { ...ENV, HOB_BRIDGES: "" },
+      env: { ...ENV, HOB_BRIDGES: "{" },
       createRuntime: async () => ({ context: new Context(), stop: async () => undefined }),
     }),
     /HOB_BRIDGES/,
   );
+});
+
+test("main starts the first-run setup runtime without parsing operational configuration", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-first-run-"));
+  let operationalStarts = 0;
+  let setupStarts = 0;
+  try {
+    const running = await main({
+      env: { HOB_DATA_DIR: dataDirectory },
+      createRuntime: async () => {
+        operationalStarts += 1;
+        return { context: new Context(), stop: async () => undefined };
+      },
+      createSetupRuntime: async (input) => {
+        setupStarts += 1;
+        assert.equal(input.dataDirectory, dataDirectory);
+        return { context: new Context(), stop: async () => undefined };
+      },
+    });
+
+    assert.equal(setupStarts, 1);
+    assert.equal(operationalStarts, 0);
+    await running.shutdown.shutdown(0);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
 });

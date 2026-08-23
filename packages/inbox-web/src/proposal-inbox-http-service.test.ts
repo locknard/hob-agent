@@ -9,6 +9,7 @@ import {
   type ProductViewProvider,
   type ProposalInboxHttpOptions,
 } from "./proposal-inbox-http-service.js";
+import { ProductHttpHost } from "./product-http-host.js";
 import type { ProductConnectionState } from "./product-shell.js";
 import { runProductViewRecipeConformance } from "./product-view-recipe-conformance.js";
 
@@ -515,6 +516,34 @@ class CancelledAdviceInbox extends StructuredAdviceInbox {
 
 const token = "a-secure-local-inbox-token-1234567890";
 const authorization = `Basic ${Buffer.from(`home:${token}`).toString("base64")}`;
+
+test("waits for an explicit attachment before Inbox serves through an external product host", async () => {
+  const host = new ProductHttpHost({ port: 0 });
+  await host.listen();
+  const ctx = new Context();
+  let inboxFiber: { dispose(): Promise<void> } | undefined;
+  let fiber: { dispose(): Promise<void> } | undefined;
+
+  try {
+    inboxFiber = await ctx.plugin(StubInbox);
+    fiber = await ctx.plugin(ProposalInboxHttpService, {
+      host,
+      authenticate: createInboxBasicAuthenticator(token),
+      principal: adminPrincipal,
+    });
+    assert.equal(ctx.homeInboxHttp.origin, host.origin);
+    assert.equal((await fetch(`${host.origin}/home`, { headers: { authorization } })).status, 503);
+
+    ctx.homeInboxHttp.attach();
+    const home = await fetch(`${host.origin}/home`, { headers: { authorization } });
+    assert.equal(home.status, 200);
+  } finally {
+    await fiber?.dispose();
+    await inboxFiber?.dispose();
+    await ctx.fiber.dispose();
+    await host.dispose();
+  }
+});
 
 test("serves an authenticated localhost-only Inbox with restrictive response headers", async () => {
   const ctx = new Context();

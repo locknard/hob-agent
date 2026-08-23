@@ -3,7 +3,10 @@ import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 
 import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
-import type { SecretVault } from "@hob-agent/agent-layer/model-credentials";
+import {
+  MacOSKeychainSecretVault,
+  type SecretVault,
+} from "@hob-agent/agent-layer/model-credentials";
 
 import {
   startHomeAgentProcess,
@@ -27,6 +30,11 @@ import {
 import { MusicAssistantMediaCatalogProvider } from "./media/music-assistant-media-provider.js";
 import { MusicAssistantWebSocketSearchClient } from "./media/music-assistant-websocket-client.js";
 import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
+import {
+  DEFAULT_PRODUCT_SETUP_PORT,
+  startProductSetupRuntime,
+  type ProductSetupRuntimeOptions,
+} from "./product-setup-runtime.js";
 
 type ActionAuthorityConfig = Readonly<Record<string, ActionAuthorityConfiguration>>;
 
@@ -38,6 +46,8 @@ export interface HomeHubMainOptions {
   readonly shutdownTimeoutMs?: number;
   /** Test seam; production uses the repository's DSH composition root. */
   readonly createRuntime?: StartHomeHubProcessOptions["createRuntime"];
+  /** Test seam for the pre-operational setup composition root. */
+  readonly createSetupRuntime?: (options: ProductSetupRuntimeOptions) => Promise<HomeHubRuntime> | HomeHubRuntime;
   /** Test seam; production resolves selected profiles from macOS Keychain. */
   readonly modelCredentialVault?: SecretVault;
 }
@@ -171,7 +181,9 @@ export async function resolveHomeHubProcessOptions(
   } catch {
     return createHomeHubProcessOptions(effectiveEnvironment);
   }
-  const selectedCredential = await loadSelectedModelCredential(dataDirectory, provider, vault);
+  const selectedCredential = activated !== undefined && environment.HOB_MODEL === undefined
+    ? { profile: activated.modelProfile, vault: vault ?? new MacOSKeychainSecretVault() }
+    : await loadSelectedModelCredential(dataDirectory, provider, vault);
   // Validate the complete launch contract before touching the optional
   // authority file so malformed bridge/model input keeps its bounded error.
   readHomeHubLaunchConfig(effectiveEnvironment, selectedCredential, vault);
@@ -218,16 +230,26 @@ function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
 
 /** Starts the one executable Home Hub process after validating its launch env. */
 export async function main(options: HomeHubMainOptions = {}): Promise<RunningHomeHubProcess> {
-  const processOptions = await resolveHomeHubProcessOptions(
-    options.env ?? process.env,
-    options.modelCredentialVault,
-  );
+  const environment = options.env ?? process.env;
+  const prepared = await prepareProductLaunch(environment);
   const lifecycle = {
     signalProcess: options.signalProcess,
     forceExit: options.forceExit,
     complete: options.complete,
     shutdownTimeoutMs: options.shutdownTimeoutMs,
   };
+  if (prepared.selection.state === "setup") {
+    const setupOptions: ProductSetupRuntimeOptions = {
+      dataDirectory: prepared.selection.dataDirectory,
+      port: productSetupPort(environment.HOB_SETUP_PORT),
+    };
+    return startHomeHubProcess({
+      ...lifecycle,
+      createRuntime: () => options.createSetupRuntime?.(setupOptions)
+        ?? startProductSetupRuntime(setupOptions),
+    });
+  }
+  const processOptions = await resolveHomeHubProcessOptions(environment, options.modelCredentialVault);
   if (options.createRuntime) {
     return startHomeHubProcess({
       ...processOptions,
@@ -236,6 +258,16 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
     });
   }
   return startHomeAgentProcess({ ...processOptions, ...lifecycle });
+}
+
+function productSetupPort(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return DEFAULT_PRODUCT_SETUP_PORT;
+  if (!/^\d{1,5}$/.test(value.trim())) throw new TypeError("HOB_SETUP_PORT must be an integer from 0 to 65535");
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+    throw new TypeError("HOB_SETUP_PORT must be an integer from 0 to 65535");
+  }
+  return port;
 }
 
 function isMainModule(): boolean {

@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./product-http-host": "./src/product-http-host.ts",
     "./http": "./src/proposal-inbox-http-service.ts",
+    "./setup": "./src/product-setup-http-service.ts",
     "./service": "./src/proposal-inbox-service.ts",
     "./view-recipe": "./src/product-view-recipe.ts",
     "./view-recipe-conformance": "./src/product-view-recipe-conformance.ts",

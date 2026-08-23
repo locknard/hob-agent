@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
-const CONFIG_VERSION = "hob.product-config/v1" as const;
+import type { AuthProfile } from "@hob-agent/agent-layer/model-credentials";
+
+const CONFIG_VERSION = "hob.product-config/v2" as const;
 const SECRET_KEY = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const MAX_FILE_BYTES = 65_536;
@@ -16,8 +18,11 @@ export interface ProductBootstrapBridgeConfig {
 }
 
 export interface ProductBootstrapConfigDraft {
+  readonly householdName: string;
+  readonly agentName: string;
   readonly modelReference: string;
   readonly modelBaseURL?: string;
+  readonly modelProfile: AuthProfile;
   readonly bridges: readonly ProductBootstrapBridgeConfig[];
 }
 
@@ -162,6 +167,10 @@ function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unkno
   if (!isRecord(value)) throw new TypeError("Product configuration draft is invalid");
   const modelReference = boundedString(value.modelReference, 300, "Model reference");
   if (/\s/u.test(modelReference) || !modelReference.includes("/")) throw new TypeError("Model reference is invalid");
+  const householdName = boundedName(value.householdName, "Household name");
+  const agentName = boundedName(value.agentName, "Agent name");
+  const provider = modelReference.slice(0, modelReference.indexOf("/"));
+  const modelProfile = validateModelProfile(value.modelProfile, provider);
   const modelBaseURL = value.modelBaseURL === undefined ? undefined : safeHttpsURL(value.modelBaseURL);
   if (!Array.isArray(value.bridges) || value.bridges.length > 16) throw new TypeError("Bridge configuration list is invalid");
   const seen = new Set<string>();
@@ -185,7 +194,28 @@ function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unkno
     }
     return Object.freeze({ bridgeId, adapterType, config, credentialRefs: Object.freeze(credentialRefs) });
   });
-  return Object.freeze({ modelReference, ...(modelBaseURL === undefined ? {} : { modelBaseURL }), bridges: Object.freeze(bridges) });
+  return Object.freeze({
+    householdName,
+    agentName,
+    modelReference,
+    ...(modelBaseURL === undefined ? {} : { modelBaseURL }),
+    modelProfile,
+    bridges: Object.freeze(bridges),
+  });
+}
+
+function validateModelProfile(value: unknown, provider: string): AuthProfile {
+  if (!isRecord(value) || value.provider !== provider || value.kind !== "api_key"
+    || typeof value.id !== "string" || typeof value.secretRef !== "string") {
+    throw new TypeError("Model profile is invalid");
+  }
+  const match = /^([A-Za-z0-9_-]+):setup:([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(value.id);
+  if (match === null || match[1] !== provider
+    || !value.secretRef.startsWith(`keychain:hob-agent/setup-model:${match[2]}:`)
+    || !/^keychain:hob-agent\/setup-model:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/u.test(value.secretRef)) {
+    throw new TypeError("Model profile is invalid");
+  }
+  return Object.freeze({ id: value.id, provider: value.provider, kind: "api_key", secretRef: value.secretRef });
 }
 
 function rejectSecretFields(value: Readonly<Record<string, unknown>>): void {
@@ -230,6 +260,12 @@ function safeHttpsURL(value: unknown): string {
 function boundedString(value: unknown, max: number, label: string): string {
   if (typeof value !== "string" || value.trim() === "" || value.length > max) throw new TypeError(`${label} is invalid`);
   return value.trim();
+}
+
+function boundedName(value: unknown, label: string): string {
+  const name = boundedString(value, 40, label).normalize("NFKC");
+  if (/[\u0000-\u001f\u007f]/u.test(name)) throw new TypeError(`${label} is invalid`);
+  return name;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

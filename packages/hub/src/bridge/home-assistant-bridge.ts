@@ -121,6 +121,18 @@ export interface HomeAssistantEndpointProbeResult {
   latencyMs: number;
 }
 
+export type HomeAssistantReadProbeResult =
+  | {
+      readonly status: "connected";
+      readonly latencyMs: number;
+      readonly summary: { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number };
+    }
+  | { readonly status: "credential_rejected" | "endpoint_unreachable" | "incompatible" | "timed_out" };
+
+export interface HomeAssistantReadProbeOptions extends HomeAssistantBridgeOptions {
+  readonly clock?: () => number;
+}
+
 interface ResultMessage {
   id: number;
   type: "result";
@@ -205,6 +217,39 @@ export function probeHomeAssistantEndpoint(
   });
 }
 
+/** Authenticates and reads one bounded snapshot without subscribing or writing. */
+export async function probeHomeAssistantReadAccess(
+  options: HomeAssistantReadProbeOptions,
+): Promise<HomeAssistantReadProbeResult> {
+  const clock = options.clock ?? Date.now;
+  const startedAt = clock();
+  const bridge = new HomeAssistantBridge(options);
+  try {
+    const snapshot = await bridge.connect({ subscribeEvents: false });
+    return {
+      status: "connected",
+      latencyMs: Math.max(0, clock() - startedAt),
+      summary: {
+        states: snapshot.states.length,
+        entities: snapshot.entityRegistry.length,
+        devices: snapshot.deviceRegistry.length,
+        areas: snapshot.areaRegistry.length,
+      },
+    };
+  } catch (error) {
+    if (error instanceof BridgeStreamError && error.reason === "authentication_failed") {
+      return { status: "credential_rejected" };
+    }
+    if (error instanceof BridgeStreamError && error.reason === "protocol_error") {
+      return { status: "incompatible" };
+    }
+    if (error instanceof Error && /timed out|timeout/iu.test(error.message)) return { status: "timed_out" };
+    return { status: "endpoint_unreachable" };
+  } finally {
+    bridge.close();
+  }
+}
+
 export class HomeAssistantBridge {
   private readonly socketFactory: SocketFactory;
   private readonly maxBootstrapItems: number;
@@ -218,7 +263,7 @@ export class HomeAssistantBridge {
     this.maxBootstrapItems = normalizeBootstrapItemBudget(options.maxBootstrapItems);
   }
 
-  connect(): Promise<HomeAssistantSnapshot> {
+  connect(options: { readonly subscribeEvents?: boolean } = {}): Promise<HomeAssistantSnapshot> {
     if (this.socket) throw new Error("Home Assistant bridge is already connected");
     this.intentionallyClosed = false;
 
@@ -262,7 +307,7 @@ export class HomeAssistantBridge {
       };
       socket.onmessage = (event) => this.handleMessage(event.data, settleResolve, settleReject, () => {
         authenticated = true;
-      }, failConnection);
+      }, failConnection, options.subscribeEvents ?? true);
       timer = setTimeout(() => {
         const error = new Error("Home Assistant connection timed out during startup");
         settleReject(error);
@@ -316,6 +361,7 @@ export class HomeAssistantBridge {
     rejectConnect: (error: Error) => void,
     markAuthenticated: () => void,
     failConnection: (error: Error) => void,
+    subscribeEvents: boolean,
   ): void {
     if (Buffer.byteLength(data, "utf8") > MAX_HOME_ASSISTANT_MESSAGE_BYTES) {
       failConnection(new BridgeStreamError("protocol_error", "Home Assistant message exceeds the byte limit"));
@@ -339,7 +385,7 @@ export class HomeAssistantBridge {
     }
     if (message.type === "auth_ok") {
       markAuthenticated();
-      void this.bootstrap().then(resolveConnect, rejectConnect);
+      void this.bootstrap(subscribeEvents).then(resolveConnect, rejectConnect);
       return;
     }
     if (message.type === "result" && typeof message.id === "number") {
@@ -351,8 +397,8 @@ export class HomeAssistantBridge {
     }
   }
 
-  private async bootstrap(): Promise<HomeAssistantSnapshot> {
-    return this.loadSnapshot(true);
+  private async bootstrap(subscribeEvents: boolean): Promise<HomeAssistantSnapshot> {
+    return this.loadSnapshot(subscribeEvents);
   }
 
   /** Reads a fresh neutralizable snapshot without registering a second event subscription. */

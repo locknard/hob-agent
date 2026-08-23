@@ -5,6 +5,7 @@ import {
   DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS,
   HomeAssistantBridge,
   probeHomeAssistantEndpoint,
+  probeHomeAssistantReadAccess,
   type SocketFactory,
   type WebSocketLike,
   toHomeAssistantWebSocketUrl,
@@ -182,6 +183,60 @@ test("authenticates, reads a bootstrap snapshot, and forwards native state chang
     attrs: {},
     ts: "2026-08-18T00:00:00.000Z",
   }]);
+});
+
+test("probes authenticated read access without subscribing or writing", async () => {
+  const socket = new FakeSocket();
+  let now = 1_000;
+  const probing = probeHomeAssistantReadAccess({
+    baseUrl: "http://ha.local:8123",
+    accessToken: "request-local-token",
+    socketFactory: () => socket,
+    clock: () => now,
+  });
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  assert.deepEqual(commands.map((command) => command.type), [
+    "get_states",
+    "config/entity_registry/list",
+    "config/device_registry/list",
+    "config/area_registry/list",
+  ]);
+  assert.equal(commands.some((command) => command.type === "subscribe_events"), false);
+  for (const command of commands) {
+    socket.receive({
+      id: command.id,
+      type: "result",
+      success: true,
+      result: command.type === "get_states"
+        ? [{ entity_id: "light.kitchen", state: "on", attributes: {} }]
+        : command.type === "config/device_registry/list"
+          ? [{ id: "device-1" }, { id: "device-2" }]
+          : command.type === "config/area_registry/list"
+            ? [{ area_id: "living", name: "客厅" }]
+            : [],
+    });
+  }
+  now = 1_085;
+  assert.deepEqual(await probing, {
+    status: "connected",
+    latencyMs: 85,
+    summary: { states: 1, entities: 0, devices: 2, areas: 1 },
+  });
+  assert.deepEqual(socket.sent.filter((message) => (message as { type?: string }).type === "call_service"), []);
+});
+
+test("maps rejected Home Assistant credentials to a closed probe outcome", async () => {
+  const socket = new FakeSocket();
+  const probing = probeHomeAssistantReadAccess({
+    baseUrl: "http://ha.local:8123",
+    accessToken: "rejected-token",
+    socketFactory: () => socket,
+  });
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_invalid", message: "bad token" });
+  assert.deepEqual(await probing, { status: "credential_rejected" });
 });
 
 test("does not expose a raw onStateEvent bypass at the Home Assistant boundary", () => {

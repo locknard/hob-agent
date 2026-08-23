@@ -9,9 +9,10 @@ import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from "@deepseek-ai/dsh-launch-environment";
+import { Context } from "@deepseek-ai/cordis";
 
 import { BridgeCatalog } from "./bridge/bridge-catalog.js";
-import { createHomeAgentRuntime } from "./home-agent-runtime.js";
+import { createHomeAgentRuntime, mountHomeAgentProductBundle } from "./home-agent-runtime.js";
 import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home/home-onboarding-store.js";
 import { SyntheticMediaCatalogProvider } from "./media/home-media-services.js";
 import { SqliteProposalStore } from "./home/proposal-store.js";
@@ -146,6 +147,38 @@ function actionHomeWorldOptions() {
     },
   };
 }
+
+test("mounts the product bundle beneath an external Cordis root and disposes only its own scope", async () => {
+  const root = new Context();
+  let hostDisposed = false;
+  root.effect(() => () => {
+    hostDisposed = true;
+  });
+
+  const bundle = await mountHomeAgentProductBundle(root, {
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "mounted-product-bundle-test",
+    },
+  });
+
+  assert.notEqual(bundle.context, root);
+  assert.equal(bundle.context.root, root);
+  assert.notEqual(bundle.context.fiber.uid, 0);
+  assert.equal(root.homeWorld.name, "homeWorld");
+
+  await bundle.dispose();
+  await bundle.dispose();
+
+  assert.equal(bundle.status, "stopped");
+  assert.equal(bundle.context.fiber.uid, null);
+  assert.equal(root.homeWorld, undefined);
+  assert.equal(root.fiber.uid, 0);
+  assert.equal(hostDisposed, false);
+});
 
 test("starts HomeWorld before the DSH Home Agent and stops both from one root", async () => {
   const runtime = createHomeAgentRuntime({

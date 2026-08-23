@@ -1,4 +1,4 @@
-import { Context } from "@deepseek-ai/cordis";
+import { Context, type Fiber, type Plugin } from "@deepseek-ai/cordis";
 import {
   DSH_LAUNCH_ENVIRONMENT_KEY,
   type LaunchEnvironmentSnapshot,
@@ -33,13 +33,14 @@ import {
 import {
   ProposalStoreError,
   SqliteProposalStore,
+  type ArtifactPreparationJob,
   type SqliteProposalStoreOptions,
 } from "./home/proposal-store.js";
 import {
   HomeAdviceService,
   type HomeAdviceServiceOptions,
 } from "./home/home-advice-service.js";
-import { ProposalInboxService } from "@hob-agent/inbox-web/service";
+import { ProposalInboxService, type InboxPreparationRetryInput } from "@hob-agent/inbox-web/service";
 import {
   ProposalInboxHttpService,
   type ProposalInboxHttpOptions,
@@ -66,7 +67,9 @@ import {
 } from "./home/household-review-center-service.js";
 import {
   HomeOnboardingCoordinatorService,
+  type OnboardingActionAuthorityPort,
   type HomeOnboardingCoordinatorOptions,
+  type OnboardingObservationPort,
 } from "./home/home-onboarding-coordinator.js";
 import {
   HomeSafetyService,
@@ -118,15 +121,15 @@ export interface HomeAgentRuntimeOptions {
 export type HomeAgentRuntimeStatus = "created" | "starting" | "running" | "stopping" | "stopped";
 
 /**
- * Owns the process-level Cordis root and the neutral Phase 0 runtime fibers.
+ * Owns the product fibers and private resources mounted below one Cordis context.
  * HomeWorld owns all configured bridge adapters; the DSH Home Agent only sees
- * its neutral service. Disposing the root fiber unloads the Agent before the
- * world runtime, in reverse registration order.
+ * its neutral service. The legacy runtime supplies a private root, while the
+ * product bundle supplies a child fiber of its host context.
  */
-export class HomeAgentRuntime {
-  readonly context: Context;
+class HomeAgentProductBundleRuntime {
   private statusValue: HomeAgentRuntimeStatus = "created";
   private stopTask: Promise<void> | undefined;
+  private readonly mountedFibers: Fiber[] = [];
   private proposalStore: SqliteProposalStore | undefined;
   private artifactRegistry: ArtifactRegistry | undefined;
   private authorityCandidates: AuthorityCandidateRegistry | undefined;
@@ -134,8 +137,10 @@ export class HomeAgentRuntime {
   private preparationRunner: ArtifactPreparationJobRunner | undefined;
   private viewRecipeDraftStore: SqliteProductViewRecipeDraftStore | undefined;
 
-  constructor(private readonly options: HomeAgentRuntimeOptions) {
-    this.context = new Context();
+  constructor(
+    readonly context: Context,
+    private readonly options: HomeAgentRuntimeOptions,
+  ) {
     this.context.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.launchEnvironment);
   }
 
@@ -143,7 +148,7 @@ export class HomeAgentRuntime {
     return this.statusValue;
   }
 
-  async start(): Promise<void> {
+  async start(disposeContextOnFailure = false): Promise<void> {
     if (this.statusValue !== "created") {
       throw new Error(`Home Agent runtime cannot start from ${this.statusValue} state`);
     }
@@ -157,25 +162,25 @@ export class HomeAgentRuntime {
       if (this.options.homeViewRecipeDrafts !== undefined) {
         this.viewRecipeDraftStore = new SqliteProductViewRecipeDraftStore(this.options.homeViewRecipeDrafts);
       }
-      await this.context.plugin(HomeWorldService, this.options.homeWorld);
-      await this.context.plugin(HomeMediaPlayerService);
-      await this.context.plugin(
+      await this.mount(HomeWorldService, this.options.homeWorld);
+      await this.mount(HomeMediaPlayerService);
+      await this.mount(
         HomeObservationAuditService,
         this.options.homeObservationAudit ?? { path: ":memory:" },
       );
-      await this.context.plugin(HomeProposalService, {
+      await this.mount(HomeProposalService, {
         store: this.proposalStore,
-        onPreparationQueued: (job) => {
+        onPreparationQueued: (job: ArtifactPreparationJob) => {
           const runner = this.preparationRunner;
           if (runner !== undefined) void runner.run(job.jobId, job.version).catch(() => undefined);
         },
-        deployment: new BridgeAutomationDeployment(this.context.homeWorld),
+        deployment: new BridgeAutomationDeployment(this.service<HomeWorldService>("homeWorld")),
       });
-      await this.context.plugin(HomeArtifactService, { registry: this.artifactRegistry });
+      await this.mount(HomeArtifactService, { registry: this.artifactRegistry });
       this.artifactPipeline = await createArtifactPipelineComposition({
         context: this.context,
         proposals: this.proposalStore,
-        homeWorld: this.context.homeWorld,
+        homeWorld: this.service<HomeWorldService>("homeWorld"),
         artifacts: this.artifactRegistry,
         authorityCandidates: this.authorityCandidates,
       });
@@ -184,21 +189,21 @@ export class HomeAgentRuntime {
         preparation: this.artifactPipeline,
       });
       await this.preparationRunner.start();
-      void this.context.homeProposals.reconcileAutomations().catch(() => undefined);
-      await this.context.plugin(HomeRetentionService);
+      void this.service<HomeProposalService>("homeProposals").reconcileAutomations().catch(() => undefined);
+      await this.mount(HomeRetentionService);
       if (this.options.mediaCatalog !== undefined) {
-        await this.context.plugin(HomeMediaCatalogService, this.options.mediaCatalog);
-        await this.context.plugin(HomeMediaPlaybackPreparationService, {
+        await this.mount(HomeMediaCatalogService, this.options.mediaCatalog);
+        await this.mount(HomeMediaPlaybackPreparationService, {
           tenantId: this.options.mediaCatalog.tenantId,
           ...(this.options.mediaCatalog.now === undefined ? {} : { now: this.options.mediaCatalog.now }),
         });
         if (this.options.mediaPlayback !== undefined) {
-          await this.context.plugin(HomeMediaPlaybackExecutionService, this.options.mediaPlayback);
+          await this.mount(HomeMediaPlaybackExecutionService, this.options.mediaPlayback);
         }
       } else if (this.options.mediaPlayback !== undefined) {
         throw new Error("Music Assistant playback requires an explicit media catalog");
       }
-      await this.context.plugin(
+      await this.mount(
         HouseholdReviewCenterService,
         {
           ...(this.options.homeReviewCenter ?? { path: ":memory:" }),
@@ -206,35 +211,37 @@ export class HomeAgentRuntime {
             ? {
                 actionDescriptorSource: {
                   actionDescriptorFor: (capabilityId: string) =>
-                    this.context.homeWorld.actionDescriptorFor(capabilityId),
+                    this.service<HomeWorldService>("homeWorld").actionDescriptorFor(capabilityId),
                 },
               }
             : {}),
         },
       );
-      await this.context.plugin(HomeBatchActionService, {
+      await this.mount(HomeBatchActionService, {
         ...(this.options.homeBatchActions ?? {}),
-        reviewCenter: this.context.homeReviewCenter,
+        reviewCenter: this.service<HouseholdReviewCenterService>("homeReviewCenter"),
       });
       if (this.options.mediaCatalog !== undefined) {
-        await this.context.plugin(HomeMediaConversationService, this.options.mediaConversation ?? {});
+        await this.mount(HomeMediaConversationService, this.options.mediaConversation ?? {});
       }
-      await mountDshHomeAgent(this.context, this.options.agent);
-      await this.context.plugin(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
+      this.mountedFibers.push(await mountDshHomeAgent(this.context, this.options.agent));
+      await this.mount(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
       if (this.options.homeOnboarding !== undefined) {
-        await this.context.plugin(HomeOnboardingCoordinatorService, {
+        await this.mount(HomeOnboardingCoordinatorService, {
           ...this.options.homeOnboarding,
           ...(this.options.homeOnboarding.actionAuthority === undefined ? {
             actionAuthority: {
-              configure: (input) => this.context.homeWorld.configureActionAuthority(input),
-              configureDelta: (changes) => this.context.homeWorld.configureActionAuthorityDelta(changes),
+              configure: (input: Parameters<OnboardingActionAuthorityPort["configure"]>[0]) =>
+                this.service<HomeWorldService>("homeWorld").configureActionAuthority(input),
+              configureDelta: (changes: Parameters<NonNullable<OnboardingActionAuthorityPort["configureDelta"]>>[0]) =>
+                this.service<HomeWorldService>("homeWorld").configureActionAuthorityDelta(changes),
             },
           } : {}),
           ...(this.options.homeOnboarding.observation === undefined ? {
             observation: {
-              configure: (input) => {
+              configure: (input: Parameters<OnboardingObservationPort["configure"]>[0]) => {
                 try {
-                  this.context.homeObservationScheduler.configure(input);
+                  this.service<HomeObservationSchedulerService>("homeObservationScheduler").configure(input);
                   return { status: "configured" as const };
                 } catch {
                   return { status: "blocked" as const, reason: "runtime_configuration_failed" };
@@ -244,54 +251,71 @@ export class HomeAgentRuntime {
           } : {}),
         });
       }
-      await this.context.plugin(
+      await this.mount(
         HomeSafetyService,
         this.options.homeSafety ?? { path: ":memory:", bindings: [] },
       );
       if (this.options.homeCorrections !== undefined) {
-        await this.context.plugin(HomeCorrectionService, this.options.homeCorrections);
+        await this.mount(HomeCorrectionService, this.options.homeCorrections);
       }
       const observationOptions: HomeObservationSchedulerOptions = {
         ...(this.options.observation ?? {}),
         ...(this.options.homeOnboarding !== undefined
           && this.options.observation?.onboarding === undefined
-          ? { onboarding: this.context.homeOnboarding }
+          ? { onboarding: this.service<HomeOnboardingCoordinatorService>("homeOnboarding") }
           : {}),
       };
-      await this.context.plugin(HomeObservationSchedulerService, observationOptions);
-      await this.context.plugin(ProposalInboxService, {
+      await this.mount(HomeObservationSchedulerService, observationOptions);
+      await this.mount(ProposalInboxService, {
         preparation: {
-          retry: (input) => this.retryPreparation(input),
+          retry: (input: InboxPreparationRetryInput) => this.retryPreparation(input),
         },
       });
       if (this.options.inboxHttp !== undefined) {
-        await this.context.plugin(ProposalInboxHttpService, {
+        await this.mount(ProposalInboxHttpService, {
           ...this.options.inboxHttp,
           ...(this.viewRecipeDraftStore === undefined ? {} : { viewRecipeDrafts: this.viewRecipeDraftStore }),
         });
       }
       this.statusValue = "running";
     } catch (error) {
-      await this.stop();
+      await this.stop(disposeContextOnFailure);
       throw error;
     }
   }
 
-  async stop(): Promise<void> {
+  async stop(disposeContext: boolean): Promise<void> {
     if (this.statusValue === "stopped") return;
     if (this.stopTask) return this.stopTask;
 
     this.statusValue = "stopping";
-    this.stopTask = this.disposeRuntime();
+    this.stopTask = this.disposeRuntime(disposeContext);
     return this.stopTask;
   }
 
-  private async disposeRuntime(): Promise<void> {
+  private async mount(plugin: Plugin, options?: unknown): Promise<void> {
+    const fiber = options === undefined
+      ? await this.context.plugin(plugin)
+      : await this.context.plugin(plugin, options as never);
+    this.mountedFibers.push(fiber);
+  }
+
+  private service<T>(name: string): T {
+    const service = this.context.get(name);
+    if (service === undefined) throw new Error(`Home Agent product service ${name} is unavailable`);
+    return service as T;
+  }
+
+  private async disposeRuntime(disposeContext: boolean): Promise<void> {
     let failure: unknown;
     try {
       await this.preparationRunner?.stop();
       await this.artifactPipeline?.stop();
-      await this.context.fiber.dispose();
+      if (disposeContext) {
+        await this.context.fiber.dispose();
+      } else {
+        await Promise.all(this.mountedFibers.splice(0).reverse().map((fiber) => fiber.dispose()));
+      }
     } catch (error) {
       failure = error;
     } finally {
@@ -340,6 +364,73 @@ export class HomeAgentRuntime {
       expectedVersion: input.expectedVersion,
     });
     void runner.run(queued.jobId, queued.version).catch(() => undefined);
+  }
+}
+
+export interface MountedHomeAgentProductBundle {
+  readonly context: Context;
+  readonly status: HomeAgentRuntimeStatus;
+  dispose(): Promise<void>;
+}
+
+class MountedHomeAgentProductBundleHandle implements MountedHomeAgentProductBundle {
+  private disposeTask: Promise<void> | undefined;
+
+  constructor(
+    readonly context: Context,
+    private readonly fiber: Fiber,
+    private readonly runtime: HomeAgentProductBundleRuntime,
+  ) {}
+
+  get status(): HomeAgentRuntimeStatus {
+    return this.runtime.status;
+  }
+
+  async dispose(): Promise<void> {
+    this.disposeTask ??= this.fiber.dispose();
+    return this.disposeTask;
+  }
+}
+
+/**
+ * Mounts the full Home Agent product into one Cordis child fiber.
+ * The returned disposer unloads only that fiber and the resources it owns.
+ */
+export async function mountHomeAgentProductBundle(
+  context: Context,
+  options: HomeAgentRuntimeOptions,
+): Promise<MountedHomeAgentProductBundle> {
+  let runtime: HomeAgentProductBundleRuntime | undefined;
+  const fiber = await context.plugin(async (bundleContext: Context) => {
+    runtime = new HomeAgentProductBundleRuntime(bundleContext, options);
+    await runtime.start();
+    return () => runtime?.stop(false);
+  });
+  if (runtime === undefined) throw new Error("Home Agent product bundle did not start");
+  const productContext = context.extend({ fiber });
+  return new MountedHomeAgentProductBundleHandle(productContext, fiber, runtime);
+}
+
+/** Owns a private Cordis root while preserving the legacy runtime API. */
+export class HomeAgentRuntime {
+  readonly context: Context;
+  private readonly bundle: HomeAgentProductBundleRuntime;
+
+  constructor(options: HomeAgentRuntimeOptions) {
+    this.context = new Context();
+    this.bundle = new HomeAgentProductBundleRuntime(this.context, options);
+  }
+
+  get status(): HomeAgentRuntimeStatus {
+    return this.bundle.status;
+  }
+
+  async start(): Promise<void> {
+    await this.bundle.start(true);
+  }
+
+  async stop(): Promise<void> {
+    await this.bundle.stop(true);
   }
 }
 

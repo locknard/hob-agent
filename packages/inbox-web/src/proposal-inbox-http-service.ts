@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { Context, Service } from "@deepseek-ai/cordis";
 
+import { ProductHttpHost, type ProductHttpHandler } from "./product-http-host.js";
+
 import type { InboxRejectionFeedbackCode, InboxReviewInput } from "./proposal-inbox.js";
 import {
   renderProductContent,
@@ -416,7 +418,9 @@ const BUILTIN_CONTROL_VIEW: ProductViewProvider = {
 
 export interface ProposalInboxHttpOptions {
   /** Port 0 is accepted only as a test/embedding seam. */
-  readonly port: number;
+  readonly port?: number;
+  /** An already-listening product host whose active surface is selected explicitly. */
+  readonly host?: ProductHttpHost;
   readonly authenticate: InboxAuthenticator;
   /** Explicit household identity for every review mutation. */
   readonly principal?: InboxReviewActor;
@@ -568,7 +572,9 @@ export class ProposalInboxHttpService extends Service {
   static inject = ["homeInbox"];
 
   origin = "";
-  private readonly server: Server;
+  private readonly server: Server | undefined;
+  private readonly host: ProductHttpHost | undefined;
+  private readonly hostHandler: ProductHttpHandler = (request, response) => this.handle(request, response);
   private readonly inbox: InboxHttpPort;
   private readonly reviewer: string;
   private readonly principal: InboxReviewActor | undefined;
@@ -579,8 +585,11 @@ export class ProposalInboxHttpService extends Service {
 
   constructor(ctx: Context, private readonly options: ProposalInboxHttpOptions) {
     super(ctx, "homeInboxHttp");
-    if (!Number.isSafeInteger(options.port) || options.port < 0 || options.port > 65_535) {
+    if (options.host === undefined && (!Number.isSafeInteger(options.port) || options.port === undefined || options.port < 0 || options.port > 65_535)) {
       throw new TypeError("Inbox HTTP port must be an integer from 0 to 65535");
+    }
+    if (options.host !== undefined && options.port !== undefined) {
+      throw new TypeError("Inbox HTTP accepts either a port or an external product host");
     }
     if (typeof options.authenticate !== "function") throw new TypeError("Inbox HTTP authenticator is required");
     this.principal = options.principal === undefined ? undefined : normalizeReviewActor(options.principal);
@@ -604,7 +613,8 @@ export class ProposalInboxHttpService extends Service {
     this.viewRecipeDrafts = options.viewRecipeDrafts;
     this.hydratePublishedProductViews();
     this.onboarding = options.onboarding ?? new UnavailableOnboardingService();
-    this.server = createServer((request, response) => { void this.handle(request, response); });
+    this.host = options.host;
+    this.server = this.host === undefined ? createServer(this.hostHandler) : undefined;
   }
 
   private hydratePublishedProductViews(): void {
@@ -621,22 +631,41 @@ export class ProposalInboxHttpService extends Service {
   }
 
   protected async [Service.init](): Promise<void> {
+    if (this.host !== undefined) {
+      if (this.host.origin === "") throw new Error("External product HTTP host must listen before Inbox initializes");
+      this.origin = this.host.origin;
+      this.ctx.effect(() => {
+        return () => {
+          this.host?.detach(this.hostHandler);
+          this.onboarding.close?.();
+        };
+      }, "home-inbox-http.detach");
+      return;
+    }
+    const server = this.server;
+    if (server === undefined) throw new Error("Inbox HTTP listener is unavailable");
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => reject(error);
-      this.server.once("error", onError);
-      this.server.listen(this.options.port, LOOPBACK_HOST, () => {
-        this.server.off("error", onError);
+      server.once("error", onError);
+      server.listen(this.options.port, LOOPBACK_HOST, () => {
+        server.off("error", onError);
         resolve();
       });
     });
-    const address = this.server.address();
+    const address = server.address();
     if (address === null || typeof address === "string") throw new Error("Inbox HTTP listener has no TCP address");
     this.origin = `http://${LOOPBACK_HOST}:${address.port}`;
     this.ctx.effect(() => async () => {
-      this.server.closeIdleConnections?.();
-      await new Promise<void>((resolve, reject) => this.server.close((error) => error ? reject(error) : resolve()));
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       this.onboarding.close?.();
     }, "home-inbox-http.close");
+  }
+
+  /** Makes this initialized Inbox surface the active handler on its external host. */
+  attach(): void {
+    if (this.host === undefined) throw new Error("Inbox HTTP service owns its listener and cannot attach to an external host");
+    this.host.switchTo(this.hostHandler);
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
