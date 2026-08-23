@@ -1133,7 +1133,8 @@ export class HomeWorldService extends Service {
    */
   configureActionAuthorityDelta(
     changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
-  ): HomeWorldActionAuthorityPolicyResult & { readonly changedCount?: number } {
+  ): { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount: number }
+    | { readonly status: "blocked"; readonly reason: string } {
     if (this.actionAuthorityConfigPathValue === undefined) {
       return { status: "blocked", reason: "configuration_source_unavailable" };
     }

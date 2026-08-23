@@ -1074,7 +1074,7 @@ test("a recheck failure never undoes the save and the receipt says so", async ()
       bridges: [],
       capabilities: [{ id: "hwc-1", label: "灯（客厅） · 灯", bridgeId: "ha", bridgeLabel: "Home Assistant", suggestedPolicyClass: "confirmation" as const }],
     }),
-    configureActionPolicy: () => ({ status: "configured" as const }),
+    configureActionPolicy: () => ({ status: "configured" as const, changedCount: 1 }),
   };
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
     port: 0,

@@ -107,7 +107,7 @@ export interface OnboardingActionAuthorityPort {
   /** Delta write over the persisted configuration; the owner preserves the rest. */
   configureDelta?(
     changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
-  ): { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount?: number }
+  ): { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount: number }
     | { readonly status: "blocked"; readonly reason: string };
 }
 
@@ -261,7 +261,7 @@ export class HomeOnboardingCoordinatorService extends Service {
       readonly administratorCapabilityIds: readonly string[];
     },
     actor?: OnboardingActor,
-  ): { readonly status: "configured"; readonly changedCount?: number } | { readonly status: "blocked"; readonly reason: string } {
+  ): { readonly status: "configured"; readonly changedCount: number } | { readonly status: "blocked"; readonly reason: string } {
     if (!actor || !actor.present || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
       throw new HomeOnboardingCoordinatorError("permission_denied", "确认方式设置需要在场，并使用绑定到本人的私人设备");
     }
@@ -293,7 +293,7 @@ export class HomeOnboardingCoordinatorService extends Service {
     ];
     const configured = this.actionAuthority.configureDelta(changes);
     return configured.status === "configured"
-      ? { status: "configured", ...(configured.changedCount === undefined ? {} : { changedCount: configured.changedCount }) }
+      ? { status: "configured", changedCount: configured.changedCount }
       : { status: "blocked", reason: "确认方式配置没有完成，家庭保持安全默认值。" };
   }
 

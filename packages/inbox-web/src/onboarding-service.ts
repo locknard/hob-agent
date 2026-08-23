@@ -94,7 +94,7 @@ export interface OnboardingPort {
       readonly administratorCapabilityIds: readonly string[];
     },
     actor?: OnboardingActor,
-  ): { readonly status: "configured"; readonly changedCount?: number } | { readonly status: "blocked"; readonly reason: string };
+  ): { readonly status: "configured"; readonly changedCount: number } | { readonly status: "blocked"; readonly reason: string };
   close?(): void;
 }
 

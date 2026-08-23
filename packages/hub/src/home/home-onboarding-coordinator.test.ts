@@ -93,7 +93,7 @@ test("the settings confirmation editor re-decides methods under step-5 rules", a
     configure: () => ({ status: "configured", configurationRevision: 1 }),
     configureDelta: (changes) => {
       configured.push(changes);
-      return { status: "configured", configurationRevision: configured.length };
+      return { status: "configured", configurationRevision: configured.length, changedCount: changes.length };
     },
   });
   try {

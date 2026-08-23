@@ -741,7 +741,7 @@ export class ProposalInboxHttpService extends Service {
         }
         const selection = actionPolicySelectionInput(body);
         if (selection === undefined) return send(response, 400, "Invalid confirmation settings");
-        let changedCount: number | undefined;
+        let changedCount: number;
         try {
           const configured = await configure(selection, this.principal as OnboardingActor | undefined);
           if (configured.status !== "configured") return send(response, 409, "Confirmation settings were not saved");
