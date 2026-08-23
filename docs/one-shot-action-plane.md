@@ -59,6 +59,14 @@ Adapter command acknowledgement means the ecosystem accepted the command.
 Verified success requires a subsequent neutral state read that matches the
 requested effect within the bounded verification window.
 
+The verification window is a hard runtime boundary. Every post-action read
+receives a derived AbortSignal that closes when either the caller cancels or
+the window reaches its deadline. The action plane races that deadline itself,
+so a bridge that ignores cancellation cannot keep a ticket executing. A
+deadline ends the ticket as `unknown` with `read_back_unavailable`; caller
+cancellation remains `verification_cancelled`. A late bridge completion cannot
+change the recorded result.
+
 The product receives one of:
 
 - `verified`: the neutral state matches the requested effect;
@@ -76,8 +84,10 @@ The product displays undo only for `verified` reversible work.
   persistence, and audit.
 - `packages/agent-layer` and `packages/inbox-web` use typed Hub intents only.
 
-This action plane is independent of HA. Home Assistant and Xiaomi are peer
-adapter implementations of the same extension.
+This action plane is independent of HA. Home Assistant is a production peer;
+Xiaomi becomes a conditional peer only when an authorized writable transport
+and its onboarding are installed. The deterministic Xiaomi fixture matrix
+proves the neutral boundary, rather than claiming a live Xiaomi transport.
 
 ## Explicit action descriptor boundary
 

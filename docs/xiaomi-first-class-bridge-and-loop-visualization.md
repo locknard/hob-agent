@@ -116,9 +116,12 @@ absolute state snapshots. Device online changes emit `device-health`; transport
 health emits `bridge-health`/heartbeat. Native payloads and MIoT vendor metadata
 do not cross the adapter boundary.
 
-Actions remain disabled in this slice. Xiaomi control is introduced only with
-the frozen actions extension, action authority, approval, idempotency, and
-audit path.
+An authorized transport may expose the frozen `actions@1` extension when it
+explicitly implements `setProperty` or `stopMedia`. Every such action still
+travels through HomeWorld authority, the household review center, idempotency,
+observed read-back, and audit. The default product bundle installs no Xiaomi
+transport, so this adapter does not claim live Xiaomi control before an
+authorized transport and its onboarding have shipped.
 
 ## First implementation milestones
 
@@ -170,6 +173,14 @@ governed household evidence path.
   property changes, reachability, resync and lifecycle into the v6 base. The
   additive v6.5 path also accepts validated device-space metadata from that
   transport and applies it to property bindings without inferring rooms.
+- A writable authorized transport can provide the neutral `actions@1` handle.
+  The deterministic fixture integration matrix proves that a Xiaomi property
+  action resolves through the same HomeWorld authority and household review
+  path as every other peer, writes one exact MIoT property, and reaches
+  fixture-observed verified state. Fixture cases with a missing or inverse
+  observation never become verified. A device that becomes unavailable before
+  execution performs no write. These deterministic transports are test
+  fixtures, not a registered product transport.
 - `createBuiltinBridgeProductBundle({ xiaomi })` registers Xiaomi beside HA;
   the default executable catalog omits it and therefore rejects Xiaomi configs
   until a live authorized transport is installed.

@@ -557,6 +557,205 @@ test("read-back stops at the verification deadline even when the bridge stays un
   assert.equal(slept, 2);
 });
 
+test("post-action read-back reaches unknown within its window when a gateway ignores abort", async () => {
+  let readCalls = 0;
+  let lateReject: ((reason: Error) => void) | undefined;
+  let postActionSignal: AbortSignal | undefined;
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+
+  const plane = new OneShotActionPlane({
+    gateway: {
+      readState: async ({ signal }) => {
+        readCalls += 1;
+        if (readCalls <= 2) {
+          return { status: "available" as const, value: false, observedAt: "2026-08-24T00:00:00.000Z", fresh: true };
+        }
+        postActionSignal = signal;
+        return new Promise((_, reject: (reason: Error) => void) => { lateReject = reject; });
+      },
+      execute: async () => ({ status: "acknowledged" as const }),
+    },
+    policy: { evaluate: () => ({ status: "allowed" as const, policyClass: "direct" as const, reversible: true }) },
+    verificationWindowMs: 20,
+    verificationPollMs: 1,
+    maxVerificationReads: 3,
+  });
+
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      plane.request({
+        requestId: "request-hung-read-back",
+        capabilityId: "cap-light",
+        action: action(true),
+        actor: member,
+      }),
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error("post-action read-back exceeded its verification window")), 200);
+      }),
+    ]);
+
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "read_back_unavailable");
+    assert.equal(result.ticket.status, "unknown");
+    assert.equal(readCalls, 3);
+    assert.equal(postActionSignal?.aborted, true, "the bounded verification signal aborts at its deadline");
+
+    lateReject?.(new Error("late gateway failure"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("does not accept a matching observation that resolves at the logical verification deadline", async () => {
+  let nowMs = 1_700_000_000_000;
+  let readCalls = 0;
+  const plane = new OneShotActionPlane({
+    gateway: {
+      readState: async () => {
+        readCalls += 1;
+        if (readCalls === 3) nowMs += 10;
+        return {
+          status: "available" as const,
+          value: readCalls === 3,
+          observedAt: new Date(nowMs).toISOString(),
+          fresh: true,
+        };
+      },
+      execute: async () => ({ status: "acknowledged" as const }),
+    },
+    policy: { evaluate: () => ({ status: "allowed" as const, policyClass: "direct" as const, reversible: true }) },
+    now: () => nowMs,
+    verificationWindowMs: 10,
+    maxVerificationReads: 3,
+  });
+
+  const result = await plane.request({
+    requestId: "request-late-matching-read-back",
+    capabilityId: "cap-light",
+    action: action(true),
+    actor: member,
+  });
+
+  assert.equal(result.status, "unknown");
+  assert.equal(result.reason, "read_back_unavailable");
+  assert.equal(readCalls, 3);
+});
+
+test("external cancellation remains distinct when post-action read-back ignores abort", async () => {
+  let readCalls = 0;
+  let postActionSignal: AbortSignal | undefined;
+  let lateReject: ((reason: Error) => void) | undefined;
+  const controller = new AbortController();
+  const plane = new OneShotActionPlane({
+    gateway: {
+      readState: async ({ signal }) => {
+        readCalls += 1;
+        if (readCalls <= 2) {
+          return { status: "available" as const, value: false, observedAt: "2026-08-24T00:00:00.000Z", fresh: true };
+        }
+        postActionSignal = signal;
+        return new Promise((_, reject: (reason: Error) => void) => { lateReject = reject; });
+      },
+      execute: async () => ({ status: "acknowledged" as const }),
+    },
+    policy: { evaluate: () => ({ status: "allowed" as const, policyClass: "direct" as const, reversible: true }) },
+    verificationWindowMs: 100,
+  });
+
+  const pending = plane.request({
+    requestId: "request-cancelled-hung-read-back",
+    capabilityId: "cap-light",
+    action: action(true),
+    actor: member,
+    signal: controller.signal,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await pending;
+  lateReject?.(new Error("late gateway failure"));
+
+  assert.equal(result.status, "unknown");
+  assert.equal(result.reason, "verification_cancelled");
+  assert.equal(postActionSignal?.aborted, true);
+});
+
+test("read-back verifies when a fresh observed state converges within the bounded window", async () => {
+  let readCalls = 0;
+  let sleeps = 0;
+  const plane = new OneShotActionPlane({
+    gateway: {
+      readState: async () => {
+        readCalls += 1;
+        return {
+          status: "available" as const,
+          value: readCalls >= 4,
+          observedAt: "2026-08-24T00:00:00.000Z",
+          fresh: true,
+        };
+      },
+      execute: async () => ({ status: "acknowledged" as const }),
+    },
+    policy: { evaluate: () => ({ status: "allowed" as const, policyClass: "direct" as const, reversible: true }) },
+    verificationWindowMs: 100,
+    verificationPollMs: 1,
+    maxVerificationReads: 3,
+    sleep: async () => { sleeps += 1; },
+  });
+
+  const result = await plane.request({
+    requestId: "request-eventual-read-back",
+    capabilityId: "cap-light",
+    action: action(true),
+    actor: member,
+  });
+
+  assert.equal(result.status, "verified");
+  assert.equal(readCalls, 4, "one request read, one execution guard, and two bounded post-action reads");
+  assert.equal(sleeps, 1);
+});
+
+test("read-back reports postcondition mismatch after every bounded fresh observation disagrees", async () => {
+  let readCalls = 0;
+  let sleeps = 0;
+  const plane = new OneShotActionPlane({
+    gateway: {
+      readState: async () => {
+        readCalls += 1;
+        return {
+          status: "available" as const,
+          value: false,
+          observedAt: "2026-08-24T00:00:00.000Z",
+          fresh: true,
+        };
+      },
+      execute: async () => ({ status: "acknowledged" as const }),
+    },
+    policy: { evaluate: () => ({ status: "allowed" as const, policyClass: "direct" as const, reversible: true }) },
+    verificationWindowMs: 100,
+    verificationPollMs: 1,
+    maxVerificationReads: 3,
+    sleep: async () => { sleeps += 1; },
+  });
+
+  const result = await plane.request({
+    requestId: "request-persistent-mismatch",
+    capabilityId: "cap-light",
+    action: action(true),
+    actor: member,
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.reason, "postcondition_mismatch");
+  assert.equal(readCalls, 5, "one request read, one execution guard, and the configured maximum post-action reads");
+  assert.equal(sleeps, 2);
+});
+
 test("undo re-enters policy and refuses when the latest state changed", async () => {
   let evaluations = 0;
   const fixtureValue = fixture();

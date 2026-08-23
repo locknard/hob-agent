@@ -215,6 +215,10 @@ export interface OneShotActionPlaneOptions {
   readonly sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
 }
 
+type BoundedVerificationRead =
+  | { readonly status: "read"; readonly read: OneShotActionRead }
+  | { readonly status: "deadline" | "cancelled" | "failed" };
+
 interface MutableState {
   tickets: OneShotActionTicket[];
   activities: OneShotActionActivity[];
@@ -578,15 +582,20 @@ export class OneShotActionPlane {
       if (reads > 0 && this.currentTimeMs() >= deadline) break;
       reads += 1;
       if (signal.aborted) return { status: "unknown", reason: "verification_cancelled" };
-      let read: OneShotActionRead;
-      try {
-        read = await this.gateway.readState({ capabilityId: ticket.capabilityId, signal, action: ticket.action });
-      } catch {
-        read = { status: "unknown", reason: "read_back_failed" };
-      }
+      const boundedRead = await this.readVerificationState(ticket, signal, deadline);
+      if (boundedRead.status === "cancelled") return { status: "unknown", reason: "verification_cancelled" };
+      if (boundedRead.status === "deadline") return { status: "unknown", reason: "read_back_unavailable" };
+      const read = boundedRead.status === "read"
+        ? boundedRead.read
+        : { status: "unknown" as const, reason: "read_back_failed" };
       if (read.status === "available" && read.fresh !== false) {
         if (valuesMatch(read.value, expected, ticket.action)) return { status: "verified", reason: "verified" };
-        return { status: "failed", reason: "postcondition_mismatch" };
+        // A bridge acknowledgement can precede its observed state event. Keep
+        // the read-back window open so one stale, still-fresh observation does
+        // not turn an eventually verified device action into a false failure.
+        if (reads >= this.maxVerificationReads || this.currentTimeMs() >= deadline) {
+          return { status: "failed", reason: "postcondition_mismatch" };
+        }
       }
       if (reads >= this.maxVerificationReads || this.currentTimeMs() >= deadline) break;
       try {
@@ -596,6 +605,62 @@ export class OneShotActionPlane {
       }
     }
     return { status: "unknown", reason: "read_back_unavailable" };
+  }
+
+  private readVerificationState(
+    ticket: OneShotActionTicket,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<BoundedVerificationRead> {
+    const remainingMs = deadline - this.currentTimeMs();
+    if (remainingMs <= 0) return Promise.resolve({ status: "deadline" });
+    const bounded = new AbortController();
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const settle = (result: BoundedVerificationRead) => {
+        if (settled) return;
+        settled = true;
+        if (timeout !== undefined) clearTimeout(timeout);
+        signal.removeEventListener("abort", onExternalAbort);
+        resolve(result);
+      };
+      const onExternalAbort = () => {
+        bounded.abort();
+        settle({ status: "cancelled" });
+      };
+      if (signal.aborted) {
+        onExternalAbort();
+        return;
+      }
+      timeout = setTimeout(() => {
+        bounded.abort();
+        settle({ status: "deadline" });
+      }, remainingMs);
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+      void Promise.resolve()
+        .then(() => this.gateway.readState({
+          capabilityId: ticket.capabilityId,
+          signal: bounded.signal,
+          action: ticket.action,
+        }))
+        .then(
+          (read) => {
+            if (signal.aborted) {
+              bounded.abort();
+              settle({ status: "cancelled" });
+              return;
+            }
+            if (this.currentTimeMs() >= deadline) {
+              bounded.abort();
+              settle({ status: "deadline" });
+              return;
+            }
+            settle({ status: "read", read });
+          },
+          () => settle({ status: "failed" }),
+        );
+    });
   }
 
   private async readFresh(
