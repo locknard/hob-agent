@@ -198,6 +198,7 @@ test("gives the gateway the neutral action while reading state", async () => {
       },
     },
     policy: { evaluate: () => ({ status: "allowed", policyClass: "direct", reversible: true }) },
+    now: () => "2026-08-24T00:00:00.000Z",
     verificationWindowMs: 1,
     sleep: async () => undefined,
   });
@@ -243,6 +244,7 @@ test("concurrent duplicate request ids coalesce into one durable execution", asy
       let count = 0;
       return () => `coalesced-${++count}`;
     })(),
+    now: () => "2026-08-24T00:00:00.000Z",
     verificationWindowMs: 1,
     sleep: async () => undefined,
   });
@@ -463,6 +465,7 @@ test("level read-back uses a bounded tolerance and restores the captured level",
       let count = 0;
       return () => `level-${++count}`;
     })(),
+    now: () => "2026-08-24T00:00:00.000Z",
     verificationWindowMs: 1,
     sleep: async () => undefined,
   });
@@ -496,6 +499,7 @@ test("prepared media playback verifies and exposes a stop-media undo", async () 
       let count = 0;
       return () => `media-${++count}`;
     })(),
+    now: () => "2026-08-24T00:00:00.000Z",
     verificationWindowMs: 1,
     sleep: async () => undefined,
   });
