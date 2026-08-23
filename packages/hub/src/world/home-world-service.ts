@@ -186,7 +186,15 @@ export interface HomeWorldActionAuthorityPolicyInput {
 
 export type HomeWorldActionAuthorityPolicyResult =
   | { readonly status: "configured"; readonly configurationRevision: number }
-  | { readonly status: "blocked"; readonly reason: "configuration_source_unavailable" | "unknown_capability" | "ambiguous_bridge" | "write_failed" };
+  | { readonly status: "blocked"; readonly reason: HomeWorldActionAuthorityBlockReason };
+
+export type HomeWorldActionAuthorityBlockReason =
+  "configuration_source_unavailable" | "unknown_capability" | "ambiguous_bridge" | "write_failed";
+
+/** Delta result: success always states the count; failure keeps the closed reason set. */
+export type HomeWorldActionAuthorityDeltaResult =
+  | { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount: number }
+  | { readonly status: "blocked"; readonly reason: HomeWorldActionAuthorityBlockReason };
 
 export interface HomeWorldForeignRuleCatalog {
   readonly bridgeId: string;
@@ -1133,8 +1141,7 @@ export class HomeWorldService extends Service {
    */
   configureActionAuthorityDelta(
     changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
-  ): { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount: number }
-    | { readonly status: "blocked"; readonly reason: string } {
+  ): HomeWorldActionAuthorityDeltaResult {
     if (this.actionAuthorityConfigPathValue === undefined) {
       return { status: "blocked", reason: "configuration_source_unavailable" };
     }
