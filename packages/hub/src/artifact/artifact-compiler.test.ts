@@ -399,7 +399,7 @@ test("rejects an unknown risk policy identity instead of compiling it", () => {
   assert.deepEqual(result.blockingReasons, ["policy_blocked"]);
 });
 
-test("keeps pending proposal input unavailable and rejected proposal input rejected", () => {
+test("compiles a proposal awaiting the household decision and rejects a closed one", () => {
   const input = makeInput();
   const { inputIdentity: _identity, ...draft } = input;
   const pending = compileNeutralArtifact(createArtifactCompileInput({
@@ -411,8 +411,7 @@ test("keeps pending proposal input unavailable and rejected proposal input rejec
     proposal: { ...input.proposal, status: "rejected" },
   }));
 
-  assert.equal(pending.status, "unavailable");
-  assert.ok(pending.blockingReasons.includes("not_ready"));
+  assert.equal(pending.blockingReasons.includes("not_ready"), false);
   assert.equal(rejected.status, "rejected");
   assert.ok(rejected.blockingReasons.includes("policy_blocked"));
 });

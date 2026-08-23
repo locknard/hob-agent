@@ -279,8 +279,8 @@ class ProposalEnableInbox extends StubInbox {
           id: "proposal-enable",
           revision: 9,
           title: "周末窗帘慢亮",
-          stage: "enable" as const,
-          status: "approved" as const,
+          lifecycle: "ready" as const,
+          status: "pending" as const,
         },
       } : {}),
     };
@@ -289,7 +289,22 @@ class ProposalEnableInbox extends StubInbox {
   canEnableProposal() { return true; }
 
   enableProposal(input: unknown) {
+    if (this.enablements.length >= 1) {
+      // The second attempt simulates a passing outage during enablement.
+      throw Object.assign(
+        new Error("方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。"),
+        { code: "enable_temporarily_unavailable" },
+      );
+    }
     this.enablements.push(input);
+  }
+
+  readonly automationCommands: unknown[] = [];
+
+  canControlAutomation() { return true; }
+
+  controlAutomation(input: unknown) {
+    this.automationCommands.push(input);
   }
 }
 
@@ -944,7 +959,153 @@ test("renders the real runtime queue and sends runtime approval through the type
   }
 });
 
-test("keeps administrator confirmations and proposal decisions on a bound private device", async () => {
+test("settings saves confirmation methods and rechecks blocked proposals", async () => {
+  const ctx = new Context();
+  const configured: unknown[] = [];
+  let rechecks = 0;
+  class RecheckInbox extends StubInbox {
+    recheckBlockedProposals() {
+      rechecks += 1;
+      return { rechecked: 1, cleared: 1 };
+    }
+  }
+  const inboxFiber = await ctx.plugin(RecheckInbox);
+  const onboarding = {
+    getState: () => ({ step: 8, complete: true, status: "complete" as const, title: "完成", body: "完成", choices: { status: "available" as const, bridges: [], capabilities: [] } }),
+    submit: () => { throw new Error("not used"); },
+    actionPolicyChoices: () => ({
+      status: "available" as const,
+      bridges: [],
+      capabilities: [{ id: "hwc-1", label: "灯（客厅） · 灯", bridgeId: "ha", bridgeLabel: "Home Assistant", suggestedPolicyClass: "confirmation" as const }],
+    }),
+    configureActionPolicy: (selection: { directCapabilityIds: readonly string[]; confirmationCapabilityIds: readonly string[]; administratorCapabilityIds: readonly string[] }) => {
+      const rows = selection.directCapabilityIds.length + selection.confirmationCapabilityIds.length + selection.administratorCapabilityIds.length;
+      if (rows === 0) return { status: "configured" as const, changedCount: 0 };
+      configured.push(selection);
+      return { status: "configured" as const, changedCount: rows };
+    },
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    onboarding,
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  try {
+    const settings = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    const settingsHtml = await settings.text();
+    assert.match(settingsHtml, /id="action-policy"/, "settings offers the confirmation-method editor");
+    assert.match(settingsHtml, /name="capability:hwc-1"/);
+    assert.match(settingsHtml, /data-policy-form/, "the form is marked for the change-gated save button");
+    const asset = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, { headers: { authorization } });
+    assert.match(await asset.text(), /data-policy-form[\s\S]*disabled = true/, "the asset gates the save button until a real change");
+
+    const saved = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers,
+      body: "capability%3Ahwc-1=confirmation",
+      redirect: "manual",
+    });
+    assert.equal(saved.status, 303);
+    const savedLocation = saved.headers.get("location") ?? "";
+    const receipt = /^\/settings\?policy=([a-f0-9]{32})#action-policy$/.exec(savedLocation)?.[1];
+    assert.ok(receipt !== undefined, "the redirect carries an opaque single-use receipt, not a guessable literal");
+    assert.deepEqual(configured, [{ directCapabilityIds: [], confirmationCapabilityIds: ["hwc-1"], administratorCapabilityIds: [] }]);
+    assert.equal(rechecks, 1, "the saved configuration immediately rechecks blocked proposals");
+
+    const probed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { method: "HEAD", headers: { authorization } });
+    assert.equal(probed.status, 200);
+
+    const confirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
+    assert.match(await confirmed.text(), /已保存确认方式，已重新检查 1 条受阻建议，其中 1 条已恢复可启用。/,
+      "a HEAD probe never consumes the receipt; the household's GET still reads it");
+
+    const replayed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
+    assert.doesNotMatch(await replayed.text(), /已保存确认方式/, "a receipt reads exactly once");
+
+    const forged = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=saved`, { headers: { authorization } });
+    assert.doesNotMatch(await forged.text(), /已保存确认方式/, "a crafted URL never fakes a success message");
+
+    const empty = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers,
+      body: "",
+      redirect: "manual",
+    });
+    assert.equal(empty.status, 303, "choosing nothing is a truthful no-change, not an error");
+    const emptyReceipt = /policy=([a-f0-9]{32})/.exec(empty.headers.get("location") ?? "")?.[1];
+    assert.ok(emptyReceipt !== undefined);
+    const emptyConfirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${emptyReceipt}`, { headers: { authorization } });
+    assert.match(await emptyConfirmed.text(), /确认方式没有变化。/);
+    assert.equal(rechecks, 1, "a no-change save rechecks nothing");
+
+    const sharedDenied = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers: { ...headers },
+      body: "capability%3Ahwc-1=direct",
+      redirect: "manual",
+    });
+    assert.equal(sharedDenied.status, 303, "the bound-phone principal saves normally");
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("a recheck failure never undoes the save and the receipt says so", async () => {
+  const ctx = new Context();
+  class ThrowingRecheckInbox extends StubInbox {
+    recheckBlockedProposals(): { rechecked: number; cleared: number } {
+      throw new Error("recheck port failed");
+    }
+  }
+  const inboxFiber = await ctx.plugin(ThrowingRecheckInbox);
+  const onboarding = {
+    getState: () => ({ step: 8, complete: true, status: "complete" as const, title: "完成", body: "完成", choices: { status: "available" as const, bridges: [], capabilities: [] } }),
+    submit: () => { throw new Error("not used"); },
+    actionPolicyChoices: () => ({
+      status: "available" as const,
+      bridges: [],
+      capabilities: [{ id: "hwc-1", label: "灯（客厅） · 灯", bridgeId: "ha", bridgeLabel: "Home Assistant", suggestedPolicyClass: "confirmation" as const }],
+    }),
+    configureActionPolicy: () => ({ status: "configured" as const, changedCount: 1 }),
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    onboarding,
+  });
+  try {
+    const saved = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: ctx.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "capability%3Ahwc-1=confirmation",
+      redirect: "manual",
+    });
+    assert.equal(saved.status, 303, "the save survives a recheck failure");
+    const receipt = /policy=([a-f0-9]{32})/.exec(saved.headers.get("location") ?? "")?.[1];
+    assert.ok(receipt !== undefined);
+    const confirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
+    assert.match(await confirmed.text(), /已保存确认方式，建议状态稍后重新检查。/, "the receipt states the recheck did not run");
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("approval stays on a bound private device while any present entry may reject", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(RuntimeDecisionInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -964,15 +1125,22 @@ test("keeps administrator confirmations and proposal decisions on a bound privat
     const page = await fetch(`${ctx.homeInboxHttp.origin}/review-center`, { headers: { authorization } });
     const html = await page.text();
     assert.equal(html.includes("runtime-confirmations/runtime-1/approve"), false);
-    const denied = await fetch(`${ctx.homeInboxHttp.origin}/runtime-confirmations/runtime-1/reject`, {
+    const sharedReject = await fetch(`${ctx.homeInboxHttp.origin}/runtime-confirmations/runtime-1/reject`, {
       method: "POST",
       headers,
       body: "",
       redirect: "manual",
     });
-    assert.equal(denied.status, 403);
+    assert.equal(sharedReject.status, 303, "rejection executes nothing, so a present shared screen may say no");
 
-    assert.match(await denied.text(), /authorized device/i);
+    const sharedApprove = await fetch(`${ctx.homeInboxHttp.origin}/runtime-confirmations/runtime-1/approve`, {
+      method: "POST",
+      headers,
+      body: "",
+      redirect: "manual",
+    });
+    assert.equal(sharedApprove.status, 403, "approval still requires the bound private phone");
+    assert.match(await sharedApprove.text(), /private device/i);
 
     const unavailableSnooze = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-1/snooze`, {
       method: "POST",
@@ -998,7 +1166,7 @@ test("keeps administrator confirmations and proposal decisions on a bound privat
   }
 });
 
-test("keeps the trial proposal detail reachable and accepts the second enablement consent", async () => {
+test("keeps the prepared plan detail reachable and accepts the single enable decision", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(ProposalEnableInbox);
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -1019,7 +1187,7 @@ test("keeps the trial proposal detail reachable and accepts the second enablemen
     assert.equal(detail.status, 200);
     const detailHtml = await detail.text();
     assert.match(detailHtml, /周末窗帘慢亮/);
-    assert.match(detailHtml, /确认长期使用/);
+    assert.match(detailHtml, />启用</);
 
     const enabled = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable/enable`, {
       method: "POST",
@@ -1034,6 +1202,34 @@ test("keeps the trial proposal detail reachable and accepts the second enablemen
       expectedRevision: 9,
       reviewer: "adult-2",
     }]);
+
+    const retryable = await fetch(`${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable/enable`, {
+      method: "POST",
+      headers,
+      body: "expectedRevision=9",
+      redirect: "manual",
+    });
+    assert.equal(retryable.status, 303, "a retryable failure stays inside the product");
+    const location = retryable.headers.get("location") ?? "";
+    assert.equal(location, "/review-center/proposals/proposal-enable?notice=enable_temporarily_unavailable",
+      "only the closed product code travels in the URL, never raw error text");
+
+    const returned = await fetch(`${ctx.homeInboxHttp.origin}${location}`, { headers: { authorization } });
+    assert.equal(returned.status, 200);
+    const returnedHtml = await returned.text();
+    assert.match(returnedHtml, /暂时没能完成.*稍后再试/, "the server renders the fixed household copy for the code");
+    assert.match(returnedHtml, />启用</, "the card keeps its full entries after the notice");
+    assert.match(returnedHtml, /data-one-shot-notice/, "the notice is marked for the asset-driven cleanup");
+    assert.doesNotMatch(returnedHtml, /<script>/, "the CSP forbids inline scripts, so the page ships none");
+    const asset = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, { headers: { authorization } });
+    assert.match(await asset.text(), /data-one-shot-notice[\s\S]*replaceState/, "the allowed asset performs the URL cleanup");
+
+    const forged = await fetch(
+      `${ctx.homeInboxHttp.origin}/review-center/proposals/proposal-enable?notice=${encodeURIComponent("已成功启用门锁自动化")}`,
+      { headers: { authorization } },
+    );
+    const forgedHtml = await forged.text();
+    assert.doesNotMatch(forgedHtml, /已成功启用门锁自动化/, "arbitrary query text never renders as a trusted status");
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();
@@ -2262,7 +2458,7 @@ test("resumes the persisted onboarding checkpoint and continues only valid steps
     const continued = await fetch(`${ctx.homeInboxHttp.origin}/onboarding/continue`, {
       method: "POST",
       headers,
-      body: "step=4&memberName=%E5%B0%8F%E9%9B%A8&memberRole=adult_admin",
+      body: "step=4&memberName=%E5%B0%8F%E9%9B%A8",
       redirect: "manual",
     });
     assert.equal(continued.status, 303);
@@ -2857,4 +3053,49 @@ test("requires an explicit principal role and device binding for Basic-authentic
   }); }, /explicit principal role and device binding/i);
   await inboxFiber.dispose();
   await ctx.fiber.dispose();
+});
+
+
+test("controls a deployed automation including an enable retry", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(ProposalEnableInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adultAdminPrincipal,
+    reviewer: "adult-2",
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  try {
+    for (const command of ["pause", "resume", "close", "retry"] as const) {
+      const controlled = await fetch(`${ctx.homeInboxHttp.origin}/automations/proposal-enable/${command}`, {
+        method: "POST",
+        headers,
+        redirect: "manual",
+      });
+      assert.equal(controlled.status, 303);
+      assert.equal(controlled.headers.get("location"), "/automations");
+    }
+    assert.deepEqual((ctx.homeInbox as unknown as ProposalEnableInbox).automationCommands, [
+      { proposalId: "proposal-enable", command: "pause", actor: "adult-2" },
+      { proposalId: "proposal-enable", command: "resume", actor: "adult-2" },
+      { proposalId: "proposal-enable", command: "close", actor: "adult-2" },
+      { proposalId: "proposal-enable", command: "retry", actor: "adult-2" },
+    ]);
+
+    const foreign = await fetch(`${ctx.homeInboxHttp.origin}/automations/proposal-enable/pause`, {
+      method: "POST",
+      headers: { authorization, origin: "https://elsewhere.example" },
+      redirect: "manual",
+    });
+    assert.equal(foreign.status, 403);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
 });

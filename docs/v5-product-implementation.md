@@ -1,7 +1,7 @@
-# V4 product implementation contract
+# V5 product implementation contract
 
 Status: implementation source of truth
-Design source: `HobAgentUI设计稿评审包v4.zip` (2026-08, 32 screens)
+Design source: `HobAgentUI设计稿评审包v5.zip` (2026-08, 33 screens)
 Scope: the existing `packages/hub`, `packages/agent-layer`, and
 `packages/inbox-web` runtime; this is not a separate prototype runtime.
 
@@ -21,6 +21,7 @@ stable semantic destinations:
 | Conversation | Ask, watch progress, stop, resume, and correct | durable advice turn, replayable SSE, structured answer and correction acknowledgement |
 | Review center | Decide runtime confirmations and persistent proposals | two independent queues, independent counts and commands |
 | Activity | Understand who did what and why | bounded household activity records and redacted cause chains |
+| Automations | See what it runs, pause it, close it | proposal lifecycle, deployment verification and version history |
 | Control | Use the same home state in a denser layout | neutral capabilities and the same governed intent seam |
 | Settings | Complete setup and manage connections, permissions and preferences | non-secret setup checkpoints and explicit capability availability |
 
@@ -31,8 +32,9 @@ projection, while the Host Shell owns authentication, safety alerts, review
 counts, provider recovery, and write-command dispatch.
 
 The top Host switcher changes the current browser session. Settings owns the
-persistent device default and its permission check: a member manages a bound
-private device, while an administrator manages a shared device. The Control
+persistent device default and its permission check: any member manages it from
+a private device bound to themselves; the household owner may also manage it
+directly on the shared device. The Control
 provider presents spaces, current values, policy labels and governed actions in
 one continuous dense surface; it uses the same Hub intent handlers as Life.
 
@@ -49,15 +51,21 @@ variants. Providers inherit these semantics through the shared presentation laye
    ten-second undo when the inverse action is still safe.
 2. **Confirmation** — broad-impact but reversible actions initiated by a present
    person. A spoken or tapped confirmation is equivalent. No response within ten
-   seconds fails closed. A rule, system task, or proposal without a present
-   initiator becomes a longer-lived runtime confirmation instead.
-3. **Administrator** — locks, water valves, security, or irreversible effects.
-   Approval must come from an authenticated private device belonging to any adult
-   administrator. Voice and shared displays are not identity.
+   seconds fails closed. A Hub-mediated action without a present initiator (a
+   rule the Hub executes, a system task) becomes a longer-lived runtime
+   confirmation instead. Actions inside a deployed native automation are a
+   different object: their consent is the enable decision on the named plan
+   (DR-015), and the plan card disclosed the concrete devices.
+3. **Protected** — locks, water valves, security, or irreversible effects.
+   Approval must come from a private device bound to the approving member.
+   Voice and shared displays are not identity. The gate follows the action's
+   consequence, not a member rank: the household is one trust domain, and any
+   present member approves from their own phone. (The wire and storage spelling
+   of this class remains `administrator` for compatibility.)
 
 The reviewed action-authority binding stores one explicit policy class for each
 Hub capability. Neutral semantic kinds provide onboarding suggestions; the
-stored class governs execution. This preserves administrator handling for water,
+stored class governs execution. This preserves protected handling for water,
 security, and other high-impact devices whose ecosystem presents them as a
 generic switch.
 
@@ -89,15 +97,33 @@ once in its owning store.
 
 ### Persistent proposal
 
-- `pending + snoozed <= 5`; a snoozed proposal still occupies one slot.
-- Snooze choices are tomorrow, weekend, or next week. A proposal may be snoozed
-  twice; the next appearance must be decided or allowed to expire naturally.
+- Preparation begins when a candidate is admitted, carries no side effect and
+  stays out of the household inbox. Only a prepared plan spends household
+  attention, so `ready + snoozed <= 5` while preparation holds its own small
+  budget. A proposal with nothing to compile reaches the inbox directly.
+- "以后再说" sleeps the card: it returns once before natural expiry, and new
+  evidence or a revised plan wakes it and sends it back through preparation.
+  There is no attempt cap and no forced decision. A sleeping card still counts
+  toward `ready + snoozed <= 5`: sleeping hides a card, it never hands the
+  Agent a fresh slot.
 - Natural expiry is normally fourteen days and is not a rejection latch.
-- “Only this time” closes the current proposal without a latch. “Do not suggest
-  this again” writes a `dedupKey` latch and visibly acknowledges the promise.
+- The household makes one decision on a prepared plan with three choices:
+  enable starts a running automation, "以后再说" sleeps the card, and "不用了"
+  opens the honest pair — "仅这次不要" closes without a latch, "不再提这件事"
+  writes a `dedupKey` latch and visibly acknowledges the promise. Changing a
+  plan happens in conversation, which produces the next prepared revision.
 - New evidence for the same `dedupKey` merges into the existing unresolved card.
-- Direction approval is the first consent. Trial and eventual enablement remain
-  separate, visible states; Phase 0 never implies that approval installed a rule.
+- Enablement is real. The decision records `enabling`, the governed deployment
+  seam applies the neutral artifact, and the interface reports a running
+  automation only after the deployment verifies. A failure is explicit and
+  stated in household language; it never appears as a running automation.
+- A running automation stays controllable: pause, resume, retry after an
+  explicit failure, and close with the original configuration restored.
+- A confirmation-class action may live inside an enabled automation; the plan
+  card discloses it and the enable decision is the household's consent
+  (protected-class actions never deploy). The deployment target follows the
+  plan's own capability bindings, and the target execution domain's read-back
+  is the truth about whether the automation runs.
 
 The Web sidebar and mobile navigation show independent amber and blue counts.
 There is no aggregate red dot.
@@ -169,9 +195,10 @@ The eight V4 steps are resumable checkpoints:
 1. Meet and name the household instance.
 2. Add an existing home read-only and show what was discovered.
 3. Confirm the neutral household map.
-4. Bind adult administrators to private devices; children and guests remain
-   present-person contexts without approval identity.
-5. Decide direct, confirmation and administrator device scopes independently.
+4. Bind members to their own private devices; approval identity is the bound
+   phone, not a member rank. Guests remain present-person contexts without
+   approval identity.
+5. Decide direct, confirmation and protected device scopes independently.
 6. Rehearse the three non-overridable safety rules.
 7. Set first-week expectations without promising autonomous behavior.
 8. Enter the real conversation surface with the first question.
@@ -211,7 +238,8 @@ status vocabulary is:
 | Media clarification and playback | exact player and media refs, queue clarification, typed `play_media`, policy ticket and verification | domain-passed |
 | Direct action / high-impact confirmation / undo | exact descriptor re-read, three policy classes, private-device guard, fresh read-back, ten-second inverse action | http-passed + domain-passed |
 | Batch action | preflighted exact targets, per-target policy, ordered verified/pending/failed/unknown result | browser-passed + domain-passed |
-| Review center · two sections / detail / snooze | independent lifecycles and badges, live TTL, 5-slot capacity, two consent stages, three snooze choices | browser-passed + domain-passed |
+| Review center · two sections / prepared plan / snooze | independent lifecycles and badges, live TTL, 5-slot capacity, one decision with five actions, three snooze choices | browser-passed + domain-passed |
+| Automations · run view | verified-only running state, explicit enable failure, pause, resume, close with restore | browser-passed + domain-passed |
 | Activity · cause chain | closed attribution vocabulary, bounded causes and verification text | browser-passed + domain-passed |
 | Safety · banner / handling | Host-owned penetrating alert, acknowledgement, fresh-sensor resolution | http-passed + domain-passed |
 | Onboarding · steps 1–8 | durable checkpoints, real bridge/capability choices, authority policy, observation schedule, first durable advice turn | browser-passed + domain-passed |

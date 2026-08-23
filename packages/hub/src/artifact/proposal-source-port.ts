@@ -34,7 +34,8 @@ export type HubVerifiedProposalSource = DeepReadonly<{
   readonly proposalId: string;
   readonly revision: number;
   readonly kind: "automation-draft";
-  readonly status: "approved";
+  /** Preparation reads a plan that the household has not yet decided on. */
+  readonly status: "pending_review";
   readonly applicationStatus: "not_available";
   readonly title: string;
   readonly summary: string;

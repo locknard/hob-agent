@@ -54,11 +54,31 @@ export class ArtifactPreparationJobRunner {
   private async execute(jobId: string, expectedVersion: number): Promise<void> {
     const claimed = this.jobs.claimPreparationJob({ jobId, expectedVersion });
     try {
-      await this.preparation.prepare({
+      const receipt = await this.preparation.prepare({
         proposalId: claimed.proposalId,
         proposalRevision: claimed.proposalRevision,
       });
-      this.jobs.completePreparationJob({ jobId: claimed.jobId, expectedVersion: claimed.version });
+      this.jobs.completePreparationJob({
+        jobId: claimed.jobId,
+        expectedVersion: claimed.version,
+        preparedArtifact: {
+          artifactId: receipt.compilation.artifact.artifactId,
+          revision: receipt.compilation.artifact.revision,
+          contentHash: receipt.compilation.artifact.contentHash,
+          compileResultId: receipt.compilation.compile.resultId,
+          dryRunResultId: receipt.compilation.dryRun.resultId,
+        },
+      });
+      try {
+        this.jobs.markProposalReady?.({
+          proposalId: claimed.proposalId,
+          expectedRevision: claimed.proposalRevision,
+          actor: "system",
+        });
+      } catch {
+        // The preparation itself is durable; a full inbox or a superseded
+        // revision defers promotion to the store's lazy sweep.
+      }
     } catch (error) {
       const failure = boundedFailure(error);
       this.failClaimedJob(claimed, failure.stage, failure.code);

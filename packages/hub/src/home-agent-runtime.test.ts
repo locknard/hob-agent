@@ -571,7 +571,11 @@ test("wakes the private durable runner after an approved automation job commits"
 
   await runtime.start();
   try {
-    const pending = runtime.context.homeProposals.create({
+    const proposalIngress = runtime.context.homeProposals as unknown as {
+      store: { create(input: unknown): { id: string; revision: number; status: string } };
+      wakePreparation(proposal: { id: string; revision: number }): unknown;
+    };
+    const pending = proposalIngress.store.create({
       kind: "automation-draft",
       title: "Review a local household note",
       summary: "Prepare one local notification without a device write.",
@@ -606,23 +610,19 @@ test("wakes the private durable runner after an approved automation job commits"
         },
       },
     });
-    const approved = runtime.context.homeProposals.review({
-      proposalId: pending.id,
-      expectedRevision: pending.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
-    });
+    // The durable runner never replays on start; admission's wake is the only
+    // nudge, so the fixture wakes exactly as governed admission would.
+    proposalIngress.wakePreparation(pending);
 
     const observer = new SqliteProposalStore({ path: proposalPath });
-    let job = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    let job = observer.getPreparationJobForProposal(pending.id, pending.revision);
     for (let attempts = 0; job !== undefined && !["succeeded", "failed"].includes(job.status) && attempts < 50; attempts += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
-      job = observer.getPreparationJobForProposal(approved.id, approved.revision);
+      job = observer.getPreparationJobForProposal(pending.id, pending.revision);
     }
     assert.equal(job?.status, "failed");
     assert.equal(job?.error?.code, "unavailable");
-    const review = runtime.context.homeArtifacts.reviewForProposal(approved.id, approved.revision);
+    const review = runtime.context.homeArtifacts.reviewForProposal(pending.id, pending.revision);
     assert.equal(review?.compile.status, "not_run");
     assert.equal(review?.dryRun.status, "not_run");
     assert.equal(review?.writesPerformed, false);
@@ -660,7 +660,11 @@ test("retries one failed exact preparation through the full Inbox facade and wak
   await runtime.start();
   const observer = new SqliteProposalStore({ path: proposalPath });
   try {
-    const pending = runtime.context.homeProposals.create({
+    const proposalIngress = runtime.context.homeProposals as unknown as {
+      store: { create(input: unknown): { id: string; revision: number; status: string } };
+      wakePreparation(proposal: { id: string; revision: number }): unknown;
+    };
+    const pending = proposalIngress.store.create({
       kind: "automation-draft",
       title: "Retry a local household note",
       summary: "Retry one local notification without a device write.",
@@ -695,18 +699,12 @@ test("retries one failed exact preparation through the full Inbox facade and wak
         },
       },
     });
-    const approved = runtime.context.homeProposals.review({
-      proposalId: pending.id,
-      expectedRevision: pending.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
-    });
+    proposalIngress.wakePreparation(pending);
 
-    let failed = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    let failed = observer.getPreparationJobForProposal(pending.id, pending.revision);
     for (let attempts = 0; failed !== undefined && failed.status !== "failed" && attempts < 50; attempts += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
-      failed = observer.getPreparationJobForProposal(approved.id, approved.revision);
+      failed = observer.getPreparationJobForProposal(pending.id, pending.revision);
     }
     assert.equal(failed?.status, "failed");
     assert.equal(failed?.attempt, 1);
@@ -736,29 +734,29 @@ test("retries one failed exact preparation through the full Inbox facade and wak
     }
 
     await assert.doesNotReject(() => inbox.retryPreparation({
-      proposalId: approved.id,
-      expectedRevision: approved.revision,
+      proposalId: pending.id,
+      expectedRevision: pending.revision,
       expectedVersion: failedVersion,
     }));
 
-    let retried = observer.getPreparationJobForProposal(approved.id, approved.revision);
+    let retried = observer.getPreparationJobForProposal(pending.id, pending.revision);
     for (let attempts = 0; retried !== undefined && !(retried.status === "failed" && retried.attempt === 2) && attempts < 50; attempts += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
-      retried = observer.getPreparationJobForProposal(approved.id, approved.revision);
+      retried = observer.getPreparationJobForProposal(pending.id, pending.revision);
     }
-    assert.equal(retried?.proposalId, approved.id);
-    assert.equal(retried?.proposalRevision, approved.revision);
+    assert.equal(retried?.proposalId, pending.id);
+    assert.equal(retried?.proposalRevision, pending.revision);
     assert.equal(retried?.status, "failed");
     assert.equal(retried?.attempt, 2);
     assert.equal(retried?.error?.code, "unavailable");
     assert.ok(retried!.version > failedVersion);
 
     await assert.rejects(() => inbox.retryPreparation({
-      proposalId: approved.id,
-      expectedRevision: approved.revision,
+      proposalId: pending.id,
+      expectedRevision: pending.revision,
       expectedVersion: failedVersion,
     }), /conflict|version|transition/i);
-    assert.deepEqual(observer.getPreparationJobForProposal(approved.id, approved.revision), retried);
+    assert.deepEqual(observer.getPreparationJobForProposal(pending.id, pending.revision), retried);
   } finally {
     observer.close();
     await runtime.stop();

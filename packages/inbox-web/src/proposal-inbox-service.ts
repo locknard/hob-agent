@@ -29,6 +29,9 @@ import type {
   ProductRuntimeConfirmation,
   ProductShellConnection,
   ProductSpace,
+  ProductEnergySummary,
+  ProductConcern,
+  ProductAutomation,
   ProductControlSpace,
   ProductControlFeedback,
   ProductActivityRecord,
@@ -296,7 +299,7 @@ export type ProposalInboxSnoozeTarget = "tomorrow" | "weekend" | "next_week";
 
 /** Proposal-owner commands used by the review surface. */
 export interface ProposalInboxProposalGovernancePort {
-  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget }): void | Promise<void>;
+  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number }): void | Promise<void>;
   decideProposal?(input: {
     readonly proposalId: string;
     readonly expectedRevision: number;
@@ -309,6 +312,12 @@ export interface ProposalInboxProposalGovernancePort {
     readonly expectedRevision: number;
     readonly reviewer: string;
   }): void | Promise<void>;
+  pauseAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  resumeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  closeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  retryEnable?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  listAutomations?(): readonly unknown[];
+  reconcileAutomations?(): Promise<void>;
 }
 
 export interface InboxProductReviewProjection {
@@ -323,6 +332,9 @@ export interface InboxProductReviewProjection {
 export interface InboxProductShellProjection {
   readonly connection: ProductShellConnection;
   readonly spaces: readonly ProductSpace[];
+  readonly energy?: ProductEnergySummary;
+  readonly concern?: ProductConcern;
+  readonly automations?: readonly ProductAutomation[];
   readonly controlSpaces: readonly ProductControlSpace[];
   readonly activity: readonly ProductActivityRecord[];
   readonly safetyAlerts?: readonly ProductSafetyAlert[];
@@ -334,6 +346,8 @@ export interface ProposalInboxServiceOptions {
   readonly preparation?: ProposalInboxPreparationPort;
   readonly proposalGovernance?: ProposalInboxProposalGovernancePort;
   readonly now?: () => Date;
+  /** Household timezone for day-window aggregation; defaults to the host timezone. */
+  readonly timezone?: string;
 }
 
 /** Local review composition over hub proposal state and metadata-safe DSH traces. */
@@ -348,6 +362,7 @@ export class ProposalInboxService extends Service {
   private readonly correction?: ProposalInboxCorrectionPort;
   private readonly proposalGovernance?: ProposalInboxProposalGovernancePort;
   private readonly now: () => Date;
+  private readonly timezone: string | undefined;
   private controlRequestSequence = 0;
   private batchRequestSequence = 0;
   private readonly batchResults = new Map<string, ProposalInboxBatchActionResult>();
@@ -400,6 +415,7 @@ export class ProposalInboxService extends Service {
       ?? optionalGovernancePort(ctx.get("proposalGovernance") ?? ctx.get("proposal_governance"))
       ?? optionalGovernancePort(proposals);
     this.now = options.now ?? (() => new Date());
+    this.timezone = options.timezone;
     this.preparation = options.preparation ?? preparationPortFrom(proposals);
     this.preparationSource = hasPreparationReadSource(proposals) ? proposals : undefined;
     this.controller = new ProposalInboxController({
@@ -453,6 +469,12 @@ export class ProposalInboxService extends Service {
     };
   }
 
+  /** Settings saved a new confirmation configuration: recheck blocked plans. */
+  recheckBlockedProposals(): { readonly rechecked: number; readonly cleared: number } {
+    const recheck = (this.proposals as { recheckBlockedEnablement?(): { rechecked: number; cleared: number } }).recheckBlockedEnablement;
+    return typeof recheck === "function" ? recheck.call(this.proposals) : { rechecked: 0, cleared: 0 };
+  }
+
   getProductReviewProjection(actor?: InboxReviewActor, selectedProposalId?: string): InboxProductReviewProjection {
     const runtimeConfirmations = this.runtime?.listRuntimeConfirmations() ?? [];
     const expiredSummary = this.runtime?.snapshot?.().expiredRuntimeSummary;
@@ -495,12 +517,85 @@ export class ProposalInboxService extends Service {
     );
     const projection = projectProductWorld(world, now, actionDescriptorFor);
     const batchControl = this.batchControlProjection(projection, batchRequestId);
+    const energy = projectEnergyToday(world, this.world, now, this.timezone);
+    const concern = this.projectConcern(now);
+    const automations = this.projectAutomations();
     return {
       ...projection,
+      ...(energy === undefined ? {} : { energy }),
+      ...(concern === undefined ? {} : { concern }),
+      ...(automations === undefined ? {} : { automations }),
       activity: projectRuntimeActivity(this.runtime?.activities?.() ?? [], now),
       ...(safetyAlerts === undefined ? {} : { safetyAlerts }),
       ...(completionNotification === undefined ? {} : { completionNotification }),
       ...(batchControl === undefined ? {} : { batchControl }),
+    };
+  }
+
+  /** Deployed automations from the governance owner; the bridge read-back converges in the background. */
+  private projectAutomations(): readonly ProductAutomation[] | undefined {
+    const governance = this.proposalGovernance;
+    if (governance?.listAutomations === undefined) return undefined;
+    void governance.reconcileAutomations?.().catch(() => undefined);
+    let records: readonly unknown[];
+    try {
+      records = governance.listAutomations();
+    } catch {
+      return undefined;
+    }
+    const automations: ProductAutomation[] = [];
+    for (const value of records.slice(0, 50)) {
+      const record = productRecord(value);
+      const id = productText(record?.id, 256);
+      const title = productText(record?.title, 512);
+      const lifecycle = productText(record?.lifecycle, 32);
+      if (id === undefined || title === undefined
+        || (lifecycle !== "enabling" && lifecycle !== "active" && lifecycle !== "paused"
+          && lifecycle !== "closed" && lifecycle !== "enable_failed")) continue;
+      const deployment = productRecord(record?.deployment);
+      const verifiedAt = productText(deployment?.verifiedAt, 64);
+      const reason = productText(deployment?.reason, 1_000);
+      const revision = typeof record?.revision === "number" ? record.revision : undefined;
+      automations.push({
+        id,
+        title,
+        lifecycle,
+        ...(revision === undefined ? {} : { version: revision }),
+        ...(lifecycle === "active" && verifiedAt !== undefined
+          ? { lastResult: `已部署并读回核对 · ${verifiedAt.slice(0, 10)}` }
+          : {}),
+        ...(lifecycle === "enable_failed" && reason !== undefined ? { failureReason: reason } : {}),
+        ...(productRecord(record?.deployment)?.drifted === true ? { drifted: true } : {}),
+      });
+    }
+    return automations;
+  }
+
+  /** Relays only a fresh, completed finding; the product never invents a concern. */
+  private projectConcern(now: Date): ProductConcern | undefined {
+    let records: readonly InboxHomeAdviceRecord[];
+    try {
+      records = this.advice?.list({ limit: 20 }) ?? [];
+    } catch {
+      return undefined;
+    }
+    const freshMs = 7 * 24 * 3_600_000;
+    const candidates = records
+      .filter((record): record is Extract<InboxHomeAdviceRecord, { status: "completed" }> => record.status === "completed")
+      .filter((record) => record.report.findings.length > 0)
+      .filter((record) => {
+        const completed = Date.parse(record.completedAt);
+        return Number.isFinite(completed) && now.getTime() - completed <= freshMs;
+      })
+      .sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt));
+    const latest = candidates[0];
+    if (latest === undefined) return undefined;
+    return {
+      adviceId: latest.id,
+      title: latest.question,
+      facts: latest.report.findings.slice(0, 4),
+      ...(latest.report.unknowns.length === 0 ? {} : { unknowns: latest.report.unknowns.slice(0, 3) }),
+      ...(latest.report.summary.length === 0 ? {} : { suggestion: latest.report.summary }),
     };
   }
 
@@ -680,7 +775,7 @@ export class ProposalInboxService extends Service {
     return typeof this.proposalGovernance?.snoozeProposal === "function";
   }
 
-  async snoozeProposal(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget }): Promise<void> {
+  async snoozeProposal(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number }): Promise<void> {
     const snooze = this.proposalGovernance?.snoozeProposal;
     if (snooze === undefined) throw new Error("proposal_snooze_unavailable");
     await snooze.call(this.proposalGovernance, input);
@@ -708,6 +803,27 @@ export class ProposalInboxService extends Service {
     const enable = this.proposalGovernance?.enableProposal;
     if (enable === undefined) throw new Error("proposal_enable_unavailable");
     await enable.call(this.proposalGovernance, input);
+  }
+
+  canControlAutomation(): boolean {
+    return typeof this.proposalGovernance?.pauseAutomation === "function"
+      && typeof this.proposalGovernance?.resumeAutomation === "function"
+      && typeof this.proposalGovernance?.closeAutomation === "function";
+  }
+
+  async controlAutomation(input: {
+    readonly proposalId: string;
+    readonly command: "pause" | "resume" | "close" | "retry";
+    readonly actor: string;
+  }): Promise<void> {
+    const governance = this.proposalGovernance;
+    const handler = input.command === "pause"
+      ? governance?.pauseAutomation
+      : input.command === "resume"
+        ? governance?.resumeAutomation
+        : input.command === "retry" ? governance?.retryEnable : governance?.closeAutomation;
+    if (handler === undefined) throw new Error("automation_control_unavailable");
+    await handler.call(governance, { proposalId: input.proposalId, actor: input.actor });
   }
 
   async latchProposal(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): Promise<void> {
@@ -879,7 +995,11 @@ export class ProposalInboxService extends Service {
   }
 
   private pendingProductProposals(): readonly InboxProposal[] {
-    return this.proposals.list({ status: "pending_review", limit: 200, visibleOnly: true });
+    // Preparing and needs-info cards stay visible: a card never vanishes into
+    // background preparation (DR-017 补充, 第九轮).
+    return this.proposals.list({ status: "pending_review", limit: 200, visibleOnly: true })
+      .filter((proposal) => proposal.lifecycle === undefined
+        || proposal.lifecycle === "ready" || proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info");
   }
 
   private async decideRuntime(
@@ -887,7 +1007,9 @@ export class ProposalInboxService extends Service {
     decision: "approve" | "reject",
   ): Promise<InboxRuntimeDecisionResult> {
     if (this.runtime === undefined) throw new Error("runtime_confirmation_unavailable");
-    if (!this.runtime.canApproveRuntimeConfirmation(input.confirmationId, input.actor)) {
+    // Approval needs the bound private phone; rejection executes nothing, so
+    // any present entry may say no and the hub records the source device.
+    if (decision === "approve" && !this.runtime.canApproveRuntimeConfirmation(input.confirmationId, input.actor)) {
       return { status: "denied", reason: "unauthorized" };
     }
     return await (decision === "approve"
@@ -1091,7 +1213,7 @@ function projectRuntimeConfirmation(
     id: confirmation.id,
     title: confirmation.actionSummary,
     effect: confirmation.actionSummary,
-    eligibleActor: confirmation.approvalLevel === "admin" ? "绑定管理员私人设备" : "在场的成年成员",
+    eligibleActor: confirmation.approvalLevel === "admin" ? "在本人手机上确认" : "任一在场的家人",
     expiresAt: confirmation.expiresAt,
     expiresLabel: formatRuntimeExpiryLabel(confirmation.expiresAt, now),
     expiresIn: formatRuntimeRemaining(confirmation.expiresAt, now),
@@ -1155,11 +1277,29 @@ function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDe
     status: proposal.status === "pending_review"
       ? "pending"
       : proposal.status === "expired" ? "expired" : proposal.status,
-    stage: proposal.rolloutState === "trial_active"
-      ? "trial"
-      : proposal.rolloutState === "enable_pending"
-        ? "enable"
-        : proposal.rolloutState === "enabled" ? "complete" : "direction",
+    ...(proposal.kind === "automation-draft" || proposal.kind === "household-insight"
+      ? { kind: proposal.kind }
+      : {}),
+    ...(Array.isArray(proposal.actionPolicyClasses) && proposal.actionPolicyClasses.includes("confirmation")
+      ? {
+          gateClasses: ["confirmation" as const],
+          ...(Array.isArray(proposal.confirmationDeviceNames) && proposal.confirmationDeviceNames.length > 0
+            ? { confirmationDeviceNames: proposal.confirmationDeviceNames.slice(0, 8) }
+            : {}),
+        }
+      : {}),
+    ...(proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info" || proposal.lifecycle === "ready"
+      ? { lifecycle: proposal.lifecycle }
+      : {}),
+    ...(typeof proposal.enableBlockedReason === "string" && proposal.enableBlockedReason.length > 0
+      ? {
+          enableBlockedReason: proposal.enableBlockedReason.slice(0, 1_000),
+          ...(proposal.enableBlockedKind === "not_configured" || proposal.enableBlockedKind === "not_approved"
+            || proposal.enableBlockedKind === "unknown_capability" || proposal.enableBlockedKind === "protected"
+            ? { enableBlockedKind: proposal.enableBlockedKind }
+            : {}),
+        }
+      : {}),
     snoozeCount: proposal.snoozeCount ?? 0,
     newEvidence: proposal.newEvidence ?? false,
     ...(trace === undefined ? {} : { trace }),
@@ -1192,11 +1332,15 @@ function projectProductWorld(
         .map(productDeviceLabel)
         .filter((label): label is string => label !== undefined)
         .slice(0, 12);
+      const metrics = spaceClimateMetrics(spaceDevices);
+      const presence = spacePresenceState(spaceDevices);
       return [{
         id,
         name,
         deviceCount: spaceDevices.length,
         ...(labels.length === 0 ? {} : { devices: labels }),
+        ...(metrics.length === 0 ? {} : { metrics }),
+        ...(presence === undefined ? {} : { state: presence }),
       }];
     });
   return {
@@ -1477,6 +1621,161 @@ function projectProductConnection(world: Record<string, unknown>, now: Date): Pr
     state,
     ...(latestContact === undefined ? {} : { lastContact: productRelativeTime(latestContact, now) }),
   };
+}
+
+
+/** The latest raw state value for one capability, matched through its bindings. */
+function capabilityLatestValue(device: Record<string, unknown>, capability: Record<string, unknown>): string | undefined {
+  const bindings = Array.isArray(capability.bindings) ? capability.bindings : [];
+  const keys = new Set(bindings.flatMap((bindingValue) => {
+    const binding = productRecord(bindingValue);
+    const instance = productText(binding?.nativeInstanceId, 256);
+    return instance === undefined ? [] : [instance];
+  }));
+  const states = Array.isArray(device.states) ? device.states : [];
+  for (let index = states.length - 1; index >= 0; index -= 1) {
+    const state = productRecord(states[index]);
+    const instance = productText(state?.nativeInstanceId, 256);
+    if (instance === undefined || !keys.has(instance)) continue;
+    const value = productRecord(state?.attrs)?.state;
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    return undefined;
+  }
+  return undefined;
+}
+
+function semanticCapabilityValues(devices: readonly Record<string, unknown>[], kinds: readonly string[]): string[] {
+  const values: string[] = [];
+  for (const device of devices) {
+    if (!Array.isArray(device.capabilities)) continue;
+    for (const capabilityValue of device.capabilities) {
+      const capability = productRecord(capabilityValue);
+      const kind = productText(capability?.semanticKind, 64);
+      if (capability === undefined || kind === undefined || !kinds.includes(kind)) continue;
+      const value = capabilityLatestValue(device, capability);
+      if (value !== undefined) values.push(value);
+    }
+  }
+  return values;
+}
+
+/** Real sensor values only; a space without a sensor shows no number. */
+function spaceClimateMetrics(devices: readonly Record<string, unknown>[]): { readonly label: string; readonly value: string }[] {
+  const metrics: { readonly label: string; readonly value: string }[] = [];
+  const temperature = semanticCapabilityValues(devices, ["temperature"])
+    .map((value) => Number.parseFloat(value))
+    .find((value) => Number.isFinite(value));
+  if (temperature !== undefined) metrics.push({ label: "温度", value: `${Math.round(temperature * 10) / 10}°` });
+  const humidity = semanticCapabilityValues(devices, ["humidity"])
+    .map((value) => Number.parseFloat(value))
+    .find((value) => Number.isFinite(value));
+  if (humidity !== undefined) metrics.push({ label: "湿度", value: `${Math.round(humidity)}%` });
+  return metrics;
+}
+
+const PRESENCE_TRUE_STATES = new Set(["on", "home", "true", "detected", "occupied"]);
+
+function spacePresenceState(devices: readonly Record<string, unknown>[]): string | undefined {
+  const values = semanticCapabilityValues(devices, ["presence", "motion"]);
+  if (values.length === 0) return undefined;
+  return values.some((value) => PRESENCE_TRUE_STATES.has(value.toLowerCase())) ? "有人在" : "无人";
+}
+
+interface EnergyEvidencePort {
+  queryRecentEvidence?(query: {
+    readonly hwCapabilityIds: readonly string[];
+    readonly lookbackHours: number;
+    readonly limit?: number;
+  }): unknown;
+}
+
+/**
+ * Today's consumption from monotone energy counters, in the household's day
+ * window. Partial coverage or a non-monotone series yields no summary; sparse
+ * history never fabricates a day-over-day comparison.
+ */
+function projectEnergyToday(
+  worldSnapshot: unknown,
+  worldPort: unknown,
+  now: Date,
+  timezone: string | undefined,
+): ProductEnergySummary | undefined {
+  const port = worldPort as EnergyEvidencePort | undefined;
+  if (port?.queryRecentEvidence === undefined) return undefined;
+  const world = productRecord(worldSnapshot);
+  if (world === undefined || !Array.isArray(world.devices)) return undefined;
+  const capabilityIds: string[] = [];
+  for (const deviceValue of world.devices) {
+    const device = productRecord(deviceValue);
+    if (device === undefined || !Array.isArray(device.capabilities)) continue;
+    for (const capabilityValue of device.capabilities) {
+      const capability = productRecord(capabilityValue);
+      if (productText(capability?.semanticKind, 64) !== "energy") continue;
+      const id = productText(capability?.hwCapabilityId, 256);
+      if (id !== undefined) capabilityIds.push(id);
+    }
+  }
+  if (capabilityIds.length === 0 || capabilityIds.length > 32) return undefined;
+  const midnightMs = householdMidnightMs(now, timezone);
+  if (midnightMs === undefined) return undefined;
+  const lookbackHours = Math.ceil((now.getTime() - midnightMs) / 3_600_000) + 1;
+  let result: unknown;
+  try {
+    result = port.queryRecentEvidence({ hwCapabilityIds: capabilityIds, lookbackHours, limit: 500 });
+  } catch {
+    return undefined;
+  }
+  const record = productRecord(result);
+  if (record === undefined || !Array.isArray(record.events) || !Array.isArray(record.coverage)) return undefined;
+  const complete = record.coverage.every((entry) => productRecord(entry)?.status === "complete");
+  if (!complete) return undefined;
+  const series = new Map<string, { at: number; value: number }[]>();
+  for (const eventValue of record.events) {
+    const event = productRecord(eventValue);
+    const id = productText(event?.hwCapabilityId, 256);
+    const at = Date.parse(productText(event?.observedAt, 64) ?? "");
+    const value = typeof event?.value === "number" ? event.value : Number.NaN;
+    if (id === undefined || !Number.isFinite(at) || !Number.isFinite(value)) continue;
+    const list = series.get(id) ?? [];
+    list.push({ at, value });
+    series.set(id, list);
+  }
+  let total = 0;
+  let counted = 0;
+  for (const list of series.values()) {
+    list.sort((left, right) => left.at - right.at);
+    if (list.some((entry, index) => index > 0 && entry.value < list[index - 1]!.value)) continue;
+    const today = list.filter((entry) => entry.at >= midnightMs);
+    if (today.length === 0) continue;
+    const baseline = [...list].reverse().find((entry) => entry.at < midnightMs) ?? today[0]!;
+    const delta = today.at(-1)!.value - baseline.value;
+    if (delta <= 0) continue;
+    total += delta;
+    counted += 1;
+  }
+  if (counted === 0 || total < 0.05) return undefined;
+  return { value: `${Math.round(total * 10) / 10} 度` };
+}
+
+function householdMidnightMs(now: Date, timezone: string | undefined): number | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      ...(timezone === undefined ? {} : { timeZone: timezone }),
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const read = (type: string) => Number.parseInt(parts.find((part) => part.type === type)?.value ?? "", 10);
+    const hours = read("hour") % 24;
+    const minutes = read("minute");
+    const seconds = read("second");
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) return undefined;
+    return now.getTime() - ((hours * 3_600 + minutes * 60 + seconds) * 1_000) - now.getMilliseconds();
+  } catch {
+    return undefined;
+  }
 }
 
 function productDeviceSpaceIds(device: Record<string, unknown>): ReadonlySet<string> {

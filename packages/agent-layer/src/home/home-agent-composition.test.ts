@@ -194,6 +194,7 @@ test("contributes tenant SKILL.md through the official registry without adding t
     assert.doesNotMatch(reviewed.content.map((item) => "text" in item ? item.text : "").join(" "), /tenant override/i);
     assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name).sort(), [
       "create_home_proposal",
+      "list_home_proposals",
       "get_home_activity",
       "get_home_calibration",
       "get_home_evidence",

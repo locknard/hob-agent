@@ -24,6 +24,7 @@ const ROUTES: readonly ProductShellRoute[] = [
   "overview",
   "conversation",
   "reviews",
+  "automations",
   "activity",
   "control",
   "settings",

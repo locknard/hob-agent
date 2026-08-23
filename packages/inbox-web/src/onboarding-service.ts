@@ -33,6 +33,9 @@ export interface OnboardingCapabilityChoice {
   readonly bridgeLabel: string;
   readonly schema?: string;
   readonly suggestedPolicyClass: OnboardingPolicySuggestion;
+  /** The saved confirmation method, present only when actually configured. */
+  readonly currentPolicyClass?: OnboardingPolicySuggestion;
+  readonly configurationState?: "unconfigured" | "active" | "revoked" | "invalid";
 }
 
 export interface OnboardingChoiceProjection {
@@ -81,6 +84,17 @@ export interface OnboardingContinuation {
 export interface OnboardingPort {
   getState(): OnboardingViewState | Promise<OnboardingViewState>;
   submit(command: OnboardingCommand, actor?: OnboardingActor): OnboardingContinuation | Promise<OnboardingContinuation>;
+  /** Step-5 capability choices, reused by the settings confirmation editor. */
+  actionPolicyChoices?(): OnboardingViewState["choices"];
+  /** Re-decides confirmation methods after onboarding, same rules as step 5. */
+  configureActionPolicy?(
+    selection: {
+      readonly directCapabilityIds: readonly string[];
+      readonly confirmationCapabilityIds: readonly string[];
+      readonly administratorCapabilityIds: readonly string[];
+    },
+    actor?: OnboardingActor,
+  ): { readonly status: "configured"; readonly changedCount: number } | { readonly status: "blocked"; readonly reason: string };
   close?(): void;
 }
 

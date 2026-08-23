@@ -150,9 +150,15 @@ test("uses one action ticket as the runtime confirmation card", async () => {
 
     const decision = service.rejectRuntimeConfirmation({
       confirmationId: requested.ticket.id,
-      actor,
+      actor: { ...actor, device: { kind: "shared" } },
     });
     assert.equal(decision.status, "rejected");
+    const record = decision.status === "rejected" ? decision.confirmation.decision : undefined;
+    assert.equal(record?.kind, "rejected");
+    assert.equal(record?.at, NOW, "an early rejection reports the rejection moment, never the expiry");
+    assert.notEqual(record?.at, decision.status === "rejected" ? decision.confirmation.expiresAt : undefined);
+    assert.equal(record?.actorId, actor.principalId, "the record names who said no");
+    assert.equal(record?.via, "shared", "the record names the source device");
     assert.deepEqual(service.counts(), { runtimeConfirmations: 0 });
     assert.equal(service.actionActivities().some((item) => item.kind === "confirmation_rejected"), true);
     const activity = service.activities();

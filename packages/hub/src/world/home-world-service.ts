@@ -15,6 +15,8 @@ import {
   bridgeActionCurrentStateSchema,
   bridgeActionResultSchema,
   type ActionsExtension,
+  type AutomationsExtension,
+  type BridgeActionTarget,
   type BridgeActionCurrentState,
   type BridgeActionDescriptor,
   type BridgeActionResult,
@@ -73,6 +75,7 @@ import {
   type AuthorityAvailability,
   type AuthorityResyncPort,
   type StateAuthorityResolution,
+  type ActionAuthorityConfigurationResolution,
 } from "../authority/authority-coordinator.js";
 import {
   actionAuthorityConfigurationPath,
@@ -183,7 +186,15 @@ export interface HomeWorldActionAuthorityPolicyInput {
 
 export type HomeWorldActionAuthorityPolicyResult =
   | { readonly status: "configured"; readonly configurationRevision: number }
-  | { readonly status: "blocked"; readonly reason: "configuration_source_unavailable" | "unknown_capability" | "ambiguous_bridge" | "write_failed" };
+  | { readonly status: "blocked"; readonly reason: HomeWorldActionAuthorityBlockReason };
+
+export type HomeWorldActionAuthorityBlockReason =
+  "configuration_source_unavailable" | "unknown_capability" | "ambiguous_bridge" | "write_failed";
+
+/** Delta result: success always states the count; failure keeps the closed reason set. */
+export type HomeWorldActionAuthorityDeltaResult =
+  | { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount: number }
+  | { readonly status: "blocked"; readonly reason: HomeWorldActionAuthorityBlockReason };
 
 export interface HomeWorldForeignRuleCatalog {
   readonly bridgeId: string;
@@ -923,6 +934,102 @@ export class HomeWorldService extends Service {
    * stale world row, unavailable bridge, or invalid adapter descriptor yields
    * a read-only result.
    */
+  /**
+   * The deployment target is decided by the plan's own capability bindings,
+   * never by bridge registration order. Every referenced capability must bind
+   * to exactly one bridge, all to the same one, and that bridge must be ready
+   * with a live automations extension. Cross-bridge plans yield no deployment
+   * path — the neutral seam stays open for any execution domain, including a
+   * future hub-native automation engine, but Phase 0 never splits one plan.
+   */
+  automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
+    readonly bridgeId: string;
+    readonly automations: AutomationsExtension;
+    resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
+  } | undefined {
+    const deviceCapabilityIds = hwCapabilityIds.filter((id) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id));
+    if (deviceCapabilityIds.length === 0 || deviceCapabilityIds.length !== hwCapabilityIds.length) return undefined;
+    let targetBridgeId: string | undefined;
+    for (const hwCapabilityId of deviceCapabilityIds) {
+      const bindings = this.authority.capability(hwCapabilityId)?.bindings ?? [];
+      const bridgeIds = new Set(bindings.map((binding) => binding.bridgeId));
+      if (bridgeIds.size !== 1) return undefined;
+      const [bridgeId] = bridgeIds;
+      if (targetBridgeId === undefined) targetBridgeId = bridgeId;
+      else if (targetBridgeId !== bridgeId) return undefined;
+    }
+    if (targetBridgeId === undefined) return undefined;
+    const handle = this.liveAutomationsHandle(targetBridgeId);
+    if (handle === undefined) return undefined;
+    const bridgeId = targetBridgeId;
+    return { bridgeId, automations: handle, resolveTarget: this.automationTargetResolver(bridgeId) };
+  }
+
+  /** Control and reconciliation address the bridge a deployment was recorded on. */
+  automationsHandleFor(bridgeId: string): AutomationsExtension | undefined {
+    return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
+  }
+
+  /**
+   * The household-facing name behind a capability, for gate disclosure:
+   * the device name first, then the stable semantic label. A capability
+   * without either cannot be disclosed and cannot enter an automation.
+   */
+  capabilityDeviceName(hwCapabilityId: string): string | undefined {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
+    const hwId = this.authority.capability(hwCapabilityId)?.hwId;
+    if (hwId === undefined) return undefined;
+    const device = this.snapshot().devices.find((candidate) => candidate.hwId === hwId);
+    if (device === undefined) return undefined;
+    if (device.name !== undefined) return device.name;
+    const capability = device.capabilities.find((candidate) => candidate.hwCapabilityId === hwCapabilityId);
+    return householdCapabilityLabel(capability?.semanticKind);
+  }
+
+  /** Deploy against a recorded intent: the same bridge, the same resolution rules. */
+  automationBridgeById(bridgeId: string): {
+    readonly bridgeId: string;
+    readonly automations: AutomationsExtension;
+    resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
+  } | undefined {
+    if (typeof bridgeId !== "string" || bridgeId.length === 0) return undefined;
+    const handle = this.liveAutomationsHandle(bridgeId);
+    if (handle === undefined) return undefined;
+    return { bridgeId, automations: handle, resolveTarget: this.automationTargetResolver(bridgeId) };
+  }
+
+  private automationTargetResolver(bridgeId: string): (hwCapabilityId: string) => BridgeActionTarget | undefined {
+    return (hwCapabilityId: string): BridgeActionTarget | undefined => {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
+      const bindings = this.authority.capability(hwCapabilityId)?.bindings.filter((binding) => binding.bridgeId === bridgeId) ?? [];
+      if (bindings.length !== 1) return undefined;
+      const [binding] = bindings;
+      if (binding === undefined) return undefined;
+      return {
+        hwCapabilityId,
+        binding: {
+          bridgeId: binding.bridgeId,
+          nativeId: binding.nativeId,
+          nativeInstanceId: binding.nativeInstanceId,
+        },
+      };
+    };
+  }
+
+  private liveAutomationsHandle(bridgeId: string): AutomationsExtension | undefined {
+    const runtime = this.runtimesById.get(bridgeId);
+    if (runtime === undefined
+      || runtime.extensionAvailability["automations@1"] !== "available"
+      || runtime.ingest.diagnostics().connectionState !== "ready") return undefined;
+    let handle: AutomationsExtension | undefined;
+    try {
+      handle = runtime.adapter.extension("automations@1") as AutomationsExtension | undefined;
+    } catch {
+      return undefined;
+    }
+    return handle !== undefined && typeof handle.deploy === "function" ? handle : undefined;
+  }
+
   actionDescriptorFor(hwCapabilityId: string): BridgeActionDescriptor | undefined {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
     this.refreshIdentity();
@@ -1023,6 +1130,74 @@ export class HomeWorldService extends Service {
     } catch {
       return { status: "blocked", reason: "write_failed" };
     }
+  }
+
+  /**
+   * Delta write over the persisted configuration: the submitted rows change,
+   * every other persisted entry — bridge down, authorization revoked, device
+   * momentarily out of the snapshot — survives byte-for-byte semantics and
+   * the whole set writes back atomically. A selected row re-approves
+   * deliberately; nothing else touches the approved flag.
+   */
+  configureActionAuthorityDelta(
+    changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
+  ): HomeWorldActionAuthorityDeltaResult {
+    if (this.actionAuthorityConfigPathValue === undefined) {
+      return { status: "blocked", reason: "configuration_source_unavailable" };
+    }
+    this.refreshIdentity();
+    const merged = new Map<string, ActionAuthorityBindingWriteInput>();
+    for (const existing of this.authority.actionAuthorityConfigurationEntries()) {
+      merged.set(existing.hwCapabilityId, {
+        hwCapabilityId: existing.hwCapabilityId,
+        bridgeId: existing.bridgeId,
+        approved: existing.approved,
+        policyClass: existing.policyClass,
+        revision: existing.revision,
+      });
+    }
+    const seen = new Set<string>();
+    let changedCount = 0;
+    for (const change of changes) {
+      if (seen.has(change.hwCapabilityId)) return { status: "blocked", reason: "unknown_capability" };
+      seen.add(change.hwCapabilityId);
+      const existing = merged.get(change.hwCapabilityId);
+      // A row already enabled with the same class is a re-statement, not a
+      // change: the original entry survives byte-for-byte — bridge, revision
+      // and identity untouched — so a form echoing what it displayed can
+      // never rebind, re-approve, or invalidate anything.
+      if (existing !== undefined && existing.approved && existing.policyClass === change.policyClass) continue;
+      const capability = this.authority.capability(change.hwCapabilityId);
+      if (capability === undefined) return { status: "blocked", reason: "unknown_capability" };
+      const bridgeIds = [...new Set(capability.bindings.map((binding) => binding.bridgeId))];
+      if (bridgeIds.length !== 1 || bridgeIds[0] === undefined) return { status: "blocked", reason: "ambiguous_bridge" };
+      merged.set(change.hwCapabilityId, {
+        hwCapabilityId: change.hwCapabilityId,
+        bridgeId: bridgeIds[0],
+        approved: true,
+        policyClass: change.policyClass,
+        revision: (existing?.revision ?? 0) + 1,
+      });
+      changedCount += 1;
+    }
+    if (changedCount === 0) {
+      // Nothing changed: no write, no revision bump, no invalidation.
+      const revisions = this.authority.actionAuthorityConfigurationEntries().map((entry) => entry.revision);
+      return { status: "configured", configurationRevision: revisions.length === 0 ? 0 : Math.max(...revisions), changedCount: 0 };
+    }
+    try {
+      const projection = writeActionAuthorityConfiguration(this.actionAuthorityConfigPathValue, [...merged.values()]);
+      this.authority.replaceActionAuthorityConfig(projection);
+      const revisions = Object.values(projection).map((entry) => entry.configRevision);
+      return { status: "configured", configurationRevision: revisions.length === 0 ? 0 : Math.max(...revisions), changedCount };
+    } catch {
+      return { status: "blocked", reason: "write_failed" };
+    }
+  }
+
+  /** Persisted configuration state for one capability — settings truth. */
+  actionAuthorityConfigurationOf(hwCapabilityId: string): ActionAuthorityConfigurationResolution {
+    return this.authority.resolveActionAuthorityConfiguration(hwCapabilityId);
   }
 
   async executeOneShotAction(input: HomeWorldOneShotActionInput): Promise<BridgeActionResult> {
@@ -1906,4 +2081,32 @@ function normalizeClock(value: string | number | Date): string {
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** Household-readable fallback labels for capabilities on unnamed devices. */
+const HOUSEHOLD_CAPABILITY_LABELS: Readonly<Record<string, string>> = {
+  light: "灯",
+  switch: "开关",
+  button: "按钮",
+  sensor: "传感器",
+  "binary-sensor": "传感器",
+  "numeric-control": "调节器",
+  "choice-control": "选择器",
+  "text-control": "文本控制",
+  "time-control": "定时控制",
+  event: "事件源",
+  media: "媒体设备",
+  cover: "窗帘",
+  lock: "门锁",
+  presence: "在家感应",
+  fan: "风扇",
+  camera: "摄像头",
+  vacuum: "扫地机",
+  climate: "空调",
+  weather: "天气",
+  automation: "自动化",
+};
+
+export function householdCapabilityLabel(semanticKind: string | undefined): string | undefined {
+  return semanticKind === undefined ? undefined : HOUSEHOLD_CAPABILITY_LABELS[semanticKind];
 }

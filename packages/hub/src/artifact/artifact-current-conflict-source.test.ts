@@ -101,7 +101,7 @@ function proposal(value: ArtifactRevision): HubVerifiedProposalSource {
     proposalId: value.sourceProposal.proposalId,
     revision: value.sourceProposal.proposalRevision,
     kind: "automation-draft",
-    status: "approved",
+    status: "pending_review",
     applicationStatus: "not_available",
     title: value.title,
     summary: value.summary,

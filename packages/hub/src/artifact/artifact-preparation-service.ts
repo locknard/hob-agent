@@ -106,6 +106,7 @@ export class ArtifactPreparationService {
       if (!isReceiptBound(receipt)) {
         throw new ArtifactPreparationServiceError("compile", "malformed_result");
       }
+      assertPreparationGreen(receipt);
       return freezeDeep(receipt);
     }
     let mutation: ArtifactMutationReceipt;
@@ -130,7 +131,22 @@ export class ArtifactPreparationService {
     if (!sameArtifact(mutation, compilation) || compilation.dryRun.writesPerformed !== false) {
       throw new ArtifactPreparationServiceError("compile", "malformed_result");
     }
+    assertPreparationGreen({ mutation, compilation });
     return freezeDeep({ mutation, compilation });
+  }
+}
+
+/**
+ * Preparation succeeded means the plan is decidable: the compile attested
+ * `compiled` and the simulation attested `passed`. Anything else fails the
+ * job visibly instead of quietly promoting an unverified plan.
+ */
+function assertPreparationGreen(receipt: ArtifactPreparationReceipt): void {
+  if (receipt.compilation.compile.status !== "compiled") {
+    throw new ArtifactPreparationServiceError("compile", "failed");
+  }
+  if (receipt.compilation.dryRun.status !== "passed") {
+    throw new ArtifactPreparationServiceError("dry-run", "failed");
   }
 }
 

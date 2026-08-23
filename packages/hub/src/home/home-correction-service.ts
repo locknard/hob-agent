@@ -311,10 +311,9 @@ function assertActor(actor: HomeCorrectionActor): void {
   if (!actor || typeof actor !== "object"
     || !boundedId(actor.principalId)
     || actor.present !== true
-    || (actor.role !== "admin" && actor.role !== "adult_member")
     || actor.device?.kind !== "private"
     || actor.device.boundPrincipalId !== actor.principalId) {
-    throw new HomeCorrectionError("permission_denied", "纠正需要在场的成年成员和已绑定私人设备");
+    throw new HomeCorrectionError("permission_denied", "纠正需要在场，并使用绑定到本人的私人设备");
   }
 }
 

@@ -69,17 +69,10 @@ function approvedProposal(): {
     },
     artifactCandidate: { schemaVersion: "1", content: notifyContent() },
   });
-  const approved = proposals.review({
-    proposalId: pending.id,
-    expectedRevision: pending.revision,
-    decision: "approved",
-    reviewer: "household-fixture",
-    feedbackCode: "useful_as_is",
-  });
   return {
     proposals,
-    proposalId: approved.id,
-    proposalRevision: approved.revision,
+    proposalId: pending.id,
+    proposalRevision: pending.revision,
   };
 }
 

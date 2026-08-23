@@ -130,6 +130,10 @@ export interface OneShotActionTicket {
   readonly resultReason?: string;
   readonly approvedAt?: string;
   readonly approvedBy?: string;
+  /** The kind of device the deciding member used, for the audit trail. */
+  readonly decidedVia?: "private" | "shared";
+  readonly rejectedAt?: string;
+  readonly rejectedBy?: string;
   readonly undoExpiresAt?: string;
   readonly undoStatus?: OneShotActionUndoStatus;
   readonly undoOf?: string;
@@ -182,6 +186,8 @@ export interface OneShotActionActivity {
   readonly outcome?: OneShotActionTicketStatus;
   readonly reason?: string;
   readonly actorId?: string;
+  /** The kind of device the decision came from, when the activity is a decision. */
+  readonly via?: "private" | "shared";
   readonly relatedTicketId?: string;
 }
 
@@ -396,16 +402,10 @@ export class OneShotActionPlane {
         ticket: this.cloneTicket(ticket),
       };
     }
-    if (!isEligible(actor, ticket.policyClass)) {
+    if (!isEligible(actor)) {
       return { status: "denied", reason: "unauthorized", ticket: this.cloneTicket(ticket) };
     }
-    const approved = this.updateTicket(ticket.id, (current) => ({
-      ...current,
-      status: "approved",
-      approvedAt: this.timestamp(),
-      approvedBy: actor.principalId,
-    }));
-    this.appendActivity(ticket.id, "confirmation_approved", actor.principalId);
+    const approved = this.decideTicket(ticket.id, actor, "approved");
     return this.executeTicket(approved.id, input.signal ?? new AbortController().signal);
   }
 
@@ -415,7 +415,7 @@ export class OneShotActionPlane {
     const ticket = this.state.tickets.find((item) => item.id === normalizedTicketId);
     return ticket?.status === "pending_confirmation"
       && !this.isExpired(ticket)
-      && isEligible(normalizedActor, ticket.policyClass);
+      && isEligible(normalizedActor);
   }
 
   reject(input: {
@@ -437,15 +437,10 @@ export class OneShotActionPlane {
         ticket: this.cloneTicket(ticket),
       };
     }
-    if (!isEligible(actor, ticket.policyClass)) {
+    if (!canRejectFrom(actor)) {
       return { status: "denied", reason: "unauthorized", ticket: this.cloneTicket(ticket) };
     }
-    const rejected = this.updateTicket(ticket.id, (current) => ({
-      ...current,
-      status: "rejected",
-      resultReason: "rejected_by_actor",
-    }));
-    this.appendActivity(rejected.id, "confirmation_rejected", actor.principalId, "rejected_by_actor");
+    const rejected = this.decideTicket(ticket.id, actor, "rejected");
     return this.resultFor(rejected, "rejected_by_actor");
   }
 
@@ -721,6 +716,39 @@ export class OneShotActionPlane {
     this.state = draft;
   }
 
+  /**
+   * A decision and its activity are one fact: they commit in the same
+   * persistence write and share one timestamp, so a crash can never leave a
+   * decided ticket whose timeline is missing the decision.
+   */
+  private decideTicket(id: string, actor: OneShotActionActor, decision: "approved" | "rejected"): OneShotActionTicket {
+    const current = this.state.tickets.find((ticket) => ticket.id === id);
+    if (current === undefined) throw new Error("one-shot action ticket not found");
+    const at = this.timestamp();
+    const next: OneShotActionTicket = decision === "approved"
+      ? { ...this.cloneTicket(current), status: "approved", approvedAt: at, approvedBy: actor.principalId, decidedVia: actor.device.kind }
+      : { ...this.cloneTicket(current), status: "rejected", resultReason: "rejected_by_actor", rejectedAt: at, rejectedBy: actor.principalId, decidedVia: actor.device.kind };
+    const activity: OneShotActionActivity = {
+      id: this.nextId("action activity"),
+      kind: decision === "approved" ? "confirmation_approved" : "confirmation_rejected",
+      at,
+      ticketId: next.id,
+      requestId: next.requestId,
+      capabilityId: next.capabilityId,
+      outcome: next.status,
+      actorId: actor.principalId,
+      via: actor.device.kind,
+      ...(decision === "rejected" ? { reason: "rejected_by_actor" } : {}),
+    };
+    this.commit((draft) => {
+      const index = draft.tickets.findIndex((ticket) => ticket.id === id);
+      if (index < 0) throw new Error("one-shot action ticket not found");
+      draft.tickets[index] = next;
+      draft.activities.push(activity);
+    });
+    return this.cloneTicket(next);
+  }
+
   private updateTicket(id: string, update: (ticket: OneShotActionTicket) => OneShotActionTicket): OneShotActionTicket {
     const current = this.state.tickets.find((ticket) => ticket.id === id);
     if (current === undefined) throw new Error("one-shot action ticket not found");
@@ -739,6 +767,7 @@ export class OneShotActionPlane {
     actorId?: string,
     reason?: string,
     relatedTicketId?: string,
+    via?: "private" | "shared",
   ): OneShotActionActivity {
     const ticket = this.state.tickets.find((item) => item.id === ticketId);
     if (ticket === undefined) throw new Error("one-shot action ticket not found");
@@ -751,6 +780,7 @@ export class OneShotActionPlane {
       capabilityId: ticket.capabilityId,
       ...(ticket.status === "pending_confirmation" ? {} : { outcome: ticket.status }),
       ...(actorId === undefined ? {} : { actorId }),
+      ...(via === undefined ? {} : { via }),
       ...(reason === undefined ? {} : { reason }),
       ...(relatedTicketId === undefined ? {} : { relatedTicketId }),
     };
@@ -848,13 +878,26 @@ function validateActor(value: OneShotActionActor): OneShotActionActor {
   };
 }
 
-function isEligible(actor: OneShotActionActor, policyClass: "direct" | "confirmation" | "administrator"): boolean {
-  if (policyClass === "administrator") {
-    return (actor.role === "admin" || actor.role === "adult_member")
-      && actor.device.kind === "private"
-      && actor.device.boundPrincipalId === actor.principalId;
-  }
-  return actor.present && (actor.role === "admin" || actor.role === "adult_member");
+/**
+ * DR-017: the household is one trust domain. Every pending confirmation —
+ * confirmation class and the protected class (wire name `administrator`) —
+ * is approved by a present member on a private device bound to themselves.
+ * The policy class describes the action's consequence and disclosure; it
+ * never changes who may confirm.
+ */
+function isEligible(actor: OneShotActionActor): boolean {
+  return actor.present
+    && actor.device.kind === "private"
+    && actor.device.boundPrincipalId === actor.principalId;
+}
+
+/**
+ * Rejection executes nothing and fails closed by itself, so any present
+ * household entry — a shared wall panel included — may say no. The source
+ * device still enters the record.
+ */
+function canRejectFrom(actor: OneShotActionActor): boolean {
+  return actor.present;
 }
 
 function deriveInverse(action: OneShotAction, before: OneShotActionValue): OneShotAction | undefined {

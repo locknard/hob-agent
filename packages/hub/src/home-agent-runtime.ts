@@ -8,6 +8,7 @@ import {
   HomeWorldService,
   type HomeWorldServiceOptions,
 } from "./world/home-world-service.js";
+import { BridgeAutomationDeployment } from "./home/bridge-automation-deployment.js";
 import { HomeProposalService } from "./home/home-proposal-service.js";
 import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {
@@ -168,6 +169,7 @@ export class HomeAgentRuntime {
           const runner = this.preparationRunner;
           if (runner !== undefined) void runner.run(job.jobId, job.version).catch(() => undefined);
         },
+        deployment: new BridgeAutomationDeployment(this.context.homeWorld),
       });
       await this.context.plugin(HomeArtifactService, { registry: this.artifactRegistry });
       this.artifactPipeline = await createArtifactPipelineComposition({
@@ -182,6 +184,7 @@ export class HomeAgentRuntime {
         preparation: this.artifactPipeline,
       });
       await this.preparationRunner.start();
+      void this.context.homeProposals.reconcileAutomations().catch(() => undefined);
       await this.context.plugin(HomeRetentionService);
       if (this.options.mediaCatalog !== undefined) {
         await this.context.plugin(HomeMediaCatalogService, this.options.mediaCatalog);
@@ -224,6 +227,7 @@ export class HomeAgentRuntime {
           ...(this.options.homeOnboarding.actionAuthority === undefined ? {
             actionAuthority: {
               configure: (input) => this.context.homeWorld.configureActionAuthority(input),
+              configureDelta: (changes) => this.context.homeWorld.configureActionAuthorityDelta(changes),
             },
           } : {}),
           ...(this.options.homeOnboarding.observation === undefined ? {

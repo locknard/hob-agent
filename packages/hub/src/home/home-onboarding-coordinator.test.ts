@@ -21,6 +21,10 @@ import { InMemoryHomeOnboardingStore } from "./home-onboarding-store.js";
 class StubWorld extends Service {
   constructor(ctx: Context, private readonly source: OnboardingWorldPort) { super(ctx, "homeWorld"); }
   snapshot(): ReturnType<OnboardingWorldPort["snapshot"]> { return this.source.snapshot(); }
+  actionAuthorityConfigurationOf(hwCapabilityId: string) {
+    return this.source.actionAuthorityConfigurationOf?.(hwCapabilityId)
+      ?? { status: "not_configured" as const, approved: false };
+  }
 }
 
 const adultPrivate: OnboardingActor = {
@@ -82,6 +86,64 @@ async function coordinator(
   });
   return { context, fiber, service: context.homeOnboarding };
 }
+
+test("the settings confirmation editor re-decides methods under step-5 rules", async () => {
+  const configured: unknown[] = [];
+  const { context, fiber, service } = await coordinator(undefined, {
+    configure: () => ({ status: "configured", configurationRevision: 1 }),
+    configureDelta: (changes) => {
+      configured.push(changes);
+      return { status: "configured", configurationRevision: configured.length, changedCount: changes.length };
+    },
+  });
+  try {
+    const choices = service.actionPolicyChoices();
+    assert.equal(choices.status, "available", "settings reads the same live choices seam as step 5");
+
+    assert.throws(
+      () => service.configureActionPolicy(
+        { directCapabilityIds: ["cap-light"], confirmationCapabilityIds: [], administratorCapabilityIds: [] },
+        { ...adultPrivate, device: { kind: "shared" } },
+      ),
+      (error: unknown) => (error as { code?: string }).code === "permission_denied",
+      "a shared screen cannot re-decide confirmation methods",
+    );
+
+    const unknown = service.configureActionPolicy(
+      { directCapabilityIds: ["cap-not-real"], confirmationCapabilityIds: [], administratorCapabilityIds: [] },
+      adultPrivate,
+    );
+    assert.equal(unknown.status, "blocked", "capabilities must come from the current home map");
+    assert.equal(configured.length, 0);
+
+    const saved = service.configureActionPolicy(
+      { directCapabilityIds: [], confirmationCapabilityIds: ["cap-light"], administratorCapabilityIds: [] },
+      adultPrivate,
+    );
+    assert.equal(saved.status, "configured");
+    assert.deepEqual(configured, [[{ hwCapabilityId: "cap-light", policyClass: "confirmation" }]],
+      "the coordinator hands the owner exactly the chosen rows");
+  } finally {
+    await fiber.dispose();
+    await context.fiber.dispose();
+  }
+});
+
+test("a settings save without the owner delta seam blocks instead of overwriting", async () => {
+  const { context, fiber, service } = await coordinator(undefined, {
+    configure: () => ({ status: "configured", configurationRevision: 1 }),
+  });
+  try {
+    const saved = service.configureActionPolicy(
+      { directCapabilityIds: ["cap-light"], confirmationCapabilityIds: [], administratorCapabilityIds: [] },
+      adultPrivate,
+    );
+    assert.equal(saved.status, "blocked", "no delta seam means no save — never a full overwrite");
+  } finally {
+    await fiber.dispose();
+    await context.fiber.dispose();
+  }
+});
 
 test("executes the eight typed onboarding commands and persists each real result", async () => {
   const { context, fiber, service } = await coordinator();

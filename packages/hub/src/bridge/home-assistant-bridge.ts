@@ -20,6 +20,17 @@ import {
   type StateEvent as ContractStateEvent,
 } from "@hob/bridge-contract";
 import {
+  AUTOMATIONS_EXTENSION,
+  bridgeAutomationSpecSchema,
+  type AutomationsExtension,
+  type BridgeAutomationAction,
+  type BridgeAutomationCondition,
+  type BridgeAutomationDeployResult,
+  type BridgeAutomationStatusResult,
+  type BridgeAutomationSpec,
+  type BridgeAutomationCommandResult,
+} from "@hob/bridge-contract";
+import {
   ACTIONS_EXTENSION,
   bridgeActionDescriptorRequestSchema,
   bridgeActionDescriptorSchema,
@@ -455,6 +466,8 @@ export interface HomeAssistantBridgeAdapterDependencies {
   readonly heartbeatIntervalMs?: number;
   readonly maxBufferedEvents?: number;
   readonly maxBootstrapItems?: number;
+  /** Testable seam for the Home Assistant config REST API. */
+  readonly fetchImpl?: typeof fetch;
 }
 
 const homeAssistantConfigSchema = z
@@ -644,7 +657,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       coreVersion: HOME_ASSISTANT_CORE_VERSION,
       ecosystem: "home-assistant",
       heartbeatIntervalMs: HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS,
-      extensions: Object.freeze([FOREIGN_RULES_EXTENSION, ORG_HINTS_EXTENSION, ACTIONS_EXTENSION]),
+      extensions: Object.freeze([FOREIGN_RULES_EXTENSION, ORG_HINTS_EXTENSION, ACTIONS_EXTENSION, AUTOMATIONS_EXTENSION]),
     });
     this.control = Object.freeze({
       requestResync: (signal: AbortSignal) => this.requestResync(signal),
@@ -679,7 +692,274 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       };
       return handle as ExtensionHandleRegistry[K];
     }
+    if (name === "automations@1") {
+      const handle: AutomationsExtension = {
+        status: (request, options) => this.automationStatus(request, options.signal),
+        deploy: (spec, options) => this.deployAutomation(spec, options.signal),
+        setEnabled: (request, options) => this.setAutomationEnabled(request, options.signal),
+        withdraw: (request, options) => this.withdrawAutomation(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
     return undefined;
+  }
+
+  /**
+   * Deploys a Hub-compiled automation through the Home Assistant config API and
+   * reports success only after reading the stored configuration back. The alias
+   * equals the Hub automation id, so the automation entity id stays
+   * deterministic and the adapter never touches a rule it did not create.
+   */
+  private async deployAutomation(specValue: BridgeAutomationSpec, signal: AbortSignal): Promise<BridgeAutomationDeployResult> {
+    const parsed = bridgeAutomationSpecSchema.safeParse(specValue);
+    if (!parsed.success) return { status: "rejected", reason: "invalid_target", detail: "Automation spec is invalid" };
+    if (this.lifecycle !== "running") return { status: "rejected", reason: "unavailable", detail: "Home Assistant bridge is not running" };
+    const spec = parsed.data;
+    const config = this.compileAutomationConfig(spec);
+    if ("reason" in config) return { status: "rejected", reason: config.reason, detail: config.detail };
+    try {
+      if (spec.trigger.kind === "schedule") {
+        const instanceTimezone = await this.instanceTimezone(signal);
+        if (instanceTimezone === undefined) {
+          return { status: "rejected", reason: "unavailable", detail: "Home Assistant timezone is unavailable" };
+        }
+        // A time trigger runs in the instance timezone; deploying a schedule
+        // into a different clock would silently shift the household's plan.
+        if (instanceTimezone !== spec.trigger.timezone) {
+          return { status: "rejected", reason: "unsupported", detail: `Home Assistant runs in ${instanceTimezone}, not ${spec.trigger.timezone}` };
+        }
+      }
+      const written = await this.automationConfigRequest("POST", spec.automationId, signal, config.value);
+      if (!written.ok) {
+        return { status: "rejected", reason: "failed", detail: `Home Assistant rejected the automation (${written.statusCode})` };
+      }
+      const readBack = await this.automationConfigRequest("GET", spec.automationId, signal);
+      // Verified means the stored behavior equals the compiled behavior, not
+      // merely that an automation with our alias exists.
+      if (!readBack.ok || !isRecord(readBack.body) || !storedAutomationMatches(config.value, readBack.body)) {
+        return { status: "rejected", reason: "failed", detail: "Home Assistant did not store the compiled automation" };
+      }
+      return {
+        status: "deployed",
+        nativeAutomationId: spec.automationId,
+        configFingerprint: automationConfigFingerprint(readBack.body),
+      };
+    } catch {
+      return { status: "rejected", reason: "unavailable", detail: "Home Assistant configuration API is unreachable" };
+    }
+  }
+
+  private async instanceTimezone(signal: AbortSignal): Promise<string | undefined> {
+    try {
+      const accessToken = await this.resolveAccessToken();
+      const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+      const response = await fetchImpl(new URL("/api/config", this.context.config.baseUrl), {
+        signal,
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      if (!response.ok) return undefined;
+      const body = await response.json() as { time_zone?: unknown };
+      return typeof body?.time_zone === "string" && body.time_zone.length > 0 ? body.time_zone : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async setAutomationEnabled(
+    request: { readonly nativeAutomationId: string; readonly enabled: boolean },
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationCommandResult> {
+    if (!/^[a-z0-9][a-z0-9_]{2,120}$/.test(request.nativeAutomationId)) {
+      return { status: "rejected", reason: "not_found", detail: "Unknown automation id" };
+    }
+    if (this.lifecycle !== "running" || this.bridge === undefined) {
+      return { status: "rejected", reason: "unavailable", detail: "Home Assistant bridge is not running" };
+    }
+    try {
+      await this.bridge.callService({
+        domain: "automation",
+        service: request.enabled ? "turn_on" : "turn_off",
+        entityId: `automation.${request.nativeAutomationId}`,
+      }, signal);
+      return { status: "acknowledged" };
+    } catch {
+      return { status: "rejected", reason: "failed", detail: "Home Assistant did not acknowledge the toggle" };
+    }
+  }
+
+  /** Withdrawal only deletes the adapter's own automation; a missing one is already withdrawn. */
+  private async withdrawAutomation(
+    request: { readonly nativeAutomationId: string },
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationCommandResult> {
+    if (!/^[a-z0-9][a-z0-9_]{2,120}$/.test(request.nativeAutomationId)) {
+      return { status: "rejected", reason: "not_found", detail: "Unknown automation id" };
+    }
+    try {
+      const deleted = await this.automationConfigRequest("DELETE", request.nativeAutomationId, signal);
+      if (deleted.ok || deleted.statusCode === 404) return { status: "acknowledged" };
+      return { status: "rejected", reason: "failed", detail: `Home Assistant rejected the removal (${deleted.statusCode})` };
+    } catch {
+      return { status: "rejected", reason: "unavailable", detail: "Home Assistant configuration API is unreachable" };
+    }
+  }
+
+  /** Reads the automation entity state; the config read-back covers existence. */
+  private async automationStatus(
+    request: { readonly nativeAutomationId: string },
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationStatusResult> {
+    if (!/^[a-z0-9][a-z0-9_]{2,120}$/.test(request.nativeAutomationId)) return { status: "missing" };
+    try {
+      const accessToken = await this.resolveAccessToken();
+      const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+      const url = new URL(`/api/states/automation.${request.nativeAutomationId}`, this.context.config.baseUrl);
+      const response = await fetchImpl(url, {
+        signal,
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      if (response.status === 404) return { status: "missing" };
+      if (!response.ok) return { status: "unknown" };
+      const body = await response.json() as { state?: unknown };
+      const state = body?.state === "on" ? "running" as const : body?.state === "off" ? "paused" as const : undefined;
+      if (state === undefined) return { status: "unknown" };
+      try {
+        const config = await this.automationConfigRequest("GET", request.nativeAutomationId, signal);
+        return config.ok && isRecord(config.body)
+          ? { status: state, configFingerprint: automationConfigFingerprint(config.body) }
+          : { status: state };
+      } catch {
+        return { status: state };
+      }
+    } catch {
+      return { status: "unknown" };
+    }
+  }
+
+  private compileAutomationConfig(spec: BridgeAutomationSpec):
+    | { readonly value: Record<string, unknown> }
+    | { readonly reason: "unsupported" | "invalid_target"; readonly detail: string } {
+    const entityFor = (binding: { bridgeId: string; nativeId: string; nativeInstanceId: string }): string | undefined => {
+      if (binding.bridgeId !== this.context.bridgeId) return undefined;
+      return [...this.bindingsByEntityId.values()].find((candidate) => (
+        candidate.nativeId === binding.nativeId && candidate.nativeInstanceId === binding.nativeInstanceId
+      ))?.entityId;
+    };
+    const conditions: Record<string, unknown>[] = [];
+    let trigger: Record<string, unknown>;
+    if (spec.trigger.kind === "schedule") {
+      trigger = { platform: "time", at: `${spec.trigger.at}:00` };
+      if (spec.trigger.daysOfWeek.length < 7) {
+        const weekdays = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+        conditions.push({ condition: "time", weekday: [...spec.trigger.daysOfWeek].sort().map((day) => weekdays[day]) });
+      }
+    } else {
+      const entityId = entityFor(spec.trigger.source.binding);
+      if (entityId === undefined) return { reason: "invalid_target", detail: "Trigger source is not bound to this bridge" };
+      trigger = { platform: "state", entity_id: entityId };
+    }
+    for (const condition of spec.conditions) {
+      const compiled = this.compileAutomationCondition(condition, entityFor);
+      if ("reason" in compiled) return compiled;
+      conditions.push(compiled.value);
+    }
+    const actions: Record<string, unknown>[] = [];
+    for (const action of spec.actions) {
+      const compiled = this.compileAutomationAction(action, spec.title, entityFor);
+      if ("reason" in compiled) return compiled;
+      actions.push(compiled.value);
+    }
+    return {
+      value: {
+        id: spec.automationId,
+        alias: spec.automationId,
+        description: `hob:${spec.title}`,
+        trigger: [trigger],
+        condition: conditions,
+        action: actions,
+        mode: "single",
+      },
+    };
+  }
+
+  private compileAutomationCondition(
+    condition: BridgeAutomationCondition,
+    entityFor: (binding: { bridgeId: string; nativeId: string; nativeInstanceId: string }) => string | undefined,
+  ): { readonly value: Record<string, unknown> } | { readonly reason: "unsupported" | "invalid_target"; readonly detail: string } {
+    const entityId = entityFor(condition.source.binding);
+    if (entityId === undefined) return { reason: "invalid_target", detail: "Condition source is not bound to this bridge" };
+    if (condition.operator === "greater_than" || condition.operator === "less_than") {
+      if (typeof condition.value !== "number") {
+        return { reason: "unsupported", detail: "Numeric comparison requires a numeric value" };
+      }
+      return {
+        value: {
+          condition: "numeric_state",
+          entity_id: entityId,
+          ...(condition.operator === "greater_than" ? { above: condition.value } : { below: condition.value }),
+        },
+      };
+    }
+    const stateCondition = { condition: "state", entity_id: entityId, state: automationStateText(condition.value) };
+    return condition.operator === "equals"
+      ? { value: stateCondition }
+      : { value: { condition: "not", conditions: [stateCondition] } };
+  }
+
+  private compileAutomationAction(
+    action: BridgeAutomationAction,
+    title: string,
+    entityFor: (binding: { bridgeId: string; nativeId: string; nativeInstanceId: string }) => string | undefined,
+  ): { readonly value: Record<string, unknown> } | { readonly reason: "unsupported" | "invalid_target"; readonly detail: string } {
+    if (action.kind === "notify_local") {
+      return { value: { service: "persistent_notification.create", data: { title, message: action.message } } };
+    }
+    const entityId = entityFor(action.target.binding);
+    if (entityId === undefined) return { reason: "invalid_target", detail: "Action target is not bound to this bridge" };
+    if (action.kind === "set_boolean") {
+      return { value: { service: action.value ? "homeassistant.turn_on" : "homeassistant.turn_off", target: { entity_id: entityId } } };
+    }
+    const domain = entityId.split(".")[0];
+    const percent = Math.round(action.level * 100);
+    switch (domain) {
+      case "light":
+        return { value: { service: "light.turn_on", target: { entity_id: entityId }, data: { brightness_pct: percent } } };
+      case "cover":
+        return { value: { service: "cover.set_cover_position", target: { entity_id: entityId }, data: { position: percent } } };
+      case "fan":
+        return { value: { service: "fan.set_percentage", target: { entity_id: entityId }, data: { percentage: percent } } };
+      case "media_player":
+        return { value: { service: "media_player.volume_set", target: { entity_id: entityId }, data: { volume_level: action.level } } };
+      default:
+        return { reason: "unsupported", detail: `Level control is not supported for ${domain} entities` };
+    }
+  }
+
+  private async automationConfigRequest(
+    method: "GET" | "POST" | "DELETE",
+    automationId: string,
+    signal: AbortSignal,
+    body?: Record<string, unknown>,
+  ): Promise<{ readonly ok: boolean; readonly statusCode: number; readonly body?: unknown }> {
+    const accessToken = await this.resolveAccessToken();
+    const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+    const url = new URL(`/api/config/automation/config/${automationId}`, this.context.config.baseUrl);
+    const response = await fetchImpl(url, {
+      method,
+      signal,
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    let parsedBody: unknown;
+    try {
+      parsedBody = await response.json();
+    } catch {
+      parsedBody = undefined;
+    }
+    return { ok: response.ok, statusCode: response.status, body: parsedBody };
   }
 
   private describeAction(requestValue: BridgeActionDescriptorRequest): BridgeActionDescriptor | undefined {
@@ -1445,6 +1725,43 @@ type NativeQueueItem =
   | { kind: "state"; event: HomeAssistantNativeStateEvent }
   | { kind: "resync"; snapshot: HomeAssistantSnapshot }
   | { kind: "heartbeat" };
+
+/** Behavioral identity of a stored automation, ignoring bookkeeping keys. */
+function automationConfigFingerprint(stored: Record<string, unknown>): string {
+  const material = stableJson({
+    trigger: stored.trigger,
+    condition: stored.condition,
+    action: stored.action,
+    mode: stored.mode,
+  });
+  return `sha256:${createHash("sha256").update(material).digest("hex")}`;
+}
+
+/** Deep equality on the behavioral fields; storage may add bookkeeping keys. */
+function storedAutomationMatches(sent: Record<string, unknown>, stored: Record<string, unknown>): boolean {
+  return stored.alias === sent.alias
+    && stableJson(stored.trigger) === stableJson(sent.trigger)
+    && stableJson(stored.condition) === stableJson(sent.condition)
+    && stableJson(stored.action) === stableJson(sent.action)
+    && stored.mode === sent.mode;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function automationStateText(value: string | number | boolean | null): string {
+  if (value === null) return "unknown";
+  if (typeof value === "boolean") return value ? "on" : "off";
+  return String(value);
+}
 
 class NativeStateQueue {
   private readonly values: NativeQueueItem[] = [];

@@ -36,6 +36,8 @@ export interface RuntimeConfirmationProjection {
     readonly kind: "approved" | "rejected" | "expired";
     readonly at: string;
     readonly actorId?: string;
+    /** The kind of device the decision came from. */
+    readonly via?: "private" | "shared";
   };
 }
 
@@ -449,7 +451,14 @@ function projectConfirmation(ticket: OneShotActionTicket): RuntimeConfirmationPr
   const status = ticket.status === "pending_confirmation"
     ? "pending"
     : ticket.status === "expired" ? "expired" : ticket.status === "rejected" ? "rejected" : "approved";
-  const decidedAt = ticket.approvedAt ?? (status === "expired" || status === "rejected" ? ticket.expiresAt ?? ticket.requestedAt : undefined);
+  // Each decision kind reads its own record: an early rejection reports the
+  // moment someone said no, never the expiry that no longer happened.
+  const decidedAt = status === "approved"
+    ? ticket.approvedAt
+    : status === "rejected"
+      ? ticket.rejectedAt ?? ticket.requestedAt
+      : status === "expired" ? ticket.expiresAt ?? ticket.requestedAt : undefined;
+  const decidedBy = status === "approved" ? ticket.approvedBy : status === "rejected" ? ticket.rejectedBy : undefined;
   return {
     id: ticket.id,
     dedupKey: ticket.requestId,
@@ -462,7 +471,8 @@ function projectConfirmation(ticket: OneShotActionTicket): RuntimeConfirmationPr
       decision: {
         kind: status === "expired" ? "expired" : status === "rejected" ? "rejected" : "approved",
         at: decidedAt,
-        ...(ticket.approvedBy === undefined ? {} : { actorId: ticket.approvedBy }),
+        ...(decidedBy === undefined ? {} : { actorId: decidedBy }),
+        ...(ticket.decidedVia === undefined ? {} : { via: ticket.decidedVia }),
       },
     }),
   };
@@ -518,7 +528,7 @@ function activityPresentation(
   kind: OneShotActionActivity["kind"],
   policyClass: OneShotActionTicket["policyClass"],
 ): { readonly status: string; readonly cause: readonly string[]; readonly verification?: string } {
-  const policy = policyClass === "administrator" ? "管理员权限" : policyClass === "confirmation" ? "成员确认权限" : "直接执行权限";
+  const policy = policyClass === "administrator" ? "高影响保护权限" : policyClass === "confirmation" ? "确认权限" : "直接执行权限";
   switch (kind) {
     case "action_requested": return { status: "已请求", cause: ["家庭动作已发起", `动作进入${policy}检查`] };
     case "confirmation_created": return { status: "等待放行", cause: [`${policy}要求放行`, "动作正在等待决定"] };

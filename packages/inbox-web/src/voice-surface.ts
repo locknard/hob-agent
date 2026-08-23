@@ -170,7 +170,16 @@ for (const voiceRoot of document.querySelectorAll("[data-voice-surface]")) {
     failureCount = Math.min(failureLimit, failureCount + 1);
     finalTranscript = "";
     showTranscript("", false);
-    if (failureCount >= failureLimit) setState("failed", "连续三次没有识别成功，先用文字继续。");
+    if (failureCount >= failureLimit) {
+      let resting = false;
+      try {
+        const lastTriple = Number(window.sessionStorage.getItem("hob-voice-last-triple") || "0");
+        resting = Date.now() - lastTriple < 600000;
+        window.sessionStorage.setItem("hob-voice-last-triple", String(Date.now()));
+      } catch {}
+      if (resting) setState("failed", "10 分钟内又连续三次没识别成功，语音先休息一会儿 —— 先用文字继续，重新开始不会清零。");
+      else setState("failed", "连续三次没有识别成功，先用文字继续。");
+    }
     else setState("no_input", message || (failureCount === 1 ? "第 1 次没有听清，可以说得更短一些。" : "第 2 次还是没有听清，试试和当前空间相关的说法。"));
   };
   const stopRecognition = () => {
@@ -278,7 +287,7 @@ export function renderVoiceSurface(requestedState = "idle", options: VoiceSurfac
     : "";
   return `<section class="product-voice" data-voice-surface data-voice-state="${requestedState}" data-voice-failure-limit="3" data-voice-submit-action="/conversation" data-voice-language="zh-CN" aria-labelledby="voice-heading">
     <header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation">改用文字</a></header>
-    <section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p><p class="product-voice-transcript" data-voice-transcript data-voice-transcript-kind="${initialTranscriptKind}" aria-live="polite" aria-atomic="true">${initialTranscript}</p><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止</button><button class="product-primary-action" type="button" data-voice-submit hidden>继续对话</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button><a class="product-secondary-action" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div><p class="product-voice-fallback" data-voice-fallback hidden>语音服务不可用或权限未打开。文字对话仍然可用。</p></section>
+    <section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p><p class="product-voice-transcript" data-voice-transcript data-voice-transcript-kind="${initialTranscriptKind}" aria-live="polite" aria-atomic="true">${initialTranscript}</p><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止</button><button class="product-primary-action" type="button" data-voice-submit hidden>继续对话</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button><a class="product-secondary-action" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div><p class="product-voice-fallback" data-voice-fallback hidden>语音服务不可用或权限未打开。文字对话仍然可用。</p><p class="product-voice-privacy">不保存音频；说出的动作照常写入活动记录。动画只表示“正在听”，不表示“正在执行”。</p></section>
     ${guideMarkup}
     ${intentMarkup}
     <form class="product-voice-submit-form" data-voice-submit-form method="post" action="/conversation" hidden><input type="hidden" name="question" data-voice-transcript-input></form>

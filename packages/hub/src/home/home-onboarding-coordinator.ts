@@ -41,6 +41,10 @@ export interface OnboardingCapabilityChoice {
   readonly bridgeLabel: string;
   readonly schema?: string;
   readonly suggestedPolicyClass: OnboardingPolicySuggestion;
+  /** The saved confirmation method, present only when actually configured. */
+  readonly currentPolicyClass?: OnboardingPolicySuggestion;
+  /** Persisted configuration state: the settings editor renders each honestly. */
+  readonly configurationState?: "unconfigured" | "active" | "revoked" | "invalid";
 }
 
 export interface OnboardingChoiceProjection {
@@ -61,6 +65,12 @@ export interface OnboardingActor {
 }
 
 export interface OnboardingWorldPort {
+  /** Persisted configuration state, when the world owner provides it (HomeWorld does). */
+  actionAuthorityConfigurationOf?(hwCapabilityId: string): {
+    readonly status: "configured" | "not_configured" | "invalid";
+    readonly approved: boolean;
+    readonly policyClass?: "direct" | "confirmation" | "administrator";
+  };
   snapshot(): {
     readonly generatedAt?: string;
     readonly bridges: Readonly<Record<string, {
@@ -93,6 +103,11 @@ export interface OnboardingActionAuthorityPort {
     readonly confirmationCapabilityIds: readonly string[];
     readonly administratorCapabilityIds: readonly string[];
   }): { readonly status: "configured"; readonly configurationRevision: number }
+    | { readonly status: "blocked"; readonly reason: string };
+  /** Delta write over the persisted configuration; the owner preserves the rest. */
+  configureDelta?(
+    changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
+  ): { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount: number }
     | { readonly status: "blocked"; readonly reason: string };
 }
 
@@ -185,8 +200,8 @@ const STEP_BODIES = [
   "你好，我会帮这个家看着点儿。开始时我只会看；每项动作都按你设定的权限执行。",
   "我先以只读方式查看已有家庭，再请你确认发现的内容。",
   "请确认房间和设备地图；待确认的地方会清楚标出。",
-  "请绑定成年管理员的私人设备；孩子和访客保留适合各自身份的家庭权限。",
-  "请分别设置直接动作、需要确认的动作和管理员动作。",
+  "请绑定一位家人的私人手机；需要确认的动作以后都会推送到这台手机。",
+  "请分别设置直接动作、需要确认的动作和高影响保护动作。",
   "请确认三条安全规矩；安全级动作始终执行最高确认要求。",
   "请设定第一周的观察频率、安静时段和期待结果。",
   "请带着一个真实问题进入家庭对话。",
@@ -224,6 +239,62 @@ export class HomeOnboardingCoordinatorService extends Service {
 
   protected [Service.init](): void {
     this.ctx.effect(() => () => this.store.close?.(), "home-onboarding.close");
+  }
+
+  /**
+   * The settings surface reuses the step-5 capability choices: the household
+   * can re-decide confirmation methods at any time after onboarding.
+   */
+  actionPolicyChoices(): OnboardingChoiceProjection {
+    return this.choiceProjection();
+  }
+
+  /**
+   * Re-decides confirmation methods outside the step machine. The same rules
+   * as step 5 apply: a present member on their own bound private device,
+   * capabilities from the current home map, one method per action.
+   */
+  configureActionPolicy(
+    selection: {
+      readonly directCapabilityIds: readonly string[];
+      readonly confirmationCapabilityIds: readonly string[];
+      readonly administratorCapabilityIds: readonly string[];
+    },
+    actor?: OnboardingActor,
+  ): { readonly status: "configured"; readonly changedCount: number } | { readonly status: "blocked"; readonly reason: string } {
+    if (!actor || !actor.present || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
+      throw new HomeOnboardingCoordinatorError("permission_denied", "确认方式设置需要在场，并使用绑定到本人的私人设备");
+    }
+    const world = this.requireWorld();
+    const all = [...selection.directCapabilityIds, ...selection.confirmationCapabilityIds, ...selection.administratorCapabilityIds];
+    if (new Set(all).size !== all.length) {
+      throw new HomeOnboardingCoordinatorError("invalid_input", "每个动作只能选择一种确认方式");
+    }
+    // No rows chosen is a truthful no-change, not an error.
+    if (all.length === 0) return { status: "configured", changedCount: 0 };
+    const available = capabilityIds(world.snapshot());
+    if (all.some((id) => !available.has(id))) {
+      return { status: "blocked", reason: "确认方式必须来自当前家庭地图中的真实能力。" };
+    }
+    if (this.actionAuthority === undefined) {
+      return { status: "blocked", reason: "确认方式配置服务尚未就绪，家庭保持安全默认值。" };
+    }
+    // The submission is a delta of the rows the household actually chose.
+    // The configuration owner merges it over the persisted facts and writes
+    // the whole set back atomically — availability plays no part, so a
+    // bridge-down or revoked entry the page never showed survives untouched.
+    if (this.actionAuthority.configureDelta === undefined) {
+      return { status: "blocked", reason: "当前配置暂时读取不到，为避免覆盖已有设置没有保存。" };
+    }
+    const changes: { hwCapabilityId: string; policyClass: "direct" | "confirmation" | "administrator" }[] = [
+      ...selection.directCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "direct" as const })),
+      ...selection.confirmationCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "confirmation" as const })),
+      ...selection.administratorCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "administrator" as const })),
+    ];
+    const configured = this.actionAuthority.configureDelta(changes);
+    return configured.status === "configured"
+      ? { status: "configured", changedCount: configured.changedCount }
+      : { status: "blocked", reason: "确认方式配置没有完成，家庭保持安全默认值。" };
   }
 
   getState(): OnboardingViewState {
@@ -289,7 +360,19 @@ export class HomeOnboardingCoordinatorService extends Service {
         const bridge = bridgeById.get(bridgeIds[0]!);
         if (bridge === undefined || !bridge.selectable) continue;
         const semanticKind = capability.semanticKind;
+        const persisted = this.world?.actionAuthorityConfigurationOf?.(capability.hwCapabilityId);
+        const configurationState = persisted === undefined
+          ? undefined
+          : persisted.status === "invalid"
+            ? "invalid" as const
+            : persisted.status === "not_configured"
+              ? "unconfigured" as const
+              : persisted.approved ? "active" as const : "revoked" as const;
         capabilities.push({
+          ...(persisted?.status === "configured" && persisted.policyClass !== undefined
+            ? { currentPolicyClass: persisted.policyClass }
+            : {}),
+          ...(configurationState === undefined ? {} : { configurationState }),
           id: capability.hwCapabilityId,
           label: `${boundedText(device.name) ? device.name : "设备"} · ${semanticLabel(semanticKind)}`,
           bridgeId: bridge.id,
@@ -354,8 +437,8 @@ export class HomeOnboardingCoordinatorService extends Service {
         });
       }
       case "bind_private_device": {
-        if (!actor || !actor.present || !isAdult(actor.role) || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
-          throw new HomeOnboardingCoordinatorError("permission_denied", "成员绑定需要在场的成年成员和已绑定私人设备");
+        if (!actor || !actor.present || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
+          throw new HomeOnboardingCoordinatorError("permission_denied", "成员绑定需要在场，并使用绑定到本人的私人设备");
         }
         return this.completeStep(command, now, {
           member: { principalId: actor.principalId, memberName: command.memberName, role: "adult_admin", deviceKind: "private", boundAt: now },
@@ -364,7 +447,7 @@ export class HomeOnboardingCoordinatorService extends Service {
       case "set_action_policy": {
         const world = this.requireWorld();
         const all = [...command.directCapabilityIds, ...command.confirmationCapabilityIds, ...command.administratorCapabilityIds];
-        if (new Set(all).size !== all.length) throw new HomeOnboardingCoordinatorError("invalid_input", "每项操作权限只能属于一个权限级别");
+        if (new Set(all).size !== all.length) throw new HomeOnboardingCoordinatorError("invalid_input", "每个动作只能选择一种确认方式");
         const available = capabilityIds(world.snapshot());
         if (all.some((id) => !available.has(id))) return this.blockStep(step, now, "操作权限必须来自当前家庭地图中的真实能力。");
         if (this.actionAuthority === undefined) return this.blockStep(step, now, "操作权限配置服务尚未就绪，家庭保持安全默认值。");
@@ -627,7 +710,6 @@ function isAcceptedAdvice(value: OnboardingAdviceStart | undefined): value is On
     && (value.status === "running" || value.status === "background" || value.status === "completed");
 }
 function isStep(value: unknown): value is HomeOnboardingStep { return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 8; }
-function isAdult(role: OnboardingActorRole): boolean { return role === "admin" || role === "adult_member"; }
 function boundedText(value: unknown, max = 200): value is string { return typeof value === "string" && value.trim() === value && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value); }
 function boundedId(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value); }
 function boundedIdArray(value: unknown): value is readonly string[] { return Array.isArray(value) && value.length <= 256 && value.every((item) => boundedId(item)); }

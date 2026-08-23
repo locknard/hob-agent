@@ -381,6 +381,39 @@ export class AuthorityCoordinator {
   }
 
   /**
+   * Hub-private dump of every persisted action-authority entry, for the
+   * configuration owner's delta write. Persisted facts only — availability
+   * plays no part.
+   */
+  actionAuthorityConfigurationEntries(): readonly {
+    readonly hwCapabilityId: string;
+    readonly bridgeId: string;
+    readonly approved: boolean;
+    readonly policyClass: ActionAuthorityPolicyClass;
+    readonly revision: number;
+  }[] {
+    const entries: {
+      hwCapabilityId: string;
+      bridgeId: string;
+      approved: boolean;
+      policyClass: ActionAuthorityPolicyClass;
+      revision: number;
+    }[] = [];
+    for (const [hwCapabilityId, raw] of this.actionAuthorityConfig) {
+      const configured = parseActionAuthorityConfiguration(raw);
+      if (configured === undefined) continue;
+      entries.push({
+        hwCapabilityId,
+        bridgeId: configured.bridgeId,
+        approved: configured.approved,
+        policyClass: configured.policyClass,
+        revision: configured.configRevision,
+      });
+    }
+    return entries;
+  }
+
+  /**
    * Hub-internal binding selector for HomeWorld's candidate projection. It
    * only answers a caller-supplied bridge predicate and never returns a route
    * or configuration record.

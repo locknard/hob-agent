@@ -62,7 +62,7 @@ const trialProposal = {
   id: "proposal-trial",
   revision: 8,
   status: "approved" as const,
-  rolloutState: "trial_active" as const,
+  lifecycle: "ready" as const,
   trial: {
     durationDays: 7 as const,
     startedAt: "2026-08-20T01:00:00.000Z",
@@ -724,14 +724,14 @@ test("uses the proposal owner for capacity, visible cards, snooze, and both prop
 
   const selected = ctx.homeInbox.getProductReviewProjection(runtimeAdminActor, trialProposal.id).selectedProposal;
   assert.equal(selected?.id, trialProposal.id);
-  assert.equal(selected?.stage, "trial");
+  assert.equal(selected?.lifecycle, "ready");
 
-  await ctx.homeInbox.snoozeProposal({ proposalId: reviewProposal.id, until: "tomorrow" });
+  await ctx.homeInbox.snoozeProposal({ proposalId: reviewProposal.id, until: "later" });
   await ctx.homeInbox.rejectProposal({ proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1" });
   await ctx.homeInbox.latchProposal({ proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1" });
   await ctx.homeInbox.enableProposal({ proposalId: trialProposal.id, expectedRevision: 8, reviewer: "admin-1" });
 
-  assert.deepEqual(proposals.snoozes, [{ proposalId: reviewProposal.id, until: "tomorrow" }]);
+  assert.deepEqual(proposals.snoozes, [{ proposalId: reviewProposal.id, until: "later" }]);
   assert.deepEqual(proposals.decisions, [
     { proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1", decision: "reject_once" },
     { proposalId: reviewProposal.id, expectedRevision: 7, reviewer: "admin-1", decision: "do_not_suggest" },
@@ -1384,5 +1384,201 @@ test("delegates failed preparation retry through the optional direct port", asyn
   assert.deepEqual((ctx.homeProposals as unknown as StubRetryableReviewedProposals).retries, [retryInput]);
 
   await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+
+function climateWorldFixture() {
+  const binding = (nativeInstanceId: string) => [{ bridgeId: "bridge-main", nativeId: nativeInstanceId, nativeInstanceId, hwSpaceId: "space-living" }];
+  const sensor = (hwId: string, semanticKind: string, nativeInstanceId: string, state: string) => ({
+    hwId,
+    health: "reachable",
+    validity: "valid",
+    bindings: binding(nativeInstanceId),
+    capabilities: [{
+      hwCapabilityId: `cap-${hwId}`,
+      hwId,
+      schema: "ha-state",
+      schemaVersion: "1",
+      semanticKind,
+      bindings: binding(nativeInstanceId),
+    }],
+    states: [{
+      nativeId: nativeInstanceId,
+      nativeInstanceId,
+      attrs: { state },
+      time: { sourceTs: "2026-08-20T09:59:00.000Z", sourceTsQuality: "platform" },
+      origin: "observed",
+    }],
+  });
+  return {
+    generatedAt: "2026-08-20T10:00:00.000Z",
+    bridges: {
+      "bridge-main": {
+        adapterType: "home-assistant",
+        diagnostics: { connectionState: "ready", lastSuccessfulContactAt: "2026-08-20T09:59:58.000Z" },
+        watermark: { epochId: "epoch-main", lastSeq: 7 },
+        metrics: { consistency: "ready", connection: "up", eventActivity: "idle" },
+      },
+    },
+    bridgeWatermarks: [{ bridgeId: "bridge-main" }],
+    diagnostics: [{ bridgeId: "bridge-main", connectionState: "ready" }],
+    spaces: [{ hwSpaceId: "space-living", name: "客厅", bindings: [{ bridgeId: "bridge-main", nativeSpaceId: "living" }] }],
+    devices: [
+      sensor("temp", "temperature", "sensor.living_temp", "24.53"),
+      sensor("hum", "humidity", "sensor.living_hum", "52"),
+      sensor("presence", "presence", "binary_sensor.living_presence", "on"),
+      sensor("meter", "energy", "sensor.living_energy", "120.4"),
+    ],
+  };
+}
+
+test("projects real climate and presence into space metrics without inventing values", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", { snapshot: () => climateWorldFixture() });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z") });
+
+  const projection = ctx.homeInbox.getProductShellProjection();
+  const living = projection.spaces[0]!;
+  assert.deepEqual(living.metrics, [
+    { label: "温度", value: "24.5°" },
+    { label: "湿度", value: "52%" },
+  ]);
+  assert.equal(living.state, "有人在");
+  const control = projection.controlSpaces[0]!;
+  assert.deepEqual(control.metrics, living.metrics);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("reports today's energy only from complete monotone counter evidence", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  const queries: unknown[] = [];
+  ctx.provide("homeWorld", {
+    snapshot: () => climateWorldFixture(),
+    queryRecentEvidence: (query: { hwCapabilityIds: string[]; lookbackHours: number }) => {
+      queries.push(query);
+      const event = (observedAt: string, value: number) => ({
+        hwId: "meter", hwCapabilityId: "cap-meter", semanticKind: "energy",
+        value, observedAt, sourceTsQuality: "platform", origin: "observed",
+        provenance: { bridgeId: "bridge-main", epochId: "epoch-main", seq: 1 },
+      });
+      return {
+        requestedSince: "2026-08-19T00:00:00.000Z",
+        requestedUntil: "2026-08-20T10:00:00.000Z",
+        events: [
+          event("2026-08-19T16:10:00.000Z", 108.0),
+          event("2026-08-19T22:00:00.000Z", 112.2),
+          event("2026-08-20T09:30:00.000Z", 118.1),
+          event("2026-08-20T09:59:00.000Z", 120.4),
+        ],
+        coverage: [{ bridgeId: "bridge-main", status: "complete", reasons: [] }],
+      };
+    },
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z"), timezone: "UTC" });
+
+  const projection = ctx.homeInbox.getProductShellProjection();
+  assert.ok(projection.energy, "complete monotone evidence produces an energy summary");
+  assert.equal(projection.energy!.value, "8.2 度");
+  assert.equal(projection.energy!.change, undefined, "a sparse history never fabricates a comparison");
+  assert.deepEqual(queries.length, 1);
+  assert.deepEqual((queries[0] as { hwCapabilityIds: string[] }).hwCapabilityIds, ["cap-meter"]);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("omits the energy summary when coverage has gaps", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", {
+    snapshot: () => climateWorldFixture(),
+    queryRecentEvidence: () => ({
+      requestedSince: "2026-08-19T00:00:00.000Z",
+      requestedUntil: "2026-08-20T10:00:00.000Z",
+      events: [],
+      coverage: [{ bridgeId: "bridge-main", status: "partial", reasons: ["history_gap"] }],
+    }),
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z"), timezone: "UTC" });
+
+  assert.equal(ctx.homeInbox.getProductShellProjection().energy, undefined);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+
+test("relays the latest fresh finding as the overview concern and never a stale one", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", { snapshot: () => climateWorldFixture() });
+  const record = (id: string, completedAt: string, findings: string[]) => ({
+    id,
+    question: "窗帘为什么开得晚？",
+    createdAt: completedAt,
+    status: "completed" as const,
+    completedAt,
+    report: {
+      summary: "可以先做一周的可逆调整试试。",
+      confidence: "partial" as const,
+      findings,
+      unknowns: ["周末作息是否不同"],
+      hardwareSuggestions: [],
+      validationSteps: [],
+    },
+  });
+  ctx.provide("homeAdvice", {
+    canAsk: () => true,
+    ask: async () => { throw new Error("unused"); },
+    list: () => [
+      record("advice-fresh", "2026-08-20T08:00:00.000Z", ["今天 09:42 才打开，平时约 07:15"]),
+      record("advice-stale", "2026-08-01T08:00:00.000Z", ["旧发现"]),
+    ],
+    get: () => undefined,
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z") });
+
+  const concern = ctx.homeInbox.getProductShellProjection().concern;
+  assert.ok(concern);
+  assert.equal(concern!.adviceId, "advice-fresh");
+  assert.equal(concern!.title, "窗帘为什么开得晚？");
+  assert.deepEqual(concern!.facts, ["今天 09:42 才打开，平时约 07:15"]);
+  assert.deepEqual(concern!.unknowns, ["周末作息是否不同"]);
+  assert.equal(concern!.suggestion, "可以先做一周的可逆调整试试。");
+
+  await fiber.dispose();
+  await centerFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("shows no concern card without a completed finding", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const centerFiber = await ctx.plugin(StubControlReviewCenter);
+  ctx.provide("homeWorld", { snapshot: () => climateWorldFixture() });
+  ctx.provide("homeAdvice", {
+    canAsk: () => true,
+    ask: async () => { throw new Error("unused"); },
+    list: () => [{ id: "advice-running", question: "q", createdAt: "2026-08-20T09:00:00.000Z", status: "running" as const }],
+    get: () => undefined,
+  });
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-20T10:00:00.000Z") });
+
+  assert.equal(ctx.homeInbox.getProductShellProjection().concern, undefined);
+
+  await fiber.dispose();
+  await centerFiber.dispose();
   await ctx.fiber.dispose();
 });

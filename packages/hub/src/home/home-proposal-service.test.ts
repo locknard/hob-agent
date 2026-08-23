@@ -7,12 +7,41 @@ import { tmpdir } from "node:os";
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HomeProposalService } from "./home-proposal-service.js";
+import { BridgeAutomationDeployment } from "./bridge-automation-deployment.js";
 import {
   ProposalStoreError,
   SqliteProposalStore,
   type ArtifactPreparationJob,
   type CreateProposalInput,
 } from "./proposal-store.js";
+
+
+function serviceStore(service: unknown): SqliteProposalStore {
+  return (service as { store: SqliteProposalStore }).store;
+}
+
+function completePreparation(store: SqliteProposalStore, proposalId: string): void {
+  const job = store.listPreparationJobs().find((candidate) =>
+    candidate.proposalId === proposalId && candidate.status === "queued");
+  if (job === undefined) return;
+  const claimed = store.claimPreparationJob({ jobId: job.jobId, expectedVersion: job.version });
+  store.completePreparationJob({
+    jobId: claimed.jobId,
+    expectedVersion: claimed.version,
+    preparedArtifact: {
+      artifactId: `artifact-${proposalId}`,
+      revision: 1,
+      contentHash: "sha256:prepared-content",
+      compileResultId: "sha256:compile-result",
+      dryRunResultId: "sha256:dry-run-result",
+    },
+  });
+}
+
+function prepareToReady(store: SqliteProposalStore, proposalId: string) {
+  completePreparation(store, proposalId);
+  return store.markProposalReady({ proposalId });
+}
 
 const rationale = {
   householdValue: "Reduce a recurring household inconvenience.",
@@ -77,7 +106,7 @@ class StubHomeWorld extends Service {
   bridgeConnectionState: "ready" | "degraded" = "ready";
   bridgeHistoryGapCount = 0;
   extraCapabilities = 0;
-  capabilitySemanticKind: "light" | "lock" = "light";
+  capabilitySemanticKind: "light" | "lock" | undefined = "light";
   actionPolicyClass: "direct" | "confirmation" | "administrator" | "unavailable" = "direct";
 
   constructor(ctx: Context) {
@@ -118,7 +147,7 @@ class StubHomeWorld extends Service {
           hwId: "hw-1",
           schema: "fixture.boolean",
           schemaVersion: "1.0.0",
-          semanticKind: this.capabilitySemanticKind,
+          ...(this.capabilitySemanticKind === undefined ? {} : { semanticKind: this.capabilitySemanticKind }),
           bindings: [{ bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: "entity-1" }],
         }, ...Array.from({ length: this.extraCapabilities }, (_, index) => ({
           hwCapabilityId: `hwc-${index + 2}`,
@@ -260,12 +289,12 @@ test("scopes authoritative rule coverage to every bridge bound to selected devic
     },
   };
 
-  const proposal = await ctx.homeProposals.createDraft(draft);
+  const proposal = ctx.homeProposals.markProposalReady({ proposalId: (await ctx.homeProposals.createDraft(draft)).id });
   assert.equal(proposal.conflictCheck.status, "checked");
   assert.equal(proposal.conflictCheck.existingAutomationCount, 1);
   ctx.homeProposals.review({
     proposalId: proposal.id,
-    expectedRevision: 1,
+    expectedRevision: proposal.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "not_useful",
@@ -293,12 +322,12 @@ test("exposes the hub-owned proposal lifecycle as a Cordis service", async () =>
     })(),
   });
 
-  const created = ctx.homeProposals.create(candidate);
+  const created = ctx.homeProposals.markProposalReady({ proposalId: serviceStore(ctx.homeProposals).create(candidate).id });
   assert.equal(ctx.homeProposals.get(created.id)?.id, created.id);
   assert.deepEqual(ctx.homeProposals.list(), [created]);
   assert.equal(ctx.homeProposals.review({
     proposalId: created.id,
-    expectedRevision: 1,
+    expectedRevision: created.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "already_covered",
@@ -311,33 +340,25 @@ test("exposes the hub-owned proposal lifecycle as a Cordis service", async () =>
 
 test("exposes the synchronous approved source gate without accepting caller evidence", async () => {
   const ctx = new Context();
-  const fiber = await ctx.plugin(HomeProposalService, {
-    path: ":memory:",
-    now: () => "2026-08-19T01:00:00.000Z",
-  });
-  const created = ctx.homeProposals.create({
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-19T01:00:00.000Z" });
+  const fiber = await ctx.plugin(HomeProposalService, { store } as never);
+  const createdCreated = store.create({
     ...candidate,
     kind: "automation-draft",
     intent: { ...candidate.intent, type: "automation-draft" },
     idempotencyKey: "source-gate:automation:v1",
     artifactCandidate: automationCandidate,
   });
-  const approved = ctx.homeProposals.review({
-    proposalId: created.id,
-    expectedRevision: 1,
-    decision: "approved",
-    reviewer: "household-owner",
-    feedbackCode: "useful_as_is",
-  });
-
+  completePreparation(store, createdCreated.id);
+  const created = ctx.homeProposals.markProposalReady({ proposalId: createdCreated.id });
   const source = ctx.homeProposals.withApprovedProposalAtRevision(
-    approved.id,
-    approved.revision,
+    created.id,
+    created.revision,
     (value) => value,
   );
-  assert.equal(source.proposalId, approved.id);
-  assert.equal(source.revision, approved.revision);
-  assert.deepEqual(source.evidence, approved.evidence);
+  assert.equal(source.proposalId, created.id);
+  assert.equal(source.revision, created.revision);
+  assert.deepEqual(source.evidence, created.evidence);
   assert.equal(Object.isFrozen(source), true);
 
   await fiber.dispose();
@@ -347,7 +368,8 @@ test("exposes the synchronous approved source gate without accepting caller evid
 test("requires a Hub-verifiable artifact candidate for new automation drafts", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);
-  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const store = new SqliteProposalStore({ path: ":memory:" });
+  const fiber = await ctx.plugin(HomeProposalService, { store } as never);
   const base = {
     kind: "automation-draft" as const,
     title: "Review one bounded light trial",
@@ -383,11 +405,13 @@ test("requires a Hub-verifiable artifact candidate for new automation drafts", a
       },
     },
   }), /selected devices/i);
-  const proposal = await ctx.homeProposals.createDraft({ ...base, artifactCandidate: automationCandidate });
+  const proposalCreated = await ctx.homeProposals.createDraft({ ...base, artifactCandidate: automationCandidate });
+  completePreparation(store, proposalCreated.id);
+  const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
   assert.deepEqual(proposal.artifactCandidate, automationCandidate);
   ctx.homeProposals.review({
     proposalId: proposal.id,
-    expectedRevision: 1,
+    expectedRevision: proposal.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "not_useful",
@@ -433,6 +457,18 @@ test("uses explicit action policy for proposal safety and fails closed without i
   world.capabilitySemanticKind = "lock";
   const proposal = await ctx.homeProposals.createDraft({ ...base, idempotencyKey: "policy:direct-lock-hint:v1" });
   assert.equal(proposal.status, "pending_review");
+
+  world.actionPolicyClass = "confirmation";
+  world.capabilitySemanticKind = undefined;
+  await assert.rejects(
+    () => ctx.homeProposals.createDraft({ ...base, dedupKey: "policy:unnamed", idempotencyKey: "policy:unnamed:v1" }),
+    /household-readable device name/,
+    "a confirmation action nobody can name never enters review",
+  );
+
+  world.capabilitySemanticKind = "light";
+  const disclosed = await ctx.homeProposals.createDraft({ ...base, dedupKey: "policy:labeled", idempotencyKey: "policy:labeled:v1" });
+  assert.deepEqual(disclosed.confirmationDeviceNames, ["灯"], "an unnamed device falls back to its stable household label");
 
   await fiber.dispose();
   await ctx.fiber.dispose();
@@ -544,7 +580,7 @@ test("retains current evidence for an exact candidate capability beyond the gene
 test("creates evidence and conflict findings from the hub instead of trusting model claims", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);
-  const fiber = await ctx.plugin(HomeProposalService, {
+  const store = new SqliteProposalStore({
     path: ":memory:",
     now: () => "2026-08-19T01:00:00.000Z",
     id: (() => {
@@ -552,8 +588,9 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
       return () => String(++value);
     })(),
   });
+  const fiber = await ctx.plugin(HomeProposalService, { store } as never);
 
-  const proposal = await ctx.homeProposals.createDraft({
+  const proposalCreated = await ctx.homeProposals.createDraft({
     kind: "automation-draft",
     title: "Arrival light follow-up",
     summary: "Review a possible arrival light automation.",
@@ -571,6 +608,8 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
       rollback: "Discard the draft.",
     },
   });
+  completePreparation(store, proposalCreated.id);
+  const proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
 
   assert.deepEqual(proposal.evidence.watermarks, [{
     bridgeId: "bridge-a",
@@ -635,14 +674,14 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
   assert.equal(secondProposal.status, "pending_review");
   ctx.homeProposals.review({
     proposalId: proposal.id,
-    expectedRevision: 1,
+    expectedRevision: proposal.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "incorrect_assumption",
   });
   ctx.homeProposals.review({
     proposalId: secondProposal.id,
-    expectedRevision: 1,
+    expectedRevision: secondProposal.revision,
     decision: "rejected",
     reviewer: "household-owner",
     feedbackCode: "not_useful",
@@ -700,6 +739,9 @@ test("keeps five unresolved household proposals and rejects the sixth", async ()
     assert.equal(proposal.status, "pending_review");
   }
 
+  for (const candidate of ctx.homeProposals.list({ status: "pending_review" })) {
+    if (candidate.lifecycle === "preparing") ctx.homeProposals.markProposalReady({ proposalId: candidate.id });
+  }
   assert.equal(ctx.homeProposals.list({ status: "pending_review" }).length, 5);
   await assert.rejects(() => ctx.homeProposals.createDraft({
     kind: "household-insight",
@@ -758,9 +800,10 @@ test("forwards stable behavior identity through draft creation and exposes gover
     assert.equal(first.dedupKey, "home:stable-behavior");
     assert.equal(merged.id, first.id);
 
+    const prepared = ctx.homeProposals.markProposalReady({ proposalId: first.id, expectedRevision: merged.revision });
     const snoozed = ctx.homeProposals.snoozeProposal({
-      proposalId: first.id,
-      expectedRevision: merged.revision,
+      proposalId: prepared.id,
+      expectedRevision: prepared.revision,
       until: "tomorrow",
     });
     assert.equal(snoozed.snoozeCount, 1);
@@ -818,7 +861,7 @@ test("uses an injected proposal store for existing reads and review without clos
   const ctx = new Context();
   let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
   try {
-    const created = store.create(candidate);
+    const created = prepareToReady(store, store.create(candidate).id);
     fiber = await ctx.plugin(HomeProposalService, { store } as never);
 
     for (const forbidden of ["listPreparationJobs", "claimPreparationJob", "retryPreparationJob"]) {
@@ -846,7 +889,7 @@ test("uses an injected proposal store for existing reads and review without clos
   }
 });
 
-test("wakes exactly once with the committed queued job after approving a qualifying automation", async () => {
+test("wakes exactly once with the committed queued job when a qualifying automation is admitted", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-home-proposal-wake-"));
   const path = join(directory, "proposals.sqlite");
   const store = new SqliteProposalStore({ path, now: () => "2026-08-19T01:00:00.000Z" });
@@ -856,13 +899,7 @@ test("wakes exactly once with the committed queued job after approving a qualify
   const callbackJobs: ArtifactPreparationJob[] = [];
   const callbackVisibleJobs: (ArtifactPreparationJob | undefined)[] = [];
   try {
-    const proposal = store.create({
-      ...candidate,
-      kind: "automation-draft",
-      idempotencyKey: "service-wake:approved:v1",
-      intent: { ...candidate.intent, type: "automation-draft" },
-      artifactCandidate: automationCandidate,
-    });
+    await ctx.plugin(StubHomeWorld);
     fiber = await ctx.plugin(HomeProposalService, {
       store,
       onPreparationQueued: (job: ArtifactPreparationJob) => {
@@ -870,20 +907,23 @@ test("wakes exactly once with the committed queued job after approving a qualify
         callbackVisibleJobs.push(observer.getPreparationJob(job.jobId));
       },
     } as never);
-
-    const approved = ctx.homeProposals.review({
-      proposalId: proposal.id,
-      expectedRevision: proposal.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
+    const proposalCreated = await ctx.homeProposals.createDraft({
+      kind: "automation-draft",
+      title: "回家自动开客厅灯",
+      summary: "有人回家时打开客厅灯。",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low" as const, reasons: [] },
+      intent: { type: "automation-draft", description: "有人回家时打开灯。", rollback: "恢复原状态。" },
+      idempotencyKey: "service-wake:approved:v1",
+      artifactCandidate: automationCandidate,
     });
     const queued = observer.listPreparationJobs()[0];
 
-    assert.equal(approved.status, "approved");
     assert.equal(callbackJobs.length, 1);
-    assert.equal(queued?.proposalId, approved.id);
-    assert.equal(queued?.proposalRevision, approved.revision);
+    assert.equal(queued?.proposalId, proposalCreated.id);
+    assert.equal(queued?.proposalRevision, 1);
     assert.deepEqual(callbackJobs, [queued]);
     assert.deepEqual(callbackVisibleJobs, [queued]);
   } finally {
@@ -907,20 +947,24 @@ test("does not wake for rejected, expired, or non-automation reviews", async () 
       store,
       onPreparationQueued: (job: ArtifactPreparationJob) => callbackJobs.push(job),
     } as never);
-    const rejected = store.create({
+    const rejectedCreated = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-wake:rejected:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
     });
-    const expired = store.create({
+    completePreparation(store, rejectedCreated.id);
+    const rejected = store.markProposalReady({ proposalId: rejectedCreated.id });
+    const expiredCreated = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-wake:expired:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
     });
+    completePreparation(store, expiredCreated.id);
+    const expired = store.markProposalReady({ proposalId: expiredCreated.id });
     const insight = store.create({
       ...candidate,
       idempotencyKey: "service-wake:insight:v1",
@@ -956,7 +1000,7 @@ test("does not wake for rejected, expired, or non-automation reviews", async () 
   }
 });
 
-test("does not report a wake-hook failure after the approval and queued job commit", async () => {
+test("does not report a wake-hook failure after the proposal and queued job commit", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-home-proposal-wake-error-"));
   const path = join(directory, "proposals.sqlite");
   const store = new SqliteProposalStore({ path, now: () => "2026-08-19T01:00:00.000Z" });
@@ -965,13 +1009,7 @@ test("does not report a wake-hook failure after the approval and queued job comm
   let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
   let calls = 0;
   try {
-    const proposal = store.create({
-      ...candidate,
-      kind: "automation-draft",
-      idempotencyKey: "service-wake:error:v1",
-      intent: { ...candidate.intent, type: "automation-draft" },
-      artifactCandidate: automationCandidate,
-    });
+    await ctx.plugin(StubHomeWorld);
     fiber = await ctx.plugin(HomeProposalService, {
       store,
       onPreparationQueued: () => {
@@ -979,20 +1017,26 @@ test("does not report a wake-hook failure after the approval and queued job comm
         throw new Error("worker wake failed");
       },
     } as never);
-
-    let approved;
-    assert.doesNotThrow(() => {
-      approved = ctx.homeProposals.review({
-        proposalId: proposal.id,
-        expectedRevision: proposal.revision,
-        decision: "approved",
-        reviewer: "household-owner",
-        feedbackCode: "useful_as_is",
-      });
+    const proposalCreated = await ctx.homeProposals.createDraft({
+      kind: "automation-draft",
+      title: "回家自动开客厅灯",
+      summary: "有人回家时打开客厅灯。",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low" as const, reasons: [] },
+      intent: { type: "automation-draft", description: "有人回家时打开灯。", rollback: "恢复原状态。" },
+      idempotencyKey: "service-wake:error:v1",
+      artifactCandidate: automationCandidate,
     });
-    assert.equal(approved?.status, "approved");
+    completePreparation(store, proposalCreated.id);
+    let proposal;
+    assert.doesNotThrow(() => {
+      proposal = ctx.homeProposals.markProposalReady({ proposalId: proposalCreated.id });
+    });
+    assert.equal(proposal.lifecycle, "ready");
     assert.equal(calls, 1);
-    assert.equal(observer.get(proposal.id)?.status, "approved");
+    assert.equal(observer.get(proposal.id)?.status, "pending_review");
     assert.equal(observer.listPreparationJobs().length, 1);
   } finally {
     await fiber?.dispose();
@@ -1011,22 +1055,16 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
   const ctx = new Context();
   let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
   try {
-    const proposal = store.create({
+    const proposalCreated = store.create({
       ...candidate,
       kind: "automation-draft",
       idempotencyKey: "service-projection:exact:v1",
       intent: { ...candidate.intent, type: "automation-draft" },
       artifactCandidate: automationCandidate,
     });
-    const approved = store.review({
-      proposalId: proposal.id,
-      expectedRevision: proposal.revision,
-      decision: "approved",
-      reviewer: "household-owner",
-      feedbackCode: "useful_as_is",
-    });
     const queued = store.listPreparationJobs()[0];
     assert.ok(queued);
+    const proposal = proposalCreated;
 
     fiber = await ctx.plugin(HomeProposalService, { store } as never);
     const service = ctx.homeProposals as unknown as {
@@ -1043,10 +1081,10 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
       } | undefined;
     };
 
-    const initial = service.preparationForProposal(approved.id, approved.revision);
+    const initial = service.preparationForProposal(proposal.id, queued.proposalRevision);
     assert.deepEqual(initial, {
-      proposalId: approved.id,
-      proposalRevision: approved.revision,
+      proposalId: proposal.id,
+      proposalRevision: queued.proposalRevision,
       status: "queued",
       attempt: 1,
       version: queued.version,
@@ -1065,10 +1103,10 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
       stage: "compile",
       code: "unavailable",
     });
-    const failure = service.preparationForProposal(approved.id, approved.revision);
+    const failure = service.preparationForProposal(proposal.id, queued.proposalRevision);
     assert.deepEqual(failure, {
-      proposalId: approved.id,
-      proposalRevision: approved.revision,
+      proposalId: proposal.id,
+      proposalRevision: queued.proposalRevision,
       status: "failed",
       attempt: failed.attempt,
       version: failed.version,
@@ -1085,8 +1123,8 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
     assert.throws(() => {
       (failure?.error as unknown as { code: string }).code = "policy_blocked";
     }, TypeError);
-    assert.equal(service.preparationForProposal(approved.id, approved.revision - 1), undefined);
-    assert.equal(service.preparationForProposal("missing-proposal", approved.revision), undefined);
+    assert.equal(service.preparationForProposal(proposal.id, queued.proposalRevision + 1), undefined);
+    assert.equal(service.preparationForProposal("missing-proposal", queued.proposalRevision), undefined);
 
     for (const forbidden of [
       "listPreparationJobs",
@@ -1098,6 +1136,274 @@ test("projects one exact preparation revision as closed deeply frozen metadata w
     ]) {
       assert.equal(forbidden in ctx.homeProposals, false, forbidden);
     }
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+
+test("recovers the crash window between external deployment and the local record", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T01:00:00.000Z" });
+  const statuses = new Map<string, "running" | "paused" | "missing" | "unknown">();
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_x", target: "ha-main" }),
+        status: async (request: { deploymentId: string }) => ({ status: statuses.get(request.deploymentId) ?? "unknown" }),
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "reconcile:crashed:v1",
+      dedupKey: "reconcile:crashed",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    const ready = prepareToReady(store, created.id);
+    // The approval persists the deployment intent; the process dies before the
+    // external result is recorded.
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_crashed", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] },
+    });
+    assert.equal(enabling.lifecycle, "enabling");
+    assert.equal(enabling.deployment?.deploymentId, "hob_crashed");
+    assert.equal(enabling.deployment?.target, "ha-main");
+
+    statuses.set("hob_crashed", "running");
+    await ctx.homeProposals.reconcileAutomations();
+    const recovered = store.get(enabling.id);
+    assert.equal(recovered?.lifecycle, "active", "a deployed-but-unrecorded enablement heals from bridge truth");
+    assert.equal(recovered?.applicationStatus, "running");
+
+    statuses.set("hob_crashed", "paused");
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(enabling.id)?.lifecycle, "paused", "a natively paused automation is reflected");
+
+    statuses.set("hob_crashed", "missing");
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(enabling.id)?.lifecycle, "closed", "a natively deleted automation closes locally");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+
+test("drift survives persistence and the fingerprint baseline reaches the record", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T02:00:00.000Z" });
+  const statuses = new Map<string, { status: "running" | "paused" | "missing" | "unknown"; configFingerprint?: string }>();
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => ({ deploymentId: "hob_drift", target: "ha-main", targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }] }),
+        deploy: async () => ({
+          status: "verified" as const,
+          deploymentId: "hob_drift",
+          target: "ha-main",
+          configFingerprint: "sha256:approved-behavior",
+        }),
+        status: async (request: { deploymentId: string }) => statuses.get(request.deploymentId) ?? { status: "unknown" as const },
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "drift:roundtrip:v1",
+      dedupKey: "drift:roundtrip",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+    const active = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(active.lifecycle, "active");
+    assert.equal(active.deployment?.configFingerprint, "sha256:approved-behavior", "the deployed fingerprint is the drift baseline");
+
+    statuses.set("hob_drift", { status: "running", configFingerprint: "sha256:natively-edited" });
+    await ctx.homeProposals.reconcileAutomations();
+    const drifted = store.get(active.id);
+    assert.equal(drifted?.deployment?.drifted, true, "a native edit surfaces as drift");
+    assert.equal(drifted?.audit.at(-1)?.action, "drift_detected");
+    assert.equal(store.get(active.id)?.deployment?.drifted, true, "the drifted record reads back without corruption");
+
+    statuses.set("hob_drift", { status: "running", configFingerprint: "sha256:approved-behavior" });
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(active.id)?.deployment?.drifted, false, "restoring the behavior clears the drift");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("a configuration gap blocks visibly and the settings recheck re-enables the same card", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.actionPolicyClass = "confirmation";
+  const bridge = {
+    bridgeId: "bridge-a",
+    automations: {
+      deploy: async (spec: { automationId: string }) => ({ status: "deployed" as const, nativeAutomationId: spec.automationId }),
+      setEnabled: async () => ({ status: "acknowledged" as const }),
+      withdraw: async () => ({ status: "acknowledged" as const }),
+    },
+    resolveTarget: (hwCapabilityId: string) => ({
+      hwCapabilityId,
+      binding: { bridgeId: "bridge-a", nativeId: "native-1", nativeInstanceId: `ent-${hwCapabilityId}` },
+    }),
+  };
+  const deploymentWorld = {
+    resolveActionAuthority: (id: string) => world.resolveActionAuthority(id),
+    // Mirrors governed admission's fallback for the unnamed stub device.
+    capabilityDeviceName: () => "灯",
+    automationBridgeForTargets: () => bridge,
+    automationBridgeById: (bridgeId: string) => bridgeId === "bridge-a" ? bridge : undefined,
+    automationsHandleFor: (bridgeId: string) => bridgeId === "bridge-a" ? bridge.automations : undefined,
+  };
+  const fiber = await ctx.plugin(HomeProposalService, {
+    path: ":memory:",
+    deployment: new BridgeAutomationDeployment(deploymentWorld as never),
+  } as never);
+  try {
+    const created = await ctx.homeProposals.createDraft({
+      kind: "automation-draft",
+      title: "回家自动开客厅灯",
+      summary: "有人回家时打开客厅灯。",
+      provenance: { producer: "dsh-home-agent" },
+      selectedHwIds: ["hw-1"],
+      rationale,
+      risk: { level: "low" as const, reasons: [] },
+      intent: { type: "automation-draft", description: "有人回家时打开灯。", rollback: "恢复原状态。" },
+      idempotencyKey: "governed-recovery:v1",
+      dedupKey: "governed-recovery",
+      artifactCandidate: automationCandidate,
+    });
+    assert.deepEqual(created.confirmationDeviceNames, ["灯"], "governed admission disclosed the named device");
+    const store = (ctx.homeProposals as unknown as { store: SqliteProposalStore }).store;
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+
+    world.actionPolicyClass = "unavailable";
+    const blocked = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(blocked.lifecycle, "ready", "the card stays in the visible ready list");
+    assert.equal(blocked.status, "pending_review", "the household decision was not spent");
+    assert.match(blocked.enableBlockedReason ?? "", /确认方式还没有设置好/);
+
+    world.actionPolicyClass = "confirmation";
+    const recheck = ctx.homeProposals.recheckBlockedEnablement();
+    assert.deepEqual(recheck, { rechecked: 1, cleared: 1 }, "the settings save rechecks and clears the block");
+    const cleared = store.get(blocked.id);
+    assert.equal(cleared?.enableBlockedReason, undefined);
+    assert.equal(cleared?.audit.at(-1)?.action, "enable_unblocked");
+
+    const enabled = await ctx.homeProposals.enableProposal({ proposalId: blocked.id, reviewer: "household-owner" });
+    assert.equal(enabled.lifecycle, "active", "the same card enables through the real deployment port");
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("a passing outage keeps the plan enableable and recovery enables it", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  let available = false;
+  const intent = {
+    deploymentId: "hob_recover",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } }],
+  };
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => available
+          ? intent
+          : { reason: "方案里有设备现在暂时连不上，家里的设置保持原样；稍后再试一次就好。" },
+        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_recover", target: "ha-main" }),
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "outage:recover:v1",
+      dedupKey: "outage:recover",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+
+    await assert.rejects(
+      () => ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" }),
+      (error: unknown) => error instanceof ProposalStoreError && /稍后再试/.test(error.message),
+    );
+    const afterOutage = store.get(ready.id);
+    assert.equal(afterOutage?.lifecycle, "ready", "the outage spends nothing");
+    assert.equal(afterOutage?.enableBlockedReason, undefined, "a passing outage never persists a block");
+    assert.equal(afterOutage?.revision, ready.revision);
+
+    available = true;
+    const enabled = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(enabled.lifecycle, "active", "the same plan enables once the world recovers");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("a changed world demotes a prepared plan instead of spending the decision", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => ({ revalidationReason: "方案里有设备已改为管理员档，需要重新准备。" }),
+        deploy: async () => { throw new Error("deploy must not run under stale consent"); },
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "revalidate:demote:v1",
+      dedupKey: "revalidate:demote",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+
+    const demoted = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(demoted.lifecycle, "preparing", "the plan re-verifies before it can be decided");
+    assert.equal(demoted.status, "pending_review", "the household decision was not spent");
+    assert.equal(demoted.preparedArtifact, undefined, "stale preparation refs are cleared");
+    assert.equal(demoted.audit.at(-1)?.action, "revalidation_required");
+    assert.equal(store.listPreparationJobs().some((job) =>
+      job.proposalId === demoted.id && job.proposalRevision === demoted.revision && job.status === "queued"), true,
+      "a fresh preparation is queued for the new revision");
   } finally {
     await fiber?.dispose();
     await ctx.fiber.dispose();

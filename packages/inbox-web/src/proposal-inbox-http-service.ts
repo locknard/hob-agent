@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual , randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { Context, Service } from "@deepseek-ai/cordis";
@@ -78,6 +78,7 @@ export type ProductRoute =
   | "home"
   | "conversation"
   | "review-center"
+  | "automations"
   | "activity"
   | "control"
   | "settings"
@@ -101,6 +102,9 @@ export interface ProductRouteRenderContext {
   readonly shellProjection?: InboxProductShellProjection;
   readonly controlFeedback?: ProductControlFeedback;
   readonly onboarding?: ProductOnboardingState;
+  /** One-shot household feedback shown inside the selected proposal detail. */
+  readonly proposalNotice?: string;
+  readonly actionPolicy?: ProductShellModel["actionPolicy"];
   readonly household?: ProductShellModel["household"];
   readonly view?: ProductShellModel["view"];
 }
@@ -114,6 +118,30 @@ export type ProductViewProvider = RegisteredProductViewProvider<ProductShellMode
 /** Static assets served alongside the fixed Host Shell and registered providers. */
 export const PRODUCT_CSS = PRODUCT_SHELL_STYLES;
 export const PRODUCT_JS = String.raw`// EventSource reconnects with Last-Event-ID for the active household turn.
+// The confirmation-method save button waits for a real change; the server
+// still answers an unchanged submission honestly for clients without script.
+for (const policyForm of document.querySelectorAll("[data-policy-form]")) {
+  if (!(policyForm instanceof HTMLFormElement)) continue;
+  const submit = policyForm.querySelector('button[type="submit"]');
+  if (!(submit instanceof HTMLButtonElement)) continue;
+  submit.disabled = true;
+  policyForm.addEventListener("change", () => {
+    submit.disabled = false;
+  }, { once: true });
+}
+
+// A one-shot notice cleans its query parameter after display, so a refresh
+// or a shared link never replays it. Runs from this asset because the page
+// CSP (script-src 'self') forbids inline scripts.
+if (document.querySelector("[data-one-shot-notice]") !== null) {
+  const cleaned = new URL(location.href);
+  if (cleaned.searchParams.has("notice") || cleaned.searchParams.has("policy")) {
+    cleaned.searchParams.delete("notice");
+    cleaned.searchParams.delete("policy");
+    history.replaceState(null, "", cleaned.pathname + cleaned.search + cleaned.hash);
+  }
+}
+
 for (const hostViewMenu of document.querySelectorAll("[data-host-view-menu]")) {
   if (!(hostViewMenu instanceof HTMLDetailsElement)) continue;
   document.addEventListener("pointerdown", (event) => {
@@ -137,20 +165,36 @@ const updateRuntimeCountdowns = () => {
     if (!Number.isFinite(expiry)) continue;
     const seconds = Math.max(0, Math.ceil((expiry - now) / 1000));
     if (seconds === 0) {
-      node.textContent = "已到期";
+      node.textContent = "已到期 · 未执行";
       const card = node.closest("[data-review-kind=\"runtime\"]");
       for (const button of card?.querySelectorAll("button") || []) button.disabled = true;
       continue;
     }
-    if (seconds < 60) node.textContent = seconds + " 秒";
-    else if (seconds < 3600) node.textContent = Math.ceil(seconds / 60) + " 分钟";
-    else node.textContent = Math.ceil(seconds / 3600) + " 小时";
+    if (seconds < 60) node.textContent = seconds + " 秒后自动取消";
+    else if (seconds < 3600) node.textContent = Math.ceil(seconds / 60) + " 分钟后自动取消";
+    else node.textContent = Math.ceil(seconds / 3600) + " 小时后自动取消";
   }
 };
 if (runtimeCountdowns.length > 0) {
   updateRuntimeCountdowns();
   const runtimeCountdownTimer = window.setInterval(updateRuntimeCountdowns, 1000);
   window.addEventListener("beforeunload", () => window.clearInterval(runtimeCountdownTimer), { once: true });
+}
+
+const activityFilters = document.querySelector("[data-activity-filters]");
+if (activityFilters instanceof HTMLElement) {
+  activityFilters.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-activity-filter]") : null;
+    if (!(button instanceof HTMLElement)) return;
+    const filter = button.getAttribute("data-activity-filter") || "all";
+    for (const other of activityFilters.querySelectorAll("[data-activity-filter]")) {
+      other.setAttribute("aria-pressed", other === button ? "true" : "false");
+    }
+    for (const item of document.querySelectorAll("[data-activity-attribution]")) {
+      if (!(item instanceof HTMLElement)) continue;
+      item.hidden = filter !== "all" && item.getAttribute("data-activity-attribution") !== filter;
+    }
+  });
 }
 
 const turn = document.querySelector("[data-advice-stream=\"sse\"]");
@@ -216,6 +260,7 @@ const PRODUCT_HREFS: Partial<Record<ProductShellRoute, string>> = {
   overview: "/home",
   conversation: "/conversation",
   reviews: "/review-center",
+  automations: "/automations",
   activity: "/activity",
   control: "/control",
   settings: "/settings",
@@ -490,13 +535,17 @@ interface InboxHttpPort {
   approveRuntimeConfirmation?(request: InboxRuntimeDecisionRequest): unknown | Promise<unknown>;
   rejectRuntimeConfirmation?(request: InboxRuntimeDecisionRequest): unknown | Promise<unknown>;
   canSnoozeProposal?(): boolean;
-  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget }): unknown | Promise<unknown>;
+  snoozeProposal?(input: { readonly proposalId: string; readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number }): unknown | Promise<unknown>;
   canRejectProposal?(): boolean;
   rejectProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
   canLatchProposal?(): boolean;
   latchProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
   canEnableProposal?(): boolean;
+  /** Settings saved a new confirmation configuration: recheck blocked plans. */
+  recheckBlockedProposals?(): { readonly rechecked: number; readonly cleared: number };
   enableProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
+  canControlAutomation?(): boolean;
+  controlAutomation?(input: { readonly proposalId: string; readonly command: "pause" | "resume" | "close" | "retry"; readonly actor: string }): unknown | Promise<unknown>;
 }
 
 declare module "@deepseek-ai/cordis" {
@@ -648,6 +697,8 @@ export class ProposalInboxHttpService extends Service {
           productRoute === "settings" ? boundedLayoutDraftId(url.searchParams.get("layout")) : undefined,
           productRoute === "settings" && url.searchParams.get("preview") === "1",
           productRoute === "settings" ? boundedLayoutDraftNotice(url.searchParams.get("layoutNotice")) : undefined,
+          undefined,
+          productRoute === "settings" && method === "GET" ? this.consumeActionPolicyReceipt(url.searchParams.get("policy")) : undefined,
         );
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
@@ -672,6 +723,57 @@ export class ProposalInboxHttpService extends Service {
         } catch (error) {
           return send(response, onboardingErrorStatus(error), onboardingErrorText(error));
         }
+      }
+      if (method === "POST" && url.pathname === "/settings/action-policy") {
+        if (this.principal === undefined || !canUsePrivateProposalReviewPrincipal(this.principal)) {
+          return send(response, 403, "Confirmation settings require a present member on their own bound private phone");
+        }
+        const configure = this.onboarding.configureActionPolicy?.bind(this.onboarding);
+        if (configure === undefined) return send(response, 404, "Confirmation settings unavailable");
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported confirmation settings content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid confirmation settings");
+        }
+        const selection = actionPolicySelectionInput(body);
+        if (selection === undefined) return send(response, 400, "Invalid confirmation settings");
+        let changedCount: number;
+        try {
+          const configured = await configure(selection, this.principal as OnboardingActor | undefined);
+          if (configured.status !== "configured") return send(response, 409, "Confirmation settings were not saved");
+          changedCount = configured.changedCount;
+        } catch (error) {
+          return send(response, onboardingErrorStatus(error), onboardingErrorText(error));
+        }
+        // A save that changed nothing writes nothing, rechecks nothing, and
+        // says so. A real change immediately rechecks every blocked plan, so
+        // the card the household came from recovers without another step. The
+        // redirect carries an opaque single-use receipt — the page can never
+        // be talked into a success message by a crafted URL. A recheck failure
+        // never undoes the save; the receipt states it plainly.
+        const noChange = changedCount === 0;
+        let recheck: { readonly rechecked: number; readonly cleared: number } | undefined;
+        let recheckFailed = false;
+        if (!noChange) {
+          try {
+            recheck = this.inbox.recheckBlockedProposals?.();
+          } catch {
+            recheckFailed = true;
+          }
+        }
+        const receipt = randomBytes(16).toString("hex");
+        this.pruneActionPolicyReceipts();
+        this.actionPolicyReceipts.set(receipt, {
+          at: Date.now(),
+          ...(noChange ? { noChange: true } : {}),
+          ...(recheck === undefined ? {} : { recheck }),
+          ...(recheckFailed ? { recheckFailed: true } : {}),
+        });
+        return redirect(response, `/settings?policy=${receipt}#action-policy`);
       }
       if (method === "POST" && url.pathname === "/settings/view-default") {
         if (!canManageProductViewDefault(this.principal)) {
@@ -728,7 +830,7 @@ export class ProposalInboxHttpService extends Service {
       }
       if (method === "POST" && url.pathname === "/settings/layout-drafts") {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
-          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+          return send(response, 403, "Layout authoring requires the household owner's bound private phone");
         }
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
           return send(response, 415, "Unsupported layout draft content type");
@@ -751,7 +853,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutDraftUpdate = /^\/settings\/layout-drafts\/([^/]+)$/.exec(url.pathname);
       if (method === "POST" && layoutDraftUpdate) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
-          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+          return send(response, 403, "Layout authoring requires the household owner's bound private phone");
         }
         const draftId = boundedLayoutDraftId(safeDecode(layoutDraftUpdate[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout draft");
@@ -780,7 +882,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutDraftDelete = /^\/settings\/layout-drafts\/([^/]+)\/delete$/.exec(url.pathname);
       if (method === "POST" && layoutDraftDelete) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts === undefined) {
-          return send(response, 403, "Layout authoring requires an administrator on a bound private device");
+          return send(response, 403, "Layout authoring requires the household owner's bound private phone");
         }
         const draftId = boundedLayoutDraftId(safeDecode(layoutDraftDelete[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout draft deletion");
@@ -805,7 +907,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutDraftPublish = /^\/settings\/layout-drafts\/([^/]+)\/publish$/.exec(url.pathname);
       if (method === "POST" && layoutDraftPublish) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.publish === undefined) {
-          return send(response, 403, "Layout publication requires an administrator on a bound private device");
+          return send(response, 403, "Layout publication requires the household owner's bound private phone");
         }
         const draftId = boundedLayoutDraftId(safeDecode(layoutDraftPublish[1]!) ?? null);
         if (draftId === undefined) return send(response, 400, "Invalid layout publication");
@@ -843,7 +945,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutPublicationRollback = /^\/settings\/layout-publications\/([^/]+)\/rollback$/.exec(url.pathname);
       if (method === "POST" && layoutPublicationRollback) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.rollbackPublication === undefined) {
-          return send(response, 403, "Layout rollback requires an administrator on a bound private device");
+          return send(response, 403, "Layout rollback requires the household owner's bound private phone");
         }
         const recipeId = boundedLayoutDraftId(safeDecode(layoutPublicationRollback[1]!) ?? null);
         if (recipeId === undefined) return send(response, 400, "Invalid layout rollback");
@@ -873,7 +975,7 @@ export class ProposalInboxHttpService extends Service {
       const layoutPublicationDeactivate = /^\/settings\/layout-publications\/([^/]+)\/deactivate$/.exec(url.pathname);
       if (method === "POST" && layoutPublicationDeactivate) {
         if (!canAuthorProductViewRecipe(this.principal) || this.viewRecipeDrafts?.deactivatePublication === undefined) {
-          return send(response, 403, "Layout deactivation requires an administrator on a bound private device");
+          return send(response, 403, "Layout deactivation requires the household owner's bound private phone");
         }
         const recipeId = boundedLayoutDraftId(safeDecode(layoutPublicationDeactivate[1]!) ?? null);
         if (recipeId === undefined) return send(response, 400, "Invalid layout deactivation");
@@ -1039,7 +1141,7 @@ export class ProposalInboxHttpService extends Service {
         const adviceId = safeDecode(adviceCorrection[1]!);
         if (adviceId === undefined) return send(response, 400, "Invalid household correction");
         if (this.principal === undefined || !canUsePrivateCorrectionPrincipal(this.principal)) {
-          return send(response, 403, "Household correction requires a present adult household member on a bound private device");
+          return send(response, 403, "Household correction requires a present member on a private device bound to themselves");
         }
         if (this.inbox.submitConversationCorrection === undefined) {
           return send(response, 503, "Household correction is unavailable");
@@ -1217,14 +1319,15 @@ export class ProposalInboxHttpService extends Service {
         const confirmationId = safeDecode(runtimeDecision[1]!);
         if (confirmationId === undefined) return send(response, 400, "Invalid runtime confirmation");
         if (this.principal === undefined || !canUsePresentHouseholdPrincipal(this.principal)) {
-          return send(response, 403, "Runtime review requires a present adult household member");
+          return send(response, 403, "Runtime review requires a present household member");
         }
         const decide = runtimeDecision[2] === "approve"
           ? this.inbox.approveRuntimeConfirmation
           : this.inbox.rejectRuntimeConfirmation;
         if (decide === undefined) return send(response, 404, "Runtime confirmation review unavailable");
-        if (this.inbox.canApproveRuntimeConfirmation?.(this.principal, confirmationId) === false) {
-          return send(response, 403, "This confirmation requires an eligible present household member on an authorized device");
+        if (runtimeDecision[2] === "approve"
+          && this.inbox.canApproveRuntimeConfirmation?.(this.principal, confirmationId) === false) {
+          return send(response, 403, "Approval requires a present member on a private device bound to themselves");
         }
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
           return send(response, 415, "Unsupported runtime confirmation content type");
@@ -1267,10 +1370,10 @@ export class ProposalInboxHttpService extends Service {
         } catch (error) {
           return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid proposal snooze");
         }
-        const until = proposalSnoozeInput(body);
-        if (until === undefined) return send(response, 400, "Invalid proposal snooze");
+        const snoozeInput = proposalSnoozeInput(body);
+        if (snoozeInput === undefined) return send(response, 400, "Invalid proposal snooze");
         try {
-          await this.inbox.snoozeProposal({ proposalId, until });
+          await this.inbox.snoozeProposal({ proposalId, ...snoozeInput });
         } catch (error) {
           return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
         }
@@ -1331,15 +1434,39 @@ export class ProposalInboxHttpService extends Service {
         try {
           await this.inbox.enableProposal({ proposalId, expectedRevision, reviewer: this.reviewer });
         } catch (error) {
+          // A retryable failure stays inside the product: the URL carries only
+          // a closed product code, never raw error text, and the card returns
+          // with every entry intact instead of an error page.
+          if (errorCode(error) === "enable_temporarily_unavailable") {
+            return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}?notice=enable_temporarily_unavailable`);
+          }
           return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
         }
         return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}`);
+      }
+      const automationControl = /^\/automations\/([^/]+)\/(pause|resume|close|retry)$/.exec(url.pathname);
+      if (method === "POST" && automationControl) {
+        const proposalId = safeDecode(automationControl[1]!);
+        const command = automationControl[2] as "pause" | "resume" | "close" | "retry";
+        if (proposalId === undefined) return send(response, 400, "Invalid automation command");
+        if (this.principal === undefined || !canUsePrivateProposalReviewPrincipal(this.principal)) {
+          return send(response, 403, "Automation control needs a bound private device");
+        }
+        if (!(this.inbox.canControlAutomation?.() ?? false) || this.inbox.controlAutomation === undefined) {
+          return send(response, 404, "Automation control unavailable");
+        }
+        try {
+          await this.inbox.controlAutomation({ proposalId, command, actor: this.reviewer });
+        } catch (error) {
+          return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
+        }
+        return redirect(response, "/automations");
       }
       const detail = /^\/review-center\/proposals\/([^/]+)$/.exec(url.pathname);
       if ((method === "GET" || method === "HEAD") && detail) {
         const proposalId = safeDecode(detail[1]!);
         if (proposalId === undefined) return send(response, 404, "Proposal not found");
-        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference);
+        return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference, undefined, false, undefined, productNoticeCopy(url.searchParams.get("notice")));
       }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
@@ -1470,6 +1597,8 @@ export class ProposalInboxHttpService extends Service {
     selectedLayoutDraftId?: string,
     previewLayoutDraft = false,
     layoutDraftNotice?: LayoutDraftNotice,
+    proposalNotice?: string,
+    actionPolicySavedNotice?: string,
   ): Promise<void> {
     const showsReviewSummary = route === "home" || route === "review-center";
     const reviewProjection = showsReviewSummary ? await this.productReviewProjection(proposalId) : undefined;
@@ -1499,6 +1628,8 @@ export class ProposalInboxHttpService extends Service {
       ...(shellProjection === undefined ? {} : { shellProjection }),
       ...(controlFeedback === undefined ? {} : { controlFeedback }),
       ...(onboarding === undefined ? {} : { onboarding }),
+      ...(proposalNotice === undefined ? {} : { proposalNotice }),
+      ...(route === "settings" ? this.actionPolicyEditorContext(actionPolicySavedNotice) : {}),
       household: hostProjection.household,
     };
     const viewCurrentPath = productViewCurrentPath(path, route, proposalId, actionTicketId, batchRequestId);
@@ -1601,6 +1732,63 @@ export class ProposalInboxHttpService extends Service {
       ...(notice === undefined ? {} : { notice }),
     });
   }
+  private readonly actionPolicyReceipts = new Map<string, { readonly at: number; readonly noChange?: boolean; readonly recheck?: { readonly rechecked: number; readonly cleared: number }; readonly recheckFailed?: boolean }>();
+
+  private pruneActionPolicyReceipts(): void {
+    const now = Date.now();
+    for (const [key, value] of this.actionPolicyReceipts) {
+      if (now - value.at > 300_000) this.actionPolicyReceipts.delete(key);
+    }
+    while (this.actionPolicyReceipts.size > 32) {
+      const oldest = this.actionPolicyReceipts.keys().next().value;
+      if (oldest === undefined) break;
+      this.actionPolicyReceipts.delete(oldest);
+    }
+  }
+
+  /** A receipt reads exactly once; a forged or replayed token reads nothing. */
+  private consumeActionPolicyReceipt(token: string | null): string | undefined {
+    if (token === null || !/^[a-f0-9]{32}$/.test(token)) return undefined;
+    const receipt = this.actionPolicyReceipts.get(token);
+    if (receipt === undefined) return undefined;
+    this.actionPolicyReceipts.delete(token);
+    if (Date.now() - receipt.at > 300_000) return undefined;
+    if (receipt.noChange === true) return "确认方式没有变化。";
+    if (receipt.recheckFailed === true) return "已保存确认方式，建议状态稍后重新检查。";
+    if (receipt.recheck === undefined) return "已保存确认方式。";
+    return receipt.recheck.rechecked === 0
+      ? "已保存确认方式，没有受影响的建议。"
+      : `已保存确认方式，已重新检查 ${receipt.recheck.rechecked} 条受阻建议${receipt.recheck.cleared > 0 ? `，其中 ${receipt.recheck.cleared} 条已恢复可启用` : ""}。`;
+  }
+
+  private actionPolicyEditorContext(savedNotice: string | undefined): { readonly actionPolicy?: ProductShellModel["actionPolicy"] } {
+    const read = this.onboarding.actionPolicyChoices?.bind(this.onboarding);
+    if (read === undefined || this.onboarding.configureActionPolicy === undefined) return {};
+    let choices: ReturnType<NonNullable<OnboardingPort["actionPolicyChoices"]>> | undefined;
+    try {
+      choices = read();
+    } catch {
+      return {};
+    }
+    if (choices === undefined) return {};
+    if (choices.status !== "available" || choices.capabilities.length === 0) return {};
+    return {
+      actionPolicy: {
+        capabilities: choices.capabilities.slice(0, 200).map((capability) => ({
+          id: capability.id,
+          label: capability.label,
+          bridgeLabel: capability.bridgeLabel,
+          // The saved configuration wins; the type-based suggestion is only a
+          // labeled hint on rows the household never configured.
+          policyClass: capability.currentPolicyClass ?? capability.suggestedPolicyClass,
+          state: capability.configurationState
+            ?? (capability.currentPolicyClass !== undefined ? "active" as const : "unconfigured" as const),
+        })),
+        ...(savedNotice === undefined ? {} : { savedNotice }),
+      },
+    };
+  }
+
   private async productHostProjection(reviewProjection?: InboxProductReviewProjection): Promise<{
     readonly reviewCounts: ProductReviewCounts;
     readonly onboardingState?: ProductOnboardingState;
@@ -1828,11 +2016,51 @@ function productRouteForPath(path: string): ProductRoute | undefined {
   if (path === "/home") return "home";
   if (path === "/conversation") return "conversation";
   if (path === "/review-center") return "review-center";
+  if (path === "/automations") return "automations";
   if (path === "/activity") return "activity";
   if (path === "/control") return "control";
   if (path === "/settings") return "settings";
   if (path === "/onboarding") return "onboarding";
   return undefined;
+}
+
+/**
+ * The notice query parameter is a closed set of product codes. The household
+ * copy renders server-side; arbitrary query text never reaches the page.
+ */
+function productNoticeCopy(code: string | null): string | undefined {
+  return code === "enable_temporarily_unavailable"
+    ? "这次启用暂时没能完成，家里的设置保持原样；稍后再试一次。"
+    : undefined;
+}
+
+function actionPolicySelectionInput(body: string): {
+  readonly directCapabilityIds: readonly string[];
+  readonly confirmationCapabilityIds: readonly string[];
+  readonly administratorCapabilityIds: readonly string[];
+} | undefined {
+  let fields: URLSearchParams;
+  try {
+    fields = new URLSearchParams(body);
+  } catch {
+    return undefined;
+  }
+  const direct: string[] = [];
+  const confirmation: string[] = [];
+  const administrator: string[] = [];
+  let total = 0;
+  for (const [name, value] of fields) {
+    if (!name.startsWith("capability:")) return undefined;
+    const id = name.slice("capability:".length);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id)) return undefined;
+    if (value === "direct") direct.push(id);
+    else if (value === "confirmation") confirmation.push(id);
+    else if (value === "administrator") administrator.push(id);
+    else return undefined;
+    total += 1;
+    if (total > 200) return undefined;
+  }
+  return { directCapabilityIds: direct, confirmationCapabilityIds: confirmation, administratorCapabilityIds: administrator };
 }
 
 function selectedProposalId(value: string | null): string | undefined {
@@ -2184,18 +2412,8 @@ function productHouseholdFromIdentity(
   return {
     ...(identity?.householdName === undefined ? {} : { name: identity.householdName }),
     ...(identity?.agentName === undefined ? {} : { agentName: identity.agentName }),
-    ...(principal === undefined ? {} : { memberName: principal.principalId, memberRole: principalRoleLabel(principal.role) }),
+    ...(principal === undefined ? {} : { memberName: principal.principalId }),
   };
-}
-
-function principalRoleLabel(role: InboxReviewActor["role"]): string {
-  switch (role) {
-    case "admin": return "管理员";
-    case "adult_member": return "成年成员";
-    case "member": return "成员";
-    case "child": return "孩子";
-    case "guest": return "访客";
-  }
 }
 
 function productShellModel(route: ProductRoute, context: ProductRouteRenderContext): ProductShellModel {
@@ -2222,6 +2440,8 @@ function productShellModel(route: ProductRoute, context: ProductRouteRenderConte
       : { expiredSummary: context.reviewProjection.expiredSummary }),
     ...(context.activeTurn === undefined ? {} : { activeTurn: context.activeTurn }),
     ...(context.controlFeedback === undefined ? {} : { controlFeedback: context.controlFeedback }),
+    ...(context.proposalNotice === undefined ? {} : { proposalNotice: context.proposalNotice }),
+    ...(context.actionPolicy === undefined ? {} : { actionPolicy: context.actionPolicy }),
     ...(context.onboarding === undefined ? {} : { onboarding: context.onboarding }),
   };
 }
@@ -2330,9 +2550,10 @@ function canUsePresentHouseholdPrincipal(actor: InboxReviewActor): boolean {
 }
 
 function canUsePrivateProposalReviewPrincipal(actor: InboxReviewActor): boolean {
-  if (!canUsePresentHouseholdPrincipal(actor)
-    || (actor.role !== "admin" && actor.role !== "adult_member")
-    || actor.device.kind !== "private") return false;
+  // The household shares one trust domain: any present member decides from a
+  // private device bound to themselves. Safety lives on the action's
+  // consequence class, not on a member rank.
+  if (!canUsePresentHouseholdPrincipal(actor) || actor.device.kind !== "private") return false;
   return actor.device.boundPrincipalId === actor.principalId;
 }
 
@@ -2389,7 +2610,9 @@ function proposalMutationErrorStatus(error: unknown): number {
   const code = errorCode(error);
   return code === "unauthorized" ? 403 : code === "not_found" || code === "proposal_snooze_unavailable" || code === "proposal_reject_unavailable" || code === "proposal_latch_unavailable" || code === "proposal_enable_unavailable"
     ? 404
-    : code === "revision_conflict" || code === "terminal_status" || code === "conflict" || code === "trial_not_complete" || code === "rollout_state_invalid" ? 409 : 500;
+    : code === "enable_temporarily_unavailable"
+      ? 503
+      : code === "revision_conflict" || code === "terminal_status" || code === "conflict" || code === "trial_not_complete" || code === "rollout_state_invalid" ? 409 : 500;
 }
 
 function proposalMutationErrorText(error: unknown): string {
@@ -2420,6 +2643,7 @@ function productRouteTitle(route: ProductRoute): string {
     case "home": return "总览";
     case "conversation": return "对话";
     case "review-center": return "处理中心";
+    case "automations": return "自动化";
     case "activity": return "活动";
     case "control": return "控制";
     case "settings": return "设置";
@@ -2654,7 +2878,6 @@ function isCorrectionType(value: unknown): value is InboxConversationCorrectionT
 
 function canUsePrivateCorrectionPrincipal(actor: InboxReviewActor): boolean {
   return actor.present === true
-    && (actor.role === "admin" || actor.role === "adult_member")
     && actor.device.kind === "private"
     && actor.device.boundPrincipalId === actor.principalId;
 }
@@ -2724,7 +2947,9 @@ function onboardingContinueInput(body: string): OnboardingCommand | undefined {
       return one("mapConfirmed") !== "confirmed" ? undefined : { step: 3, kind: "confirm_map", confirmed: true, ...(one("mapCorrection") === undefined ? {} : { correction: one("mapCorrection") }) };
     case 4: {
       const memberName = one("memberName");
-      return memberName === undefined || one("memberRole") !== "adult_admin" ? undefined : { step: 4, kind: "bind_private_device", memberName, role: "adult_admin" };
+      // The binding has exactly one shape, so the server supplies the
+      // compatibility command value instead of asking the household to pick it.
+      return memberName === undefined ? undefined : { step: 4, kind: "bind_private_device", memberName, role: "adult_admin" };
     }
     case 5: {
       const selections = Object.entries(fieldsByName)
@@ -2768,7 +2993,7 @@ const ONBOARDING_FIELDS_BY_STEP: Readonly<Record<number, readonly string[]>> = {
   1: ["agentName", "householdName"],
   2: ["bridgeId", "bridgeMode"],
   3: ["mapConfirmed", "mapCorrection"],
-  4: ["memberName", "memberRole"],
+  4: ["memberName"],
   5: [],
   6: ["safetyAcknowledged"],
   7: ["observationEnabled", "observationInterval", "quietHoursStart", "quietHoursEnd"],
@@ -2791,7 +3016,6 @@ const ONBOARDING_OPTIONAL_FIELDS = new Set([
 const ONBOARDING_FIELD_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   bridgeMode: ["read_only"],
   mapConfirmed: ["confirmed"],
-  memberRole: ["adult_admin"],
   safetyAcknowledged: ["understood"],
   observationEnabled: ["enabled"],
 };
@@ -2951,7 +3175,7 @@ function onboardingErrorText(error: unknown): string {
     case "invalid_step": return "Invalid onboarding continuation";
     case "stale_step": return "Onboarding step is no longer current";
     case "already_complete": return "Onboarding is already complete";
-    case "permission_denied": return "This onboarding step requires an adult member on a bound private device";
+    case "permission_denied": return "This onboarding step requires a present member on their own bound private phone";
     case "unavailable": return "家庭设置正在准备，连接完成后从这里继续。";
     case "onboarding_unavailable": return "家庭设置正在准备，连接完成后从这里继续。";
     default: return "Onboarding continuation failed";
@@ -2973,12 +3197,17 @@ function preparationRetryInput(
     : { proposalId, expectedRevision, expectedVersion };
 }
 
-function proposalSnoozeInput(body: string): ProposalInboxSnoozeTarget | undefined {
+function proposalSnoozeInput(body: string): { readonly until: ProposalInboxSnoozeTarget | "later"; readonly expectedRevision?: number } | undefined {
   const form = new URLSearchParams(body);
-  if (form.getAll("until").length !== 1 || [...form.keys()].some((key) => key !== "until")) return undefined;
+  if (form.getAll("until").length !== 1
+    || [...form.keys()].some((key) => key !== "until" && key !== "expectedRevision")) return undefined;
   const until = form.get("until");
-  if (until === "tomorrow" || until === "weekend" || until === "next_week") return until;
-  return undefined;
+  if (until !== "later" && until !== "tomorrow" && until !== "weekend" && until !== "next_week") return undefined;
+  const revisionRaw = form.get("expectedRevision");
+  if (revisionRaw === null) return { until };
+  const expectedRevision = Number.parseInt(revisionRaw, 10);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) return undefined;
+  return { until, expectedRevision };
 }
 
 function proposalDecisionInput(body: string): number | undefined {

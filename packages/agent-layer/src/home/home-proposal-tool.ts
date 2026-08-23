@@ -68,7 +68,7 @@ interface HomeProposalPort {
     id: string;
     revision: number;
     status: "pending_review";
-    applicationStatus: "not_available";
+    applicationStatus: string;
     conflictCheck: { existingAutomationCount: number; matches: readonly unknown[] };
     spaceCoverage: {
       selectedDevices: number;
@@ -95,7 +95,7 @@ const OUTPUT_SCHEMA = {
     proposalId: { type: "string", required: true },
     status: { type: "string", required: true, enum: ["pending_review"] },
     revision: { type: "number", required: true },
-    applicationStatus: { type: "string", required: true, enum: ["not_available"] },
+    applicationStatus: { type: "string", required: true, enum: ["not_available", "deploying", "running", "failed", "withdrawn"] },
     conflictSummary: {
       type: "object",
       required: true,
@@ -279,6 +279,56 @@ const artifactCandidateParameter = {
 } as const;
 
 export function apply(ctx: Context): void {
+  ctx.tools.register(defineTool({
+    name: "list_home_proposals",
+    description: [
+      "List the household's unresolved proposals with their stable dedupKey.",
+      "To revise one after the household asks for a change, call create_home_proposal with the SAME dedupKey and the full replacement plan; the Hub replaces the plan content, wakes the card, and re-verifies it before the household decides.",
+      "Read-only; it exposes no device control and no approval authority.",
+    ].join(" "),
+    parameters: {},
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          proposals: {
+            type: "array",
+            required: true,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                proposalId: { type: "string", required: true },
+                revision: { type: "number", required: true },
+                title: { type: "string", required: true },
+                summary: { type: "string", required: true },
+                dedupKey: { type: "string", required: true },
+                kind: { type: "string", required: true },
+                lifecycle: { type: "string", required: true },
+              },
+            },
+          },
+        },
+      } as never,
+      render: (_args: unknown, value: unknown) => [{ type: "text" as const, text: JSON.stringify(value) }],
+    },
+    execute: async () => {
+      const proposals = (ctx as ProposalContext).homeProposals.list({ status: "pending_review", limit: 20 });
+      return {
+        proposals: proposals.map((proposal) => ({
+          proposalId: proposal.id,
+          revision: proposal.revision,
+          title: proposal.title,
+          summary: proposal.summary,
+          dedupKey: proposal.dedupKey,
+          kind: proposal.kind,
+          lifecycle: proposal.lifecycle ?? "ready",
+        })),
+      };
+    },
+  } as never));
+
   ctx.tools.register(defineTool({
     name: "create_home_proposal",
     description: [

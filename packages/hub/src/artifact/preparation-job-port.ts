@@ -50,6 +50,26 @@ export interface ArtifactPreparationJobFailure extends ArtifactPreparationJobTra
 
 export interface ArtifactPreparationJobPort {
   readonly claimPreparationJob: (input: ArtifactPreparationJobTransition) => ArtifactPreparationJob;
-  readonly completePreparationJob: (input: ArtifactPreparationJobTransition) => ArtifactPreparationJob;
+  readonly completePreparationJob: (input: ArtifactPreparationJobTransition & {
+    /** The immutable receipt refs commit atomically with the success itself. */
+    readonly preparedArtifact: {
+      readonly artifactId: string;
+      readonly revision: number;
+      readonly contentHash: string;
+      readonly compileResultId: string;
+      readonly dryRunResultId: string;
+    };
+  }) => ArtifactPreparationJob;
   readonly failPreparationJob: (input: ArtifactPreparationJobFailure) => ArtifactPreparationJob;
+  /**
+   * Promotes the prepared proposal into the household inbox. Optional so
+   * borrowed job stores without proposal ownership stay valid; the runner
+   * treats a declined promotion (capacity, superseded revision) as deferred,
+   * never as a job failure.
+   */
+  readonly markProposalReady?: (input: {
+    readonly proposalId: string;
+    readonly expectedRevision?: number;
+    readonly actor?: string;
+  }) => unknown;
 }
