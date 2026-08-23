@@ -131,6 +131,15 @@ class FakeAudio {
     this.paused = true;
   }
 }
+class FakeWindow {
+  readonly listeners = new Map<string, Handler>();
+  addEventListener(name: string, handler: Handler): void {
+    this.listeners.set(name, handler);
+  }
+  dispatch(name: string): void {
+    this.listeners.get(name)?.({});
+  }
+}
 
 interface Harness {
   root: Element;
@@ -147,6 +156,7 @@ interface Harness {
   calls: Array<{ url: string; init: any }>;
   streams: FakeStream[];
   timers: Array<Handler>;
+  pagehide(): void;
 }
 function createHarness(
   options: {
@@ -157,6 +167,7 @@ function createHarness(
     fetch?: (url: string, init: any) => Promise<any> | any;
     sampleRate?: number;
     permissionRequest?: Promise<FakeStream>;
+    leaseRequest?: (init: any) => Promise<any> | any;
   } = {},
 ): Harness {
   FakeRecorder.instances = [];
@@ -202,7 +213,9 @@ function createHarness(
   root.nodes.set("[data-voice-conversation]", conversation);
   const streams: FakeStream[] = [];
   const calls: Array<{ url: string; init: any }> = [];
+  let adviceId = "";
   const timers: Handler[] = [];
+  const window = new FakeWindow();
   const result = options.response ?? {
     status: "accepted",
     adviceId: "turn_1",
@@ -210,8 +223,36 @@ function createHarness(
   };
   const fetch = async (url: string, init: any = {}) => {
     calls.push({ url, init });
-    if (options.fetch) return options.fetch(url, init);
-    return url.startsWith("/voice/transcribe")
+    if (url === "/voice/turns") {
+      if (options.leaseRequest !== undefined) return options.leaseRequest(init);
+      return {
+        ok: true,
+        json: async () => ({
+          status: "leased",
+          voiceTurnId: "lease_turn_000000",
+          captureMode: options.mode ?? "encoded_audio",
+        }),
+      };
+    }
+    if (options.fetch) {
+      const isTranscription = /\/voice\/turns\/[^/]+\/transcribe$/.test(url);
+      const legacyUrl = isTranscription
+        ? "/test/transcribe"
+        : /\/voice\/turns\/[^/]+\/speech$/.test(url)
+          ? "/test/speech/" + adviceId
+          : url;
+      const response = await options.fetch(legacyUrl, init);
+      if (isTranscription && response?.json instanceof Function) {
+        const json = response.json.bind(response);
+        response.json = async () => {
+          const result = await json();
+          if (typeof result?.adviceId === "string") adviceId = result.adviceId;
+          return result;
+        };
+      }
+      return response;
+    }
+    return url.includes("/transcribe")
       ? { ok: true, json: async () => result }
       : {
           ok: true,
@@ -254,6 +295,7 @@ function createHarness(
     DataView,
     AbortController,
     URL: { createObjectURL: () => "blob:test", revokeObjectURL: () => {} },
+    window,
     setTimeout: (handler: Handler) => {
       timers.push(handler);
       return timers.length;
@@ -275,6 +317,7 @@ function createHarness(
     calls,
     streams,
     timers,
+    pagehide: () => window.dispatch("pagehide"),
   };
 }
 async function flush(): Promise<void> {
@@ -292,22 +335,24 @@ function deferred<T>(): {
   return { promise, resolve };
 }
 
-test("records encoded audio once, transcribes through the private route, streams progress, and plays private speech", async () => {
+test("acquires a private voice turn before microphone permission, then uses and releases that opaque lease", async () => {
   const h = createHarness();
   h.start.click();
   await flush();
+  assert.equal(h.calls[0]?.url, "/voice/turns");
+  assert.equal(h.calls[0]?.init.method, "POST");
   assert.equal(h.root.dataset.voiceState, "listening");
   FakeRecorder.instances[0]!.emit();
   h.stop.click();
   await flush();
-  assert.equal(h.calls[0]?.url, "/voice/transcribe");
-  assert.equal(h.calls[0]?.init.method, "POST");
-  assert.equal(h.calls[0]?.init.headers["Content-Type"], "audio/webm");
+  assert.equal(h.calls[1]?.url, "/voice/turns/lease_turn_000000/transcribe");
+  assert.equal(h.calls[1]?.init.method, "POST");
+  assert.equal(h.calls[1]?.init.headers["Content-Type"], "audio/webm");
   assert.equal(h.transcript.textContent, "打开客厅灯");
   assert.equal(FakeEvents.instances[0]?.url, "/conversation/turn_1/events");
   FakeEvents.instances[0]?.emit("completed");
   await flush();
-  assert.equal(h.calls[1]?.url, "/voice/speech/turn_1");
+  assert.equal(h.calls[2]?.url, "/voice/turns/lease_turn_000000/speech");
   assert.equal(h.root.dataset.voiceState, "speaking");
   h.start.click();
   await flush();
@@ -329,8 +374,8 @@ test("encodes bounded mono PCM16 with actual audio headers", async () => {
   FakeAudioContext.instances[0]!.processor.emit([-1, 0, 1]);
   h.stop.click();
   await flush();
-  const sent = h.calls[0]!;
-  assert.equal(sent.url, "/voice/transcribe");
+  const sent = h.calls.find((call) => call.url.endsWith("/transcribe"))!;
+  assert.match(sent.url, /^\/voice\/turns\//);
   assert.equal(sent.init.headers["Content-Type"], "audio/l16");
   assert.deepEqual(sent.init.headers["X-Audio-Rate"], "16000");
   assert.deepEqual(sent.init.headers["X-Audio-Width"], "2");
@@ -364,13 +409,13 @@ test("keeps the completed answer and retries only playback when speech is unavai
   let speechAttempts = 0;
   const h = createHarness({
     fetch: (url) => {
-      if (url === "/voice/transcribe") {
+      if (url === "/test/transcribe") {
         return {
           ok: true,
           json: async () => ({ status: "accepted", adviceId: "turn_playback", transcript: "客厅现在怎么样？" }),
         };
       }
-      if (url === "/voice/speech/turn_playback") {
+      if (url === "/test/speech/turn_playback") {
         speechAttempts += 1;
         return speechAttempts === 1
           ? { ok: false, status: 503 }
@@ -400,14 +445,14 @@ test("keeps the completed answer and retries only playback when speech is unavai
   h.restart.click();
   await flush();
   assert.equal(speechAttempts, 2);
-  assert.equal(h.calls.filter((call) => call.url === "/voice/transcribe").length, 1,
+  assert.equal(h.calls.filter((call) => call.url.endsWith("/transcribe")).length, 1,
     "playback recovery does not start a new household request");
 });
 
 test("respects an ASR retry window while keeping the text exit visible", async () => {
   const h = createHarness({
     fetch: (url) => {
-      if (url === "/voice/transcribe") {
+      if (url === "/test/transcribe") {
         return {
           ok: false,
           status: 429,
@@ -440,7 +485,7 @@ test("preserves a full fifteen-second PCM turn at 96 kHz", async () => {
   FakeAudioContext.instances[0]!.processor.emit(new Float32Array(1_500_000));
   h.stop.click();
   await flush();
-  const sent = h.calls[0]!;
+  const sent = h.calls.find((call) => call.url.endsWith("/transcribe"))!;
   assert.equal(sent.init.headers["X-Audio-Rate"], "96000");
   assert.equal((sent.init.body as Blob).size, 2_880_000);
 });
@@ -449,7 +494,7 @@ test("ignores an old completed event after a newer voice turn starts", async () 
   let turn = 0;
   const h = createHarness({
     fetch: (url) => {
-      if (url === "/voice/transcribe") {
+      if (url === "/test/transcribe") {
         turn += 1;
         return {
           ok: true,
@@ -480,11 +525,11 @@ test("ignores an old completed event after a newer voice turn starts", async () 
   FakeEvents.instances[0]!.emit("completed");
   await flush();
   assert.equal(h.root.dataset.voiceState, "thinking");
-  assert.equal(h.calls.some((call) => call.url === "/voice/speech/turn_1"), false);
+  assert.equal(h.calls.some((call) => call.url.endsWith("/speech")), false);
 
   FakeEvents.instances[1]!.emit("completed");
   await flush();
-  assert.equal(h.calls.some((call) => call.url === "/voice/speech/turn_2"), true);
+  assert.equal(h.calls.some((call) => call.url.endsWith("/speech")), true);
 });
 
 test("keeps the current upload controller when an older upload settles", async () => {
@@ -493,7 +538,7 @@ test("keeps the current upload controller when an older upload settles", async (
   let uploads = 0;
   const h = createHarness({
     fetch: (url) => {
-      if (url !== "/voice/transcribe")
+      if (url !== "/test/transcribe")
         return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
       uploads += 1;
       return uploads === 1 ? first.promise : second.promise;
@@ -513,7 +558,7 @@ test("keeps the current upload controller when an older upload settles", async (
   first.resolve({ ok: true, json: async () => ({ status: "no_input" }) });
   await flush();
   h.cancel.click();
-  assert.equal(h.calls[1]!.init.signal.aborted, true);
+  assert.equal(h.calls.filter((call) => call.url.endsWith("/transcribe")).at(-1)!.init.signal.aborted, true);
 });
 
 test("ignores a delayed recorder stop from a replaced voice turn", async () => {
@@ -527,7 +572,7 @@ test("ignores a delayed recorder stop from a replaced voice turn", async () => {
   FakeRecorder.instances[0]!.finish();
   await flush();
 
-  assert.equal(h.calls.length, 0);
+  assert.equal(h.calls.filter((call) => call.url.endsWith("/transcribe")).length, 0);
   assert.equal(h.root.dataset.voiceState, "listening");
 });
 
@@ -535,7 +580,7 @@ test("confirms a committed turn cancellation with the service before showing can
   const stopped = deferred<any>();
   const h = createHarness({
     fetch: (url) => {
-      if (url === "/voice/transcribe")
+      if (url === "/test/transcribe")
         return {
           ok: true,
           json: async () => ({ status: "active", adviceId: "turn_stop" }),
@@ -567,7 +612,7 @@ test("confirms a committed turn cancellation with the service before showing can
 test("keeps a committed turn visibly running when its cancellation cannot be confirmed", async () => {
   const h = createHarness({
     fetch: (url) => {
-      if (url === "/voice/transcribe")
+      if (url === "/test/transcribe")
         return {
           ok: true,
           json: async () => ({ status: "active", adviceId: "turn_background" }),
@@ -593,13 +638,13 @@ test("stopping speech aborts synthesis before any delayed audio can start", asyn
   const speech = deferred<any>();
   const h = createHarness({
     fetch: (url) => {
-      if (url === "/voice/transcribe") {
+      if (url === "/test/transcribe") {
         return {
           ok: true,
           json: async () => ({ status: "accepted", adviceId: "turn_speech_stop", transcript: "测试播报" }),
         };
       }
-      if (url === "/voice/speech/turn_speech_stop") return speech.promise;
+      if (url === "/test/speech/turn_speech_stop") return speech.promise;
       throw new Error(`Unexpected request: ${url}`);
     },
   });
@@ -611,7 +656,7 @@ test("stopping speech aborts synthesis before any delayed audio can start", asyn
   FakeEvents.instances[0]!.emit("completed");
   await flush();
 
-  const speechRequest = h.calls.find((call) => call.url === "/voice/speech/turn_speech_stop");
+  const speechRequest = h.calls.find((call) => call.url.endsWith("/speech"));
   assert.ok(speechRequest);
   h.speechStop.click();
   assert.equal(speechRequest.init.signal.aborted, true);
@@ -632,14 +677,14 @@ test("keeps permission, cancellation, timeout, and unavailable recovery local an
   cancelled.cancel.click();
   assert.equal(cancelled.root.dataset.voiceState, "cancelled");
   assert.equal(cancelled.streams[0]?.stopped, true);
-  assert.equal(cancelled.calls.length, 0);
+  assert.equal(cancelled.calls.filter((call) => call.url.endsWith("/transcribe")).length, 0);
   const timed = createHarness();
   timed.start.click();
   await flush();
   FakeRecorder.instances[0]!.emit();
   timed.timers[0]!();
   await flush();
-  assert.equal(timed.calls[0]?.url, "/voice/transcribe");
+  assert.ok(timed.calls.some((call) => call.url.endsWith("/transcribe")));
   const unavailable = createHarness({ available: false });
   assert.equal(unavailable.root.dataset.voiceState, "text_mode");
   assert.equal(unavailable.start.hidden, true);
@@ -662,5 +707,134 @@ test("stops a pending microphone request before a late permission grant can reco
   await flush();
   assert.equal(lateStream.stopped, true);
   assert.equal(FakeRecorder.instances.length, 0);
-  assert.equal(h.calls.length, 0);
+  assert.equal(h.calls.filter((call) => call.url.endsWith("/transcribe")).length, 0);
+});
+
+test("cancels a pending lease acquisition and releases its late lease without disturbing the next turn", async () => {
+  const firstLease = deferred<any>();
+  let leaseAttempt = 0;
+  const h = createHarness({
+    leaseRequest: () => {
+      leaseAttempt += 1;
+      return leaseAttempt === 1
+        ? firstLease.promise
+        : {
+            ok: true,
+            json: async () => ({
+              status: "leased",
+              voiceTurnId: "lease_turn_second_000000",
+              captureMode: "encoded_audio",
+            }),
+          };
+    },
+  });
+
+  h.start.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "requesting_permission");
+  assert.equal(h.calls[0]?.url, "/voice/turns");
+
+  h.stop.click();
+  assert.equal(h.root.dataset.voiceState, "cancelled");
+  assert.equal(h.calls[0]?.init.signal.aborted, true);
+
+  h.start.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "listening");
+  assert.equal(FakeRecorder.instances.length, 1);
+
+  firstLease.resolve({
+    ok: true,
+    json: async () => ({
+      status: "leased",
+      voiceTurnId: "lease_turn_first_000000",
+      captureMode: "encoded_audio",
+    }),
+  });
+  await flush();
+
+  assert.ok(h.calls.some((call) => call.url === "/voice/turns/lease_turn_first_000000/release"));
+  assert.equal(h.calls.some((call) => call.url === "/voice/turns/lease_turn_second_000000/release"), false);
+  assert.equal(h.root.dataset.voiceState, "listening");
+  assert.equal(FakeRecorder.instances.length, 1);
+});
+
+test("releases a late lease when the voice surface is disposed during acquisition", async () => {
+  const lease = deferred<any>();
+  const h = createHarness({ leaseRequest: () => lease.promise });
+
+  h.start.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "requesting_permission");
+
+  h.pagehide();
+  assert.equal(h.calls[0]?.init.signal.aborted, true);
+  lease.resolve({
+    ok: true,
+    json: async () => ({
+      status: "leased",
+      voiceTurnId: "lease_turn_disposed_000000",
+      captureMode: "encoded_audio",
+    }),
+  });
+  await flush();
+
+  assert.ok(h.calls.some((call) => call.url === "/voice/turns/lease_turn_disposed_000000/release"));
+  assert.equal(FakeRecorder.instances.length, 0);
+});
+
+test("releases an active lease with a keepalive request when the voice surface closes", async () => {
+  const h = createHarness();
+  h.start.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "listening");
+
+  h.pagehide();
+
+  const release = h.calls.find((call) => call.url === "/voice/turns/lease_turn_000000/release");
+  assert.ok(release);
+  assert.equal(release.init.keepalive, true);
+  assert.equal(h.streams[0]?.stopped, true);
+});
+
+test("releases a lease parsed after cancellation without clearing a later generation", async () => {
+  const firstPayload = deferred<any>();
+  let leaseAttempt = 0;
+  const h = createHarness({
+    leaseRequest: () => {
+      leaseAttempt += 1;
+      if (leaseAttempt === 1) {
+        return {
+          ok: true,
+          json: async () => firstPayload.promise,
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          status: "leased",
+          voiceTurnId: "lease_turn_json_second_000000",
+          captureMode: "encoded_audio",
+        }),
+      };
+    },
+  });
+
+  h.start.click();
+  await flush();
+  h.stop.click();
+  h.start.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "listening");
+
+  firstPayload.resolve({
+    status: "leased",
+    voiceTurnId: "lease_turn_json_first_000000",
+    captureMode: "encoded_audio",
+  });
+  await flush();
+
+  assert.ok(h.calls.some((call) => call.url === "/voice/turns/lease_turn_json_first_000000/release"));
+  assert.equal(h.calls.some((call) => call.url === "/voice/turns/lease_turn_json_second_000000/release"), false);
+  assert.equal(h.root.dataset.voiceState, "listening");
 });

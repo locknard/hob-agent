@@ -187,6 +187,11 @@ export class PrivateVoiceProviderRuntime {
     for (const controller of this.operations) controller.abort();
   }
 
+  /** Cancels only the current start or retry activation, preserving in-flight turn calls. */
+  cancelRetry(): void {
+    this.startController?.abort();
+  }
+
   /** Disables future calls and cancels in-flight work. Repeating disposal is safe. */
   async dispose(): Promise<void> {
     if (this.disposed) return;

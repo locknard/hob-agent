@@ -17,6 +17,9 @@ import type { ProductBootstrapConfigDraft } from "./product-bootstrap-config-sto
 import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
 import { ProductSetupDraftStore } from "./product-setup-draft-store.js";
 import { ProductSessionStore } from "./product-session-store.js";
+import { ProductVoiceCleanupLedger } from "./product-voice-cleanup-ledger.js";
+import { ProductOperationalVoiceSettings } from "./product-operational-voice-settings.js";
+import { PrivateVoiceGateway } from "./voice/private-voice-gateway.js";
 import {
   ProductRuntimeSupervisor,
   type RuntimeProductBundle,
@@ -36,6 +39,234 @@ const draft: ProductBootstrapConfigDraft = {
   },
   bridges: [],
 };
+
+test("mounts a stable disabled private voice gateway when voice is not configured", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-disabled-voice-"));
+  let observed: PrivateVoiceGateway | undefined;
+  let observedSettings: ProductOperationalVoiceSettings | undefined;
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    configurationStore: new ProductBootstrapConfigStore(directory),
+    mountOperational: async ({ privateVoice, voiceSettings }) => {
+      observed = privateVoice;
+      observedSettings = voiceSettings;
+      return mountedBundle().bundle;
+    },
+  });
+  try {
+    await new ProductBootstrapConfigStore(directory).commit(0, draft);
+    await runtime.start();
+    assert.equal(observed instanceof PrivateVoiceGateway, true);
+    assert.equal(observed?.status, "disabled");
+    assert.equal(observedSettings instanceof ProductOperationalVoiceSettings, true);
+    assert.deepEqual(await observedSettings?.projection(), {
+      status: "disabled",
+      generation: 1,
+      configured: false,
+    });
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("mounts one operational voice settings owner that configures its exact gateway", async () => {
+  const server = createServer((request, response) => {
+    if (request.url === "/v1/audio/transcriptions") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ text: "语音服务已连接" }));
+      return;
+    }
+    if (request.url === "/v1/audio/speech") {
+      response.setHeader("content-type", "audio/wav");
+      response.end(Buffer.from([82, 73, 70, 70]));
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve, reject) => server.listen(0, "127.0.0.1", (error?: Error) => error === undefined ? resolve() : reject(error)));
+  const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-voice-settings-owner-"));
+  const credentials = new Map<string, string>();
+  let privateVoice: PrivateVoiceGateway | undefined;
+  let voiceSettings: ProductOperationalVoiceSettings | undefined;
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    configurationStore: new ProductBootstrapConfigStore(directory),
+    voiceSetup: {
+      vault: {
+        read: async (reference) => credentials.get(reference),
+        write: async (reference, value) => { credentials.set(reference, value); },
+        delete: async (reference) => { credentials.delete(reference); },
+      },
+    },
+    mountOperational: async (input) => {
+      privateVoice = input.privateVoice;
+      voiceSettings = input.voiceSettings;
+      return mountedBundle().bundle;
+    },
+  });
+  try {
+    await new ProductBootstrapConfigStore(directory).commit(0, draft);
+    await runtime.start();
+    assert.equal(voiceSettings?.constructor, ProductOperationalVoiceSettings);
+    assert.equal(privateVoice?.status, "disabled");
+    assert.deepEqual(await voiceSettings?.configure({
+      expectedGeneration: 1,
+      asr: { kind: "asr", transport: "openai_http", endpoint, credential: "asr-test-secret" },
+      tts: { kind: "tts", transport: "openai_http", endpoint, locale: "zh-CN", credential: "tts-test-secret" },
+    }), { status: "configured", generation: 2 });
+    assert.equal(privateVoice?.status, "active");
+    assert.deepEqual(await voiceSettings?.projection(), {
+      status: "active",
+      generation: 2,
+      configured: true,
+      asr: { transport: "openai_http", endpoint, credentialConfigured: true },
+      tts: { transport: "openai_http", endpoint, locale: "zh-CN", credentialConfigured: true },
+    });
+    const configuration = await new ProductBootstrapConfigStore(directory).load();
+    assert.match(configuration?.voice?.asr.credentialRef ?? "", /^keychain:hob-agent\/voice:asr:v[A-Za-z0-9_-]{32}:[A-Za-z0-9_-]+$/u);
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
+test("reconciles operational voice cleanup after restart without deleting current active references", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-voice-ledger-"));
+  const configurationStore = new ProductBootstrapConfigStore(directory);
+  const ledger = new ProductVoiceCleanupLedger(directory);
+  const activeAsr = "keychain:hob-agent/voice:asr:candidate-current:asr";
+  const activeTts = "keychain:hob-agent/voice:tts:candidate-current:tts";
+  const abandoned = "keychain:hob-agent/voice:asr:candidate-abandoned:asr";
+  const retired = "keychain:hob-agent/voice:tts:candidate-retired:tts";
+  const deleted: string[] = [];
+  const vault: WritableSecretVault = {
+    read: async () => undefined,
+    write: async () => undefined,
+    delete: async (reference) => { deleted.push(reference); },
+  };
+  await configurationStore.commit(0, draft);
+  await configurationStore.commit(1, {
+    ...draft,
+  });
+  await configurationStore.commit(2, {
+    ...draft,
+    voice: {
+      asr: { transport: "openai_http", endpoint: "http://127.0.0.1:1", credentialRef: activeAsr },
+      tts: { transport: "openai_http", endpoint: "http://127.0.0.1:1", credentialRef: activeTts, locale: "zh-CN" },
+    },
+  });
+  await ledger.reserve({ candidateId: "candidate-current", track: "asr", credentialRef: activeAsr, expectedGeneration: 2 });
+  await ledger.reserve({ candidateId: "candidate-current", track: "tts", credentialRef: activeTts, expectedGeneration: 2 });
+  await ledger.reserve({ candidateId: "candidate-abandoned", track: "asr", credentialRef: abandoned, expectedGeneration: 2 });
+  await ledger.reserve({ candidateId: "candidate-retired", track: "tts", credentialRef: retired, expectedGeneration: 1 });
+  await ledger.markCommitted({ candidateId: "candidate-retired", track: "tts", credentialRef: retired, expectedGeneration: 1, committedGeneration: 2 });
+  const mounted = mountedBundle();
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    configurationStore,
+    voiceSetup: { vault },
+    mountOperational: async () => mounted.bundle,
+  });
+  try {
+    await runtime.start();
+    assert.equal(runtime.mode, "operational");
+    assert.equal(mounted.attachCalls(), 1);
+    assert.deepEqual(deleted.sort(), [abandoned, retired].sort());
+    assert.deepEqual((await ledger.load()).entries.map((entry) => ({
+      ref: entry.credentialRef,
+      phase: entry.phase,
+      generation: entry.committedGeneration,
+    })).sort((left, right) => left.ref.localeCompare(right.ref)), [
+      { ref: activeAsr, phase: "active", generation: 3 },
+      { ref: activeTts, phase: "active", generation: 3 },
+    ].sort((left, right) => left.ref.localeCompare(right.ref)));
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("adopts exact voice references from an existing first-generation product configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-voice-adoption-"));
+  const configurationStore = new ProductBootstrapConfigStore(directory);
+  const ledger = new ProductVoiceCleanupLedger(directory);
+  const activeAsr = "keychain:hob-agent/voice:asr:setup_candidate:asr";
+  const activeTts = "keychain:hob-agent/voice:tts:setup_candidate:tts";
+  await configurationStore.commit(0, {
+    ...draft,
+    voice: {
+      asr: { transport: "openai_http", endpoint: "http://127.0.0.1:1", credentialRef: activeAsr },
+      tts: { transport: "openai_http", endpoint: "http://127.0.0.1:1", credentialRef: activeTts, locale: "zh-CN" },
+    },
+  });
+  const deleted: string[] = [];
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    configurationStore,
+    voiceSetup: {
+      vault: {
+        read: async () => "private-value",
+        write: async () => undefined,
+        delete: async (reference) => { deleted.push(reference); },
+      },
+    },
+    mountOperational: async () => mountedBundle().bundle,
+  });
+  try {
+    await runtime.start();
+    assert.deepEqual((await ledger.load()).entries.map((entry) => ({
+      ref: entry.credentialRef,
+      phase: entry.phase,
+      expectedGeneration: entry.expectedGeneration,
+      committedGeneration: entry.committedGeneration,
+    })).sort((left, right) => left.ref.localeCompare(right.ref)), [
+      { ref: activeAsr, phase: "active", expectedGeneration: 0, committedGeneration: 1 },
+      { ref: activeTts, phase: "active", expectedGeneration: 0, committedGeneration: 1 },
+    ].sort((left, right) => left.ref.localeCompare(right.ref)));
+    assert.deepEqual(deleted, []);
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps product mounting when operational voice cleanup fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-voice-ledger-error-"));
+  const configurationStore = new ProductBootstrapConfigStore(directory);
+  const ledger = new ProductVoiceCleanupLedger(directory);
+  const abandoned = "keychain:hob-agent/voice:asr:candidate-abandoned:asr";
+  await ledger.reserve({ candidateId: "candidate-abandoned", track: "asr", credentialRef: abandoned, expectedGeneration: 1 });
+  const mounted = mountedBundle();
+  await configurationStore.commit(0, draft);
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    configurationStore,
+    voiceSetup: {
+      vault: { read: async () => undefined, write: async () => undefined, delete: async () => { throw new Error("vault unavailable"); } },
+    },
+    mountOperational: async () => mounted.bundle,
+  });
+  try {
+    await runtime.start();
+    assert.equal(runtime.mode, "operational");
+    assert.equal(mounted.attachCalls(), 1);
+    assert.equal((await ledger.listPending())[0]?.credentialRef, abandoned);
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("recovers persisted voice staging once before the setup surface becomes available", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-voice-staging-"));
@@ -628,11 +859,14 @@ test("activates the configured private voice providers before handing over the p
     pairingCode: "LIVE-HOME",
     setupDrafts: new MapSetupDrafts(voiceDraft),
     mountOperational: async ({ privateVoice }) => {
-      assert.deepEqual(privateVoice?.status, { status: "active" });
-      assert.deepEqual(await privateVoice?.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" }), {
+      assert.equal(privateVoice.status, "active");
+      const lease = privateVoice.beginTurn();
+      assert.notEqual(lease, undefined);
+      assert.deepEqual(await lease!.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" }), {
         status: "transcribed",
         text: "语音服务已连接",
       });
+      await lease!.release();
       return mounted.bundle;
     },
     announce: () => undefined,
@@ -679,7 +913,7 @@ test("activates the household product with text available when private voice is 
     setupDrafts: new MapSetupDrafts(voiceDraft),
     configurationStore,
     mountOperational: async ({ privateVoice }) => {
-      observedVoiceStatus = privateVoice?.status;
+      observedVoiceStatus = privateVoice.status;
       return mounted.bundle;
     },
     announce: () => undefined,
@@ -699,7 +933,7 @@ test("activates the household product with text available when private voice is 
 
     assert.equal(response.status, 303);
     assert.equal(runtime.mode, "operational");
-    assert.deepEqual(observedVoiceStatus, { status: "degraded", reason: "endpoint_unreachable" });
+    assert.equal(observedVoiceStatus, "degraded");
     assert.equal((await configurationStore.load())?.generation, 1);
     assert.equal(mounted.attachCalls(), 1);
   } finally {
@@ -726,7 +960,7 @@ test("restores the household product when a committed private voice endpoint is 
     pairingCode: "LIVE-HOME",
     configurationStore,
     mountOperational: async ({ privateVoice }) => {
-      observedVoiceStatus = privateVoice?.status;
+      observedVoiceStatus = privateVoice.status;
       return mounted.bundle;
     },
     announce: () => undefined,
@@ -734,7 +968,7 @@ test("restores the household product when a committed private voice endpoint is 
   try {
     await runtime.start();
     assert.equal(runtime.mode, "operational");
-    assert.deepEqual(observedVoiceStatus, { status: "degraded", reason: "endpoint_unreachable" });
+    assert.equal(observedVoiceStatus, "degraded");
     assert.equal(mounted.attachCalls(), 1);
   } finally {
     await runtime.stop();
@@ -898,7 +1132,9 @@ test("cancels private voice work before waiting for the operational product to f
     });
     assert.equal(activation.status, 303);
     const started = new Promise<void>((resolve) => { operationStarted = resolve; });
-    const transcription = privateVoice!.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" });
+    const lease = privateVoice!.beginTurn();
+    assert.notEqual(lease, undefined);
+    const transcription = lease!.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" });
     await started;
     const stopping = runtime.stop();
     const settledBeforeProduct = await Promise.race([

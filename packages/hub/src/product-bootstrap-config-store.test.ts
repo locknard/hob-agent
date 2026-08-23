@@ -17,7 +17,7 @@ test("commits and reloads one composition-root product configuration generation"
       householdName: "梧桐家",
       agentName: "小满",
       modelReference: "custom/deepseek-v4-flash-0731",
-      modelBaseURL: "https://model.example.test/v1",
+      modelBaseURL: "http://127.0.0.1:8080/v1/",
       modelProfile: {
         id: "custom:setup:draft-a",
         provider: "custom",
@@ -33,6 +33,7 @@ test("commits and reloads one composition-root product configuration generation"
     });
 
     assert.equal(committed.generation, 1);
+    assert.equal(committed.modelBaseURL, "http://127.0.0.1:8080/v1");
     assert.deepEqual(await store.load(), committed);
     assert.equal((await stat(join(directory, "product-config.json"))).mode & 0o777, 0o600);
     const source = await readFile(join(directory, "product-config.json"), "utf8");
@@ -214,7 +215,18 @@ test("canonicalizes OpenAI voice service roots and rejects Wyoming TTS model set
       asr: { transport: "openai_http", endpoint: "https://voice.example.test", credentialRef: "keychain:hob-agent/voice:asr:draft-voice-contract:asr-one" },
       tts: { transport: "openai_http", endpoint: "http://127.0.0.1:9880", locale: "zh-CN" },
     });
-    await assert.rejects(store.commit(1, {
+    const tcpWyoming = await store.commit(1, {
+      ...base,
+      voice: {
+        asr: { transport: "wyoming", endpoint: "tcp://127.0.0.1:10700" },
+        tts: { transport: "wyoming", endpoint: "tcp://127.0.0.1:10701", locale: "zh-CN" },
+      },
+    });
+    assert.deepEqual(tcpWyoming.voice, {
+      asr: { transport: "wyoming", endpoint: "wyoming://127.0.0.1:10700" },
+      tts: { transport: "wyoming", endpoint: "wyoming://127.0.0.1:10701", locale: "zh-CN" },
+    });
+    await assert.rejects(store.commit(2, {
       ...base,
       voice: {
         asr: { transport: "wyoming", endpoint: "wyoming://127.0.0.1:10700" },
@@ -245,6 +257,71 @@ test("loads v2 configuration without voice and rejects an unknown configuration 
     v2.version = "hob.product-config/v99";
     await writeFile(path, `${JSON.stringify(v2)}\n`, { mode: 0o600 });
     await assert.rejects(store.load(), /header is invalid/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("commits voice changes without replacing the active non-voice configuration or activation time", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-voice-commit-"));
+  try {
+    const activatedAt = new Date("2026-08-24T10:00:00.000Z");
+    const store = new ProductBootstrapConfigStore(directory, () => activatedAt);
+    const base = await store.commit(0, {
+      householdName: "梧桐家", agentName: "小满", modelReference: "custom/model",
+      modelBaseURL: "https://model.example.test/v1",
+      modelProfile: { id: "custom:setup:active", provider: "custom", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:active:model" },
+      bridges: [{
+        bridgeId: "ha-home", adapterType: "home-assistant", config: { baseUrl: "http://ha.local:8123" },
+        credentialRefs: { access: "keychain:hob-agent/bridge:ha-home:access" },
+      }],
+    });
+    const enabled = await store.commitVoice(1, {
+      asr: { transport: "openai_http", endpoint: "http://127.0.0.1:9000", credentialRef: "keychain:hob-agent/voice:asr:voice-a:credential-a" },
+      tts: { transport: "openai_http", endpoint: "http://127.0.0.1:9001", credentialRef: "keychain:hob-agent/voice:tts:voice-a:credential-a", locale: "zh-CN", voice: "warm" },
+    });
+    const replaced = await store.commitVoice(2, {
+      asr: { transport: "wyoming", endpoint: "wyoming://voice.local:10700" },
+      tts: { transport: "wyoming", endpoint: "wyoming://voice.local:10700", locale: "zh-CN", voice: "calm" },
+    });
+    const disabled = await store.commitVoice(3, undefined);
+
+    assert.equal(enabled.generation, 2);
+    assert.equal(replaced.generation, 3);
+    assert.equal(disabled.generation, 4);
+    assert.equal(disabled.activatedAt, base.activatedAt);
+    assert.deepEqual({
+      householdName: disabled.householdName,
+      agentName: disabled.agentName,
+      modelReference: disabled.modelReference,
+      modelBaseURL: disabled.modelBaseURL,
+      modelProfile: disabled.modelProfile,
+      bridges: disabled.bridges,
+    }, {
+      householdName: base.householdName,
+      agentName: base.agentName,
+      modelReference: base.modelReference,
+      modelBaseURL: base.modelBaseURL,
+      modelProfile: base.modelProfile,
+      bridges: base.bridges,
+    });
+    assert.equal(disabled.voice, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects voice changes that have no current configuration or a stale generation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-voice-conflict-"));
+  try {
+    const store = new ProductBootstrapConfigStore(directory);
+    await assert.rejects(store.commitVoice(0, undefined), ProductBootstrapConfigurationConflictError);
+    await store.commit(0, {
+      householdName: "梧桐家", agentName: "小满", modelReference: "custom/model",
+      modelProfile: { id: "custom:setup:active", provider: "custom", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:active:model" }, bridges: [],
+    });
+    await assert.rejects(store.commitVoice(0, undefined), ProductBootstrapConfigurationConflictError);
+    assert.equal((await store.load())?.generation, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

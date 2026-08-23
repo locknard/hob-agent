@@ -41,7 +41,7 @@ test("stages independent Wyoming ASR and HTTP TTS settings without selecting a p
 
   const asr = await setup.probe({
     setupId: "family-a",
-    track: { kind: "asr", transport: "wyoming", endpoint: "wyoming://127.0.0.1:10300", model: "whisper-large-v3" },
+    track: { kind: "asr", transport: "wyoming", endpoint: "tcp://127.0.0.1:10300", model: "whisper-large-v3" },
   });
   const tts = await probeCredentialed(setup, {
     setupId: "family-a",
@@ -179,6 +179,72 @@ test("requires a durable lease before the direct setup API writes a credential",
   assert.equal(vault.values.size, 0);
 });
 
+test("waits for a credential write to settle before a cancelled execute returns and never starts its probe", async () => {
+  const values = new Map<string, string>();
+  let releaseWrite: (() => void) | undefined;
+  const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let signalWriteStarted: (() => void) | undefined;
+  const writeStarted = new Promise<void>((resolve) => { signalWriteStarted = resolve; });
+  const vault = {
+    read: async (reference: string) => values.get(reference),
+    write: async (reference: string, value: string) => {
+      signalWriteStarted?.();
+      await writeGate;
+      values.set(reference, value);
+    },
+    delete: async (reference: string) => { values.delete(reference); },
+  };
+  let probeCalls = 0;
+  const setup = new ProductVoiceSetup({
+    vault,
+    createStageNonce: () => "cancelled_write",
+    probe: async () => {
+      probeCalls += 1;
+      return { status: "ready", latencyMs: 1 };
+    },
+  });
+  const preparation = setup.prepare({
+    setupId: "family-cancelled-write",
+    track: { kind: "asr", transport: "openai_http", endpoint: "http://127.0.0.1:9880", credential: "candidate-secret" },
+  });
+  if (preparation.status !== "prepared") assert.fail("expected a prepared credential stage");
+  const controller = new AbortController();
+
+  const execution = setup.execute({
+    prepared: preparation.prepared,
+    credentialLease: { stage: preparation.prepared.stage },
+    signal: controller.signal,
+  });
+  await writeStarted;
+  controller.abort();
+  releaseWrite?.();
+
+  assert.deepEqual(await execution, { status: "unavailable" });
+  assert.equal(probeCalls, 0);
+  assert.equal(values.get("keychain:hob-agent/voice:asr:family-cancelled-write:cancelled_write"), "candidate-secret");
+});
+
+test("passes a private cancellation signal into the selected provider probe", async () => {
+  const controller = new AbortController();
+  let receivedSignal: AbortSignal | undefined;
+  const setup = new ProductVoiceSetup({
+    vault: new MemoryVault(),
+    probe: async ({ signal }) => {
+      receivedSignal = signal;
+      return new Promise((resolve) => signal?.addEventListener("abort", () => resolve({ status: "unavailable" }), { once: true }));
+    },
+  });
+  const probe = setup.probe({
+    setupId: "family-probe-cancel",
+    track: { kind: "asr", transport: "wyoming", endpoint: "wyoming://127.0.0.1:10300" },
+    signal: controller.signal,
+  });
+  controller.abort();
+
+  assert.deepEqual(await probe, { status: "unavailable" });
+  assert.equal(receivedSignal, controller.signal);
+});
+
 test("rejects a Wyoming credential because the protocol transport cannot send one", async () => {
   const vault = new MemoryVault();
   const setup = new ProductVoiceSetup({ vault, probe: async () => ({ status: "ready", latencyMs: 1 }) });
@@ -235,6 +301,24 @@ test("uses the built-in Wyoming capability probe for the selected track", async 
       track: { kind: "asr", transport: "wyoming", endpoint: `wyoming://127.0.0.1:${address.port}` },
     });
     assert.equal(result.status, "ready");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
+test("settles the built-in Wyoming capability probe when its private signal is cancelled", async () => {
+  const server = createTcpServer(() => undefined);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  const controller = new AbortController();
+  try {
+    const probe = new ProductVoiceSetup({ vault: new MemoryVault() }).probe({
+      setupId: "family-wyoming-cancel",
+      track: { kind: "asr", transport: "wyoming", endpoint: `wyoming://127.0.0.1:${address.port}` },
+      signal: controller.signal,
+    });
+    controller.abort();
+    assert.deepEqual(await probe, { status: "unavailable" });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
   }

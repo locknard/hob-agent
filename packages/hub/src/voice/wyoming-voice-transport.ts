@@ -1,11 +1,14 @@
 import { createConnection, type Socket } from "node:net";
 
+import { normalizePrivateVoiceEndpoint } from "./private-voice-endpoint.js";
+
 /**
  * Bounded TCP client for the Wyoming JSONL + binary voice protocol.
  *
- * The adapter accepts one trusted `wyoming://host:port` endpoint and returns
- * a closed result vocabulary. It deliberately keeps endpoint, payload and
- * upstream error details inside this transport boundary.
+ * The adapter accepts trusted `tcp://host:port` and `wyoming://host:port`
+ * configuration, canonicalizes it to Wyoming, and returns a closed result
+ * vocabulary. It keeps endpoint, payload and upstream error details inside
+ * this transport boundary.
  */
 export const WYOMING_VOICE_TRANSPORT_VERSION = 1;
 
@@ -53,7 +56,7 @@ export type WyomingVoiceSynthesizeResult =
   | WyomingVoiceTransportFailure;
 
 export interface WyomingVoiceTransportOptions {
-  /** A trusted provider setting in the form `wyoming://host:port`. */
+  /** A trusted provider setting in the form `tcp://host:port` or `wyoming://host:port`. */
   readonly endpoint: string;
   readonly timeoutMs?: number;
   readonly limits?: Partial<WyomingVoiceTransportLimits>;
@@ -367,9 +370,7 @@ class WyomingFrameDecoder {
 
 function parseEndpoint(value: string): { readonly host: string; readonly port: number } {
   try {
-    const endpoint = new URL(value);
-    if (endpoint.protocol !== "wyoming:" || endpoint.username !== "" || endpoint.password !== "" || endpoint.search !== "" || endpoint.hash !== ""
-      || (endpoint.pathname !== "" && endpoint.pathname !== "/") || endpoint.hostname === "" || endpoint.port === "") throw new Error();
+    const endpoint = new URL(normalizePrivateVoiceEndpoint("wyoming", value));
     const port = Number(endpoint.port);
     if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error();
     return { host: endpoint.hostname, port };

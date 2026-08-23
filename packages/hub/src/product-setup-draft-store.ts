@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
   ProductSetupDraftProjection,
 } from "@hob-agent/inbox-web/setup";
+import { validateCustomModelBaseURL } from "@hob-agent/agent-layer/model-providers";
 import type {
   ProductBootstrapConfigDraft,
   ProductBootstrapVoiceAsrConfig,
@@ -911,7 +912,7 @@ function validateModelStage(draftId: string, stage: ProductModelSetupStage): {
     throw new TypeError("Setup model stage is invalid");
   }
   const modelId = boundedString(stage.modelId, 256, "Model id");
-  const baseURL = stage.baseURL === undefined ? undefined : safeHttpsURL(stage.baseURL);
+  const baseURL = stage.baseURL === undefined ? undefined : customModelBaseURL(provider, stage.baseURL);
   return {
     projection: Object.freeze({ provider, modelId, ...(baseURL === undefined ? {} : { baseURL }) }),
     credentialRef,
@@ -923,7 +924,7 @@ function validateStoredModel(value: unknown): NonNullable<ProductSetupDraftProje
   if (!isRecord(value)) throw new Error("Setup model selection is invalid");
   const provider = boundedString(value.provider, 64, "Model provider");
   const modelId = boundedString(value.modelId, 256, "Model id");
-  const baseURL = value.baseURL === undefined ? undefined : safeHttpsURL(value.baseURL);
+  const baseURL = value.baseURL === undefined ? undefined : customModelBaseURL(provider, value.baseURL);
   return Object.freeze({ provider, modelId, ...(baseURL === undefined ? {} : { baseURL }) });
 }
 
@@ -932,14 +933,13 @@ function boundedString(value: unknown, max: number, label: string): string {
   return value.trim();
 }
 
-function safeHttpsURL(value: unknown): string {
-  const source = boundedString(value, 2_048, "Model endpoint");
-  let url: URL;
-  try { url = new URL(source); } catch { throw new TypeError("Model endpoint is invalid"); }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
+function customModelBaseURL(provider: string, value: unknown): string {
+  if (provider !== "custom") throw new TypeError("Model endpoint is invalid");
+  try {
+    return validateCustomModelBaseURL(boundedString(value, 2_048, "Model endpoint"));
+  } catch {
     throw new TypeError("Model endpoint is invalid");
   }
-  return url.toString().replace(/\/$/u, "");
 }
 
 function validDraftId(value: unknown): string {

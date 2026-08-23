@@ -294,7 +294,8 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
             requestAuthenticator: input.authenticateProductSession,
             sessionRecovery: input.recoverProductSession,
             principal: PRODUCT_HOUSEHOLD_ACTOR,
-            ...(input.privateVoice === undefined ? {} : { privateVoice: input.privateVoice }),
+            privateVoice: input.privateVoice,
+            voiceSettings: input.voiceSettings,
           },
           homeViewRecipeDrafts: { path: join(dataDirectory, "layout-drafts.sqlite") },
           homeOnboarding: {

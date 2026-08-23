@@ -89,6 +89,8 @@ export interface ProductVoiceCredentialLease {
 export type ProductVoiceTransportProbe = (input: {
   readonly track: ProductVoiceSetupStage;
   readonly credential?: string;
+  /** Cancels only this bounded provider probe after staged credential ownership is established. */
+  readonly signal?: AbortSignal;
 }) => Promise<{ readonly status: "ready"; readonly latencyMs: number } | ProductVoiceProbeFailure>;
 
 export interface ProductVoiceSetupOptions {
@@ -138,6 +140,7 @@ export class ProductVoiceSetup {
   async execute(input: {
     readonly prepared: ProductVoicePreparedProbe;
     readonly credentialLease?: ProductVoiceCredentialLease;
+    readonly signal?: AbortSignal;
   }): Promise<ProductVoiceProbeOutcome> {
     const staged = input.prepared.stage;
     const credential = input.prepared.credential;
@@ -150,10 +153,18 @@ export class ProductVoiceSetup {
       } catch {
         return { status: "unavailable" };
       }
+      if (isCancelled(input.signal)) return { status: "unavailable" };
     }
 
+    if (isCancelled(input.signal)) return { status: "unavailable" };
+
     try {
-      const result = await this.transportProbe({ track: staged, ...(credential === undefined ? {} : { credential }) });
+      const result = await this.transportProbe({
+        track: staged,
+        ...(credential === undefined ? {} : { credential }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+      if (isCancelled(input.signal)) return { status: "unavailable" };
       if (result.status === "ready" && Number.isSafeInteger(result.latencyMs) && result.latencyMs >= 0 && result.latencyMs <= 120_000) {
         return { status: "ready", latencyMs: result.latencyMs, staged };
       }
@@ -164,13 +175,13 @@ export class ProductVoiceSetup {
   }
 
   /** Credential-free setup callers can probe in one step; credential probes use prepare + durable lease + execute. */
-  async probe(input: { readonly setupId: string; readonly track: ProductVoiceTrackInput }): Promise<ProductVoiceProbeOutcome> {
+  async probe(input: { readonly setupId: string; readonly track: ProductVoiceTrackInput; readonly signal?: AbortSignal }): Promise<ProductVoiceProbeOutcome> {
     const preparation = this.prepare(input);
     if (preparation.status !== "prepared") return preparation;
     if (preparation.prepared.credential !== undefined) {
       throw new TypeError("Voice credential probes require a durable staging lease");
     }
-    return this.execute({ prepared: preparation.prepared });
+    return this.execute({ prepared: preparation.prepared, ...(input.signal === undefined ? {} : { signal: input.signal }) });
   }
 
   /** Removes only the exact locator created for this staged voice track. */
@@ -305,6 +316,10 @@ function validateSetupId(value: unknown): asserts value is string {
   if (typeof value !== "string" || !SETUP_ID.test(value)) throw new TypeError("Voice setup draft id is invalid");
 }
 
+function isCancelled(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
 function validateCredentialFreeStage(stage: ProductVoiceSetupStage): void {
   if (stage.kind !== "asr" && stage.kind !== "tts") throw new TypeError("Voice setup stage is invalid");
   normalizeEndpoint(stage.transport, stage.endpoint);
@@ -327,6 +342,7 @@ function validateStagedCredentialReference(stage: ProductVoiceSetupStage): void 
 async function probeConfiguredVoiceTransport(input: {
   readonly track: ProductVoiceSetupStage;
   readonly credential?: string;
+  readonly signal?: AbortSignal;
 }): Promise<{ readonly status: "ready"; readonly latencyMs: number } | ProductVoiceProbeFailure> {
   if (input.track.transport === "openai_http") {
     const transport = new OpenAiHttpVoiceTransport({
@@ -338,6 +354,7 @@ async function probeConfiguredVoiceTransport(input: {
     const result = await transport.probe({
       kind: input.track.kind,
       ...(input.track.kind === "tts" ? { locale: input.track.locale, voice: input.track.voice } : {}),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
     if (result.status === "ready") return result;
     switch (result.reason) {
@@ -352,7 +369,9 @@ async function probeConfiguredVoiceTransport(input: {
   }
 
   const startedAt = Date.now();
-  const result = await new WyomingVoiceTransport({ endpoint: input.track.endpoint }).describe();
+  const result = await new WyomingVoiceTransport({ endpoint: input.track.endpoint }).describe(
+    input.signal === undefined ? {} : { signal: input.signal },
+  );
   if (result.status === "ready") {
     if (!result.services[input.track.kind]) return { status: "incompatible" };
     return { status: "ready", latencyMs: Math.min(120_000, Math.max(0, Date.now() - startedAt)) };

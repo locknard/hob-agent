@@ -386,6 +386,51 @@ export interface ProductOnboardingState {
   readonly choices?: ProductOnboardingChoices;
 }
 
+export type ProductPrivateVoiceStatus = "disabled" | "active" | "degraded" | "retrying" | "switching";
+
+export interface ProductPrivateVoiceAsr {
+  readonly transport: string;
+  readonly endpoint: string;
+  readonly model?: string;
+  readonly credentialConfigured: boolean;
+}
+
+export interface ProductPrivateVoiceTts {
+  readonly transport: string;
+  readonly endpoint: string;
+  readonly model?: string;
+  readonly locale: string;
+  readonly voice?: string;
+  readonly credentialConfigured: boolean;
+}
+
+/** HTTP-owned work in progress. It identifies one cancellable candidate, not a provider state. */
+export interface ProductPrivateVoiceConfigurationPending {
+  readonly id: string;
+  readonly startedAt: number;
+}
+
+interface ProductPrivateVoiceBase {
+  readonly generation: number;
+  /** One redirect-scoped, household-readable outcome. */
+  readonly notice?: string;
+  /** A server-owned candidate check that has not changed the active voice generation. */
+  readonly configurationPending?: ProductPrivateVoiceConfigurationPending;
+}
+
+/** Read-only settings projection. Credential references and values never cross this boundary. */
+export type ProductPrivateVoice =
+  | (ProductPrivateVoiceBase & {
+    readonly status: "disabled";
+    readonly configured: false;
+  })
+  | (ProductPrivateVoiceBase & {
+    readonly status: Exclude<ProductPrivateVoiceStatus, "disabled">;
+    readonly configured: true;
+    readonly asr: ProductPrivateVoiceAsr;
+    readonly tts: ProductPrivateVoiceTts;
+  });
+
 export interface ProductShellModel {
   readonly route?: ProductShellRoute;
   readonly household?: ProductShellHousehold;
@@ -428,6 +473,7 @@ export interface ProductShellModel {
     }[];
     readonly savedNotice?: string;
   };
+  readonly privateVoice?: ProductPrivateVoice;
 }
 
 export interface ProductShellRenderOptions {
@@ -1309,17 +1355,78 @@ function renderActionPolicyEditor(model: NormalizedProductShellModel): string {
   return `<section class="product-settings-section product-card" id="action-policy"><div><h2>设备动作的确认方式</h2><p class="product-muted">逐项决定每个动作要不要先问你；保存后会重新检查受影响的建议。</p></div>${notice}<form class="product-policy-form" method="post" action="/settings/action-policy" data-policy-form><ul class="product-policy-list">${rows}</ul><button class="product-primary-action" type="submit">保存确认方式</button></form></section>`;
 }
 
+function privateVoiceTransportOptions(current: string | undefined): string {
+  const options = [
+    ["openai_http", "OpenAI 兼容接口"],
+    ["wyoming", "Wyoming 本地语音"],
+  ] as const;
+  const configured = current?.trim() ?? "";
+  const placeholder = `<option value=""${configured.length === 0 ? " selected" : ""}>请选择服务类型</option>`;
+  const recognized = options.some(([value]) => value === configured);
+  const retained = configured.length > 0 && !recognized
+    ? `<option value="${escapeHtml(configured)}" selected>${escapeHtml(configured)}</option>`
+    : "";
+  const standard = options.map(([value, label]) => `<option value="${value}"${value === configured ? " selected" : ""}>${label}</option>`).join("");
+  return `${placeholder}${retained}${standard}`;
+}
+
+function privateVoiceTransportLabel(transport: string): string {
+  if (transport === "openai_http") return "OpenAI 兼容接口";
+  if (transport === "wyoming") return "Wyoming 本地语音";
+  return "已配置的私有服务";
+}
+
+function renderPrivateVoiceConfiguration(voice: ProductPrivateVoice, open: boolean, summary = open ? "配置私有语音" : "重新设置"): string {
+  const asr = voice.configured ? voice.asr : undefined;
+  const tts = voice.configured ? voice.tts : undefined;
+  const asrCredentialHint = asr?.credentialConfigured === true ? "地址不变时可留空；更换地址请重新输入凭据" : "如服务需要凭据，请输入新的凭据";
+  const ttsCredentialHint = tts?.credentialConfigured === true ? "地址不变时可留空；更换地址请重新输入凭据" : "如服务需要凭据，请输入新的凭据";
+  return `<details class="product-private-voice-configuration"${open ? " open" : ""}><summary>${summary}</summary><form class="product-private-voice-form" method="post" action="/settings/private-voice/configure" data-private-voice-form><input type="hidden" name="expectedGeneration" value="${voice.generation}"><fieldset><legend>语音识别</legend><label for="private-voice-asr-transport">服务类型<select id="private-voice-asr-transport" name="asrTransport" required>${privateVoiceTransportOptions(asr?.transport)}</select></label><label for="private-voice-asr-endpoint">服务地址<input id="private-voice-asr-endpoint" name="asrEndpoint" type="url" value="${escapeHtml(asr?.endpoint ?? "")}" autocomplete="url" required></label><label for="private-voice-asr-model">模型（可选）<input id="private-voice-asr-model" name="asrModel" value="${escapeHtml(asr?.model ?? "")}" autocomplete="off"></label><label for="private-voice-asr-credential">访问凭据（可选）<input id="private-voice-asr-credential" name="asrCredential" type="password" autocomplete="new-password"><small>${asrCredentialHint}</small></label></fieldset><fieldset><legend>语音回复</legend><label for="private-voice-tts-transport">服务类型<select id="private-voice-tts-transport" name="ttsTransport" required>${privateVoiceTransportOptions(tts?.transport)}</select></label><label for="private-voice-tts-endpoint">服务地址<input id="private-voice-tts-endpoint" name="ttsEndpoint" type="url" value="${escapeHtml(tts?.endpoint ?? "")}" autocomplete="url" required></label><label for="private-voice-tts-model">模型（可选）<input id="private-voice-tts-model" name="ttsModel" value="${escapeHtml(tts?.model ?? "")}" autocomplete="off"></label><label for="private-voice-tts-locale">语言<input id="private-voice-tts-locale" name="ttsLocale" value="${escapeHtml(tts?.locale ?? "")}" autocomplete="language" required></label><label for="private-voice-tts-voice">声音（可选）<input id="private-voice-tts-voice" name="ttsVoice" value="${escapeHtml(tts?.voice ?? "")}" autocomplete="off"></label><label for="private-voice-tts-credential">访问凭据（可选）<input id="private-voice-tts-credential" name="ttsCredential" type="password" autocomplete="new-password"><small>${ttsCredentialHint}</small></label></fieldset><p class="product-private-voice-form-status" role="status" aria-live="polite" data-private-voice-form-status></p><button class="product-primary-action" type="submit">检查并保存</button></form></details>`;
+}
+
+function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string {
+  const voice = model.privateVoice;
+  if (voice === undefined) return "";
+  const notice = voice.notice === undefined ? "" : `<p class="product-enable-notice" role="status" aria-live="polite" data-one-shot-notice>${escapeHtml(voice.notice)}</p>`;
+  const textExit = `<a class="product-secondary-action" href="/conversation">使用文字对话</a>`;
+  const pending = voice.configurationPending;
+  if (pending !== undefined) {
+    const cancel = `<form method="post" action="/settings/private-voice/cancel-configure" data-private-voice-cancel-configure-form><input type="hidden" name="configurationId" value="${escapeHtml(pending.id)}"><button class="product-secondary-action" type="submit">停止这次检查</button></form>`;
+    return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" data-private-voice-configuration-pending data-private-voice-configuration-id="${escapeHtml(pending.id)}" data-private-voice-pending-started-at="${escapeHtml(String(pending.startedAt))}" data-private-voice-configuration-status-url="/settings/private-voice/configuration-status" aria-busy="true" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}<p class="product-private-voice-state" role="progressbar" aria-label="语音设置检查进度" aria-valuetext="正在检查语音识别与回复服务" aria-live="polite">正在检查语音识别与回复服务</p><p class="product-private-voice-pending-exit" data-private-voice-pending-exit hidden>可以离开此页，我会继续检查。</p><div class="product-private-voice-actions">${cancel}${textExit}</div></div></section>`;
+  }
+  if (!voice.configured) {
+    const configuration = renderPrivateVoiceConfiguration(voice, true);
+    return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="disabled" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}<p class="product-muted">语音暂未开启，文字对话始终可用。</p>${configuration}<div class="product-private-voice-actions">${textExit}</div></div></section>`;
+  }
+  const configuration = renderPrivateVoiceConfiguration(voice, voice.status === "degraded", voice.status === "degraded" ? "编辑设置" : undefined);
+  const serviceRows = [
+    `<li><span>语音识别</span><strong>${privateVoiceTransportLabel(voice.asr.transport)}</strong></li>`,
+    `<li><span>语音回复</span><strong>${privateVoiceTransportLabel(voice.tts.transport)}</strong></li>`,
+  ].join("");
+  const close = `<form class="product-private-voice-close" method="post" action="/settings/private-voice/disable" data-private-voice-disable-form><input type="hidden" name="expectedGeneration" value="${voice.generation}"><input type="hidden" name="confirmDisable" value="confirmed"><p>关闭只会停用家庭语音入口，不会停止外部服务。</p><button class="product-danger-action" type="submit">关闭语音</button></form>`;
+  const retry = `<form method="post" action="/settings/private-voice/retry" data-private-voice-retry-form><input type="hidden" name="expectedGeneration" value="${voice.generation}"><button class="product-primary-action" type="submit">再次连接</button></form>`;
+  const cancel = `<form method="post" action="/settings/private-voice/cancel-retry" data-private-voice-cancel-form><input type="hidden" name="expectedGeneration" value="${voice.generation}"><button class="product-secondary-action" type="submit">停止连接</button></form>`;
+  const content = voice.status === "active"
+      ? `<p class="product-private-voice-state">语音可用</p><ul class="product-settings-list">${serviceRows}</ul>${configuration}<div class="product-private-voice-actions">${close}${textExit}</div>`
+      : voice.status === "degraded"
+        ? `<p class="product-private-voice-state">语音需要恢复，文字对话仍然可用。</p><div class="product-private-voice-actions">${retry}${textExit}</div>${configuration}`
+        : voice.status === "retrying"
+          ? `<p class="product-private-voice-state" role="progressbar" aria-label="语音连接进度" aria-valuetext="正在重新连接语音">正在重新连接语音</p><div class="product-private-voice-actions">${cancel}${textExit}</div>`
+          : `<p class="product-private-voice-state" role="progressbar" aria-label="语音设置进度" aria-valuetext="正在应用新的语音设置" aria-live="polite">正在应用新的语音设置</p><div class="product-private-voice-actions">${textExit}</div>`;
+  return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}${content}</div></section>`;
+}
+
 function renderManagedSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const memberName = model.household.memberName ?? "待设置";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接与设备细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>家人与设备</h2><p class="product-muted">需要确认的动作推送到绑定本人的私人手机。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}<section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接与设备细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>家人与设备</h2><p class="product-muted">需要确认的动作推送到绑定本人的私人手机。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}${renderPrivateVoiceSettings(model)}<section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
 }
 
 function renderSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   if (model.view !== undefined) return renderManagedSettings(model, options);
   const memberName = model.household.memberName ?? "待设置";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、家人与设备和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid"><section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>家人与设备</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}<section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、家人与设备和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid"><section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>家人与设备</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}${renderPrivateVoiceSettings(model)}<section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
 }
 
 function onboardingSteps(model: NormalizedProductShellModel): readonly ProductOnboardingStepData[] {
@@ -1570,5 +1677,74 @@ export function renderProductHost(
 export function renderProductShell(source: ProductShellModel = {}, options: ProductShellRenderOptions = {}): string {
   return renderProductHost(source, renderProductContent(source, options), options);
 }
+
+/**
+ * Progressive feedback for the Settings form. The HTTP host appends this to its
+ * same-origin product asset; forms still navigate normally when script is absent.
+ */
+export const PRODUCT_PRIVATE_VOICE_JS = String.raw`
+for (const voiceForm of document.querySelectorAll("[data-private-voice-form], [data-private-voice-disable-form], [data-private-voice-retry-form], [data-private-voice-cancel-form], [data-private-voice-cancel-configure-form]")) {
+  if (!(voiceForm instanceof HTMLFormElement)) continue;
+  const voiceSection = voiceForm.closest("[data-private-voice-status]");
+  const formStatus = voiceSection?.querySelector("[data-private-voice-form-status]");
+  const state = voiceSection?.querySelector(".product-private-voice-state");
+  const message = voiceForm.hasAttribute("data-private-voice-form")
+    ? "正在检查并保存…"
+    : voiceForm.hasAttribute("data-private-voice-disable-form")
+      ? "正在关闭语音…"
+      : voiceForm.hasAttribute("data-private-voice-retry-form")
+        ? "正在重新连接语音…"
+        : voiceForm.hasAttribute("data-private-voice-cancel-configure-form")
+          ? "正在停止这次检查…"
+          : "正在停止连接…";
+  voiceForm.addEventListener("submit", (event) => {
+    const submit = event.submitter;
+    if (!(submit instanceof HTMLButtonElement)) return;
+    submit.disabled = true;
+    voiceSection?.setAttribute("aria-busy", "true");
+    if (formStatus instanceof HTMLElement) formStatus.textContent = message;
+    if (state instanceof HTMLElement) state.textContent = message;
+  }, { once: true });
+}
+
+for (const pendingSection of document.querySelectorAll("[data-private-voice-configuration-pending]")) {
+  if (!(pendingSection instanceof HTMLElement)) continue;
+  const configurationId = pendingSection.dataset.privateVoiceConfigurationId;
+  const statusUrl = pendingSection.dataset.privateVoiceConfigurationStatusUrl;
+  if (configurationId === undefined || statusUrl === undefined) continue;
+  const longWaitExit = pendingSection.querySelector("[data-private-voice-pending-exit]");
+  const startedAt = Number(pendingSection.dataset.privateVoicePendingStartedAt);
+  const revealAfter = Number.isFinite(startedAt)
+    ? Math.max(0, 10_000 - Math.max(0, Date.now() - startedAt))
+    : 10_000;
+  window.setTimeout(() => {
+    if (longWaitExit instanceof HTMLElement) longWaitExit.hidden = false;
+  }, revealAfter);
+
+  let reloaded = false;
+  let pollTimer;
+  const poll = async () => {
+    try {
+      const response = await fetch(statusUrl, { credentials: "same-origin", headers: { accept: "application/json" } });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (typeof result !== "object" || result === null) return;
+      if (result.configurationId !== configurationId) {
+        window.clearInterval(pollTimer);
+        return;
+      }
+      if (result.status !== "completed" || typeof result.receipt !== "string" || !/^[a-f0-9]{32}$/.test(result.receipt) || reloaded) return;
+      reloaded = true;
+      window.clearInterval(pollTimer);
+      location.replace("/settings?voice=" + encodeURIComponent(result.receipt) + "#private-voice");
+    } catch {
+      // The normal server-rendered pending state and its cancel/text exits remain available.
+    }
+  };
+  void poll();
+  pollTimer = window.setInterval(() => { void poll(); }, 2_000);
+  window.addEventListener("pagehide", () => window.clearInterval(pollTimer), { once: true });
+}
+`;
 
 export { PRODUCT_SHELL_CSS } from "./product-shell-styles.js";

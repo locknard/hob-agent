@@ -28,10 +28,7 @@ export interface VoiceSurfaceIntent {
   readonly volume?: string;
 }
 export type PrivateVoiceAvailability =
-  | {
-      readonly status: "active";
-      readonly captureMode: "encoded_audio" | "pcm_s16le";
-    }
+  | { readonly status: "active" }
   | { readonly status: "retryable" | "unavailable" };
 export interface VoiceSurfaceRenderOptions {
   readonly transcript?: string;
@@ -196,7 +193,6 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const answerNode = voiceRoot.querySelector("[data-voice-answer]");
   const conversationNode = voiceRoot.querySelector("[data-voice-conversation]");
   const availability = voiceRoot.getAttribute("data-private-voice-status");
-  const captureMode = voiceRoot.getAttribute("data-private-voice-capture-mode");
   const maxTurnMs = 15000;
   const maxPcmBytes = 5 * 1024 * 1024;
   let state = voiceRoot.getAttribute("data-voice-state") || "idle";
@@ -215,6 +211,12 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   let audio;
   let audioUrl;
   let generation = 0;
+  let activeLeaseId;
+  let activeLeaseGeneration;
+  let leaseController;
+  let leaseGeneration;
+  let disposed = false;
+  let captureMode;
   let activeAdviceId;
   let answerText = "";
   const copy = {
@@ -360,6 +362,28 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     } catch {}
     if (eventStream === target) eventStream = undefined;
   };
+  const releaseLease = (leaseId = activeLeaseId, leaseOwnerGeneration = activeLeaseGeneration) => {
+    if (typeof leaseId !== "string") return;
+    if (activeLeaseId === leaseId && activeLeaseGeneration === leaseOwnerGeneration) {
+      activeLeaseId = undefined;
+      activeLeaseGeneration = undefined;
+      captureMode = undefined;
+    }
+    void fetch("/voice/turns/" + encodeURIComponent(leaseId) + "/release", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "",
+      keepalive: true,
+    }).catch(() => undefined);
+  };
+  const cancelLeaseAcquisition = (ownerGeneration) => {
+    if (leaseController === undefined || leaseGeneration !== ownerGeneration) return;
+    try {
+      leaseController.abort();
+    } catch {}
+    leaseController = undefined;
+    leaseGeneration = undefined;
+  };
   const stopCapture = () => {
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -380,7 +404,9 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     stopTracks();
   };
   const resetTurn = () => {
+    const previousGeneration = generation;
     generation += 1;
+    cancelLeaseAcquisition(previousGeneration);
     activeAdviceId = undefined;
     showAnswer("");
     if (conversationNode instanceof HTMLAnchorElement) conversationNode.hidden = true;
@@ -390,6 +416,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     requestController = undefined;
     closeEvents();
     stopPlayback();
+    releaseLease();
     return generation;
   };
   const cancelTurn = async () => {
@@ -440,7 +467,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     requestController = controller;
     try {
       const response = await fetch(
-        "/voice/speech/" + encodeURIComponent(adviceId),
+        "/voice/turns/" + encodeURIComponent(activeLeaseId || "") + "/speech",
         { signal: controller.signal },
       );
       if (generation !== turnGeneration) return;
@@ -455,6 +482,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       nextAudio.onended = () => {
         if (generation !== turnGeneration || audio !== nextAudio) return;
         stopPlayback();
+        releaseLease();
         setState("idle", "播报结束。想继续时可以再说一句。");
       };
       nextAudio.onerror = () => {
@@ -538,11 +566,13 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     nextEventStream.addEventListener("failed", () => {
       if (generation !== turnGeneration || eventStream !== nextEventStream) return;
       closeEvents(nextEventStream);
+      releaseLease();
       setState("failed", "这次处理没有完成。可以再试一次或改用文字。");
     });
     nextEventStream.addEventListener("cancelled", () => {
       if (generation !== turnGeneration || eventStream !== nextEventStream) return;
       closeEvents(nextEventStream);
+      releaseLease();
       setState("cancelled");
     });
     nextEventStream.addEventListener("error", () => {
@@ -558,6 +588,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     if (generation !== turnGeneration) return;
     if (!body || body.size === 0) {
       discardAudio();
+      releaseLease();
       setState("no_input");
       return;
     }
@@ -575,7 +606,9 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
         : {}),
     };
     try {
-      const response = await fetch("/voice/transcribe", {
+      const leaseId = activeLeaseId;
+      if (typeof leaseId !== "string") throw new Error("voice_lease_missing");
+      const response = await fetch("/voice/turns/" + encodeURIComponent(leaseId) + "/transcribe", {
         method: "POST",
         headers,
         body,
@@ -607,14 +640,21 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
         typeof result.adviceId === "string"
       )
         beginEvents(result.adviceId, turnGeneration);
-      else if (result.status === "no_input") setState("no_input");
-      else if (result.status === "unavailable")
+      else if (result.status === "no_input") {
+        releaseLease();
+        setState("no_input");
+      } else if (result.status === "unavailable") {
+        releaseLease();
         setState("text_mode", "私人语音暂时不可用；可以直接改用文字。");
-      else if (result.status === "failed") setState("failed");
+      } else if (result.status === "failed") {
+        releaseLease();
+        setState("failed");
+      }
       else throw new Error("invalid_asr_response");
     } catch (error) {
       if (generation !== turnGeneration) return;
       discardAudio();
+      releaseLease();
       if (error?.name !== "AbortError")
         setState("failed", "语音服务暂时没有完成。请再试一次或改用文字。");
     } finally {
@@ -645,17 +685,63 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       channels: 1,
     }, turnGeneration);
   };
+  const beginLease = async (turnGeneration) => {
+    const controller = new AbortController();
+    leaseController = controller;
+    leaseGeneration = turnGeneration;
+    try {
+      const response = await fetch("/voice/turns", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "",
+        signal: controller.signal,
+      });
+      const result = await responseJson(response);
+      const leased = response.ok && result?.status === "leased" &&
+        typeof result.voiceTurnId === "string" &&
+        /^[A-Za-z0-9_-]{16,128}$/.test(result.voiceTurnId) &&
+        (result.captureMode === "encoded_audio" || result.captureMode === "pcm_s16le");
+      const current = generation === turnGeneration &&
+        leaseController === controller && !controller.signal.aborted;
+      if (!current) {
+        if (leased) releaseLease(result.voiceTurnId, turnGeneration);
+        return undefined;
+      }
+      if (!leased) return undefined;
+      activeLeaseId = result.voiceTurnId;
+      activeLeaseGeneration = turnGeneration;
+      captureMode = result.captureMode;
+      return result;
+    } finally {
+      if (leaseController === controller) {
+        leaseController = undefined;
+        leaseGeneration = undefined;
+      }
+    }
+  };
   const startCapture = async () => {
+    if (disposed) return;
     const turnGeneration = resetTurn();
     showTranscript("");
-    if (
-      availability !== "active" ||
-      (captureMode !== "encoded_audio" && captureMode !== "pcm_s16le")
-    ) {
+    if (availability !== "active") {
       setState("text_mode");
       return;
     }
+    setState("requesting_permission", "正在准备麦克风；你可以随时停止。");
+    try {
+      const lease = await beginLease(turnGeneration);
+      if (generation !== turnGeneration) return;
+      if (lease === undefined) {
+        setState("text_mode", "私人语音暂时不可用；可以直接改用文字。");
+        return;
+      }
+    } catch {
+      if (generation === turnGeneration)
+        setState("text_mode", "私人语音暂时不可用；可以直接改用文字。");
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
+      releaseLease();
       setState("text_mode", "这台设备不能提供麦克风；请改用文字。");
       return;
     }
@@ -727,6 +813,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     } catch (error) {
       if (generation !== turnGeneration) return;
       stopCapture();
+      releaseLease();
       if (error?.name === "NotAllowedError" || error?.name === "SecurityError")
         setState("permission_denied");
       else setState("failed", "麦克风暂时无法使用。请再试一次或改用文字。");
@@ -757,8 +844,18 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     requestController?.abort();
     requestController = undefined;
     stopPlayback();
+    releaseLease();
     setState("idle", "播报已停止。想继续时可以再说一句。");
   });
+  const disposeVoiceSurface = () => {
+    if (disposed) return;
+    disposed = true;
+    resetTurn();
+  };
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("pagehide", disposeVoiceSurface, { once: true });
+    window.addEventListener("beforeunload", disposeVoiceSurface, { once: true });
+  }
   if (availability !== "active") setState("text_mode");
   else setState(state);
 }`;
@@ -801,10 +898,6 @@ export function renderVoiceSurface(
     transcriptKind,
     options.intent,
   );
-  const captureMode =
-    privateVoice.status === "active"
-      ? ` data-private-voice-capture-mode="${privateVoice.captureMode}"`
-      : "";
   const voiceStartHidden =
     privateVoice.status !== "active" || renderedState === "text_mode"
       ? " hidden"
@@ -817,7 +910,7 @@ export function renderVoiceSurface(
     : options.notice === "unavailable"
       ? '<p class="product-notice" data-one-shot-notice role="status">私人语音仍在恢复中。文字对话现在就能继续。</p>'
       : "";
-  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}"${captureMode} aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。任何动作仍由 Hub 的确认和审计流程决定。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
+  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。任何动作仍由 Hub 的确认和审计流程决定。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
 }
 function renderVoiceIntent(
   transcript: string,

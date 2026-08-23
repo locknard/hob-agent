@@ -205,6 +205,118 @@ test("recovers a degraded provider pair through one explicit retry after its end
   }
 });
 
+test("cancelling a retry preserves an active turn and permits a later retry", async () => {
+  let transcriptionCalls = 0;
+  let speechCalls = 0;
+  let turnStarted: (() => void) | undefined;
+  let retryProbeStarted: (() => void) | undefined;
+  let heldTurnResponse: ServerResponse | undefined;
+  let heldRetryProbeResponse: ServerResponse | undefined;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume bounded request input */ }
+    if (request.url === "/v1/audio/transcriptions") {
+      transcriptionCalls += 1;
+      if (transcriptionCalls === 1 || transcriptionCalls >= 4) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ text: "已完成" }));
+        return;
+      }
+      if (transcriptionCalls === 2) {
+        heldTurnResponse = response;
+        turnStarted?.();
+        return;
+      }
+      heldRetryProbeResponse = response;
+      retryProbeStarted?.();
+      return;
+    }
+    speechCalls += 1;
+    if (speechCalls === 2) {
+      request.socket.destroy();
+      return;
+    }
+    response.setHeader("content-type", "audio/wav");
+    response.end(Buffer.from([82, 73, 70, 70]));
+  });
+  await new Promise<void>((resolve, reject) => server.listen(0, "127.0.0.1", (error?: Error) => error === undefined ? resolve() : reject(error)));
+  const address = server.address() as AddressInfo;
+  const runtime = new PrivateVoiceProviderRuntime({
+    config: {
+      asr: { transport: "openai_http", endpoint: `http://127.0.0.1:${address.port}` },
+      tts: { transport: "openai_http", endpoint: `http://127.0.0.1:${address.port}`, locale: "zh-CN" },
+    },
+    vault: { read: async () => assert.fail("Credential-free providers must not read the vault") },
+  });
+  try {
+    assert.deepEqual(await runtime.start(), { status: "active" });
+    const turnReady = new Promise<void>((resolve) => { turnStarted = resolve; });
+    const activeTurn = runtime.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" });
+    let activeTurnSettled = false;
+    void activeTurn.finally(() => { activeTurnSettled = true; });
+    await turnReady;
+    assert.deepEqual(await runtime.synthesize({ text: "触发重试" }), { status: "failed", reason: "endpoint_unreachable" });
+    assert.deepEqual(runtime.status, { status: "degraded", reason: "endpoint_unreachable" });
+
+    const retryReady = new Promise<void>((resolve) => { retryProbeStarted = resolve; });
+    const retry = runtime.retry();
+    await retryReady;
+    runtime.cancelRetry();
+    assert.deepEqual(await retry, { status: "degraded", reason: "cancelled" });
+    assert.equal(activeTurnSettled, false);
+    heldRetryProbeResponse?.end();
+
+    assert.deepEqual(await runtime.retry(), { status: "active" });
+    heldTurnResponse?.setHeader("content-type", "application/json");
+    heldTurnResponse?.end(JSON.stringify({ text: "持续中的转写" }));
+    assert.deepEqual(await activeTurn, { status: "transcribed", text: "持续中的转写" });
+  } finally {
+    await runtime.dispose();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
+test("disposing aborts an active provider call", async () => {
+  let transcriptionCalls = 0;
+  let operationStarted: (() => void) | undefined;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume bounded request input */ }
+    if (request.url === "/v1/audio/transcriptions") {
+      transcriptionCalls += 1;
+      if (transcriptionCalls === 1) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ text: "探测" }));
+        return;
+      }
+      operationStarted?.();
+      return;
+    }
+    response.setHeader("content-type", "audio/wav");
+    response.end(Buffer.from([82, 73, 70, 70]));
+  });
+  await new Promise<void>((resolve, reject) => server.listen(0, "127.0.0.1", (error?: Error) => error === undefined ? resolve() : reject(error)));
+  const address = server.address() as AddressInfo;
+  const runtime = new PrivateVoiceProviderRuntime({
+    config: {
+      asr: { transport: "openai_http", endpoint: `http://127.0.0.1:${address.port}` },
+      tts: { transport: "openai_http", endpoint: `http://127.0.0.1:${address.port}`, locale: "zh-CN" },
+    },
+    vault: { read: async () => assert.fail("Credential-free providers must not read the vault") },
+  });
+  try {
+    assert.deepEqual(await runtime.start(), { status: "active" });
+    const started = new Promise<void>((resolve) => { operationStarted = resolve; });
+    const pending = runtime.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" });
+    await started;
+    await runtime.dispose();
+    assert.deepEqual(await pending, { status: "failed", reason: "cancelled" });
+    assert.deepEqual(runtime.status, { status: "disabled" });
+  } finally {
+    await runtime.dispose();
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
 test("disposes a retry while a credential read is pending and leaves no active provider", async () => {
   let reads = 0;
   let retryReadStarted: (() => void) | undefined;

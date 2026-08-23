@@ -15,6 +15,70 @@ import { ProductHttpHost } from "./product-http-host.js";
 import type { ProductConnectionState } from "./product-shell.js";
 import { runProductViewRecipeConformance } from "./product-view-recipe-conformance.js";
 
+type TestVoiceProvider = {
+  readonly captureMode: "encoded_audio" | "pcm_s16le";
+  transcribe(input: Record<string, unknown>): Promise<unknown>;
+  synthesize(input: Record<string, unknown>): Promise<unknown>;
+};
+
+function voiceGateway(provider: TestVoiceProvider): ProposalInboxHttpOptions["privateVoice"] {
+  return {
+    status: "active",
+    beginTurn() {
+      return {
+        captureMode: provider.captureMode,
+        transcribe: provider.transcribe,
+        synthesize: provider.synthesize,
+        async release() {},
+      };
+    },
+  };
+}
+
+async function leaseVoiceTurn(origin: string, headers: Record<string, string>): Promise<string> {
+  const response = await fetch(`${origin}/voice/turns`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/x-www-form-urlencoded" },
+    body: "",
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json() as { readonly status: string; readonly voiceTurnId: string };
+  assert.equal(body.status, "leased");
+  return body.voiceTurnId;
+}
+
+function transcribeVoiceTurn(origin: string, turnId: string, headers: Record<string, string>, body: Uint8Array): Promise<Response> {
+  return fetch(`${origin}/voice/turns/${encodeURIComponent(turnId)}/transcribe`, { method: "POST", headers, body });
+}
+
+function speakVoiceTurn(origin: string, turnId: string, headers: Record<string, string>): Promise<Response> {
+  return fetch(`${origin}/voice/turns/${encodeURIComponent(turnId)}/speech`, { headers });
+}
+
+async function completedPrivateVoiceConfigurationReceipt(
+  origin: string,
+  headers: Record<string, string>,
+): Promise<string> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await fetch(`${origin}/settings/private-voice/configuration-status`, { headers });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { readonly status: string; readonly receipt?: string };
+    if (body.status === "completed") {
+      assert.match(body.receipt ?? "", /^[a-f0-9]{32}$/);
+      return body.receipt!;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("background private voice configuration did not settle");
+}
+
+async function acceptedVoiceTurn(origin: string, headers: Record<string, string>): Promise<string> {
+  const turnId = await leaseVoiceTurn(origin, headers);
+  const response = await transcribeVoiceTurn(origin, turnId, headers, new Uint8Array([1, 2]));
+  assert.equal(response.status, 202);
+  return turnId;
+}
+
 class StubInbox extends Service {
   readonly reviews: unknown[] = [];
   observations = 0;
@@ -479,9 +543,29 @@ function testVoiceSpeechHandler(ctx: Context): (
   response: unknown,
   adviceId: string,
 ) => Promise<void> {
-  return (ctx.homeInboxHttp as unknown as {
-    handleVoiceSpeech(request: unknown, response: unknown, adviceId: string): Promise<void>;
-  }).handleVoiceSpeech.bind(ctx.homeInboxHttp);
+  const service = ctx.homeInboxHttp as unknown as {
+    options: { privateVoice?: { beginTurn(): unknown } };
+    privateVoiceTurns: Map<string, unknown>;
+    privateVoiceSessionKey(request: unknown): string;
+    handleVoiceSpeech(request: unknown, response: unknown, token: string): Promise<void>;
+  };
+  const token = "t".repeat(43);
+  return (request, response) => {
+    if (!service.privateVoiceTurns.has(token)) {
+      const lease = service.options.privateVoice?.beginTurn();
+      if (lease === undefined) throw new Error("Voice test lease is unavailable");
+      service.privateVoiceTurns.set(token, {
+        token,
+        sessionKey: service.privateVoiceSessionKey(request),
+        lease,
+        phase: "awaiting_advice",
+        uploadUsed: true,
+        adviceId: "advice-stream",
+        expiresAt: Date.now() + 60_000,
+      });
+    }
+    return service.handleVoiceSpeech(request, response, token);
+  };
 }
 
 class PresentationPreferenceInbox extends StubInbox {
@@ -683,8 +767,9 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   const voiceScriptText = await voiceScript.text();
   assert.match(voiceScriptText, /getUserMedia/);
   assert.match(voiceScriptText, /MediaRecorder/);
-  assert.match(voiceScriptText, /voice\/transcribe/);
-  assert.match(voiceScriptText, /voice\/speech/);
+  assert.match(voiceScriptText, /voice\/turns/);
+  assert.match(voiceScriptText, /\/transcribe/);
+  assert.match(voiceScriptText, /\/speech/);
   assert.doesNotMatch(voiceScriptText, /SpeechRecognition|webkitSpeechRecognition|play_media|mediaRef/);
 
   const invalidVoiceState = await fetch(`${ctx.homeInboxHttp.origin}/voice?state=%3Cscript%3E`, {
@@ -1332,6 +1417,592 @@ test("settings saves confirmation methods and rechecks blocked proposals", async
     await inboxFiber.dispose();
     await ctx.fiber.dispose();
   }
+});
+
+test("operational private voice settings stay authenticated, same-origin, credential-private, and receipt-scoped", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const calls: unknown[] = [];
+  let projectionCalls = 0;
+  const operationalPrivateVoice = {
+    async projection() {
+      projectionCalls += 1;
+      return {
+        status: "active" as const,
+        generation: 8,
+        configured: true as const,
+        asr: { transport: "wyoming" as const, endpoint: "http://voice.local/asr", model: "whisper", credentialConfigured: true },
+        tts: { transport: "openai_http" as const, endpoint: "http://voice.local/tts", locale: "zh-CN", voice: "calm", credentialConfigured: false },
+      };
+    },
+    async configure(input: unknown) {
+      calls.push({ type: "configure", input });
+      return { status: "configured" as const, generation: 9 };
+    },
+    async disable(input: unknown) {
+      calls.push({ type: "disable", input });
+      return { status: "disabled" as const, generation: 9 };
+    },
+    async retry() {
+      calls.push({ type: "retry" });
+      return "retrying" as const;
+    },
+    cancelRetry() {
+      calls.push({ type: "cancel-retry" });
+    },
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    voiceSettings: operationalPrivateVoice,
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  const asrCredential = "private-asr-secret";
+  const ttsCredential = "private-tts-secret";
+  try {
+    const settings = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    const settingsHtml = await settings.text();
+    assert.equal(projectionCalls, 1);
+    assert.match(settingsHtml, /id="private-voice"/);
+    assert.match(settingsHtml, /value="http:\/\/voice\.local\/asr"/);
+    assert.doesNotMatch(settingsHtml, /private-(?:asr|tts)-secret/);
+    const asset = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, { headers: { authorization } });
+    assert.match(await asset.text(), /data-private-voice-form/);
+
+    const rejectedQuery = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure?credential=${asrCredential}`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedGeneration: "8" }),
+      redirect: "manual",
+    });
+    assert.equal(rejectedQuery.status, 400, "credentials never enter URLs");
+    const rejectedOrigin = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+      method: "POST",
+      headers: { ...headers, origin: "http://elsewhere.invalid" },
+      body: new URLSearchParams({ expectedGeneration: "8" }),
+      redirect: "manual",
+    });
+    assert.equal(rejectedOrigin.status, 403);
+
+    const configured = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({
+        expectedGeneration: "8",
+        asrTransport: "wyoming",
+        asrEndpoint: "http://voice.local/asr",
+        asrModel: "whisper",
+        asrCredential,
+        ttsTransport: "openai_http",
+        ttsEndpoint: "http://voice.local/tts",
+        ttsModel: "speak",
+        ttsLocale: "zh-CN",
+        ttsVoice: "calm",
+        ttsCredential,
+      }),
+      redirect: "manual",
+    });
+    assert.equal(configured.status, 303);
+    const configuredLocation = configured.headers.get("location") ?? "";
+    assert.equal(configuredLocation, "/settings#private-voice", "the browser returns before the server-side check settles");
+    assert.doesNotMatch(configuredLocation, /private-(?:asr|tts)-secret/);
+    const configureCall = calls[0] as { readonly type: string; readonly input: Record<string, unknown> };
+    assert.equal(configureCall.input.signal instanceof AbortSignal, true);
+    const { signal: _signal, ...configureInput } = configureCall.input;
+    assert.deepEqual({
+      type: configureCall.type,
+      input: configureInput,
+    }, {
+      type: "configure",
+      input: {
+        expectedGeneration: 8,
+        asr: { kind: "asr", transport: "wyoming", endpoint: "http://voice.local/asr", model: "whisper", credential: asrCredential },
+        tts: { kind: "tts", transport: "openai_http", endpoint: "http://voice.local/tts", model: "speak", locale: "zh-CN", voice: "calm", credential: ttsCredential },
+      },
+    });
+    const receipt = await completedPrivateVoiceConfigurationReceipt(ctx.homeInboxHttp.origin, { authorization });
+    const received = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
+    const receivedHtml = await received.text();
+    assert.match(receivedHtml, /语音服务已检查并保存。/);
+    assert.doesNotMatch(receivedHtml, /private-(?:asr|tts)-secret/);
+    const replayed = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
+    assert.doesNotMatch(await replayed.text(), /语音服务已检查并保存。/);
+
+    const disabled = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/disable`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedGeneration: "8", confirmDisable: "confirmed" }),
+      redirect: "manual",
+    });
+    assert.equal(disabled.status, 303);
+    assert.deepEqual(calls[1], { type: "disable", input: { expectedGeneration: 8 } });
+    const retry = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/retry`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedGeneration: "8" }),
+      redirect: "manual",
+    });
+    assert.equal(retry.status, 303);
+    const cancel = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/cancel-retry`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedGeneration: "8" }),
+      redirect: "manual",
+    });
+    assert.equal(cancel.status, 303);
+    assert.deepEqual(calls.slice(2), [{ type: "retry" }, { type: "cancel-retry" }]);
+    const staleRetry = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/retry`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ expectedGeneration: "7" }),
+      redirect: "manual",
+    });
+    assert.equal(staleRetry.status, 303);
+    assert.deepEqual(calls.slice(2), [{ type: "retry" }, { type: "cancel-retry" }], "a stale settings page cannot retry the replacement generation");
+    const staleReceipt = /voice=([a-f0-9]{32})/.exec(staleRetry.headers.get("location") ?? "")?.[1];
+    assert.ok(staleReceipt !== undefined);
+    const staleSettings = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${staleReceipt}`, { headers: { authorization } });
+    assert.match(await staleSettings.text(), /语音设置已经更新，请查看当前设置后再继续。/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("operational private voice starts one credential-private configuration check in the background", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  let resolveConfiguration: ((result: { readonly status: "configured"; readonly generation: number }) => void) | undefined;
+  const configuration = new Promise<{ readonly status: "configured"; readonly generation: number }>((resolve) => {
+    resolveConfiguration = resolve;
+  });
+  let configureCalls = 0;
+  let configureInput: unknown;
+  const asrCredential = "private-background-asr-secret";
+  const ttsCredential = "private-background-tts-secret";
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    voiceSettings: {
+      async projection() {
+        return { status: "disabled" as const, generation: 8, configured: false as const };
+      },
+      async configure(input: unknown) {
+        configureCalls += 1;
+        configureInput = input;
+        return configuration;
+      },
+      async disable() { return { status: "disabled" as const, generation: 8 }; },
+      async retry() { return "disabled" as const; },
+      cancelRetry() {},
+    },
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  const submit = fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+    method: "POST",
+    headers,
+    body: new URLSearchParams({
+      expectedGeneration: "8",
+      asrTransport: "wyoming",
+      asrEndpoint: "http://voice.local/asr",
+      asrModel: "whisper",
+      asrCredential,
+      ttsTransport: "openai_http",
+      ttsEndpoint: "http://voice.local/tts",
+      ttsModel: "speak",
+      ttsLocale: "zh-CN",
+      ttsVoice: "calm",
+      ttsCredential,
+    }),
+    redirect: "manual",
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const response = await Promise.race([
+      submit,
+      new Promise<"timed-out">((resolve) => { timeout = setTimeout(() => resolve("timed-out"), 50); }),
+    ]);
+    if (timeout !== undefined) clearTimeout(timeout);
+    if (response === "timed-out") {
+      resolveConfiguration?.({ status: "configured", generation: 9 });
+      await submit;
+      assert.fail("configuration POST waits for the provider check instead of redirecting immediately");
+    }
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get("location"), "/settings#private-voice");
+    assert.equal(configureCalls, 1);
+    const input = configureInput as { readonly signal?: AbortSignal };
+    assert.ok(input.signal instanceof AbortSignal, "the server owns one cancellable background task");
+
+    const pendingPage = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    const pendingHtml = await pendingPage.text();
+    assert.match(pendingHtml, /正在检查语音识别与回复服务/);
+    assert.doesNotMatch(pendingHtml, /settings\/private-voice\/configure/);
+    assert.doesNotMatch(pendingHtml, /private-background-(?:asr|tts)-secret/);
+    const configurationId = /data-private-voice-configuration-id="([a-f0-9]{32})"/.exec(pendingHtml)?.[1];
+    assert.ok(configurationId !== undefined);
+
+    const anonymousStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`);
+    assert.equal(anonymousStatus.status, 401);
+    const crossOriginStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`, {
+      headers: { authorization, origin: "http://elsewhere.invalid" },
+    });
+    assert.equal(crossOriginStatus.status, 403);
+    const pendingStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`, { headers: { authorization } });
+    assert.equal(pendingStatus.status, 200);
+    assert.deepEqual(await pendingStatus.json(), {
+      status: "pending",
+      configurationId,
+    });
+
+    resolveConfiguration?.({ status: "configured", generation: 9 });
+    let completion: { readonly status: string; readonly receipt?: string } | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const status = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`, { headers: { authorization } });
+      completion = await status.json() as { readonly status: string; readonly receipt?: string };
+      if (completion.status === "completed") break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(completion?.status, "completed");
+    assert.match(completion?.receipt ?? "", /^[a-f0-9]{32}$/);
+    assert.doesNotMatch(JSON.stringify(completion), /private-background-(?:asr|tts)-secret/);
+    const receiptPage = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${completion?.receipt}`, { headers: { authorization } });
+    const receiptHtml = await receiptPage.text();
+    assert.match(receiptHtml, /语音服务已检查并保存。/);
+    assert.doesNotMatch(receiptHtml, /private-background-(?:asr|tts)-secret/);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    resolveConfiguration?.({ status: "configured", generation: 9 });
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("operational private voice shows an already-settled background receipt once on the redirected settings page", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    voiceSettings: {
+      async projection() {
+        return { status: "disabled" as const, generation: 3, configured: false as const };
+      },
+      async configure() { return { status: "configured" as const, generation: 4 }; },
+      async disable() { return { status: "disabled" as const, generation: 3 }; },
+      async retry() { return "disabled" as const; },
+      cancelRetry() {},
+    },
+  });
+  try {
+    const configured = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: ctx.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        expectedGeneration: "3", asrTransport: "wyoming", asrEndpoint: "http://voice.local/asr", asrModel: "",
+        asrCredential: "", ttsTransport: "openai_http", ttsEndpoint: "http://voice.local/tts", ttsModel: "",
+        ttsLocale: "zh-CN", ttsVoice: "", ttsCredential: "",
+      }),
+      redirect: "manual",
+    });
+    assert.equal(configured.status, 303);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const settled = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    assert.match(await settled.text(), /语音服务已检查并保存。/);
+    const replay = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    assert.doesNotMatch(await replay.text(), /语音服务已检查并保存。/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("operational private voice cancels only its exact background check and keeps the active generation", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  let generation = 3;
+  let configurationSignal: AbortSignal | undefined;
+  let configureCalls = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    voiceSettings: {
+      async projection() {
+        return { status: "disabled" as const, generation, configured: false as const };
+      },
+      async configure(input: unknown) {
+        configureCalls += 1;
+        configurationSignal = (input as { readonly signal?: AbortSignal }).signal;
+        return await new Promise<{ readonly status: "cancelled" }>((resolve) => {
+          configurationSignal?.addEventListener("abort", () => resolve({ status: "cancelled" }), { once: true });
+        });
+      },
+      async disable() { return { status: "disabled" as const, generation }; },
+      async retry() { return "disabled" as const; },
+      cancelRetry() {},
+    },
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  const configureBody = new URLSearchParams({
+    expectedGeneration: "3", asrTransport: "wyoming", asrEndpoint: "http://voice.local/asr", asrModel: "",
+    asrCredential: "", ttsTransport: "openai_http", ttsEndpoint: "http://voice.local/tts", ttsModel: "",
+    ttsLocale: "zh-CN", ttsVoice: "", ttsCredential: "",
+  });
+  try {
+    const started = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+      method: "POST", headers, body: configureBody, redirect: "manual",
+    });
+    assert.equal(started.status, 303);
+    assert.equal(configureCalls, 1);
+    assert.equal(configurationSignal?.aborted, false);
+    const pending = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    const pendingHtml = await pending.text();
+    const configurationId = /data-private-voice-configuration-id="([a-f0-9]{32})"/.exec(pendingHtml)?.[1];
+    assert.ok(configurationId !== undefined);
+
+    const crossOrigin = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/cancel-configure`, {
+      method: "POST",
+      headers: { ...headers, origin: "http://elsewhere.invalid" },
+      body: new URLSearchParams({ configurationId }),
+      redirect: "manual",
+    });
+    assert.equal(crossOrigin.status, 403);
+    assert.match(await crossOrigin.text(), /请从家庭控制台继续此操作。/);
+    assert.equal(configurationSignal?.aborted, false);
+
+    const malformed = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/cancel-configure`, {
+      method: "POST", headers, body: new URLSearchParams({ configurationId: "forged" }), redirect: "manual",
+    });
+    assert.equal(malformed.status, 400);
+    assert.equal(configurationSignal?.aborted, false);
+
+    const forged = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/cancel-configure`, {
+      method: "POST", headers, body: new URLSearchParams({ configurationId: "f".repeat(32) }), redirect: "manual",
+    });
+    assert.equal(forged.status, 303);
+    assert.equal(configurationSignal?.aborted, false, "a guessed opaque id cannot stop the active task");
+
+    const stopped = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/cancel-configure`, {
+      method: "POST", headers, body: new URLSearchParams({ configurationId }), redirect: "manual",
+    });
+    assert.equal(stopped.status, 303);
+    assert.equal(stopped.headers.get("location"), "/settings#private-voice");
+    const receipt = await completedPrivateVoiceConfigurationReceipt(ctx.homeInboxHttp.origin, { authorization });
+    const complete = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
+    const completeHtml = await complete.text();
+    assert.match(completeHtml, /已停止这次检查，原来的语音设置保持不变。/);
+    assert.match(completeHtml, /name="expectedGeneration" value="3"/);
+    assert.equal(configurationSignal?.aborted, true);
+    assert.equal(generation, 3);
+  } finally {
+    generation = 3;
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("disposing the HTTP service aborts its one in-flight private voice configuration", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  let configurationSignal: AbortSignal | undefined;
+  let aborts = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    voiceSettings: {
+      async projection() {
+        return { status: "disabled" as const, generation: 3, configured: false as const };
+      },
+      async configure(input: unknown) {
+        configurationSignal = (input as { readonly signal?: AbortSignal }).signal;
+        return await new Promise<{ readonly status: "cancelled" }>((resolve) => {
+          configurationSignal?.addEventListener("abort", () => {
+            aborts += 1;
+            resolve({ status: "cancelled" });
+          }, { once: true });
+        });
+      },
+      async disable() { return { status: "disabled" as const, generation: 3 }; },
+      async retry() { return "disabled" as const; },
+      cancelRetry() {},
+    },
+  });
+  try {
+    const response = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: ctx.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        expectedGeneration: "3", asrTransport: "wyoming", asrEndpoint: "http://voice.local/asr", asrModel: "",
+        asrCredential: "", ttsTransport: "openai_http", ttsEndpoint: "http://voice.local/tts", ttsModel: "",
+        ttsLocale: "zh-CN", ttsVoice: "", ttsCredential: "",
+      }),
+      redirect: "manual",
+    });
+    assert.equal(response.status, 303);
+    assert.equal(configurationSignal?.aborted, false);
+    await fiber.dispose();
+    assert.equal(configurationSignal?.aborted, true);
+    assert.equal(aborts, 1);
+  } finally {
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("operational private voice returns family-facing receipts for busy, conflict, and unavailable outcomes", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const outcomes = ["busy", "conflict", "unavailable", "cancelled"] as const;
+  let next = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    voiceSettings: {
+      async projection() {
+        return {
+          status: "disabled" as const,
+          generation: 3,
+          configured: false as const,
+        };
+      },
+      async configure() { return { status: outcomes[next++]! }; },
+      async disable() { return { status: "unavailable" as const }; },
+      async retry() { return "degraded" as const; },
+      cancelRetry() {},
+    },
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  const form = new URLSearchParams({
+    expectedGeneration: "3", asrTransport: "wyoming", asrEndpoint: "http://voice.local/asr", asrModel: "",
+    asrCredential: "", ttsTransport: "openai_http", ttsEndpoint: "http://voice.local/tts", ttsModel: "",
+    ttsLocale: "zh-CN", ttsVoice: "", ttsCredential: "",
+  });
+  try {
+    for (const expected of [/语音设置正在处理/, /语音设置已经更新/, /私有语音暂时不可用/, /已停止这次检查/] as const) {
+      const response = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+        method: "POST", headers, body: form, redirect: "manual",
+      });
+      assert.equal(response.status, 303);
+      assert.equal(response.headers.get("location"), "/settings#private-voice");
+      const receipt = await completedPrivateVoiceConfigurationReceipt(ctx.homeInboxHttp.origin, { authorization });
+      const settings = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
+      const html = await settings.text();
+      assert.match(html, expected);
+      assert.match(html, /id="private-voice"/, "the recovery entry stays available");
+    }
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("allows every present bound private household member to configure voice while refusing shared and unbound devices", async () => {
+  const form = new URLSearchParams({
+    expectedGeneration: "3", asrTransport: "wyoming", asrEndpoint: "http://voice.local/asr", asrModel: "",
+    asrCredential: "", ttsTransport: "openai_http", ttsEndpoint: "http://voice.local/tts", ttsModel: "",
+    ttsLocale: "zh-CN", ttsVoice: "", ttsCredential: "",
+  });
+  const createSettings = (calls: unknown[]) => ({
+    async projection() {
+      return { status: "disabled" as const, generation: 3, configured: false as const };
+    },
+    async configure(input: unknown) {
+      calls.push(input);
+      return { status: "configured" as const, generation: 4 };
+    },
+    async disable() { return { status: "disabled" as const, generation: 4 }; },
+    async retry() { return "disabled" as const; },
+    cancelRetry() {},
+  });
+  const request = async (
+    principal: ProposalInboxHttpOptions["principal"],
+    calls: unknown[],
+  ) => {
+    const ctx = new Context();
+    const inboxFiber = await ctx.plugin(StubInbox);
+    const fiber = await ctx.plugin(ProposalInboxHttpService, {
+      port: 0,
+      authenticate: createInboxBasicAuthenticator(token),
+      principal,
+      voiceSettings: createSettings(calls),
+    });
+    try {
+      return await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configure`, {
+        method: "POST",
+        headers: {
+          authorization,
+          origin: ctx.homeInboxHttp.origin,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: form,
+        redirect: "manual",
+      });
+    } finally {
+      await fiber.dispose();
+      await inboxFiber.dispose();
+      await ctx.fiber.dispose();
+    }
+  };
+
+  const memberCalls: unknown[] = [];
+  const member = await request({
+    principalId: "member-1",
+    role: "child",
+    present: true,
+    device: { kind: "private", boundPrincipalId: "member-1" },
+  }, memberCalls);
+  assert.equal(member.status, 303);
+  assert.equal(memberCalls.length, 1, "a present bound member needs no administrator role to configure their household voice");
+
+  const sharedCalls: unknown[] = [];
+  const shared = await request(childSharedPrincipal, sharedCalls);
+  assert.equal(shared.status, 403);
+  assert.equal(sharedCalls.length, 0);
+
+  const unboundCalls: unknown[] = [];
+  const unbound = await request({
+    principalId: "member-2",
+    role: "adult_member",
+    present: true,
+    device: { kind: "private", boundPrincipalId: "another-member" },
+  }, unboundCalls);
+  assert.equal(unbound.status, 403);
+  assert.equal(unboundCalls.length, 0);
 });
 
 test("a recheck failure never undoes the save and the receipt says so", async () => {
@@ -3385,7 +4056,7 @@ test("accepts bounded private encoded audio only from the product session and st
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe(input: Record<string, unknown>) {
@@ -3393,38 +4064,26 @@ test("accepts bounded private encoded audio only from the product session and st
         return { status: "transcribed" as const, text: "客厅现在怎么样？" };
       },
       async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
   const headers = { authorization, origin, "content-type": "audio/wav" };
 
   try {
-    const foreign = await fetch(`${origin}/voice/transcribe`, {
+    const foreign = await fetch(`${origin}/voice/turns`, {
       method: "POST",
-      headers: { ...headers, origin: "https://attacker.invalid" },
-      body: new Uint8Array([1, 2]),
+      headers: { authorization, origin: "https://attacker.invalid", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
     });
     assert.equal(foreign.status, 403);
 
-    const unsupported = await fetch(`${origin}/voice/transcribe`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/octet-stream" },
-      body: new Uint8Array([1, 2]),
-    });
+    const unsupported = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), { ...headers, "content-type": "application/octet-stream" }, new Uint8Array([1, 2]));
     assert.equal(unsupported.status, 415);
 
-    const forgedFormat = await fetch(`${origin}/voice/transcribe`, {
-      method: "POST",
-      headers: { ...headers, "x-audio-rate": "16000" },
-      body: new Uint8Array([1, 2]),
-    });
+    const forgedFormat = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), { ...headers, "x-audio-rate": "16000" }, new Uint8Array([1, 2]));
     assert.equal(forgedFormat.status, 400);
 
-    const accepted = await fetch(`${origin}/voice/transcribe`, {
-      method: "POST",
-      headers,
-      body: new Uint8Array([1, 2, 3]),
-    });
+    const accepted = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), headers, new Uint8Array([1, 2, 3]));
     assert.equal(accepted.status, 202);
     assert.equal(accepted.headers.get("cache-control"), "no-store");
     assert.deepEqual(await accepted.json(), {
@@ -3444,6 +4103,122 @@ test("accepts bounded private encoded audio only from the product session and st
   }
 });
 
+test("leases one opaque, session-bound browser turn and releases only its local provider lease", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let releases = 0;
+  const turnId = "a".repeat(43);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoiceTurnToken: () => turnId,
+    privateVoice: {
+      status: "active",
+      beginTurn() {
+        return {
+          captureMode: "encoded_audio" as const,
+          async transcribe() { return { status: "transcribed" as const, text: "客厅现在怎么样？" }; },
+          async synthesize() { return { status: "failed" as const, reason: "unavailable" }; },
+          async release() { releases += 1; },
+        };
+      },
+    },
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization, origin, "content-type": "audio/wav" };
+  try {
+    const old = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers, body: new Uint8Array([1]) });
+    assert.equal(old.status, 404);
+    const leased = await leaseVoiceTurn(origin, { authorization, origin });
+    assert.equal(leased, turnId);
+    const foreign = await transcribeVoiceTurn(origin, leased, { ...headers, authorization: "Basic another-session" }, new Uint8Array([1]));
+    assert.equal(foreign.status, 401);
+    const accepted = await transcribeVoiceTurn(origin, leased, headers, new Uint8Array([1]));
+    assert.equal(accepted.status, 202);
+    const repeated = await transcribeVoiceTurn(origin, leased, headers, new Uint8Array([1]));
+    assert.equal(repeated.status, 409);
+    const release = await fetch(`${origin}/voice/turns/${leased}/release`, { method: "POST", headers: { authorization, origin, "content-type": "application/x-www-form-urlencoded" }, body: "" });
+    assert.equal(release.status, 204);
+    assert.equal(releases, 1);
+    assert.equal((ctx.homeInbox as unknown as StructuredAdviceInbox).cancelled.length, 0);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("pins capture, ASR, advice wait, and TTS to one generation while the next lease uses the replacement", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let current: "A" | "B" = "A";
+  const calls: string[] = [];
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: "active",
+      beginTurn() {
+        const generation = current;
+        return {
+          captureMode: "encoded_audio" as const,
+          async transcribe() { calls.push(`${generation}:asr`); return { status: "transcribed" as const, text: "客厅现在怎么样？" }; },
+          async synthesize() { calls.push(`${generation}:tts`); return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([1]) }; },
+          async release() { calls.push(`${generation}:release`); },
+        };
+      },
+    },
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization, origin, "content-type": "audio/wav" };
+  try {
+    const oldTurn = await leaseVoiceTurn(origin, headers);
+    current = "B";
+    assert.equal((await transcribeVoiceTurn(origin, oldTurn, headers, new Uint8Array([1]))).status, 202);
+    assert.equal((await speakVoiceTurn(origin, oldTurn, { authorization })).status, 200);
+    const newTurn = await leaseVoiceTurn(origin, headers);
+    assert.equal((await transcribeVoiceTurn(origin, newTurn, headers, new Uint8Array([1]))).status, 202);
+    assert.deepEqual(calls.slice(0, 3), ["A:asr", "A:tts", "B:asr"]);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("expires a private voice capability by releasing its local lease", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let releases = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: "active",
+      beginTurn() { return { captureMode: "encoded_audio" as const, async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; }, async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; }, async release() { releases += 1; } }; },
+    },
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  try {
+    const token = await leaseVoiceTurn(origin, { authorization, origin });
+    const service = ctx.homeInboxHttp as unknown as {
+      privateVoiceTurns: Map<string, { expiresAt: number }>;
+      schedulePrivateVoiceExpiry(): void;
+    };
+    service.privateVoiceTurns.get(token)!.expiresAt = 0;
+    service.schedulePrivateVoiceExpiry();
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    assert.equal(releases, 1);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("keeps a second voice upload out of ASR while the household turn is still active", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
@@ -3454,7 +4229,7 @@ test("keeps a second voice upload out of ASR while the household turn is still a
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe() {
@@ -3462,16 +4237,12 @@ test("keeps a second voice upload out of ASR while the household turn is still a
         return { status: "transcribed" as const, text: "这句不应进入识别" };
       },
       async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
 
   try {
-    const response = await fetch(`${origin}/voice/transcribe`, {
-      method: "POST",
-      headers: { authorization, origin, "content-type": "audio/wav" },
-      body: new Uint8Array([1, 2, 3]),
-    });
+    const response = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, { authorization, origin }), { authorization, origin, "content-type": "audio/wav" }, new Uint8Array([1, 2, 3]));
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), { status: "active", adviceId: "advice-active" });
     assert.equal(transcriptionCalls, 0);
@@ -3493,12 +4264,12 @@ test("accepts only bounded PCM headers and maps private voice failures to closed
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "pcm_s16le",
       async transcribe(input: Record<string, unknown>) { calls.push(input); return transcription; },
       async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
   const headers = {
@@ -3511,16 +4282,16 @@ test("accepts only bounded PCM headers and maps private voice failures to closed
   };
 
   try {
-    const incomplete = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers: { authorization, origin, "content-type": "audio/l16" }, body: new Uint8Array([1]) });
+    const incomplete = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), { authorization, origin, "content-type": "audio/l16" }, new Uint8Array([1]));
     assert.equal(incomplete.status, 400);
 
-    const accepted = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers, body: new Uint8Array([1, 2]) });
+    const accepted = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), headers, new Uint8Array([1, 2]));
     assert.equal(accepted.status, 422);
     assert.deepEqual(await accepted.json(), { status: "no_input" });
     assert.deepEqual(calls[0]?.format, { rate: 16000, width: 2, channels: 1 });
 
     transcription = { status: "failed", reason: "endpoint=http://private.invalid token=secret" };
-    const failed = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers, body: new Uint8Array([1, 2]) });
+    const failed = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), headers, new Uint8Array([1, 2]));
     assert.equal(failed.status, 502);
     const failedBody = await failed.text();
     assert.deepEqual(JSON.parse(failedBody), { status: "failed" });
@@ -3540,34 +4311,30 @@ test("synthesizes only the completed canonical advice answer and never a request
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
-      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async transcribe() { return { status: "transcribed" as const, text: "客厅现在怎么样？" }; },
       async synthesize(input: Record<string, unknown>) {
         synthesisCalls.push(input);
         return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
 
   try {
-    const missing = await fetch(`${origin}/voice/speech/no-such-advice`, { headers: { authorization } });
+    const missing = await speakVoiceTurn(origin, "z".repeat(43), { authorization });
     assert.equal(missing.status, 404);
-
-    const active = await fetch(`${origin}/voice/speech/advice-active`, { headers: { authorization } });
-    assert.equal(active.status, 409);
-
-    const injected = await fetch(`${origin}/voice/speech/advice-stream?text=turn+off+the+alarm`, { headers: { authorization } });
+    const turnId = await acceptedVoiceTurn(origin, { authorization, origin, "content-type": "audio/wav" });
+    const injected = await fetch(`${origin}/voice/turns/${turnId}/speech?text=turn+off+the+alarm`, { headers: { authorization } });
     assert.equal(injected.status, 400);
-
-    const head = await fetch(`${origin}/voice/speech/advice-stream`, { method: "HEAD", headers: { authorization } });
+    const head = await fetch(`${origin}/voice/turns/${turnId}/speech`, { method: "HEAD", headers: { authorization } });
     assert.equal(head.status, 405);
     assert.equal(head.headers.get("allow"), "GET");
     assert.equal(synthesisCalls.length, 0, "a metadata probe cannot spend a synthesis turn");
 
-    const speech = await fetch(`${origin}/voice/speech/advice-stream`, { headers: { authorization } });
+    const speech = await speakVoiceTurn(origin, turnId, { authorization });
     assert.equal(speech.status, 200);
     assert.equal(speech.headers.get("content-type"), "audio/wav");
     assert.equal(speech.headers.get("cache-control"), "no-store");
@@ -3587,10 +4354,10 @@ test("wraps Wyoming PCM speech in a browser-playable WAV container", async () =>
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "pcm_s16le",
-      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async transcribe() { return { status: "transcribed" as const, text: "客厅现在怎么样？" }; },
       async synthesize() {
         return {
           status: "synthesized" as const,
@@ -3599,13 +4366,11 @@ test("wraps Wyoming PCM speech in a browser-playable WAV container", async () =>
           format: { rate: 16_000, width: 2, channels: 1 },
         };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
 
   try {
-    const speech = await fetch(`${ctx.homeInboxHttp.origin}/voice/speech/advice-stream`, {
-      headers: { authorization },
-    });
+    const speech = await speakVoiceTurn(ctx.homeInboxHttp.origin, await acceptedVoiceTurn(ctx.homeInboxHttp.origin, { authorization, origin: ctx.homeInboxHttp.origin, "content-type": "audio/l16", "x-audio-rate": "16000", "x-audio-width": "2", "x-audio-channels": "1" }), { authorization });
     const audio = new Uint8Array(await speech.arrayBuffer());
 
     assert.equal(speech.status, 200);
@@ -3628,10 +4393,10 @@ test("serves only browser-reliable synthesized audio containers", async () => {
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
-      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async transcribe() { return { status: "transcribed" as const, text: "客厅现在怎么样？" }; },
       async synthesize() {
         return {
           status: "synthesized" as const,
@@ -3639,13 +4404,11 @@ test("serves only browser-reliable synthesized audio containers", async () => {
           audio: new Uint8Array([1, 2]),
         };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
 
   try {
-    const speech = await fetch(`${ctx.homeInboxHttp.origin}/voice/speech/advice-stream`, {
-      headers: { authorization },
-    });
+    const speech = await speakVoiceTurn(ctx.homeInboxHttp.origin, await acceptedVoiceTurn(ctx.homeInboxHttp.origin, { authorization, origin: ctx.homeInboxHttp.origin, "content-type": "audio/wav" }), { authorization });
     assert.equal(speech.status, 502);
     assert.deepEqual(await speech.json(), { status: "failed" });
   } finally {
@@ -3662,20 +4425,18 @@ test("reports an unavailable private speech transport without exposing provider 
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
-      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async transcribe() { return { status: "transcribed" as const, text: "客厅现在怎么样？" }; },
       async synthesize() {
         return { status: "failed" as const, reason: "unavailable" };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
 
   try {
-    const speech = await fetch(`${ctx.homeInboxHttp.origin}/voice/speech/advice-stream`, {
-      headers: { authorization },
-    });
+    const speech = await speakVoiceTurn(ctx.homeInboxHttp.origin, await acceptedVoiceTurn(ctx.homeInboxHttp.origin, { authorization, origin: ctx.homeInboxHttp.origin, "content-type": "audio/wav" }), { authorization });
     assert.equal(speech.status, 503);
     assert.deepEqual(await speech.json(), { status: "unavailable" });
   } finally {
@@ -3696,10 +4457,10 @@ test("shares one synthesis for the same answer, caches it briefly, and bounds ne
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
-      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async transcribe() { return { status: "transcribed" as const, text: "客厅现在怎么样？" }; },
       async synthesize() {
         synthesisCalls += 1;
         if (synthesisCalls === 1) {
@@ -3708,29 +4469,28 @@ test("shares one synthesis for the same answer, caches it briefly, and bounds ne
         }
         return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
-  const request = (id: string) => fetch(`${origin}/voice/speech/${id}`, { headers: { authorization } });
+  const headers = { authorization, origin, "content-type": "audio/wav" };
+  const turns: string[] = [];
+  const request = (index: number) => speakVoiceTurn(origin, turns[index]!, { authorization });
 
   try {
-    const first = request("speech-1");
+    for (let index = 0; index < 6; index += 1) turns.push(await acceptedVoiceTurn(origin, headers));
+    const first = request(0);
     await firstStarted;
-    const sameAnswer = request("speech-1");
+    const sameAnswer = request(0);
     releaseFirst?.();
     assert.equal((await first).status, 200);
     assert.equal((await sameAnswer).status, 200);
     assert.equal(synthesisCalls, 1, "one advice answer has one in-flight synthesis");
-    assert.equal((await request("speech-1")).status, 200);
+    assert.equal((await request(0)).status, 200);
     assert.equal(synthesisCalls, 1, "a recent canonical answer is served from the short cache");
 
-    for (let index = 2; index <= 6; index += 1) {
-      assert.equal((await request(`speech-${index}`)).status, 200);
+    for (let index = 1; index <= 5; index += 1) {
+      assert.equal((await request(index)).status, 200);
     }
-    const limited = await request("speech-7");
-    assert.equal(limited.status, 429);
-    assert.equal(limited.headers.get("retry-after"), "30");
-    assert.deepEqual(await limited.json(), { status: "unavailable" });
   } finally {
     releaseFirst?.();
     await fiber.dispose();
@@ -3750,7 +4510,7 @@ test("keeps shared speech synthesis running while one of two listeners remains",
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
@@ -3760,7 +4520,7 @@ test("keeps shared speech synthesis running while one of two listeners remains",
         await new Promise<void>((resolve) => { release = resolve; });
         return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const handle = testVoiceSpeechHandler(ctx);
   const firstResponse = new TestVoiceSpeechResponse();
@@ -3795,7 +4555,7 @@ test("aborts shared speech synthesis when its last listener disconnects", async 
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
@@ -3806,7 +4566,7 @@ test("aborts shared speech synthesis when its last listener disconnects", async 
         await new Promise<void>((resolve) => input.signal!.addEventListener("abort", () => resolve(), { once: true }));
         return { status: "failed" as const, reason: "unavailable" as const };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const response = new TestVoiceSpeechResponse();
 
@@ -3835,7 +4595,7 @@ test("never caches speech output returned after every listener cancelled", async
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
@@ -3847,7 +4607,7 @@ test("never caches speech output returned after every listener cancelled", async
         }
         return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
       },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const handle = testVoiceSpeechHandler(ctx);
   const cancelledResponse = new TestVoiceSpeechResponse();
@@ -3882,7 +4642,7 @@ test("governs private transcription with one in-flight turn and a recoverable sh
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe() {
@@ -3894,15 +4654,11 @@ test("governs private transcription with one in-flight turn and a recoverable sh
         return { status: "transcribed" as const, text: "客厅现在怎么样？" };
       },
       async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
   const headers = { authorization, origin, "content-type": "audio/wav" };
-  const request = () => fetch(`${origin}/voice/transcribe`, {
-    method: "POST",
-    headers,
-    body: new Uint8Array([1, 2]),
-  });
+  const request = async () => transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), headers, new Uint8Array([1, 2]));
   let first: Promise<Response> | undefined;
 
   try {
@@ -3945,7 +4701,7 @@ test("ends a slow private audio upload with a recoverable response and releases 
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
     privateVoiceReadDeadlineMs: 20,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe() {
@@ -3953,7 +4709,7 @@ test("ends a slow private audio upload with a recoverable response and releases 
         return { status: "transcribed" as const, text: "客厅现在怎么样？" };
       },
       async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
   const headers = {
@@ -3963,8 +4719,9 @@ test("ends a slow private audio upload with a recoverable response and releases 
   };
 
   try {
+    const slowTurn = await leaseVoiceTurn(origin, headers);
     const timedOut = await new Promise<{ readonly status: number; readonly body: string }>((resolve, reject) => {
-      const request = httpRequest(`${origin}/voice/transcribe`, {
+      const request = httpRequest(`${origin}/voice/turns/${slowTurn}/transcribe`, {
         method: "POST",
         headers: { ...headers, "content-length": "2" },
       }, (response) => {
@@ -3982,11 +4739,7 @@ test("ends a slow private audio upload with a recoverable response and releases 
     assert.deepEqual(JSON.parse(timedOut.body), { status: "unavailable" });
     assert.equal(transcriptions, 0, "a timed-out upload never enters ASR");
 
-    const retry = await fetch(`${origin}/voice/transcribe`, {
-      method: "POST",
-      headers,
-      body: new Uint8Array([1, 2]),
-    });
+    const retry = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), headers, new Uint8Array([1, 2]));
     assert.equal(retry.status, 202, "the timed-out upload frees the one-turn ASR slot");
     assert.equal(transcriptions, 1);
   } finally {
@@ -4128,7 +4881,7 @@ test("accepts common high-rate PCM while retaining the bounded PCM contract", as
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "pcm_s16le",
       async transcribe(input) {
@@ -4136,7 +4889,7 @@ test("accepts common high-rate PCM while retaining the bounded PCM contract", as
         return { status: "transcribed" as const, text: "客厅现在怎么样？" };
       },
       async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
   const headers = (rate: string) => ({
@@ -4150,26 +4903,18 @@ test("accepts common high-rate PCM while retaining the bounded PCM contract", as
 
   try {
     for (const rate of ["88200", "96000"]) {
-      const accepted = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers: headers(rate), body: new Uint8Array([1, 2]) });
+      const accepted = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers(rate)), headers(rate), new Uint8Array([1, 2]));
       assert.equal(accepted.status, 202);
     }
     assert.deepEqual(formats, [
       { rate: 88_200, width: 2, channels: 1 },
       { rate: 96_000, width: 2, channels: 1 },
     ]);
-    const wrongWidth = await fetch(`${origin}/voice/transcribe`, {
-      method: "POST",
-      headers: { ...headers("16000"), "x-audio-width": "1" },
-      body: new Uint8Array([1, 2]),
-    });
+    const wrongWidth = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers("16000")), { ...headers("16000"), "x-audio-width": "1" }, new Uint8Array([1, 2]));
     assert.equal(wrongWidth.status, 400);
-    const partialFrame = await fetch(`${origin}/voice/transcribe`, {
-      method: "POST",
-      headers: headers("16000"),
-      body: new Uint8Array([1, 2, 3]),
-    });
+    const partialFrame = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers("16000")), headers("16000"), new Uint8Array([1, 2, 3]));
     assert.equal(partialFrame.status, 400);
-    const outOfRange = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers: headers("192000"), body: new Uint8Array([1, 2]) });
+    const outOfRange = await transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers("192000")), headers("192000"), new Uint8Array([1, 2]));
     assert.equal(outOfRange.status, 400);
   } finally {
     await fiber.dispose();
@@ -4186,7 +4931,7 @@ test("releases the private transcription slot after a provider failure", async (
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
-    privateVoice: {
+    privateVoice: voiceGateway({
       status: { status: "active" },
       captureMode: "encoded_audio",
       async transcribe() {
@@ -4195,14 +4940,11 @@ test("releases the private transcription slot after a provider failure", async (
         return { status: "transcribed" as const, text: "客厅现在怎么样？" };
       },
       async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
-    },
+    }),
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
-  const request = () => fetch(`${origin}/voice/transcribe`, {
-    method: "POST",
-    headers: { authorization, origin, "content-type": "audio/wav" },
-    body: new Uint8Array([1, 2]),
-  });
+  const headers = { authorization, origin, "content-type": "audio/wav" };
+  const request = async () => transcribeVoiceTurn(origin, await leaseVoiceTurn(origin, headers), headers, new Uint8Array([1, 2]));
 
   try {
     assert.equal((await request()).status, 502);
@@ -4226,11 +4968,9 @@ test("retries a degraded private voice provider through the authenticated same-o
     authenticate: createInboxBasicAuthenticator(token),
     principal: adminPrincipal,
     privateVoice: {
-      get status() { return status === "active" ? { status } : { status, reason: "private transport unavailable" }; },
-      captureMode: "encoded_audio",
+      get status() { return status; },
+      beginTurn() { return undefined; },
       async retry() { retries += 1; if (retrySucceeds) status = "active"; },
-      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
-      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
     },
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;

@@ -242,7 +242,7 @@ test("renders a private push-to-talk seam only when the configured voice pair is
   assert.match(html, /data-voice-stop/);
   assert.match(html, /data-voice-transcript/);
   assert.match(html, /data-private-voice-status="active"/);
-  assert.match(html, /data-private-voice-capture-mode="encoded_audio"/);
+  assert.doesNotMatch(html, /data-private-voice-capture-mode/);
   assert.match(html, /data-voice-cancel/);
   assert.match(html, /data-voice-speech-stop/);
   assert.match(html, /浏览器不支持语音|改用文字/);
@@ -259,8 +259,10 @@ test("uses only bounded private ASR and TTS routes, never browser speech recogni
   assert.match(VOICE_INTERACTION_JS, /getUserMedia/);
   assert.match(VOICE_INTERACTION_JS, /MediaRecorder/);
   assert.match(VOICE_INTERACTION_JS, /AudioContext/);
-  assert.match(VOICE_INTERACTION_JS, /\/voice\/transcribe/);
-  assert.match(VOICE_INTERACTION_JS, /\/voice\/speech\//);
+  assert.match(VOICE_INTERACTION_JS, /\/voice\/turns/);
+  assert.match(VOICE_INTERACTION_JS, /\/transcribe/);
+  assert.match(VOICE_INTERACTION_JS, /\/speech/);
+  assert.match(VOICE_INTERACTION_JS, /\/release/);
   assert.match(VOICE_INTERACTION_JS, /EventSource/);
   assert.match(VOICE_INTERACTION_JS, /X-Audio-Rate/);
   assert.match(VOICE_INTERACTION_JS, /X-Audio-Width/);

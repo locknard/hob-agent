@@ -44,7 +44,7 @@ export function validateCustomModelBaseURL(value: string): string {
   } catch {
     throw new Error("Invalid custom model endpoint");
   }
-  if (url.protocol !== "https:"
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && isPrivateOrLoopbackLiteral(url.hostname)))
     || url.username !== ""
     || url.password !== ""
     || url.search !== ""
@@ -53,4 +53,21 @@ export function validateCustomModelBaseURL(value: string): string {
     throw new Error("Invalid custom model endpoint");
   }
   return url.toString().replace(/\/+$/, "");
+}
+
+function isPrivateOrLoopbackLiteral(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  const octets = host.split(".").map((part) => Number(part));
+  if (octets.length === 4 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    return octets[0] === 10
+      || octets[0] === 127
+      || (octets[0] === 192 && octets[1] === 168)
+      || (octets[0] === 172 && octets[1] !== undefined && octets[1] >= 16 && octets[1] <= 31);
+  }
+  const literal = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  if (literal === "::1") return true;
+  const first = /^[0-9a-f]{1,4}/u.exec(literal)?.[0];
+  if (first === undefined || !literal.includes(":")) return false;
+  const firstValue = Number.parseInt(first, 16);
+  return (firstValue & 0xfe00) === 0xfc00 || (firstValue & 0xffc0) === 0xfe80;
 }

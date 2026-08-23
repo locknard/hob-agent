@@ -23,13 +23,22 @@ test("publishes the DSH route catalog without resolving credentials", () => {
   );
 });
 
-test("validates one HTTPS OpenAI-compatible custom deployment endpoint", () => {
+test("canonicalizes HTTPS and private-literal HTTP custom deployment endpoints", () => {
   assert.equal(
     providerSetup("custom", { baseURL: "https://models.example.test:8443/v1/" }).baseURL,
     "https://models.example.test:8443/v1",
   );
+  assert.equal(
+    providerSetup("custom", { baseURL: "http://127.0.0.1:8000/v1/" }).baseURL,
+    "http://127.0.0.1:8000/v1",
+  );
+  assert.equal(
+    providerSetup("custom", { baseURL: "http://192.168.10.12:8000/v1" }).baseURL,
+    "http://192.168.10.12:8000/v1",
+  );
   for (const baseURL of [
     "http://models.example.test/v1",
+    "http://localhost:8000/v1",
     "https://user:secret@models.example.test/v1",
     "https://models.example.test/v1?token=secret",
     "https://models.example.test/v1#fragment",

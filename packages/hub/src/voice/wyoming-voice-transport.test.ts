@@ -112,6 +112,18 @@ test("reads split and coalesced Wyoming describe/info frames", async () => {
   });
 });
 
+test("accepts a tcp configuration alias and speaks the canonical Wyoming protocol", async () => {
+  const { WyomingVoiceTransport, encodeWyomingFrame } = await loadTransport();
+  await withServer((socket, reader) => {
+    if (reader.shift()?.type === "describe") {
+      socket.end(encodeWyomingFrame({ type: "info", data: { asr: [{}], tts: [{}] } }));
+    }
+  }, async (endpoint) => {
+    const transport = new WyomingVoiceTransport({ endpoint: endpoint.replace("wyoming://", "tcp://") });
+    assert.deepEqual(await transport.describe(), { status: "ready", services: { asr: true, tts: true } });
+  });
+});
+
 test("sends an ASR stream and returns the bounded final transcript", async () => {
   const { WyomingVoiceTransport, encodeWyomingFrame } = await loadTransport();
   const received: Frame[] = [];

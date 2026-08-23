@@ -46,7 +46,7 @@ test("persists one private setup session and resumes its identity stage after re
           secretRef: "keychain:hob-agent/setup-model:draft-stable-id:stage-1",
         },
         modelId: "deepseek-v4-flash-0731",
-        baseURL: "https://model.example.test/v1",
+        baseURL: "http://127.0.0.1:8081/v1/",
       },
     });
     assert.deepEqual(modelReady, {
@@ -56,7 +56,7 @@ test("persists one private setup session and resumes its identity stage after re
       model: {
         provider: "custom",
         modelId: "deepseek-v4-flash-0731",
-        baseURL: "https://model.example.test/v1",
+        baseURL: "http://127.0.0.1:8081/v1",
       },
     });
     const bridgeReady = await store.recordBridgeProbe({
@@ -90,7 +90,7 @@ test("persists one private setup session and resumes its identity stage after re
       householdName: "梧桐家",
       agentName: "小满",
       modelReference: "custom/deepseek-v4-flash-0731",
-      modelBaseURL: "https://model.example.test/v1",
+      modelBaseURL: "http://127.0.0.1:8081/v1",
       modelProfile: {
         id: "custom:setup:draft-stable-id",
         provider: "custom",

@@ -3,6 +3,7 @@ import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/prom
 import { join } from "node:path";
 
 import type { AuthProfile } from "@hob-agent/agent-layer/model-credentials";
+import { validateCustomModelBaseURL } from "@hob-agent/agent-layer/model-providers";
 import { normalizePrivateVoiceEndpoint } from "./voice/private-voice-endpoint.js";
 
 const CONFIG_VERSION = "hob.product-config/v3" as const;
@@ -85,19 +86,50 @@ export class ProductBootstrapConfigStore {
   async commit(expectedGeneration: number, draft: ProductBootstrapConfigDraft): Promise<ProductBootstrapConfiguration> {
     if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) throw new TypeError("Expected generation is invalid");
     const validated = validateDraft(draft);
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    await chmod(this.directory, 0o700);
-    const lock = await acquireConfigurationLock(this.lockPath);
-    const temporaryPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
+    return this.exclusive(async () => {
       const current = await this.load();
       if ((current?.generation ?? 0) !== expectedGeneration) throw new ProductBootstrapConfigurationConflictError();
-      const configuration: ProductBootstrapConfiguration = Object.freeze({
+      return this.writeConfiguration(Object.freeze({
         version: CONFIG_VERSION,
         generation: expectedGeneration + 1,
         activatedAt: this.now().toISOString(),
         ...validated,
-      });
+      }));
+    });
+  }
+
+  /** Replaces only the optional voice capability on an already activated product generation. */
+  async commitVoice(expectedGeneration: number, voice: ProductVoiceRuntimeConfig | undefined): Promise<ProductBootstrapConfiguration> {
+    if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) throw new TypeError("Expected generation is invalid");
+    const validatedVoice = voice === undefined ? undefined : validateVoiceRuntimeConfig(voice);
+    return this.exclusive(async () => {
+      const current = await this.load();
+      if (current === undefined || current.generation !== expectedGeneration) throw new ProductBootstrapConfigurationConflictError();
+      const { version: _version, generation: _generation, activatedAt, voice: _voice, ...draft } = current;
+      return this.writeConfiguration(Object.freeze({
+        version: CONFIG_VERSION,
+        generation: expectedGeneration + 1,
+        activatedAt,
+        ...draft,
+        ...(validatedVoice === undefined ? {} : { voice: validatedVoice }),
+      }));
+    });
+  }
+
+  private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await chmod(this.directory, 0o700);
+    const lock = await acquireConfigurationLock(this.lockPath);
+    try {
+      return await operation();
+    } finally {
+      await releaseConfigurationLock(this.lockPath, lock);
+    }
+  }
+
+  private async writeConfiguration(configuration: ProductBootstrapConfiguration): Promise<ProductBootstrapConfiguration> {
+    const temporaryPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
       const source = `${JSON.stringify(configuration)}\n`;
       if (Buffer.byteLength(source) > MAX_FILE_BYTES) throw new Error("Product configuration exceeds its size limit");
       const file = await open(temporaryPath, "wx", 0o600);
@@ -114,7 +146,6 @@ export class ProductBootstrapConfigStore {
       return configuration;
     } finally {
       await unlink(temporaryPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
-      await releaseConfigurationLock(this.lockPath, lock);
     }
   }
 }
@@ -204,7 +235,7 @@ function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unkno
   const agentName = boundedName(value.agentName, "Agent name");
   const provider = modelReference.slice(0, modelReference.indexOf("/"));
   const modelProfile = validateModelProfile(value.modelProfile, provider);
-  const modelBaseURL = value.modelBaseURL === undefined ? undefined : safeHttpsURL(value.modelBaseURL);
+  const modelBaseURL = value.modelBaseURL === undefined ? undefined : customModelBaseURL(provider, value.modelBaseURL);
   const voice = value.voice === undefined ? undefined : validateVoiceRuntimeConfig(value.voice);
   if (!Array.isArray(value.bridges) || value.bridges.length > 16) throw new TypeError("Bridge configuration list is invalid");
   const seen = new Set<string>();
@@ -360,12 +391,13 @@ function cloneJsonValue(value: unknown, depth: number): unknown {
   throw new TypeError("Bridge config value is invalid");
 }
 
-function safeHttpsURL(value: unknown): string {
-  const source = boundedString(value, 2_048, "Model endpoint");
-  let url: URL;
-  try { url = new URL(source); } catch { throw new TypeError("Model endpoint is invalid"); }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "") throw new TypeError("Model endpoint is invalid");
-  return url.toString().replace(/\/$/u, "");
+function customModelBaseURL(provider: string, value: unknown): string {
+  if (provider !== "custom") throw new TypeError("Model endpoint is invalid");
+  try {
+    return validateCustomModelBaseURL(boundedString(value, 2_048, "Model endpoint"));
+  } catch {
+    throw new TypeError("Model endpoint is invalid");
+  }
 }
 
 function boundedString(value: unknown, max: number, label: string): string {

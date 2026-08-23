@@ -20,6 +20,7 @@ import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js
 import {
   type ProductRuntimeSupervisorOptions,
 } from "./product-runtime-supervisor.js";
+import { PrivateVoiceGateway } from "./voice/private-voice-gateway.js";
 import { PrivateVoiceProviderRuntime } from "./voice/private-voice-provider-runtime.js";
 
 const ENV = {
@@ -436,7 +437,7 @@ test("main restores an activated product through the same supervisor instead of 
   }
 });
 
-test("mounts the supervisor's exact active private voice provider into the operational HTTP surface", async () => {
+test("mounts the supervisor's exact stable private voice gateway into the operational HTTP surface", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-private-voice-"));
   const server = createServer((request, response) => {
     if (request.url === "/v1/audio/transcriptions") {
@@ -459,25 +460,33 @@ test("mounts the supervisor's exact active private voice provider into the opera
     write: async () => undefined,
     delete: async () => undefined,
   };
-  const privateVoice = new PrivateVoiceProviderRuntime({
+  const privateVoiceProvider = new PrivateVoiceProviderRuntime({
     config: {
       asr: { transport: "openai_http", endpoint },
       tts: { transport: "openai_http", endpoint, locale: "zh-CN" },
     },
     vault,
   });
+  const privateVoice = new PrivateVoiceGateway({
+    configGeneration: 1,
+    providerGeneration: "main-test:1",
+    runtime: privateVoiceProvider,
+  });
+  const voiceSettings = {} as never;
   let productOptions: ProductRuntimeSupervisorOptions | undefined;
   let mountedVoice: unknown;
+  let mountedVoiceSettings: unknown;
   let mountedRecovery: unknown;
   let running: Awaited<ReturnType<typeof main>> | undefined;
   const host = new ProductHttpHost({ port: 0 });
   try {
-    assert.deepEqual(await privateVoice.start(), { status: "active" });
+    assert.deepEqual(await privateVoiceProvider.start(), { status: "active" });
     running = await main({
       env: { HOB_DATA_DIR: dataDirectory },
       modelCredentialVault: vault,
       mountProductBundle: async (_context, options) => {
         mountedVoice = options.inboxHttp?.privateVoice;
+        mountedVoiceSettings = options.inboxHttp?.voiceSettings;
         mountedRecovery = options.inboxHttp?.sessionRecovery;
         return {
           context: { homeInboxHttp: { attach: () => undefined } },
@@ -509,15 +518,17 @@ test("mounts the supervisor's exact active private voice provider into the opera
       authenticateProductSession: async () => true,
       recoverProductSession: { recover: async () => ({ status: "invalid" as const }) },
       privateVoice,
+      voiceSettings,
     });
     assert.notEqual(bundle, undefined);
     assert.equal(mountedVoice, privateVoice);
+    assert.equal(mountedVoiceSettings, voiceSettings);
     assert.notEqual(mountedRecovery, undefined);
     await bundle?.dispose();
   } finally {
     await running?.shutdown.shutdown(0);
     await host.dispose();
-    await privateVoice.dispose();
+    await privateVoice.dispose({ force: true });
     await rm(dataDirectory, { recursive: true, force: true });
     await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
   }

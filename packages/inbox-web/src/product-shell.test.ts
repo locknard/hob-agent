@@ -6,6 +6,7 @@ import {
   renderProductHost,
   renderProductShell,
   renderProductViewRecipeContent,
+  PRODUCT_PRIVATE_VOICE_JS,
   type ProductConnectionState,
   type ProductControlFeedback,
   type ProductShellModel,
@@ -1073,6 +1074,152 @@ test("action buttons keep their decision hierarchy inside action forms", () => {
     activeTurn: { id: "turn-1", question: "窗帘为什么开得晚？", status: "streaming", canStop: true, canBackground: true },
   }));
   assert.match(streaming, /class="product-quiet-action" type="submit">停止/);
+});
+
+test("renders private voice setup in both settings layouts without exposing credentials", () => {
+  const privateVoice = {
+    status: "disabled" as const,
+    generation: 7,
+    configured: false,
+  };
+  const fallback = renderProductShell(model({ route: "settings", privateVoice }));
+  const managed = renderProductShell(model({
+    route: "settings",
+    privateVoice,
+    view: { activeId: "builtin.life", currentPath: "/settings", choices: [{ id: "builtin.life", label: "生活视图" }] },
+  }));
+
+  for (const html of [fallback, managed]) {
+    assert.match(html, /id="private-voice"/);
+    assert.match(html, /<h2[^>]*>私有语音<\/h2>/);
+    assert.match(html, /语音暂未开启，文字对话始终可用/);
+    assert.match(html, /由你选择的私有服务处理/);
+    assert.match(html, /action="\/settings\/private-voice\/configure"/);
+    assert.match(html, /name="expectedGeneration" value="7"/);
+    assert.match(html, /<select[^>]+name="asrTransport"/);
+    assert.match(html, /name="asrTransport" required/);
+    assert.match(html, /<option value="" selected>请选择服务类型<\/option>/);
+    assert.match(html, /<option value="openai_http">OpenAI 兼容接口<\/option>/);
+    assert.match(html, /<option value="wyoming">Wyoming 本地语音<\/option>/);
+    assert.match(html, /name="asrEndpoint"/);
+    assert.match(html, /name="asrEndpoint" type="url"[^>]* required/);
+    assert.match(html, /name="asrModel"/);
+    assert.match(html, /name="asrCredential" type="password"/);
+    assert.match(html, /<select[^>]+name="ttsTransport"/);
+    assert.match(html, /name="ttsEndpoint"/);
+    assert.match(html, /name="ttsModel"/);
+    assert.match(html, /name="ttsLocale"/);
+    assert.match(html, /name="ttsVoice"/);
+    assert.match(html, /name="ttsCredential" type="password"/);
+    assert.doesNotMatch(html, /name="(?:asr|tts)Credential"[^>]*value=/);
+    assert.match(html, />检查并保存</);
+    assert.match(html, /href="\/conversation"/);
+  }
+});
+
+test("renders configured private voice service state, change controls, and an explicit close confirmation", () => {
+  const html = renderProductShell(model({
+    route: "settings",
+    privateVoice: {
+      status: "active",
+      generation: 12,
+      configured: true,
+      asr: { transport: "openai_http", endpoint: "http://voice.local/asr", model: "small", credentialConfigured: true },
+      tts: { transport: "wyoming", endpoint: "http://voice.local/tts", model: "zh_CN-huayan-medium", locale: "zh-CN", voice: "花宴", credentialConfigured: true },
+      notice: "语音服务已准备好。",
+    },
+  }));
+
+  assert.match(html, /data-private-voice-status="active"/);
+  assert.match(html, /语音可用/);
+  assert.match(html, /<strong>OpenAI 兼容接口<\/strong>/);
+  assert.match(html, /<strong>Wyoming 本地语音<\/strong>/);
+  assert.doesNotMatch(html, /<strong>openai_http<\/strong>/);
+  assert.match(html, /<option value="openai_http" selected>OpenAI 兼容接口<\/option>/);
+  assert.match(html, /<option value="wyoming" selected>Wyoming 本地语音<\/option>/);
+  assert.match(html, /地址不变时可留空；更换地址请重新输入凭据/);
+  assert.match(html, /value="http:\/\/voice\.local\/asr"/);
+  assert.match(html, /value="http:\/\/voice\.local\/tts"/);
+  assert.doesNotMatch(html, /value="[^" ]*(?:secret|token|credential)[^" ]*"/i);
+  assert.match(html, /action="\/settings\/private-voice\/disable"/);
+  assert.match(html, /name="confirmDisable" value="confirmed"/);
+  assert.match(html, /关闭只会停用家庭语音入口，不会停止外部服务。/);
+  assert.match(html, />关闭语音</);
+  assert.match(html, /语音服务已准备好。/);
+});
+
+test("renders private voice recovery states with an immediate text exit", () => {
+  const degraded = renderProductShell(model({
+    route: "settings",
+    privateVoice: { status: "degraded", generation: 3, configured: true, asr: { transport: "whisper-compatible", endpoint: "http://voice.local/asr", credentialConfigured: false }, tts: { transport: "piper", endpoint: "http://voice.local/tts", locale: "zh-CN", credentialConfigured: false } },
+  }));
+  assert.match(degraded, /语音需要恢复/);
+  assert.match(degraded, /action="\/settings\/private-voice\/retry"/);
+  assert.match(degraded, />再次连接</);
+  assert.match(degraded, />编辑设置</);
+  assert.match(degraded, /href="\/conversation"/);
+
+  const retrying = renderProductShell(model({
+    route: "settings",
+    privateVoice: { status: "retrying", generation: 4, configured: true, asr: { transport: "whisper-compatible", endpoint: "http://voice.local/asr", credentialConfigured: false }, tts: { transport: "piper", endpoint: "http://voice.local/tts", locale: "zh-CN", credentialConfigured: false } },
+  }));
+  assert.match(retrying, /data-private-voice-status="retrying"/);
+  assert.match(retrying, /正在重新连接语音/);
+  assert.match(retrying, /action="\/settings\/private-voice\/cancel-retry"/);
+  assert.match(retrying, />停止连接</);
+  assert.match(retrying, /role="progressbar"/);
+
+  const switching = renderProductShell(model({
+    route: "settings",
+    privateVoice: { status: "switching", generation: 5, configured: true, asr: { transport: "whisper-compatible", endpoint: "http://voice.local/asr", credentialConfigured: false }, tts: { transport: "piper", endpoint: "http://voice.local/tts", locale: "zh-CN", credentialConfigured: false } },
+  }));
+  assert.match(switching, /正在应用新的语音设置/);
+  assert.match(switching, /aria-live="polite"/);
+  assert.match(switching, /href="\/conversation"/);
+});
+
+test("renders a cancellable background private voice check without treating it as a provider state", () => {
+  const pending = renderProductShell(model({
+    route: "settings",
+    privateVoice: {
+      status: "disabled",
+      generation: 6,
+      configured: false,
+      configurationPending: { id: "d".repeat(32), startedAt: 1_777_777_777_000 },
+    } as unknown as ProductShellModel["privateVoice"],
+  }));
+
+  assert.match(pending, /data-private-voice-configuration-pending/);
+  assert.match(pending, /正在检查语音识别与回复服务/);
+  assert.match(pending, /action="\/settings\/private-voice\/cancel-configure"/);
+  assert.match(pending, /name="configurationId" value="d{32}"/);
+  assert.match(pending, /可以离开此页，我会继续检查。/);
+  assert.match(pending, /使用文字对话/);
+  assert.doesNotMatch(pending, /action="\/settings\/private-voice\/configure"/);
+  assert.match(pending, /data-private-voice-configuration-status-url="\/settings\/private-voice\/configuration-status"/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /fetch\(statusUrl/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /10_000/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /location\.replace/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /result\.configurationId !== configurationId\)\s*\{\s*window\.clearInterval\(pollTimer\)/s);
+});
+
+test("styles private voice forms as touch-safe, responsive settings rows", () => {
+  assert.match(PRODUCT_SHELL_CSS, /\.product-private-voice-configuration summary\s*\{[^}]*min-height:\s*2\.75rem/s);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-private-voice-form input\s*\{[^}]*min-height:\s*2\.75rem/s);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-private-voice-form select\s*\{[^}]*min-height:\s*2\.75rem/s);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-private-voice-actions\s*\{[^}]*display:\s*flex/s);
+  assert.match(PRODUCT_SHELL_CSS, /data-private-voice-status="retrying"/);
+  assert.match(PRODUCT_SHELL_CSS, /@media \(max-width: 56rem\)[\s\S]*\.product-private-voice-actions/s);
+  assert.match(PRODUCT_SHELL_CSS, /@media \(prefers-color-scheme: dark\)[\s\S]*--shell-bg/s);
+});
+
+test("ships progressive private voice submission feedback without replacing server forms", () => {
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /data-private-voice-form/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /addEventListener\("submit"/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /submit\.disabled = true/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /正在检查并保存/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /正在重新连接语音/);
+  assert.doesNotMatch(PRODUCT_PRIVATE_VOICE_JS, /preventDefault/);
 });
 
 

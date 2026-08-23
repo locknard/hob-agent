@@ -33,6 +33,9 @@ import {
   ProductVoiceSetupService,
   type ProductVoiceSetupOptions,
 } from "./product-voice-setup.js";
+import { ProductOperationalVoiceSettings } from "./product-operational-voice-settings.js";
+import { ProductVoiceCleanupLedger, type ProductVoiceCleanupEntry } from "./product-voice-cleanup-ledger.js";
+import { PrivateVoiceGateway } from "./voice/private-voice-gateway.js";
 import { PrivateVoiceProviderRuntime } from "./voice/private-voice-provider-runtime.js";
 
 const PRODUCT_SESSION_COOKIE = "hob_product_session";
@@ -69,8 +72,10 @@ export interface ProductRuntimeOperationalMountInput {
   readonly authenticateProductSession: InboxRequestAuthenticator;
   /** One-time local recovery authority scoped to this active product generation. */
   readonly recoverProductSession: ProductSessionRecoveryPort;
-  /** Active, provider-neutral ASR/TTS capability for this exact generation. */
-  readonly privateVoice?: PrivateVoiceProviderRuntime;
+  /** Stable provider-neutral ASR/TTS boundary for this exact operational bundle. */
+  readonly privateVoice: PrivateVoiceGateway;
+  /** Operational configuration owner backed by this bundle's exact voice gateway and credential ledger. */
+  readonly voiceSettings: ProductOperationalVoiceSettings;
 }
 
 /** Setup drafts additionally provide an exact, verified activation candidate. */
@@ -88,6 +93,7 @@ export interface ProductRuntimeSetupDrafts extends ProductSetupDraftPort {
 interface ProductRuntimeConfigurationStore {
   load(): Promise<ProductBootstrapConfiguration | undefined>;
   commit: ProductBootstrapConfigStore["commit"];
+  commitVoice: ProductBootstrapConfigStore["commitVoice"];
 }
 
 interface ProductRuntimeSessionStore {
@@ -139,6 +145,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
   private setupDrafts: ProductRuntimeSetupDrafts | undefined;
   private readonly configurationStore: ProductRuntimeConfigurationStore;
   private readonly productSessions: ProductRuntimeSessionStore;
+  private readonly voiceCleanupLedger: ProductVoiceCleanupLedger;
   private readonly host: ProductHttpHost;
   private readonly activation: ProductActivationController<
     { readonly sessionExpiresAt: Date },
@@ -162,6 +169,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
       : undefined;
     this.configurationStore = options.configurationStore ?? new ProductBootstrapConfigStore(options.dataDirectory, this.now);
     this.productSessions = options.productSessions ?? new ProductSessionStore(options.dataDirectory, this.now);
+    this.voiceCleanupLedger = new ProductVoiceCleanupLedger(options.dataDirectory, this.now);
     this.host = new ProductHttpHost({ port: options.port });
     this.activation = new ProductActivationController({
       configurationStore: this.configurationStore,
@@ -194,6 +202,8 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     }
     this.statusValue = "starting";
     try {
+      const active = await this.configurationStore.load();
+      await this.recoverOperationalVoiceCleanup(active).catch(() => undefined);
       await this.host.listen();
       await this.context.plugin(ProductVoiceSetupService, {
         ...this.options.voiceSetup,
@@ -211,7 +221,6 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
       }
       await this.recoverVoiceCredentialStaging();
       await this.sweepVoiceCredentialCleanup();
-      const active = await this.configurationStore.load();
       if (active === undefined) {
         await this.productSessions.clearForSetup();
         await this.mountSetupSurface();
@@ -350,14 +359,34 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     candidate: ProductBootstrapConfigDraft,
   ): Promise<RuntimeProductBundle | undefined> {
     const recovery = this.createSessionRecovery();
-    let privateVoice: PrivateVoiceProviderRuntime | undefined;
+    const configGeneration = await this.operationalGeneration(candidate);
+    let provider: PrivateVoiceProviderRuntime | undefined;
     if (candidate.voice !== undefined) {
-      privateVoice = new PrivateVoiceProviderRuntime({
+      provider = new PrivateVoiceProviderRuntime({
         config: candidate.voice,
         vault: this.voiceCredentialVault,
       });
-      await privateVoice.start();
+      await provider.start();
     }
+    const privateVoice = provider === undefined
+      ? new PrivateVoiceGateway()
+      : new PrivateVoiceGateway({
+          configGeneration,
+          providerGeneration: `${candidate.modelProfile.id}:${configGeneration}`,
+          runtime: provider,
+        });
+    const voiceSettings = new ProductOperationalVoiceSettings({
+      configurationStore: this.configurationStore,
+      gateway: privateVoice,
+      voiceSetup: this.context.productVoiceSetup,
+      cleanupLedger: this.voiceCleanupLedger,
+      vault: this.voiceCredentialVault,
+      createCandidateId: () => `v${randomBytes(24).toString("base64url")}`,
+      createProviderRuntime: (config) => new PrivateVoiceProviderRuntime({
+        config,
+        vault: this.voiceCredentialVault,
+      }),
+    });
 
     let mounted: RuntimeProductBundle | undefined;
     try {
@@ -367,20 +396,75 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
         host: this.host,
         authenticateProductSession: this.authenticateProductSession,
         recoverProductSession: recovery.port,
-        ...(privateVoice === undefined ? {} : { privateVoice }),
+        privateVoice,
+        voiceSettings,
       });
     } catch (error) {
-      await privateVoice?.dispose();
+      await privateVoice.dispose({ force: true });
       throw error;
     }
     if (mounted === undefined) {
-      await privateVoice?.dispose();
+      await privateVoice.dispose({ force: true });
       return undefined;
     }
     this.pendingRecoveryAnnouncement = recovery.announcement;
-    return privateVoice === undefined
-      ? mounted
-      : operationalBundleWithPrivateVoice(mounted, privateVoice);
+    return operationalBundleWithPrivateVoice(mounted, privateVoice);
+  }
+
+  private async operationalGeneration(candidate: ProductBootstrapConfigDraft): Promise<number> {
+    if (isCommittedConfiguration(candidate)) return candidate.generation;
+    return ((await this.configurationStore.load())?.generation ?? 0) + 1;
+  }
+
+  /** Reconciles metadata-only ownership before HTTP surfaces attach, then makes one bounded cleanup pass. */
+  private async recoverOperationalVoiceCleanup(configuration: ProductBootstrapConfiguration | undefined): Promise<void> {
+    const activeRefs = activeVoiceCredentialRefs(configuration);
+    for (const owner of activeVoiceCredentialOwners(configuration)) {
+      try {
+        await this.voiceCleanupLedger.adoptCommitted(owner);
+      } catch {
+        // Existing ledger facts retain authority; a later settings operation
+        // can retry exact adoption without delaying the household product.
+      }
+    }
+    for (const entry of (await this.voiceCleanupLedger.load()).entries) {
+      try {
+        if (entry.phase === "staged") {
+          if (configuration !== undefined
+            && entry.expectedGeneration + 1 === configuration.generation
+            && activeRefs.has(entry.credentialRef)) {
+            await this.voiceCleanupLedger.markCommitted({
+              candidateId: entry.candidateId,
+              track: entry.track,
+              credentialRef: entry.credentialRef,
+              expectedGeneration: entry.expectedGeneration,
+              committedGeneration: configuration.generation,
+            });
+          } else {
+            await this.voiceCleanupLedger.abandonStaged(entry);
+          }
+        } else if (entry.phase === "active" && !activeVoiceEntryOwnsConfiguration(entry, configuration, activeRefs)) {
+          await this.voiceCleanupLedger.retire({
+            candidateId: entry.candidateId,
+            track: entry.track,
+            credentialRef: entry.credentialRef,
+            committedGeneration: entry.committedGeneration!,
+          });
+        }
+      } catch {
+        // A later bounded recovery pass retains authority over an unmodified record.
+      }
+    }
+    for (const entry of await this.voiceCleanupLedger.listPending({ limit: 16 })) {
+      if (activeRefs.has(entry.credentialRef)) continue;
+      try {
+        await this.voiceCleanupLedger.markCleanupAttempt(entry);
+        await this.voiceCredentialVault.delete(entry.credentialRef);
+        await this.voiceCleanupLedger.acknowledge(entry);
+      } catch {
+        // Vault maintenance never prevents text product availability.
+      }
+    }
   }
 
   private createSessionRecovery(): {
@@ -487,7 +571,7 @@ export function createPairingCode(): string {
 
 function operationalBundleWithPrivateVoice(
   mounted: RuntimeProductBundle,
-  privateVoice: PrivateVoiceProviderRuntime,
+  privateVoice: PrivateVoiceGateway,
 ): RuntimeProductBundle {
   let disposeTask: Promise<void> | undefined;
   return {
@@ -496,7 +580,7 @@ function operationalBundleWithPrivateVoice(
       disposeTask ??= (async () => {
         let failure: unknown;
         try {
-          await privateVoice.dispose();
+          await privateVoice.dispose({ force: true });
         } catch (error) {
           failure = error;
         }
@@ -510,6 +594,52 @@ function operationalBundleWithPrivateVoice(
       return disposeTask;
     },
   };
+}
+
+function isCommittedConfiguration(candidate: ProductBootstrapConfigDraft): candidate is ProductBootstrapConfiguration {
+  const generation = (candidate as { readonly generation?: unknown }).generation;
+  return Number.isSafeInteger(generation) && Number(generation) >= 1;
+}
+
+function activeVoiceCredentialRefs(configuration: ProductBootstrapConfiguration | undefined): ReadonlySet<string> {
+  const refs = [
+    configuration?.voice?.asr.credentialRef,
+    configuration?.voice?.tts.credentialRef,
+  ].filter((reference): reference is string => reference !== undefined);
+  return new Set(refs);
+}
+
+function activeVoiceCredentialOwners(configuration: ProductBootstrapConfiguration | undefined): ReadonlyArray<{
+  readonly candidateId: string;
+  readonly track: "asr" | "tts";
+  readonly credentialRef: string;
+  readonly committedGeneration: number;
+}> {
+  if (configuration?.voice === undefined) return [];
+  return ([
+    ["asr", configuration.voice.asr.credentialRef],
+    ["tts", configuration.voice.tts.credentialRef],
+  ] as const).flatMap(([track, credentialRef]) => {
+    if (credentialRef === undefined) return [];
+    const parsed = /^keychain:hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(credentialRef);
+    if (parsed === null || parsed[1] !== track || parsed[2] === undefined) return [];
+    return [{
+      candidateId: parsed[2],
+      track,
+      credentialRef,
+      committedGeneration: configuration.generation,
+    }];
+  });
+}
+
+function activeVoiceEntryOwnsConfiguration(
+  entry: ProductVoiceCleanupEntry,
+  configuration: ProductBootstrapConfiguration | undefined,
+  activeRefs: ReadonlySet<string>,
+): boolean {
+  return configuration !== undefined
+    && entry.committedGeneration === configuration.generation
+    && activeRefs.has(entry.credentialRef);
 }
 
 function cookieValue(header: string | undefined, name: string): string | undefined {

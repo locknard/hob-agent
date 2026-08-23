@@ -27,10 +27,11 @@ export function normalizePrivateVoiceEndpoint(
     throw new TypeError("Voice endpoint is invalid");
   }
   if (transport === "wyoming") {
-    if (endpoint.protocol !== "wyoming:" || endpoint.port === "" || !isLocalVoiceHost(endpoint.hostname)
+    if ((endpoint.protocol !== "wyoming:" && endpoint.protocol !== "tcp:") || endpoint.port === "" || !isLocalVoiceHost(endpoint.hostname)
       || (endpoint.pathname !== "" && endpoint.pathname !== "/")) {
       throw new TypeError("Voice endpoint is invalid");
     }
+    endpoint.protocol = "wyoming:";
     return endpoint.toString().replace(/\/$/u, "");
   }
   if (transport !== "openai_http" || (endpoint.protocol !== "http:" && endpoint.protocol !== "https:")
