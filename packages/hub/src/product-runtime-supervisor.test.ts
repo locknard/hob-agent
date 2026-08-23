@@ -181,6 +181,11 @@ test("mounts the private voice provider setup capability without opening a secon
     });
     assert.equal(result.status, "ready");
     assert.deepEqual(calls, ["tts"]);
+    const turn = runtime.context.privateVoiceRuntime.dispatch("setup-browser", {
+      type: "begin",
+      turnId: "turn-a",
+    });
+    assert.equal(turn.state.activeTurnId, "turn-a");
   } finally {
     await runtime.stop();
     await rm(directory, { recursive: true, force: true });

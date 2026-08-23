@@ -4,6 +4,9 @@ import {
 } from "@hob-agent/agent-layer/model-credentials";
 import { Context, Service } from "@deepseek-ai/cordis";
 
+import { OpenAiHttpVoiceTransport } from "./voice/openai-http-voice-transport.js";
+import { WyomingVoiceTransport } from "./voice/wyoming-voice-transport.js";
+
 const SETUP_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const STAGE_NONCE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const VOICE_LABEL = /^[^\u0000-\u001f\u007f]{1,128}$/u;
@@ -18,6 +21,7 @@ export type ProductVoiceTrackInput =
       readonly endpoint: string;
       /** Request-local only. Successful probes retain only a secret locator. */
       readonly credential?: string;
+      readonly model?: string;
     }
   | {
       readonly kind: "tts";
@@ -26,6 +30,7 @@ export type ProductVoiceTrackInput =
       readonly credential?: string;
       readonly locale: string;
       readonly voice?: string;
+      readonly model?: string;
     };
 
 export type ProductVoiceSetupStage =
@@ -34,6 +39,7 @@ export type ProductVoiceSetupStage =
       readonly transport: ProductVoiceTransport;
       readonly endpoint: string;
       readonly credentialRef?: string;
+      readonly model?: string;
     }
   | {
       readonly kind: "tts";
@@ -42,6 +48,7 @@ export type ProductVoiceSetupStage =
       readonly credentialRef?: string;
       readonly locale: string;
       readonly voice?: string;
+      readonly model?: string;
     };
 
 export type ProductVoiceProbeFailure =
@@ -81,9 +88,9 @@ declare module "@deepseek-ai/cordis" {
 /**
  * Stages one independent ASR or TTS provider for a setup draft.
  *
- * It neither selects a runtime profile nor starts audio capture. The future
- * Wyoming and OpenAI-compatible adapters implement `probe`; this owner keeps
- * their configuration and credential lifecycle identical.
+ * It neither selects a runtime profile nor starts audio capture. Built-in
+ * Wyoming and OpenAI-compatible adapters implement `probe`; this
+ * owner keeps their configuration and credential lifecycle identical.
  */
 export class ProductVoiceSetup {
   private readonly vault: WritableSecretVault;
@@ -92,7 +99,7 @@ export class ProductVoiceSetup {
 
   constructor(options: ProductVoiceSetupOptions = {}) {
     this.vault = options.vault ?? new MacOSKeychainSecretVault();
-    this.transportProbe = options.probe ?? unavailableProbe;
+    this.transportProbe = options.probe ?? probeConfiguredVoiceTransport;
     this.createStageNonce = options.createStageNonce ?? (() => globalThis.crypto.randomUUID().replace(/-/gu, ""));
   }
 
@@ -166,12 +173,24 @@ function prepareInput(input: { readonly setupId: string; readonly track: Product
   try {
     const endpoint = normalizeEndpoint(track.transport, track.endpoint);
     const credential = credentialValue(track.credential);
-    if (track.kind === "asr") return { setupId: input.setupId, track: { ...track, endpoint, ...(credential === undefined ? {} : { credential }) } };
+    if (track.transport === "wyoming" && credential !== undefined) return { status: "incompatible" };
+    const model = normalizeOptionalLabel(track.model);
+    if (track.kind === "asr") return {
+      setupId: input.setupId,
+      track: { ...track, endpoint, ...(credential === undefined ? {} : { credential }), ...(model === undefined ? {} : { model }) },
+    };
     const locale = normalizeLocale(track.locale);
     const voice = normalizeOptionalLabel(track.voice);
     return {
       setupId: input.setupId,
-      track: { ...track, endpoint, locale, ...(voice === undefined ? {} : { voice }), ...(credential === undefined ? {} : { credential }) },
+      track: {
+        ...track,
+        endpoint,
+        locale,
+        ...(voice === undefined ? {} : { voice }),
+        ...(model === undefined ? {} : { model }),
+        ...(credential === undefined ? {} : { credential }),
+      },
     };
   } catch {
     return { status: "incompatible" };
@@ -190,6 +209,7 @@ function createStage(input: { readonly setupId: string; readonly track: ProductV
       transport: input.track.transport,
       endpoint: input.track.endpoint,
       ...(credentialRef === undefined ? {} : { credentialRef }),
+      ...(input.track.model === undefined ? {} : { model: input.track.model }),
     });
   }
   return Object.freeze({
@@ -199,6 +219,7 @@ function createStage(input: { readonly setupId: string; readonly track: ProductV
     ...(credentialRef === undefined ? {} : { credentialRef }),
     locale: input.track.locale,
     ...(input.track.voice === undefined ? {} : { voice: input.track.voice }),
+    ...(input.track.model === undefined ? {} : { model: input.track.model }),
   });
 }
 
@@ -244,7 +265,12 @@ function normalizeOptionalLabel(value: unknown): string | undefined {
 
 function credentialValue(value: unknown): string | undefined {
   if (value === undefined || value === "") return undefined;
-  if (typeof value !== "string" || value.trim().length === 0 || value.length > 16_384) throw new TypeError("Voice credential is invalid");
+  if (typeof value !== "string"
+    || value.trim().length === 0
+    || value.length > 16_384
+    || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new TypeError("Voice credential is invalid");
+  }
   return value;
 }
 
@@ -259,6 +285,7 @@ function validateCredentialFreeStage(stage: ProductVoiceSetupStage): void {
     normalizeLocale(stage.locale);
     normalizeOptionalLabel(stage.voice);
   }
+  normalizeOptionalLabel(stage.model);
 }
 
 function validateStagedCredentialReference(stage: ProductVoiceSetupStage): void {
@@ -270,6 +297,44 @@ function validateStagedCredentialReference(stage: ProductVoiceSetupStage): void 
   if (match === null || match[1] !== stage.kind) throw new TypeError("Voice setup stage is invalid");
 }
 
-async function unavailableProbe(): Promise<ProductVoiceProbeFailure> {
-  return { status: "unavailable" };
+async function probeConfiguredVoiceTransport(input: {
+  readonly track: ProductVoiceSetupStage;
+  readonly credential?: string;
+}): Promise<{ readonly status: "ready"; readonly latencyMs: number } | ProductVoiceProbeFailure> {
+  if (input.track.transport === "openai_http") {
+    const transport = new OpenAiHttpVoiceTransport({
+      baseUrl: input.track.endpoint,
+      ...(input.credential === undefined ? {} : { credential: input.credential }),
+      ...(input.track.kind === "asr" && input.track.model !== undefined ? { asrModel: input.track.model } : {}),
+      ...(input.track.kind === "tts" && input.track.model !== undefined ? { ttsModel: input.track.model } : {}),
+    });
+    const result = await transport.probe({
+      kind: input.track.kind,
+      ...(input.track.kind === "tts" ? { locale: input.track.locale, voice: input.track.voice } : {}),
+    });
+    if (result.status === "ready") return result;
+    switch (result.reason) {
+      case "credential_rejected": return { status: "credential_rejected" };
+      case "endpoint_unreachable": return { status: "endpoint_unreachable" };
+      case "timed_out": return { status: "timed_out" };
+      case "incompatible":
+      case "invalid_input": return { status: "incompatible" };
+      case "cancelled":
+      case "unavailable": return { status: "unavailable" };
+    }
+  }
+
+  const startedAt = Date.now();
+  const result = await new WyomingVoiceTransport({ endpoint: input.track.endpoint }).describe();
+  if (result.status === "ready") {
+    if (!result.services[input.track.kind]) return { status: "incompatible" };
+    return { status: "ready", latencyMs: Math.min(120_000, Math.max(0, Date.now() - startedAt)) };
+  }
+  switch (result.status) {
+    case "unavailable": return { status: "endpoint_unreachable" };
+    case "timed_out": return { status: "timed_out" };
+    case "incompatible":
+    case "limit_exceeded": return { status: "incompatible" };
+    case "cancelled": return { status: "unavailable" };
+  }
 }

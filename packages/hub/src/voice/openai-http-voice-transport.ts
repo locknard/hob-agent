@@ -46,6 +46,9 @@ export interface OpenAiHttpVoiceTransportOptions {
   readonly timeoutMs?: number;
   readonly maxAudioBytes?: number;
   readonly maxTranscriptChars?: number;
+  /** Exact model identifiers configured by the household's private provider. */
+  readonly asrModel?: string;
+  readonly ttsModel?: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly clock?: () => number;
 }
@@ -75,6 +78,8 @@ export class OpenAiHttpVoiceTransport {
   private readonly timeoutMs: number;
   private readonly maxAudioBytes: number;
   private readonly maxTranscriptChars: number;
+  private readonly asrModel: string;
+  private readonly ttsModel: string;
   private readonly fetch: typeof globalThis.fetch;
   private readonly clock: () => number;
 
@@ -84,6 +89,8 @@ export class OpenAiHttpVoiceTransport {
     this.timeoutMs = boundedInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 10, 120_000, "Voice timeout");
     this.maxAudioBytes = boundedInteger(options.maxAudioBytes ?? DEFAULT_MAX_AUDIO_BYTES, 1, 32 * 1024 * 1024, "Voice audio limit");
     this.maxTranscriptChars = boundedInteger(options.maxTranscriptChars ?? DEFAULT_MAX_TRANSCRIPT_CHARS, 1, 16_384, "Voice transcript limit");
+    this.asrModel = normalizeLabel(options.asrModel ?? "whisper-1", 256);
+    this.ttsModel = normalizeLabel(options.ttsModel ?? "tts-1", 256);
     const fetch = options.fetch ?? globalThis.fetch;
     if (typeof fetch !== "function") throw new TypeError("Voice fetch implementation is invalid");
     this.fetch = fetch;
@@ -99,7 +106,7 @@ export class OpenAiHttpVoiceTransport {
     }
 
     const form = new FormData();
-    form.set("model", "whisper-1");
+    form.set("model", this.asrModel);
     if (prepared.locale !== undefined) form.set("language", prepared.locale);
     form.set("file", new Blob([Buffer.from(prepared.audio)], { type: prepared.mimeType }), `voice.${extensionForMime(prepared.mimeType)}`);
     return this.request(input.signal, "/v1/audio/transcriptions", {
@@ -128,7 +135,7 @@ export class OpenAiHttpVoiceTransport {
       method: "POST",
       headers: { accept: "audio/wav", "content-type": "application/json" },
       body: JSON.stringify({
-        model: "tts-1",
+        model: this.ttsModel,
         input: prepared.text,
         voice: prepared.voice,
         response_format: "wav",
@@ -360,7 +367,7 @@ function parseJsonRecord(bytes: Uint8Array): Record<string, unknown> {
 function boundedTranscript(value: unknown, maximum: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const transcript = value.trim();
-  return transcript.length > 0 && transcript.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(transcript)
+  return transcript.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(transcript)
     ? transcript
     : undefined;
 }

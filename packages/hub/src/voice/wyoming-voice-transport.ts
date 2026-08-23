@@ -182,8 +182,7 @@ export class WyomingVoiceTransport {
           continue;
         }
         if (frame.type === "audio-stop") {
-          if (format === undefined) throw incompatible();
-          await session.send({ type: "synthesize-stopped" });
+          if (format === undefined || total === 0) throw incompatible();
           return { status: "audio", format, audio: joinChunks(chunks, total) };
         }
         throw incompatible();

@@ -96,6 +96,8 @@ HTTP ASR/TTS 使用各自的窄适配器。ASR 只接收受限音频流和 local
 
 状态不允许 `listening + speaking`、`partial + execution` 或“已验证但没有 Hub result”等组合。UI 对应现有 voice surface 的可访问实时状态，屏幕只是加强说明：每段播报在无屏幕时也应可理解，确认信息一次不超过三个核心事实。
 
+当前实现以 `packages/hub/src/voice/private-voice-turn-machine.ts` 提供确定性的纯 reducer。它按 `voiceTurnId` 隔离状态，并把采集、DSH、TTS 与 Hub 的工作表达成受调用方执行的 effect。该 reducer 已覆盖 partial 仅用于展示、final 端点后只提交一次、三阶无输入恢复、绑定确认、Hub 结果裁决、超时、取消与 barge-in。它不启动音频、不执行工具，也不代替 Hub 保存或核验动作结果。
+
 ### 屏幕级流与恢复出口
 
 ```mermaid
@@ -191,7 +193,11 @@ interface PrivateVoiceRuntimeConfig {
 - 不把 LLM secret 复制为语音 secret。LLM 继续引用已选 model profile；ASR 与 TTS 可各自没有 credential、各自持有一个不同 ref，或者被禁用。
 - 关闭语音即停止 gateway 与音频采集，不删除模型/HA/媒体设置；它也不改变现有 `/conversation` 文字通道。
 
-`ProductVoiceSetup` 以这条契约实现了独立 ASR/TTS 的 staged probe：它接收 `wyoming` 或 `openai_http` transport、规范化本机或私网的无路径 endpoint，并返回 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible` 或 `unavailable` 的闭合结果。`ProductRuntimeSupervisor` 将它作为空闲的 Cordis capability 挂载，授权 transport 插件可以提供真实 probe；挂载本身不会打开麦克风或音频流。它把请求中的 credential 仅交给当前 probe，成功时只留下 track-scoped locator；它不选择 primary profile，也不激活家庭运行时。
+`ProductVoiceSetup` 以这条契约实现了独立 ASR/TTS 的 staged probe：它接收 `wyoming` 或 `openai_http` transport、规范化本机或私网的无路径 endpoint，并返回 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible` 或 `unavailable` 的闭合结果。`ProductRuntimeSupervisor` 将它与 `PrivateVoiceRuntimeService` 挂载在同一 Cordis 根下；挂载本身不会打开麦克风或音频流。它把请求中的 credential 仅交给当前 probe，成功时只留下 track-scoped locator；它不选择 primary profile，也不激活家庭运行时。
+
+当前 built-in transport 已能进行真实的有限探测与数据交换：`OpenAiHttpVoiceTransport` 固定使用 `/v1/audio/transcriptions` 与 `/v1/audio/speech`，允许家庭显式选择私有部署暴露的 ASR/TTS model id，并限制音频、文本、响应类型、响应大小、重定向、超时和取消；`WyomingVoiceTransport` 实现 `describe/info`、ASR audio stream 与 TTS audio stream，限制 frame、event、text 和累计音频。Wyoming 协议本身没有 bearer credential 字段，因此产品不会接收一个实际无法发送的 Wyoming token。两种 transport 都只返回闭合错误分类，不把内网 endpoint、provider body 或 secret 变成产品文案。
+
+`PrivateVoiceRuntimeService` 按 capture surface 隔离 turn machine，允许手机、墙面屏或自建语音卫星各自保留一个可打断的会话。它只保存状态并返回 effect；ASR/TTS/DSH/Hub 的实际调用仍由后续 gateway 组合执行。Hub 已认领的动作在卫星断开时保留可核验状态，语音服务无权把“停止播报”解释为“动作已取消”。
 
 Probe 是一次性、低权限且不改变家庭状态的操作：LLM 复用现有最小 DSH 流式 probe；ASR 对有限合成/fixture 音频验证 `ready -> final`；TTS 对固定非家庭文本验证 health、可解码的有限音频；Wyoming probe 验证 capability/locale 而非依赖某个实现的内部字段。probe 只返回稳定分类（如 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible`）和耗时。它不得记录 prompt、音频、transcript、response、endpoint private detail 或 secret。
 
@@ -207,7 +213,7 @@ Phase 0 只交付一个可验证、默认安全的纵切，不增加自定义 au
 
 ## 测试门槛
 
-新增实现前先写确定性测试。测试使用 fake audio frames、fake Wyoming/HTTP servers、fake clock 和 synthetic Hub/DSH ports；CI 不连接家庭设备、局域部署、真实模型或真实密钥。
+状态机实现使用确定性测试；transport 与浏览器实现使用 fake audio frames、fake Wyoming/HTTP servers、fake clock 和 synthetic Hub/DSH ports。CI 不连接家庭设备、局域部署、真实模型或真实密钥。
 
 - schema/vault：严格拒绝 secret-shaped config、未知字段、URL userinfo/query、越界端点参数、重复 track、错误权限、非 `SecretRef` 和无效 locale；commit 中只出现 ref，失败/过期 setup stage 彻底清理。
 - probe：三轨分别覆盖 ready、认证拒绝、TLS/网络失败、超时、畸形协议、取消；断言不写音频、文本、响应或 secret 到配置/日志。
@@ -217,4 +223,4 @@ Phase 0 只交付一个可验证、默认安全的纵切，不增加自定义 au
 - media/bridge：验证语音无法伪造 opaque `mediaRef` 或 player capability，仍经历 media prepare/clarification/confirmation；HA adapter 不接收 audio/ASR/TTS provider payload，契约包不新增生态原生类型。
 - 体验：真实浏览器测试 permission、listening、partial、空输入、澄清、等待、确认、执行、核验、播报、打断、失败、断线、完成和文字接管；检查键盘、屏幕阅读器与 reduced-motion/reduced-transparency/increased-contrast 的等价反馈。
 
-在这些门槛和现有 `pnpm test`、`pnpm check` 通过前，私有语音只能保持为设计与 setup probe，不能成为家庭控制的替代通道。
+在 gateway 将 capture、final transcript、现有 DSH 会话、Hub 结果与 TTS 串成同一条受测链路前，私有语音保持为真实 transport、setup probe 与 turn owner，不能宣称已经成为家庭控制通道。

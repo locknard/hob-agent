@@ -27,6 +27,7 @@ import {
   ProductVoiceSetupService,
   type ProductVoiceSetupOptions,
 } from "./product-voice-setup.js";
+import { PrivateVoiceRuntimeService } from "./voice/private-voice-runtime-service.js";
 
 const PRODUCT_SESSION_COOKIE = "hob_product_session";
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -132,6 +133,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     try {
       await this.host.listen();
       await this.context.plugin(ProductVoiceSetupService, this.options.voiceSetup ?? {});
+      await this.context.plugin(PrivateVoiceRuntimeService);
       const active = await this.configurationStore.load();
       if (active === undefined) {
         await this.mountSetupSurface();

@@ -130,7 +130,7 @@ test("sends an ASR stream and returns the bounded final transcript", async () =>
   assert.deepEqual(received[2]?.payload, new Uint8Array([1, 2, 3, 4]));
 });
 
-test("collects a TTS audio stream and acknowledges synthesis completion", async () => {
+test("collects a TTS audio stream without sending a non-protocol completion event", async () => {
   const { WyomingVoiceTransport, encodeWyomingFrame } = await loadTransport();
   const received: Frame[] = [];
   await withServer((socket, reader) => {
@@ -149,7 +149,21 @@ test("collects a TTS audio stream and acknowledges synthesis completion", async 
       audio: new Uint8Array([8, 9]),
     });
   });
-  assert.equal(received.some((frame) => frame.type === "synthesize-stopped"), true);
+  assert.deepEqual(received.map((frame) => frame.type), ["synthesize"]);
+});
+
+test("rejects a TTS response that finishes without producing audio", async () => {
+  const { WyomingVoiceTransport, encodeWyomingFrame } = await loadTransport();
+  await withServer((socket, reader) => {
+    if (reader.shift()?.type !== "synthesize") return;
+    socket.write(Buffer.concat([
+      encodeWyomingFrame({ type: "audio-start", data: { rate: 24_000, width: 2, channels: 1 } }),
+      encodeWyomingFrame({ type: "audio-stop" }),
+    ]));
+  }, async (endpoint) => {
+    const transport = new WyomingVoiceTransport({ endpoint, timeoutMs: 500 });
+    assert.deepEqual(await transport.synthesize({ text: "你好" }), { status: "incompatible" });
+  });
 });
 
 test("closes malformed or oversized frames into closed transport results", async () => {

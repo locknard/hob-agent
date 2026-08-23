@@ -209,3 +209,45 @@ test("rejects malformed JSON, unexpected audio MIME, and exposes a reusable capa
     await server.close();
   }
 });
+
+test("accepts an empty silence transcript as a healthy ASR probe response", async () => {
+  const { OpenAiHttpVoiceTransport } = await loadTransport();
+  const server = await startFakeVoiceServer((_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ text: "" }));
+  });
+  try {
+    const transport = new OpenAiHttpVoiceTransport({ baseUrl: server.baseUrl });
+    assert.equal((await transport.probe({ kind: "asr" }) as { status: string }).status, "ready");
+  } finally {
+    await server.close();
+  }
+});
+
+test("uses explicitly selected self-hosted ASR and TTS model names", async () => {
+  const { OpenAiHttpVoiceTransport } = await loadTransport();
+  const received: Array<{ readonly path?: string; readonly body: string }> = [];
+  const server = await startFakeVoiceServer(async (request, response) => {
+    received.push({ path: request.url, body: (await requestBody(request)).toString("utf8") });
+    if (request.url === "/v1/audio/transcriptions") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ text: "测试" }));
+      return;
+    }
+    response.setHeader("content-type", "audio/wav");
+    response.end(Buffer.from([82, 73, 70, 70]));
+  });
+  try {
+    const transport = new OpenAiHttpVoiceTransport({
+      baseUrl: server.baseUrl,
+      asrModel: "faster-whisper-large-v3",
+      ttsModel: "qwen3-tts",
+    });
+    await transport.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" });
+    await transport.synthesize({ text: "你好", voice: "warm", locale: "zh-CN" });
+    assert.match(received[0]?.body ?? "", /name="model"\r\n\r\nfaster-whisper-large-v3/);
+    assert.equal(JSON.parse(received[1]?.body ?? "{}").model, "qwen3-tts");
+  } finally {
+    await server.close();
+  }
+});
