@@ -80,12 +80,25 @@ class StubMediaPlaybackPreparationService extends Service {
 }
 
 class StubMediaConversationService extends Service {
+  readonly calls: unknown[] = [];
+
   constructor(ctx: Context) {
     super(ctx, "homeMediaConversation");
   }
 
-  handle() {
-    return { status: "blocked", reason: "authenticated_actor_required" };
+  handle(input: unknown) {
+    this.calls.push(input);
+    return {
+      status: "pending_confirmation",
+      ticketId: "media-ticket-1",
+      policyClass: "confirmation",
+      intent: {
+        kind: "play_media",
+        playerCapabilityId: "hwc-media-room",
+        mediaRef: "opaqueMediaRef0001",
+        queueMode: "play_next",
+      },
+    };
   }
 }
 
@@ -98,6 +111,49 @@ class RecordingAdapter extends LlmAdapter {
     yield { type: "text-delta", index: 0, text: "home is readable" };
     yield { type: "block-end", index: 0, block: { type: "text", text: "home is readable" } };
     yield { type: "usage", usage: { inputTokens: 0, outputTokens: 3 } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }
+}
+
+class MediaActionAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = [];
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options);
+    if (this.requests.length === 1) {
+      const args = JSON.stringify({});
+      yield { type: "block-start", index: 0, blockType: "tool-call" };
+      yield { type: "tool-call-delta", index: 0, id: "media-players-1", name: "get_home_media_players", argumentsDelta: args };
+      yield { type: "block-end", index: 0, block: { type: "tool-call", id: "media-players-1", name: "get_home_media_players", arguments: args } };
+      yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish", reason: { kind: "tool-calls" } };
+      return;
+    }
+    if (this.requests.length === 2) {
+      const args = JSON.stringify({ limit: 1 });
+      yield { type: "block-start", index: 0, blockType: "tool-call" };
+      yield { type: "tool-call-delta", index: 0, id: "media-inventory-blocked", name: "get_home_inventory", argumentsDelta: args };
+      yield { type: "block-end", index: 0, block: { type: "tool-call", id: "media-inventory-blocked", name: "get_home_inventory", arguments: args } };
+      yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish", reason: { kind: "tool-calls" } };
+      return;
+    }
+    if (this.requests.length === 3) {
+      const args = JSON.stringify({
+        operation: "request_action",
+        query: "爵士",
+      });
+      yield { type: "block-start", index: 0, blockType: "tool-call" };
+      yield { type: "tool-call-delta", index: 0, id: "media-action-1", name: "home_media_conversation", argumentsDelta: args };
+      yield { type: "block-end", index: 0, block: { type: "tool-call", id: "media-action-1", name: "home_media_conversation", arguments: args } };
+      yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish", reason: { kind: "tool-calls" } };
+      return;
+    }
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "text-delta", index: 0, text: "The action is ready for confirmation." };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "The action is ready for confirmation." } };
+    yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
     yield { type: "finish", reason: { kind: "stop" } };
   }
 }
@@ -222,6 +278,44 @@ class HangingAdapter extends LlmAdapter {
   }
 }
 
+class ReleasableIgnoringSignalAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = [];
+  readonly firstStarted: Promise<void>;
+  private markFirstStarted!: () => void;
+  private releaseFirst!: () => void;
+  private readonly firstGate: Promise<void>;
+
+  constructor() {
+    super();
+    this.firstStarted = new Promise<void>((resolve) => { this.markFirstStarted = resolve; });
+    this.firstGate = new Promise<void>((resolve) => { this.releaseFirst = resolve; });
+  }
+
+  release(): void {
+    this.releaseFirst();
+  }
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options);
+    if (this.requests.length === 1) {
+      this.markFirstStarted();
+      await this.firstGate;
+      const args = JSON.stringify({ limit: 1 });
+      yield { type: "block-start", index: 0, blockType: "tool-call" };
+      yield { type: "tool-call-delta", index: 0, id: "late-inventory", name: "get_home_inventory", argumentsDelta: args };
+      yield { type: "block-end", index: 0, block: { type: "tool-call", id: "late-inventory", name: "get_home_inventory", arguments: args } };
+      yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+      yield { type: "finish", reason: { kind: "tool-calls" } };
+      return;
+    }
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "text-delta", index: 0, text: "No media action was requested." };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "No media action was requested." } };
+    yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }
+}
+
 test("declares the neutral home-world service as a required production dependency", () => {
   assert.deepEqual(DshHomeAgentService.inject, ["homeWorld", "homeProposals"]);
 });
@@ -300,6 +394,49 @@ test("mounts the governed media conversation tool only when its Hub owner is ava
   assert.equal(ctx.tools.schemas().some((schema) => schema.name === "home_media_conversation"), true);
 
   await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("runs one explicit media action turn through the same Agent without publishing an advice report", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  await ctx.plugin(StubMediaPlayerService);
+  await ctx.plugin(StubMediaConversationService);
+  const adapter = new MediaActionAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter,
+    sessionId: "media-action-turn",
+  });
+
+  await ctx.homeAgent.requestMediaActionTurn("在多媒体室接下来播放晚间爵士");
+
+  assert.equal(adapter.requests.length, 4);
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) =>
+      JSON.stringify(message).includes("governed household media action turn")),
+    true,
+  );
+  assert.equal(
+    adapter.requests[0]?.messages.some((message) => JSON.stringify(message).includes("Do not call report_home_advice")),
+    true,
+  );
+  const call = (ctx.homeMediaConversation as unknown as StubMediaConversationService).calls[0] as Record<string, unknown>;
+  assert.equal((ctx.homeMediaConversation as unknown as StubMediaConversationService).calls.length, 1);
+  assert.deepEqual({
+    operation: call.operation,
+    query: call.query,
+  }, {
+    operation: "request_action",
+    query: "爵士",
+  });
+  const trace = ctx.homeAgent.traceSnapshot();
+  assert.equal(trace?.tools.find((tool) => tool.name === "get_home_media_players")?.status, "completed");
+  assert.equal(trace?.tools.find((tool) => tool.name === "get_home_inventory")?.status, "failed");
+  assert.equal(ctx.homeAgent.observationStatus, "idle");
+
   await ctx.fiber.dispose();
 });
 
@@ -663,6 +800,61 @@ test("cancels a model request that exceeds the autonomous observation deadline",
   );
   assert.equal(adapter.requests, 1);
   assert.equal(ctx.homeAgent.observationStatus, "idle");
+
+  await ctx.fiber.dispose();
+});
+
+test("returns a media action timeout while retaining the busy lease until an ignoring adapter settles", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  await ctx.plugin(StubMediaConversationService);
+  const adapter = new ReleasableIgnoringSignalAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter,
+    sessionId: "ignoring-media-action-timeout",
+    mediaActionTimeoutMs: 20,
+  });
+
+  const action = ctx.homeAgent.requestMediaActionTurn("播放晚间爵士");
+  await adapter.firstStarted;
+  let outerTimer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    action.then(
+      () => ({ kind: "resolved" as const }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    ),
+    new Promise<{ readonly kind: "hung" }>((resolve) => {
+      outerTimer = setTimeout(() => resolve({ kind: "hung" }), 250);
+    }),
+  ]);
+  if (outerTimer !== undefined) clearTimeout(outerTimer);
+  if (outcome.kind === "hung") {
+    adapter.release();
+    await action.catch(() => undefined);
+  }
+  assert.equal(outcome.kind, "rejected", "media action call did not return at its product deadline");
+  if (outcome.kind === "rejected") assert.match(String(outcome.error), /timed out/i);
+  assert.equal(ctx.homeAgent.observationStatus, "running");
+  await assert.rejects(ctx.homeAgent.requestMediaActionTurn("再播放一次"), /busy/i);
+  const guardedLateTool = await ctx.tools.execute({
+    callId: "late-inventory-while-media-task-active" as never,
+    name: "get_home_inventory",
+    arguments: { limit: 1 },
+    agent: ctx.homeAgent.agent,
+    signal: new AbortController().signal,
+  });
+  assert.equal(guardedLateTool.isError, true);
+
+  adapter.release();
+  for (let attempt = 0; attempt < 50 && ctx.homeAgent.observationStatus !== "idle"; attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(ctx.homeAgent.observationStatus, "idle");
+  await ctx.homeAgent.requestMediaActionTurn("新的媒体请求");
+  assert.equal(adapter.requests.length, 2);
 
   await ctx.fiber.dispose();
 });

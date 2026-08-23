@@ -1,7 +1,8 @@
 # Voice and media interaction
 
-Status: accepted product direction; contract and non-applying UX may be built in
-Phase 0, while device playback remains behind the governed-action-plane gate.
+Status: accepted product direction. Neutral media discovery, preparation, the
+governed action path, and an explicit media-only DSH turn seam are implemented;
+the durable Product action-turn owner and household-facing entry remain pending.
 
 ## Product decision
 
@@ -151,6 +152,39 @@ authenticated actor assertion from a present private device whose binding
 matches its principal. Missing actor data, ordinary advice text, and shared
 screen speech do not create identity and fail closed. A click cannot approve a
 different ticket by using the latest card or a request-local fallback.
+
+### Explicit media action turn
+
+Ordinary Home Advice is permanently read-only. It never receives an actor or a
+mutable media scope, even when the request came from an authenticated product
+session. A household media command instead enters a distinct, explicit action
+turn on the same mounted DSH Agent and AgentLoop. This is a capability boundary,
+not a second chat runtime or a model-classification shortcut.
+
+`HomeMediaConversationService.runActionTurn` binds one present actor and one
+Hub-owned request id to the callback. Only the first `request_action` in that
+scope may reach the existing action-ticket owner. The model tool accepts no
+actor, ticket id, or request id; it can supply only bounded search text, an
+opaque media reference, a neutral player capability id, and an explicit queue
+mode. Separate household turns therefore cannot alias an old ticket by reusing
+model output, while retries owned by one future durable turn can retain one
+idempotency key.
+
+`DshHomeAgentService.requestMediaActionTurn` uses the existing Agent with a
+media-only tool guard, an independent bounded tool budget, and a bounded
+deadline. It permits read-only player discovery and the governed media
+conversation tool; proposal, advice-report, observation-report, inventory, and
+other control tools fail in code. A cancelled or timed-out scope is revocable,
+so a provider completion that arrives later cannot acquire its former actor or
+create a ticket.
+
+The backend seam is intentionally not exposed by `/conversation` or `/voice`
+yet. Product delivery requires a Hub-owned durable media-action turn that
+creates the request id, starts the scoped DSH turn with the current authenticated
+actor, stores only the closed clarification or existing ticket id, and projects
+the ticket's current result rather than copying confirmation or execution state.
+Restart may recover an already-created ticket, but it must never replay an
+unfinished command with stale presence.
 
 The neutral action describes the desired outcome rather than an HA service:
 
@@ -469,13 +503,6 @@ claim is atomic across store connections. A cancelled background turn records
 a failed terminal row with a `cancelled` event so the household receives the
 same durable completion path.
 
-An authenticated, present household actor enters the media conversation through
-an async-local request scope for the current Agent advice call. The scope
-isolates concurrent member requests, and the existing action-ticket owner
-receives that exact actor when advice requests media action. The Inbox passes
-the normalized HTTP principal explicitly; scheduled observation runs without a
-request actor and its action request returns a closed blocked state.
-
 Service restart reopens a `background` row and reattaches the original advice
 id to the current Hub Agent when the home is ready. The recovery path preserves
 the retained event cursor and resumes the same question. A running row remains
@@ -485,10 +512,9 @@ runs one bounded recovery timer at a low default frequency of one second while
 durable background work awaits a ready World and Agent. Service disposal clears
 the timer and leaves the background row available for a later process.
 
-The durable advice row stores no actor identity. Same-process background work
-keeps its in-memory actor scope. Restart recovery starts without an actor, so a
-later media action requires a new authenticated request scope and otherwise
-returns `authenticated_actor_required`.
+The durable advice row stores no actor identity because Advice owns no mutable
+actor scope. Restart recovery remains read-only. Media commands use the separate
+durable action-turn design above and cannot inherit Advice recovery or presence.
 
 Cancellation applies only to the active running or background advice. Terminal
 advice rejects further cancellation and background transitions. Retry starts a
@@ -509,13 +535,17 @@ ready, while the failed record and its terminal notification remain intact.
    two DSH read-only tools, and an explicitly mounted synthetic provider are in
    place. The synthetic provider is never a production default or a Bridge
    adapter. The search and player tools remain read-only.
-4. **V3 — governed playback (implemented):** the exact `play_media` intent now
+4. **V3 — governed playback backend (implemented):** the exact `play_media` intent now
    flows through preparation and the existing action-ticket, executor,
    postcondition, and audit path. The V4 conversation seam returns closed
    clarification states, preserves exact opaque references, routes confirmation
    through the ticket owner, and allows direct actions only after Hub policy
-   approval and read-back verification.
-5. **V4 — ambient household assistant:** evaluate local wake word, barge-in,
+   approval and read-back verification. One explicit media-only turn uses the
+   same DSH Agent, while ordinary Advice remains non-applying.
+5. **V4 — household media command product (pending):** add the durable Hub turn
+   owner, explicit text/private-voice mode, clarification/result projection,
+   and links to the one existing confirmation ticket and Activity record.
+6. **V5 — ambient household assistant:** evaluate local wake word, barge-in,
    multi-room handoff, household-member policy, and local speech providers only
    after push-to-talk privacy and reliability are proven.
 

@@ -52,6 +52,25 @@ class StubConversation extends Service {
         },
       };
     }
+    const request = input as Record<string, unknown>;
+    if (request.mediaRef === undefined) {
+      return request.query === undefined
+        ? { status: "clarification", slot: "query", reason: "missing", options: [] }
+        : request.query === "爵士"
+        ? {
+          status: "clarification",
+          slot: "mediaRef",
+          reason: "ambiguous",
+          options: [{ mediaRef: "opaqueMediaRef0001", title: "晚间爵士", sourceLabel: "家庭音乐库", playable: true }],
+        }
+        : { status: "clarification", slot: "mediaRef", reason: "missing", options: [] };
+    }
+    if (request.playerCapabilityId === undefined) {
+      return { status: "clarification", slot: "playerCapabilityId", reason: "missing", options: [] };
+    }
+    if (request.queueMode === undefined) {
+      return { status: "clarification", slot: "queueMode", reason: "missing", options: [{ queueMode: "play_next" }] };
+    }
     return {
       status: "pending_confirmation",
       ticketId: "action-ticket-1",
@@ -83,7 +102,7 @@ test("exposes one bounded media conversation tool with closed clarification and 
     assert.match(definition.description, /does not.*(?:authenticate|identity)/i);
     assert.deepEqual(
       Object.keys(definition.parameters.properties as Record<string, unknown>).sort(),
-      ["mediaRef", "operation", "playerCapabilityId", "query", "queueMode", "requestId"],
+      ["mediaRef", "operation", "playerCapabilityId", "query", "queueMode"],
     );
 
     const search = await ctx.tools.execute({
@@ -120,7 +139,6 @@ test("exposes one bounded media conversation tool with closed clarification and 
       name: "home_media_conversation",
       arguments: {
         operation: "request_action",
-        requestId: "media-request-1",
         mediaRef: "opaqueMediaRef0001",
         playerCapabilityId: "hwc-media-room",
         queueMode: "replace_and_play",
@@ -152,7 +170,6 @@ test("exposes one bounded media conversation tool with closed clarification and 
       },
       {
         operation: "request_action",
-        requestId: "media-request-1",
         mediaRef: "opaqueMediaRef0001",
         playerCapabilityId: "hwc-media-room",
         queueMode: "replace_and_play",
@@ -165,7 +182,53 @@ test("exposes one bounded media conversation tool with closed clarification and 
   }
 });
 
-test("rejects non-opaque refs, missing slots, hidden actor fields and confirmation operations before Hub", async () => {
+test("passes partial request actions to the Hub for closed clarification without accepting extra fields", async () => {
+  const { apply, inject, name } = await loadTool();
+  const ctx = new Context();
+  await ctx.plugin(SystemPrompt, {});
+  await ctx.plugin(ToolRuntime);
+  await ctx.plugin(StubConversation);
+  const fiber = await ctx.plugin({ name, inject, apply });
+  try {
+    const execute = (argumentsValue: Record<string, unknown>) => ctx.tools.execute({
+      callId: `media-conversation-partial-${JSON.stringify(argumentsValue)}` as never,
+      name: "home_media_conversation",
+      arguments: argumentsValue,
+      signal: new AbortController().signal,
+    });
+    const missingQuery = await execute({ operation: "request_action" });
+    const ambiguous = await execute({ operation: "request_action", query: "爵士" });
+    const missingPlayer = await execute({
+      operation: "request_action",
+      mediaRef: "opaqueMediaRef0001",
+    });
+    const missingQueue = await execute({
+      operation: "request_action",
+      mediaRef: "opaqueMediaRef0001",
+      playerCapabilityId: "hwc-media-room",
+    });
+    assert.equal(missingQuery.isError, false);
+    assert.equal(ambiguous.isError, false);
+    assert.equal(missingPlayer.isError, false);
+    assert.equal(missingQueue.isError, false);
+    const text = (result: Awaited<ReturnType<typeof execute>>) => {
+      const item = result.content.find((content) => content.type === "text");
+      assert.ok(item && item.type === "text");
+      return JSON.parse(item.text);
+    };
+    assert.deepEqual(text(missingQuery), { status: "clarification", slot: "query", reason: "missing", options: [] });
+    assert.deepEqual(text(ambiguous), { status: "clarification", slot: "mediaRef", reason: "ambiguous", options: [{ mediaRef: "opaqueMediaRef0001", title: "晚间爵士", sourceLabel: "家庭音乐库", playable: true }] });
+    assert.deepEqual(text(missingPlayer), { status: "clarification", slot: "playerCapabilityId", reason: "missing", options: [] });
+    assert.deepEqual(text(missingQueue), { status: "clarification", slot: "queueMode", reason: "missing", options: [{ queueMode: "play_next" }] });
+    const extra = await execute({ operation: "request_action", query: "爵士", actor: "forged" });
+    assert.equal(extra.isError, true);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("rejects non-opaque refs, malformed prepare calls, hidden actor fields and confirmation operations before Hub", async () => {
   const { apply, inject, name } = await loadTool();
   const ctx = new Context();
   await ctx.plugin(SystemPrompt, {});
@@ -176,7 +239,8 @@ test("rejects non-opaque refs, missing slots, hidden actor fields and confirmati
     for (const argumentsValue of [
       { operation: "prepare", mediaRef: "https://provider.invalid/jazz", playerCapabilityId: "hwc-media-room", queueMode: "play_next" },
       { operation: "prepare", mediaRef: "opaqueMediaRef0001", playerCapabilityId: "hwc-media-room", queueMode: "play" },
-      { operation: "request_action", requestId: "request-1", mediaRef: "opaqueMediaRef0001", playerCapabilityId: "hwc-media-room", queueMode: "replace_and_play", actor: { principalId: "admin" } },
+      { operation: "request_action", mediaRef: "opaqueMediaRef0001", playerCapabilityId: "hwc-media-room", queueMode: "replace_and_play", actor: { principalId: "admin" } },
+      { operation: "request_action", requestId: "model-chosen-id" },
       { operation: "confirm", ticketId: "action-ticket-1", actor: { principalId: "admin" } },
       { operation: "search" },
     ]) {

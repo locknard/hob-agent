@@ -122,7 +122,6 @@ export function apply(ctx: Context): void {
       mediaRef: { type: "string" },
       playerCapabilityId: { type: "string" },
       queueMode: { type: "string", enum: QUEUE_MODES },
-      requestId: { type: "string" },
     },
     output: {
       schema: OUTPUT_SCHEMA,
@@ -151,23 +150,32 @@ function parseArguments(value: Record<string, unknown>): Record<string, unknown>
     ? ["operation", "query"]
     : operation === "prepare"
       ? ["operation", "mediaRef", "playerCapabilityId", "queueMode"]
-      : ["operation", "mediaRef", "playerCapabilityId", "queueMode", "requestId"];
+      : ["operation", "query", "mediaRef", "playerCapabilityId", "queueMode"];
   const keys = Object.keys(value).sort();
-  if (keys.length !== expected.length || keys.some((key, index) => key !== [...expected].sort()[index])) {
+  if (operation === "request_action"
+    ? keys.some((key) => !expected.includes(key))
+    : keys.length !== expected.length || keys.some((key, index) => key !== [...expected].sort()[index])) {
     throw new TypeError("home media conversation arguments are invalid");
   }
   if (operation === "search") {
     boundedText(value.query, "query", 512);
     return { operation, query: value.query };
   }
-  const mediaRef = validateMediaRef(value.mediaRef);
-  const playerCapabilityId = boundedId(value.playerCapabilityId, "playerCapabilityId");
-  const queueMode = validateQueueMode(value.queueMode);
   if (operation === "prepare") {
-    return { operation, mediaRef, playerCapabilityId, queueMode };
+    return {
+      operation,
+      mediaRef: validateMediaRef(value.mediaRef),
+      playerCapabilityId: boundedId(value.playerCapabilityId, "playerCapabilityId"),
+      queueMode: validateQueueMode(value.queueMode),
+    };
   }
-  const requestId = boundedId(value.requestId, "requestId");
-  return { operation, requestId, mediaRef, playerCapabilityId, queueMode };
+  return {
+    operation,
+    ...(value.query === undefined ? {} : { query: boundedText(value.query, "query", 512) }),
+    ...(value.mediaRef === undefined ? {} : { mediaRef: validateMediaRef(value.mediaRef) }),
+    ...(value.playerCapabilityId === undefined ? {} : { playerCapabilityId: boundedId(value.playerCapabilityId, "playerCapabilityId") }),
+    ...(value.queueMode === undefined ? {} : { queueMode: validateQueueMode(value.queueMode) }),
+  };
 }
 
 function projectConversationResult(value: unknown): Record<string, unknown> {

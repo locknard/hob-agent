@@ -459,7 +459,7 @@ test("blocks a scheduled request action when no request actor scope exists", asy
   }
 });
 
-test("keeps concurrent request actor scopes isolated", async () => {
+test("runs each explicit media action turn with an isolated actor and captures its one action state", async () => {
   const { HomeMediaConversationService } = await loadModule();
   const ctx = new Context();
   await ctx.plugin(StubCatalog);
@@ -469,7 +469,7 @@ test("keeps concurrent request actor scopes isolated", async () => {
   try {
     const service = ctx.homeMediaConversation as unknown as {
       requestAction(input: Record<string, unknown>): Promise<Record<string, unknown>>;
-      runWithActor<T>(actor: OneShotActionActor, callback: () => T | PromiseLike<T>): T | PromiseLike<T>;
+      runActionTurn(actor: OneShotActionActor, requestId: string, callback: () => unknown | PromiseLike<unknown>): Promise<Record<string, unknown>>;
     };
     const actorA: OneShotActionActor = {
       principalId: "adult-a",
@@ -485,19 +485,21 @@ test("keeps concurrent request actor scopes isolated", async () => {
     };
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const request = (requestId: string) => service.requestAction({
-      requestId,
+    const request = () => service.requestAction({
+      requestId: "model-reused-id",
       mediaRef: "opaqueMediaRef0001",
       playerCapabilityId: "hwc-media-room",
       queueMode: "play_next",
     });
-    const first = service.runWithActor(actorA, async () => {
+    const first = service.runActionTurn(actorA, "media-turn-a", async () => {
       await firstGate;
-      return request("media-request-a");
+      return request();
     });
-    const second = service.runWithActor(actorB, () => request("media-request-b"));
+    const second = service.runActionTurn(actorB, "media-turn-b", () => request());
     releaseFirst();
-    await Promise.all([first, second]);
+    const [firstState, secondState] = await Promise.all([first, second]);
+    assert.equal(firstState.status, "pending_confirmation");
+    assert.equal(secondState.status, "pending_confirmation");
     const byRequest = new Map(
       (ctx.homeReviewCenter as unknown as StubReviewCenter).requests.map((item) => [
         String((item as { requestId: unknown }).requestId),
@@ -505,9 +507,188 @@ test("keeps concurrent request actor scopes isolated", async () => {
       ]),
     );
     assert.deepEqual(Object.fromEntries(byRequest), {
-      "media-request-a": "adult-a",
-      "media-request-b": "adult-b",
+      "media-turn-a": "adult-a",
+      "media-turn-b": "adult-b",
     });
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("admits only one request action in an explicit media action turn", async () => {
+  const { HomeMediaConversationService } = await loadModule();
+  const ctx = new Context();
+  await ctx.plugin(StubCatalog);
+  await ctx.plugin(StubPreparation);
+  await ctx.plugin(StubReviewCenter);
+  const fiber = await ctx.plugin(HomeMediaConversationService);
+  try {
+    const service = ctx.homeMediaConversation as unknown as {
+      requestAction(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+      runActionTurn(actor: OneShotActionActor, requestId: string, callback: () => unknown | PromiseLike<unknown>): Promise<Record<string, unknown>>;
+    };
+    const result = await service.runActionTurn(actor, "media-turn-once", async () => {
+      const first = await service.requestAction({
+        requestId: "model-chosen-first",
+        mediaRef: "opaqueMediaRef0001",
+        playerCapabilityId: "hwc-media-room",
+        queueMode: "play_next",
+      });
+      assert.equal(first.status, "pending_confirmation");
+      const second = await service.requestAction({
+        requestId: "model-chosen-second",
+        mediaRef: "opaqueMediaRef0001",
+        playerCapabilityId: "hwc-media-room",
+        queueMode: "play_next",
+      });
+      assert.deepEqual(second, { status: "blocked", reason: "unavailable" });
+    });
+    assert.equal(result.status, "pending_confirmation");
+    assert.equal((ctx.homeReviewCenter as unknown as StubReviewCenter).requests.length, 1);
+    assert.equal(
+      ((ctx.homeReviewCenter as unknown as StubReviewCenter).requests[0] as { requestId: unknown }).requestId,
+      "media-turn-once",
+    );
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("admits at most one concurrent request action in an explicit media action turn", async () => {
+  const { HomeMediaConversationService } = await loadModule();
+  const ctx = new Context();
+  await ctx.plugin(StubCatalog);
+  await ctx.plugin(StubPreparation);
+  await ctx.plugin(StubReviewCenter);
+  const fiber = await ctx.plugin(HomeMediaConversationService);
+  try {
+    const service = ctx.homeMediaConversation as unknown as {
+      requestAction(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+      runActionTurn(actor: OneShotActionActor, requestId: string, callback: () => unknown | PromiseLike<unknown>): Promise<Record<string, unknown>>;
+    };
+    const request = (requestId: string) => service.requestAction({
+      requestId,
+      mediaRef: "opaqueMediaRef0001",
+      playerCapabilityId: "hwc-media-room",
+      queueMode: "play_next",
+    });
+    const result = await service.runActionTurn(actor, "media-turn-concurrent", async () => {
+      const [first, second] = await Promise.all([request("media-request-concurrent-a"), request("media-request-concurrent-b")]);
+      assert.equal(first.status, "pending_confirmation");
+      assert.deepEqual(second, { status: "blocked", reason: "unavailable" });
+    });
+    assert.equal(result.status, "pending_confirmation");
+    assert.equal((ctx.homeReviewCenter as unknown as StubReviewCenter).requests.length, 1);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("returns an explicit unavailable state when an action turn makes no request action", async () => {
+  const { HomeMediaConversationService } = await loadModule();
+  const ctx = new Context();
+  await ctx.plugin(StubCatalog);
+  await ctx.plugin(StubPreparation);
+  await ctx.plugin(StubReviewCenter);
+  const fiber = await ctx.plugin(HomeMediaConversationService);
+  try {
+    const service = ctx.homeMediaConversation as unknown as {
+      runActionTurn(actor: OneShotActionActor, requestId: string, callback: () => unknown | PromiseLike<unknown>): Promise<Record<string, unknown>>;
+    };
+    assert.deepEqual(
+      await service.runActionTurn(actor, "media-turn-empty", async () => undefined),
+      { status: "blocked", reason: "unavailable" },
+    );
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("rejects a nested explicit media action turn before either turn can request an action", async () => {
+  const { HomeMediaConversationService } = await loadModule();
+  const ctx = new Context();
+  await ctx.plugin(StubCatalog);
+  await ctx.plugin(StubPreparation);
+  await ctx.plugin(StubReviewCenter);
+  const fiber = await ctx.plugin(HomeMediaConversationService);
+  try {
+    const service = ctx.homeMediaConversation as unknown as {
+      runActionTurn(actor: OneShotActionActor, requestId: string, callback: () => unknown | PromiseLike<unknown>): Promise<Record<string, unknown>>;
+    };
+    await assert.rejects(
+      service.runActionTurn(actor, "media-turn-outer", () =>
+        service.runActionTurn(actor, "media-turn-inner", async () => undefined)),
+      /media action turn is already active/i,
+    );
+    assert.equal((ctx.homeReviewCenter as unknown as StubReviewCenter).requests.length, 0);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("revokes an explicit media action scope before a detached late request can create a ticket", async () => {
+  const { HomeMediaConversationService } = await loadModule();
+  const ctx = new Context();
+  await ctx.plugin(StubCatalog);
+  await ctx.plugin(StubPreparation);
+  await ctx.plugin(StubReviewCenter);
+  const fiber = await ctx.plugin(HomeMediaConversationService);
+  try {
+    const service = ctx.homeMediaConversation as unknown as {
+      requestAction(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+      runActionTurn(actor: OneShotActionActor, requestId: string, callback: () => unknown | PromiseLike<unknown>): Promise<Record<string, unknown>>;
+    };
+    let releaseLate!: () => void;
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve; });
+    let lateResult!: Promise<Record<string, unknown>>;
+    const turnResult = await service.runActionTurn(actor, "media-turn-revoked", () => {
+      lateResult = (async () => {
+        await lateGate;
+        return service.requestAction({
+          mediaRef: "opaqueMediaRef0001",
+          playerCapabilityId: "hwc-media-room",
+          queueMode: "play_next",
+        });
+      })();
+    });
+    assert.deepEqual(turnResult, { status: "blocked", reason: "unavailable" });
+    releaseLate();
+    assert.deepEqual(await lateResult, { status: "blocked", reason: "unavailable" });
+    assert.equal((ctx.homeReviewCenter as unknown as StubReviewCenter).requests.length, 0);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("rejects a new media action turn inherited by a detached child of a revoked scope", async () => {
+  const { HomeMediaConversationService } = await loadModule();
+  const ctx = new Context();
+  await ctx.plugin(StubCatalog);
+  await ctx.plugin(StubPreparation);
+  await ctx.plugin(StubReviewCenter);
+  const fiber = await ctx.plugin(HomeMediaConversationService);
+  try {
+    const service = ctx.homeMediaConversation as unknown as {
+      runActionTurn(actor: OneShotActionActor, requestId: string, callback: () => unknown | PromiseLike<unknown>): Promise<Record<string, unknown>>;
+    };
+    let releaseLate!: () => void;
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve; });
+    let inheritedTurn!: Promise<Record<string, unknown>>;
+    await service.runActionTurn(actor, "media-turn-parent", () => {
+      inheritedTurn = (async () => {
+        await lateGate;
+        return service.runActionTurn(actor, "media-turn-inherited", async () => undefined);
+      })();
+    });
+    releaseLate();
+    await assert.rejects(inheritedTurn, /media action turn is already active/i);
+    assert.equal((ctx.homeReviewCenter as unknown as StubReviewCenter).requests.length, 0);
   } finally {
     await fiber.dispose();
     await ctx.fiber.dispose();

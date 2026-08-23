@@ -123,6 +123,14 @@ export type HomeMediaConversationState =
   | HomeMediaPreparedState
   | HomeMediaActionState;
 
+interface HomeMediaActionTurnScope {
+  readonly actor: OneShotActionActor;
+  readonly requestId: string;
+  active: boolean;
+  actionRequested: boolean;
+  actionState: HomeMediaConversationState | undefined;
+}
+
 export interface HomeMediaCatalogPort {
   search(input: {
     readonly query: string;
@@ -182,7 +190,7 @@ export interface HomeMediaPreparationInput {
 }
 
 export interface HomeMediaActionRequest {
-  readonly requestId: string;
+  readonly requestId?: string;
   readonly query?: string;
   readonly playerCapabilityId?: string;
   readonly mediaRef?: string;
@@ -225,7 +233,7 @@ export class HomeMediaConversationService extends Service {
   private readonly catalog: HomeMediaCatalogPort;
   private readonly preparation: HomeMediaPreparationPort;
   private readonly reviewCenter: HomeMediaReviewPort;
-  private readonly actorScope = new AsyncLocalStorage<OneShotActionActor>();
+  private readonly actionTurnScope = new AsyncLocalStorage<HomeMediaActionTurnScope>();
 
   constructor(ctx: Context, options: HomeMediaConversationServiceOptions = {}) {
     super(ctx, "homeMediaConversation");
@@ -243,14 +251,34 @@ export class HomeMediaConversationService extends Service {
     this.confirm = (input) => this.confirmAction(input);
   }
 
-  /** Runs one authenticated member request with an isolated action owner. */
-  runWithActor<T>(
+  /**
+   * Runs one explicit media action turn. The authenticated actor is available
+   * only to the one request_action issued inside this callback.
+   */
+  async runActionTurn(
     actor: OneShotActionActor,
-    callback: () => T | PromiseLike<T>,
-  ): T | PromiseLike<T> {
+    requestId: string,
+    callback: () => unknown | PromiseLike<unknown>,
+  ): Promise<HomeMediaConversationState> {
+    if (this.actionTurnScope.getStore() !== undefined) {
+      throw new Error("A media action turn is already active");
+    }
     if (!isPresentActor(actor)) throw new TypeError("an authenticated present actor is required");
+    const ownedRequestId = boundedId(requestId, "requestId");
     if (typeof callback !== "function") throw new TypeError("an actor scope callback is required");
-    return this.actorScope.run(actor, callback);
+    const scope: HomeMediaActionTurnScope = {
+      actor,
+      requestId: ownedRequestId,
+      active: true,
+      actionRequested: false,
+      actionState: undefined,
+    };
+    try {
+      await this.actionTurnScope.run(scope, callback);
+      return scope.actionState ?? { status: "blocked", reason: "unavailable" };
+    } finally {
+      scope.active = false;
+    }
   }
 
   private async searchCatalog(input: HomeMediaSearchInput): Promise<HomeMediaSearchState> {
@@ -309,46 +337,58 @@ export class HomeMediaConversationService extends Service {
   }
 
   private async requestMediaAction(input: HomeMediaActionRequest): Promise<HomeMediaConversationState> {
-    const requestId = boundedId(input?.requestId, "requestId");
+    const actionTurn = this.actionTurnScope.getStore();
+    if (actionTurn !== undefined && !actionTurn.active) return { status: "blocked", reason: "unavailable" };
+    if (actionTurn?.actionRequested === true) return { status: "blocked", reason: "unavailable" };
+    if (actionTurn !== undefined) actionTurn.actionRequested = true;
+    const complete = (state: HomeMediaConversationState): HomeMediaConversationState => {
+      if (actionTurn !== undefined) {
+        if (!actionTurn.active) return { status: "blocked", reason: "unavailable" };
+        actionTurn.actionState = state;
+      }
+      return state;
+    };
+    const requestId = actionTurn?.requestId ?? boundedId(input?.requestId, "requestId");
     const signal = input?.signal ?? new AbortController().signal;
     if (signal.aborted) throw signal.reason;
     let mediaRef = input.mediaRef === undefined ? undefined : validateMediaRef(input.mediaRef);
     const query = input.query === undefined ? undefined : boundedText(input.query, "query", MAX_TEXT_LENGTH).trim();
-    if (query !== undefined && query.length === 0) return clarification("query", "missing");
+    if (query !== undefined && query.length === 0) return complete(clarification("query", "missing"));
     if (mediaRef === undefined) {
-      if (query === undefined) return clarification("query", "missing");
+      if (query === undefined) return complete(clarification("query", "missing"));
       const search = await this.searchCatalog({ query, signal });
       const playable = search.candidates.filter((candidate) => candidate.playable);
       if (playable.length === 0) {
-        return clarification("mediaRef", search.candidates.length === 0 ? "no_match" : "not_playable");
+        return complete(clarification("mediaRef", search.candidates.length === 0 ? "no_match" : "not_playable"));
       }
       if (playable.length !== 1) {
-        return clarification("mediaRef", "ambiguous", playable.map((candidate) => ({
+        return complete(clarification("mediaRef", "ambiguous", playable.map((candidate) => ({
           mediaRef: candidate.mediaRef,
           title: candidate.title,
           sourceLabel: candidate.sourceLabel,
           playable: true,
-        })));
+        }))));
       }
       mediaRef = playable[0]!.mediaRef;
     }
     const playerCapabilityId = input.playerCapabilityId === undefined
       ? undefined
       : boundedId(input.playerCapabilityId, "playerCapabilityId");
-    if (playerCapabilityId === undefined) return clarification("playerCapabilityId", "missing");
+    if (playerCapabilityId === undefined) return complete(clarification("playerCapabilityId", "missing"));
     const queueMode = input.queueMode === undefined ? undefined : validateQueueMode(input.queueMode);
     if (queueMode === undefined) {
-      return clarification("queueMode", "missing", MEDIA_QUEUE_MODES.map((mode) => ({ queueMode: mode })));
+      return complete(clarification("queueMode", "missing", MEDIA_QUEUE_MODES.map((mode) => ({ queueMode: mode }))));
     }
-    const actor = input.actor ?? this.actorScope.getStore();
-    if (!isPresentActor(actor)) return { status: "blocked", reason: "authenticated_actor_required" };
+    const actor = actionTurn?.actor ?? input.actor;
+    if (!isPresentActor(actor)) return complete({ status: "blocked", reason: "authenticated_actor_required" });
     const prepared = await this.prepareIntent({
       playerCapabilityId,
       mediaRef,
       queueMode,
       signal,
     });
-    if (prepared.status !== "prepared") return prepared;
+    if (prepared.status !== "prepared") return complete(prepared);
+    if (actionTurn !== undefined && !actionTurn.active) return { status: "blocked", reason: "unavailable" };
     const action: OneShotAction = {
       kind: "play_media",
       mediaRef,
@@ -363,7 +403,7 @@ export class HomeMediaConversationService extends Service {
       source: input.source ?? "member",
       signal,
     });
-    return projectActionResult(result, prepared.preparation, prepared.intent);
+    return complete(projectActionResult(result, prepared.preparation, prepared.intent));
   }
 
   private async handleInput(input: HomeMediaConversationInput): Promise<HomeMediaConversationState> {
