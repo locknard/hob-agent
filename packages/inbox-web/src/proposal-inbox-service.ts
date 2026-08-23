@@ -1191,6 +1191,10 @@ function projectMediaClarification(value: unknown): Extract<ProductMediaActionTu
     reason: value.reason,
     options: value.options.flatMap((option) => {
       if (!isRecord(option)) throw new TypeError("media_action_clarification_invalid");
+      if (value.slot === "queueMode") {
+        const title = productMediaQueueModeTitle(option.queueMode);
+        return title === undefined ? [] : [{ title }];
+      }
       const title = productMediaOptionText(option.title);
       const sourceLabel = productMediaOptionText(option.sourceLabel);
       const playable = typeof option.playable === "boolean" ? option.playable : undefined;
@@ -1198,6 +1202,13 @@ function projectMediaClarification(value: unknown): Extract<ProductMediaActionTu
       return [{ ...(title === undefined ? {} : { title }), ...(sourceLabel === undefined ? {} : { sourceLabel }), ...(playable === undefined ? {} : { playable }) }];
     }),
   };
+}
+
+function productMediaQueueModeTitle(value: unknown): string | undefined {
+  if (value === "replace_and_play") return "现在播放";
+  if (value === "play_next") return "下一首播放";
+  if (value === "add_to_queue") return "加入队列";
+  return undefined;
 }
 
 function projectMediaActionTicket(value: unknown): Extract<ProductMediaActionTurn, { readonly status: "ticket" }>['ticket'] {

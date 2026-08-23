@@ -328,6 +328,26 @@ test("renders an explicit media command separately from read-only household advi
   assert.match(clarification, /请重新明确输入/);
   assert.doesNotMatch(clarification, /已完成/);
 
+  const queueClarification = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      kind: "media_action",
+      id: "media-queue-1",
+      question: "在多媒体室放 Jazz Evening",
+      status: "clarification",
+      clarification: {
+        slot: "queueMode",
+        reason: "missing",
+        options: [{ title: "现在播放" }, { title: "下一首播放" }, { title: "加入队列" }],
+      },
+    },
+  }));
+  assert.match(queueClarification, /还需要确认播放方式/);
+  assert.match(queueClarification, /现在播放/);
+  assert.match(queueClarification, /下一首播放/);
+  assert.match(queueClarification, /加入队列/);
+  assert.doesNotMatch(queueClarification, /replace_and_play|play_next|add_to_queue/);
+
   const pending = renderProductShell(model({
     route: "conversation",
     activeTurn: {

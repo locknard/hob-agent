@@ -610,7 +610,11 @@ class StubMediaActionTurns extends Service {
       clarification: {
         slot: "queueMode" as const,
         reason: "missing" as const,
-        options: [{ queueMode: "play_next", mediaRef: "opaque-ref" }],
+        options: [
+          { queueMode: "replace_and_play", mediaRef: "opaque-ref" },
+          { queueMode: "play_next" },
+          { queueMode: "add_to_queue" },
+        ],
       },
     };
     return undefined;
@@ -933,7 +937,15 @@ test("projects an explicit media action through the Hub owner without exposing o
     id: "media-queue",
     question: "播放 Jazz",
     status: "clarification",
-    clarification: { slot: "queueMode", reason: "missing", options: [] },
+    clarification: {
+      slot: "queueMode",
+      reason: "missing",
+      options: [
+        { title: "现在播放" },
+        { title: "下一首播放" },
+        { title: "加入队列" },
+      ],
+    },
   });
   assert.deepEqual(ctx.homeInbox.readMediaActionEvents("media-turn-1"), [{ id: 2, type: "ticket" }]);
 
