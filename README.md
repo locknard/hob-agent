@@ -47,46 +47,39 @@ and test/commit discipline.
 The initial implementation connects to Home Assistant's WebSocket API, reads a
 state and registry bootstrap snapshot, and subscribes to `state_changed`
 events. Read-only observation and governed actions share the neutral bridge
-boundary; bridge transport never grants action authority. Configure a neutral
-bridge catalog locally; never commit a token.
-`HOB_BRIDGES` contains only bridge identity, adapter type, non-secret config, and
-explicit credential locators. On macOS, prefer an exact bridge-scoped Keychain
-locator:
+boundary; bridge transport never grants action authority.
+
+### Start a household product
+
+Production startup uses the single `ProductRuntimeSupervisor`. It reads the
+saved product generation when one exists, and otherwise starts the local setup
+product. Start it with a private data directory:
 
 ```sh
 export HOB_DATA_DIR="/var/lib/hob-agent"
-export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","config":{"baseUrl":"http://homeassistant.local:8123","authenticationPrincipal":"home-owner"},"credentialRefs":{"access-token":"keychain:hob-agent/bridge:ha-main:access-token"}}]'
-export HOB_BRIDGE_ID='ha-main'
-export HOB_BRIDGE_CREDENTIAL_ALIAS='access-token'
-# Enter the HA token without echo; only the locator above remains in config.
-pnpm credentials:bridge
-export HOB_MODEL=deepseek/deepseek-v4-flash
-# Preferred on macOS: enter without echo; the key is stored in Keychain.
-pnpm credentials:model
-# Optional local review UI (HTTP Basic user is `home`):
-export HOB_INBOX_AUTH_TOKEN='at-least-32-random-characters-kept-local'
-export HOB_INBOX_PORT=8787
-export HOB_INBOX_PRINCIPAL_ID='household-member'
-export HOB_INBOX_PRINCIPAL_ROLE='adult_member'
-export HOB_INBOX_DEVICE_KIND='private'
-export HOB_INBOX_DEVICE_BOUND_PRINCIPAL_ID='household-member'
-# Optional local observation cadence (disabled unless explicitly set):
-export HOB_OBSERVATION_INTERVAL_MINUTES=360
-export HOB_OBSERVE_ON_START=false
-# Optional bounded SOUL.md, HOME.md, and MEMORY.md household context:
-export HOB_HOME_DIR='/absolute/path/to/private-home'
-# Legacy/development bridge fallback: use `env:HOB_HA_TOKEN` (or the old raw
-# `HOB_HA_TOKEN` locator) and set that variable only in the launch environment.
-# Legacy/development model fallback: set the matching DEEPSEEK_API_KEY,
-# OPENAI_API_KEY, ANTHROPIC_API_KEY, MOONSHOT_API_KEY, or ZAI_API_KEY.
+# HOB_SETUP_PORT is optional and defaults to 8787.
+export HOB_SETUP_PORT=8787
 pnpm start
 ```
 
-For a self-hosted OpenAI-compatible deployment, select the neutral custom
-provider and configure its HTTPS endpoint; keep the token in the same Keychain
-flow:
+On first launch, the terminal prints the local `/setup` address and a
+short-lived pairing code. Open that address on the paired private device, name
+the household, verify a model and Home Assistant connection, then optionally
+verify private ASR and TTS. The same Product Host switches that paired browser
+to the operational product and creates its durable local product session.
+
+`HOB_MODEL` and `HOB_BRIDGES` remain explicit inputs for command-line
+diagnostics and credential utilities. They do not directly start the production
+household Agent or bridge runtime. The diagnostic bridge catalog contains only
+bridge identity, adapter type, non-secret configuration, and credential
+locators. For example:
 
 ```sh
+export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","config":{"baseUrl":"http://homeassistant.local:8123","authenticationPrincipal":"home-owner"},"credentialRefs":{"access-token":"keychain:hob-agent/bridge:ha-main:access-token"}}]'
+export HOB_BRIDGE_ID='ha-main'
+export HOB_BRIDGE_CREDENTIAL_ALIAS='access-token'
+# Enter the HA token without echo; the utility retains only its locator.
+pnpm credentials:bridge
 export HOB_MODEL='custom/deployment-model-id'
 export HOB_MODEL_BASE_URL='https://models.example.com:8443/v1'
 pnpm credentials:model
@@ -95,10 +88,12 @@ pnpm credentials:test
 
 `HOB_MODEL_BASE_URL` is valid only for `custom`. One endpoint is active per
 process; switching to a backup endpoint is currently explicit rather than
-automatic.
+automatic. Product setup accepts HTTPS endpoints and also accepts plain HTTP
+for a loopback or private-network literal address, so a household can connect a
+fully local model without sending its credential through public DNS.
 
 `credentials:model` uses `HOB_DATA_DIR` and the provider selected by
-`HOB_MODEL`. Re-running it safely rotates that provider's primary key. Only a
+`HOB_MODEL`. Re-running it safely rotates that diagnostic profile's primary key. Only a
 non-secret profile locator and selection order are written to the private
 `auth-profiles.json` (`0600`); the key itself is sent through no-echo stdin to
 macOS Keychain and is never placed in command arguments or repository files.
@@ -144,8 +139,8 @@ disconnects and resolves it after a fresh clear value arrives:
 export HOB_SAFETY_BINDINGS='[{"id":"kitchen-leak","hwCapabilityId":"hwc-kitchen-leak","kind":"water_leak","title":"厨房漏水","sourceLabel":"厨房漏水传感器","stateAttribute":"state","activeValues":["on"],"clearValues":["off"]}]'
 ```
 
-Before enabling the Agent or observation schedule, the same bridge and data
-configuration can be validated without `HOB_MODEL` or a model API key:
+For a command-line bridge check, `HOB_BRIDGES` and `HOB_DATA_DIR` can be
+validated without `HOB_MODEL` or a model API key:
 
 ```sh
 pnpm validate:home
@@ -191,21 +186,26 @@ when it creates no proposal), records a metadata-only observation attempt under
 [`docs/one-shot-observation.md`](docs/one-shot-observation.md) and
 [`docs/observation-disposition.md`](docs/observation-disposition.md).
 
-The single full runtime serves the authenticated local product after
-`HOB_INBOX_AUTH_TOKEN` and the four explicit Inbox identity values shown above
-are configured. It can record an approval or rejection, while persistent
-automation changes continue through proposal, preparation and second consent.
+The single full runtime serves the authenticated local product through its
+paired private-device product session. A persistent automation reaches the
+review center only after background preparation is complete. The household then
+makes one explicit enable decision on the exact plan. That decision records a
+deployment intent and the selected bridge installs the corresponding native
+automation; the product reports it as running only after the bridge reads back
+its deployed status. Running automations remain visible and support native
+status, pause, resume, and withdrawal through the same governed boundary.
 It also shows recent metadata-only observation attempts and the household
 calibration summary over decisions and outcomes. **Ask about your home** accepts one bounded
 question and returns a locally persisted, structured advice document. The
-Agent may suggest a reversible trial and optional sensing capabilities.
-Persistent behavior follows proposal, evidence, trial and approval; device
-actions follow the Hub action gate. Stored answers remain readable after a
-restart. See [`docs/household-advice.md`](docs/household-advice.md),
+Agent may suggest additional sensing capabilities when the household needs
+better evidence. Persistent behavior follows proposal, evidence, preparation,
+one enable decision, and native deployment; device actions follow the Hub
+action gate. Stored answers remain readable after a restart. See
+[`docs/household-advice.md`](docs/household-advice.md),
 [`docs/observation-audit.md`](docs/observation-audit.md), and
 [`docs/household-calibration-summary.md`](docs/household-calibration-summary.md).
-The recommended sequence for a real-home trial is documented in
-[`docs/household-pilot.md`](docs/household-pilot.md).
+[`docs/household-pilot.md`](docs/household-pilot.md) defines real-home
+acceptance evidence; it is not a product lifecycle or a delayed second decision.
 
 The product includes an accessible voice-first household surface and governed
 media playback. Voice remains an input mode for the single DSH runtime. Media
@@ -213,9 +213,10 @@ discovery is read-only; playback passes through Hub policy, action tickets,
 confirmation when required, verification and audit. See
 [`docs/voice-and-media-interaction.md`](docs/voice-and-media-interaction.md).
 When the local product is enabled, `/voice` exposes the authenticated
-push-to-talk surface. A direct member gesture opens Web Speech, live and final
-captions remain visible, three bounded recognition failures lead to text input,
-and the final transcript enters the canonical `/conversation` route.
+push-to-talk surface. A direct member gesture starts a bounded `MediaRecorder`
+capture, which the verified private ASR service transcribes; the verified private
+TTS service speaks the completed answer. The voice turn enters the same
+canonical DSH conversation loop as text, and text remains available throughout.
 
 The Hub owns the `mediaCatalog@1` boundary. A trusted Music Assistant-compatible
 provider returns bounded neutral media kinds, while Agent-facing candidates use
@@ -231,8 +232,10 @@ the media conversation tool. It re-resolves the opaque media reference and the
 selected Hub player, asks for a missing queue choice, prepares the exact neutral
 `play_media` action and requests the same governed action ticket used for other
 household effects. Direct playback completes only after fresh policy and
-read-back verification; confirmation and administrator classes route to their
-respective owners.
+read-back verification. Actions use consequence-based handling: direct actions
+execute and verify, confirmation actions receive a short-lived response, and
+protected effects require a confirmation from a private device bound to the
+present household member. The household has no member-rank approval hierarchy.
 The production Hub also mounts an authority-selected, neutral media-player
 inventory and exposes it through the read-only `get_home_media_players` DSH
 tool. The HA adapter uses a strict additive `ha.media-player@1` read schema;
@@ -277,25 +280,24 @@ bounded read-only `get_home_evidence` tool, plus the review-only
 Inbox. A catalog is usable only when its exact `epochId + lastSeq` matches the
 bridge's committed watermark. Device actions use the Hub's exact descriptor,
 policy, action-ticket, verification and audit owners. Persistent behavior uses
-proposal, preparation, trial and explicit enablement.
+proposal, background preparation, one explicit enable decision, and native
+deployment.
 
-The Hub also contains the first non-applying neutral Artifact foundation:
-strict immutable ECA revisions, stable canonical hashes, append-only lifecycle
-and audit records, and separately versioned evidence, risk, and authority
-assessments. New automation proposals include the same closed neutral ECA
-content as a review-only candidate; the Hub validates its selected devices and
-capability evidence, and the Inbox renders the exact trigger, conditions,
-actions, rollback, and postconditions. A qualifying approval atomically queues
-a durable Hub-private preparation job. The production root wakes that job only
-for an approval committed while the process is running, then executes the fixed
-Artifact → evidence → authority → risk → compile → dry-run chain. Writable
-registries, the runner, and bridge authority inputs remain private to the root;
-Cordis, the Agent, Inbox, plugins, and bridges can discover only bounded review
-projections. Notify-only artifacts explicitly produce an empty authority scope.
-Startup never scans or replays queued/running jobs, and preparation has no
-device-write, credential, executor, or remote-rule installation port. Approval
-tickets and execution remain unavailable; an approved or compiled proposal is
-not an installed automation.
+The Hub stores immutable neutral Artifact revisions with stable canonical
+hashes, append-only lifecycle and audit records, and separately versioned
+evidence, risk, and authority assessments. New automation candidates include a
+closed neutral ECA plan. The Hub validates the selected devices and capability
+evidence, then prepares the fixed Artifact → evidence → authority → risk →
+compile → dry-run chain without writing to devices. The Inbox renders the exact
+trigger, conditions, actions, and postconditions only when the current revision
+is ready. One enable decision atomically records its precise deployment intent;
+the bridge installs its native automation and its read-back state drives the
+running, paused, failed, and withdrawn product states. Writable registries,
+the runner, and bridge authority inputs remain private to the root; Cordis, the
+Agent, Inbox, plugins, and bridges discover only bounded review projections.
+Notify-only artifacts explicitly produce an empty authority scope. Local tests
+cover the intent and read-back lifecycle; a real-home deployment remains an
+acceptance check rather than a claim made by this document.
 
 Long-running sessions use the official DSH compaction engine with its one
 supported summarizer hook replaced by a household checkpoint template; the
@@ -357,12 +359,11 @@ while any proposal is pending household review. The interval is limited to one
 hour through seven days. See
 [`docs/observation-scheduling.md`](docs/observation-scheduling.md).
 
-Inbox HTTP starts when its token and explicit principal identity are configured.
-It binds to `127.0.0.1`, authenticates every request, and enforces same-origin
-review and observation POSTs. A private device also declares a principal
-binding that exactly matches `HOB_INBOX_PRINCIPAL_ID`; a shared device omits the
-binding and receives shared-device permissions. The launch config retains a
-credential verifier while the secret stays in its configured secret source.
+The Product Host binds its local HTTP surface to loopback and authenticates each
+request with the paired private-device product session. It enforces same-origin
+review and observation mutations. Session storage retains a digest, expiry, and
+bound household device identity; it never retains a browser token in product
+configuration.
 
 When `HOB_HOME_DIR` is set, the three household Markdown files are loaded as a
 bounded startup snapshot through DSH's prompt/context registry. They personalize
@@ -376,11 +377,9 @@ does not declare or import it, and it owns no product API or runtime lifecycle.
 The intended user journey is documented in
 [`docs/ha-onboarding.md`](docs/ha-onboarding.md).
 
-The HA onboarding path starts with a credential-free WebSocket preflight. A
-later private read-only checkpoint covered 75 neutral devices and 18,206
-canonical events without recording household identities or values in this
-repository. A current-process bootstrap still requires an explicitly supplied
-token and the Phase 0 adapter remains read-only.
+The HA onboarding path starts with a credential-free WebSocket preflight, then
+uses the paired setup flow to verify a scoped bridge credential. The Phase 0
+adapter remains read-only until a governed Hub action is prepared and approved.
 
 Supported model providers and credential boundaries are documented in
 [`docs/model-providers.md`](docs/model-providers.md).
@@ -388,10 +387,10 @@ Supported model providers and credential boundaries are documented in
 The OpenClaw-derived provider adaptation audit is tracked in
 [`docs/openclaw-provider-adaptation.md`](docs/openclaw-provider-adaptation.md).
 
-The repository now has one executable Cordis composition root for the neutral
-HomeWorld bridge runtime and DSH agent. The production Home Agent creates or
-resumes its stable session through the official DSH SQLite provider and loads
-bounded household prompt context. An optional tenant Skill provider contributes
+The repository now has one executable `ProductRuntimeSupervisor` composition
+root for setup and the operational neutral HomeWorld bridge runtime. It mounts
+one DSH Home Agent loop and resumes its stable session through the official DSH
+SQLite provider while loading bounded household prompt context. An optional tenant Skill provider contributes
 strict, contained, byte-bounded `SKILL.md` files through the official DSH
 registry without granting tools or authority. See
 [`docs/architecture-self-review.md`](docs/architecture-self-review.md) for the
@@ -399,8 +398,6 @@ verified boundaries and prioritized gaps.
 The intended provider authorization and model-selection journey is documented
 in [`docs/provider-onboarding.md`](docs/provider-onboarding.md).
 
-DeepSeek `deepseek-v4-flash` has passed one explicit, one-token live probe through
-the provider adapter. This validates the API-key transport path, not the still-
-pending settings UI or Claude OAuth product flow. Never commit provider keys;
-use a scoped environment reference or macOS Keychain profile and rotate any key
-that has appeared in chat or logs.
+Model setup verifies the household-selected provider through a bounded probe
+before activation. Never commit provider keys; the product retains a vault
+reference and keeps the value in request-local memory.

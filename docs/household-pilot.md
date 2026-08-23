@@ -10,8 +10,13 @@ review safely. DSH, Cordis, neutral bridges, bounded evidence, conflict checks,
 and the Inbox are now supporting infrastructure. The next proof is repeated
 usefulness in one real home.
 
-This pilot does not enable device control or automation installation. Approval
-continues to record household judgment only.
+This pilot is a real-household acceptance protocol, not a product trial state.
+It adds no waiting period, second decision, or temporary automation lifecycle.
+The read-side scenarios recorded below exercise observation only. They do not
+prove native automation deployment. A real deployment scenario uses the normal
+product path: a prepared exact plan receives one explicit enable decision, the
+selected bridge installs its native automation, and the product verifies its
+reported state before it calls the automation running.
 
 ## Stage 1 — model-free readiness
 
@@ -184,8 +189,10 @@ Phase 0 is product-proven when the household can repeat this loop:
    for producing none is recorded;
 4. the household reviews it with structured feedback;
 5. the next observation demonstrably incorporates that feedback; and
-6. no approval, observation, Skill, plugin, or bridge path can apply a change.
+6. every persistent change follows the reviewed plan, one enable decision,
+   bridge deployment, state read-back, and audit path; every one-shot action
+   follows its consequence-based confirmation and verification path.
 
-Only after this loop produces repeatable value should the project choose a
-Phase 1 artifact compiler/simulator or an authorized live Xiaomi transport.
-Those are separate decisions; neither should be smuggled into the Agent loop.
+Only after this loop produces repeatable value should the project choose its
+next ecosystem execution expansion, such as an authorized live Xiaomi
+transport. That is a separate decision; it does not create another Agent loop.

@@ -115,7 +115,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-connection[data-connection-state="disconnected"], .product-connection[data-connection-state="connecting"] { color: var(--shell-amber); }
 .product-connection[data-connection-state="disconnected"]::before { border-radius: .15rem; }
 .product-connection[data-connection-state="unknown"] { color: var(--shell-muted); }
-.product-view-switcher { display: inline-flex; align-items: center; gap: .35rem; min-height: 2.65rem; padding: .5rem .85rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-surface); color: var(--shell-muted); text-decoration: none; font-weight: 650; }
+.product-view-switcher { display: inline-flex; align-items: center; gap: .35rem; min-height: 2.75rem; padding: .5rem .85rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-surface); color: var(--shell-muted); text-decoration: none; font-weight: 650; }
 .product-view-switcher:hover { border-color: var(--shell-blue); color: var(--shell-blue); }
 
 .product-safety-banner { position: relative; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem max(1rem, env(safe-area-inset-right)) .85rem max(1rem, env(safe-area-inset-left)); background: var(--shell-red); color: white; }

@@ -7,6 +7,7 @@ import {
   ProductSetupHttpService,
   type ProductSetupDraftPort,
   type ProductSetupDraftProjection,
+  type ProductSetupModelProbeResult,
 } from "./product-setup-http-service.js";
 import { ProductHttpHost } from "./product-http-host.js";
 
@@ -27,6 +28,15 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
     readonly voice?: string;
     readonly model?: string;
   }> = [];
+  modelProbe: ((input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+    readonly provider: string;
+    readonly modelId: string;
+    readonly baseURL?: string;
+    readonly apiKey: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<ProductSetupModelProbeResult>) | undefined;
 
   seed(sessionToken: string, projection: ProductSetupDraftProjection): void {
     this.token = sessionToken;
@@ -69,7 +79,9 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
     readonly modelId: string;
     readonly baseURL?: string;
     readonly apiKey: string;
+    readonly signal?: AbortSignal;
   }) {
+    if (this.modelProbe !== undefined) return this.modelProbe(input);
     if (input.sessionToken !== this.token || input.expectedRevision !== this.projection?.revision) {
       throw new Error("Setup draft conflict");
     }
@@ -168,6 +180,213 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
   }
 }
 
+class ExpiringSetupDrafts extends MemorySetupDrafts {
+  expired = false;
+
+  override loadForSession(sessionToken: string) {
+    return this.expired ? Promise.resolve(undefined) : super.loadForSession(sessionToken);
+  }
+}
+
+test("rotates an expired setup session through a short-lived recovery code without losing verified draft progress", async () => {
+  let now = new Date("2026-08-23T02:01:00.000Z");
+  let sessionNumber = 0;
+  const ctx = new Context();
+  const setupDrafts = new ExpiringSetupDrafts();
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "FIRST-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => now,
+    sessionTtlMs: 60_000,
+    createSessionToken: () => `recovery-setup-session-token-${String(++sessionNumber).padStart(8, "0")}`,
+    createRecoveryPairingCode: () => "RESUME-HOME",
+    recoveryPairingTtlMs: 60_000,
+    setupDrafts,
+  });
+  try {
+    const initial = await fetch(`${ctx.productSetupHttp.origin}/setup/pair`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code: "FIRST-HOME" }),
+    });
+    assert.equal(initial.status, 303);
+    const initialCookie = initial.headers.get("set-cookie")?.split(";", 1)[0];
+    assert.ok(initialCookie);
+
+    const named = await fetch(`${ctx.productSetupHttp.origin}/setup/identity`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie: initialCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ revision: "1", householdName: "梧桐家", agentName: "小满" }),
+    });
+    assert.equal(named.status, 303);
+
+    const model = await fetch(`${ctx.productSetupHttp.origin}/setup/model/probe`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie: initialCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        revision: "2",
+        provider: "custom",
+        modelId: "family-model",
+        baseURL: "http://127.0.0.1:18090/v1",
+        apiKey: "model-test-secret",
+      }),
+    });
+    assert.equal(model.status, 303);
+
+    now = new Date("2026-08-23T02:02:01.000Z");
+    setupDrafts.expired = true;
+    const recovery = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie: initialCookie } });
+    const recoveryHtml = await recovery.text();
+    assert.equal(recovery.status, 200);
+    assert.match(recoveryHtml, /继续此前设置/);
+    assert.match(recoveryHtml, /RESUMEHOME/);
+    const unrelated = await fetch(`${ctx.productSetupHttp.origin}/setup`);
+    assert.equal((await unrelated.text()).includes("RESUMEHOME"), false);
+
+    const resumed = await fetch(`${ctx.productSetupHttp.origin}/setup/pair`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code: "RESUME-HOME" }),
+    });
+    assert.equal(resumed.status, 303);
+    const resumedCookie = resumed.headers.get("set-cookie")?.split(";", 1)[0];
+    assert.ok(resumedCookie);
+    assert.notEqual(resumedCookie, initialCookie);
+
+    setupDrafts.expired = false;
+    const workspace = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie: resumedCookie } });
+    assert.match(await workspace.text(), /接入家庭/);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("runs a setup model check in the background and waits for cancellation to settle without exposing its secret", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "setup-background-probe-private-token";
+  setupDrafts.seed(sessionToken, { draftId: "draft-background-probe", revision: 2, stage: "model", householdName: "测试家", agentName: "测试助手" });
+  let receivedSignal: AbortSignal | undefined;
+  let started: (() => void) | undefined;
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  setupDrafts.modelProbe = async (input) => {
+    receivedSignal = input.signal;
+    started?.();
+    await new Promise<void>((resolve) => input.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return { status: "unavailable" as const };
+  };
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "BACKGROUND-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-setup-session-token",
+    setupDrafts,
+  });
+  const cookie = `hob_product_session=${sessionToken}`;
+  try {
+    const startedResponse = await fetch(`${ctx.productSetupHttp.origin}/setup/model/probe`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ revision: "2", provider: "custom", modelId: "fixture-model", baseURL: "http://127.0.0.1:18090/v1", apiKey: "setup-model-secret" }),
+    });
+    assert.equal(startedResponse.status, 303);
+    assert.equal(startedResponse.headers.get("location"), "/setup");
+    await entered;
+    const pending = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie } });
+    const pendingHtml = await pending.text();
+    assert.match(pendingHtml, /正在检查模型服务/);
+    assert.match(pendingHtml, /可以离开这个页面/);
+    assert.match(pendingHtml, /action="\/setup\/probe\/cancel"/);
+    assert.match(pendingHtml, /<a class="secondary-action probe-result-link" href="\/setup">查看检查结果<\/a>/);
+    assert.equal(pendingHtml.includes("setup-model-secret"), false);
+    const taskId = /name="taskId" value="([a-f0-9]{32})"/u.exec(pendingHtml)?.[1];
+    assert.notEqual(taskId, undefined);
+    const status = await fetch(`${ctx.productSetupHttp.origin}/setup/probe-status`, { headers: { origin: ctx.productSetupHttp.origin, cookie } });
+    assert.deepEqual(await status.json(), { status: "pending", taskId, kind: "model" });
+
+    const cancelled = await fetch(`${ctx.productSetupHttp.origin}/setup/probe/cancel`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ taskId: taskId! }),
+    });
+    assert.equal(cancelled.status, 303);
+    assert.equal(receivedSignal?.aborted, true);
+    await new Promise((resolve) => setImmediate(resolve));
+    const completedHead = await fetch(`${ctx.productSetupHttp.origin}/setup`, { method: "HEAD", headers: { cookie } });
+    assert.equal(completedHead.status, 200);
+    assert.equal(await completedHead.text(), "");
+    const completed = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie } });
+    const completedHtml = await completed.text();
+    assert.match(completedHtml, /已停止这次模型服务检查/);
+    const completedAfterNotice = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie } });
+    assert.doesNotMatch(await completedAfterNotice.text(), /已停止这次模型服务检查/);
+    assert.equal(completedHtml.includes("setup-model-secret"), false);
+    assert.match(completedHtml, /连接模型/);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps a failed background bridge check available after a HEAD request", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "setup-failed-bridge-private-token";
+  setupDrafts.seed(sessionToken, {
+    draftId: "draft-failed-bridge-probe",
+    revision: 3,
+    stage: "bridge",
+    householdName: "测试家",
+    agentName: "测试助手",
+    model: { provider: "custom", modelId: "fixture-model" },
+  });
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "FAILED-BRIDGE-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-setup-session-token",
+    setupDrafts,
+  });
+  const cookie = `hob_product_session=${sessionToken}`;
+  try {
+    const started = await fetch(`${ctx.productSetupHttp.origin}/setup/bridge/probe`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        revision: "3",
+        adapterType: "home-assistant",
+        baseUrl: "http://homeassistant.local:8123",
+        accessToken: "rejected-token",
+      }),
+    });
+    assert.equal(started.status, 303);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const head = await fetch(`${ctx.productSetupHttp.origin}/setup`, { method: "HEAD", headers: { cookie } });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+
+    const firstGet = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie } });
+    assert.match(await firstGet.text(), /Home Assistant 没有接受这个令牌，请重新复制长期访问令牌。/);
+    const secondGet = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie } });
+    assert.doesNotMatch(await secondGet.text(), /Home Assistant 没有接受这个令牌，请重新复制长期访问令牌。/);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("activates the exact map revision through the paired product session", async () => {
   const ctx = new Context();
   const setupDrafts = new MemorySetupDrafts();
@@ -183,6 +402,16 @@ test("activates the exact map revision through the paired product session", asyn
       label: "家庭桥",
       endpoint: "fixture://home",
       summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+      review: {
+        areas: [
+          { name: "客厅", deviceCount: 4 },
+          { name: "卧室", deviceCount: 2 },
+          { name: "厨房", deviceCount: 1 },
+          { name: "书房", deviceCount: 1 },
+        ],
+        unassignedDeviceCount: 0,
+        complete: true,
+      },
     },
   });
   const calls: unknown[] = [];
@@ -212,11 +441,172 @@ test("activates the exact map revision through the paired product session", asyn
         cookie,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: new URLSearchParams({ revision: "4" }),
+      body: new URLSearchParams({ revision: "4", mapReviewed: "confirmed" }),
     });
     assert.equal(activated.status, 303);
     assert.equal(activated.headers.get("location"), "/onboarding");
     assert.deepEqual(calls, [{ sessionToken, expectedRevision: 4 }]);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("allows an honest partial household map review with explicit confirmation", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "map-review-private-product-session-token";
+  setupDrafts.seed(sessionToken, {
+    draftId: "draft-map-review",
+    revision: 4,
+    stage: "map",
+    householdName: "梧桐家",
+    agentName: "小满",
+    bridge: {
+      adapterType: "fixture-peer",
+      label: "家庭桥",
+      endpoint: "fixture://home",
+      summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+      review: {
+        areas: [{
+          name: "客厅",
+          deviceCount: 2,
+        }, {
+          name: "卧室",
+          deviceCount: 1,
+        }],
+        unassignedDeviceCount: 0,
+        complete: false,
+      },
+    },
+  });
+  const calls: unknown[] = [];
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "START-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-product-session-token",
+    setupDrafts,
+    activation: { activate: async (input) => { calls.push(input); return { status: "activated" as const }; } },
+  });
+  const cookie = `hob_product_session=${sessionToken}`;
+  try {
+    const map = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie } });
+    const mapHtml = await map.text();
+    assert.match(mapHtml, /核对家庭地图/);
+    assert.match(mapHtml, /客厅/);
+    assert.match(mapHtml, /已同步 2 个设备/);
+    assert.match(mapHtml, /这次只读同步展示了当前可确认的空间结构/);
+    assert.match(mapHtml, /我已核对当前空间结构与设备数量/);
+    assert.match(mapHtml, /name="mapReviewed" value="confirmed" required/);
+
+    const missingConfirmation = await fetch(`${ctx.productSetupHttp.origin}/setup/activate`, {
+      method: "POST",
+      headers: { origin: ctx.productSetupHttp.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ revision: "4" }),
+    });
+    assert.equal(missingConfirmation.status, 400);
+    assert.match(await missingConfirmation.text(), /请先核对家庭地图，再确认继续/);
+    assert.deepEqual(calls, []);
+
+    const activated = await fetch(`${ctx.productSetupHttp.origin}/setup/activate`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ revision: "4", mapReviewed: "confirmed" }),
+    });
+    assert.equal(activated.status, 303);
+    assert.deepEqual(calls, [{ sessionToken, expectedRevision: 4 }]);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("holds activation until the bridge supplies a household-readable map review", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "summary-only-private-product-session-token";
+  setupDrafts.seed(sessionToken, {
+    draftId: "draft-summary-only",
+    revision: 4,
+    stage: "map",
+    bridge: {
+      adapterType: "fixture-peer",
+      label: "家庭桥",
+      summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+    },
+  });
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "START-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-product-session-token",
+    setupDrafts,
+    activation: { activate: async () => ({ status: "activated" as const }) },
+  });
+  try {
+    const map = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: `hob_product_session=${sessionToken}` },
+    });
+    const html = await map.text();
+    assert.match(html, /家庭地图尚未准备好/);
+    assert.match(html, /连接摘要/);
+    assert.equal(html.includes('action="/setup/activate"'), false);
+
+    setupDrafts.seed(sessionToken, {
+      draftId: "draft-summary-only",
+      revision: 4,
+      stage: "map",
+      bridge: {
+        adapterType: "fixture-peer",
+        label: "家庭桥",
+        summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+        review: { areas: [{ name: "客厅", deviceCount: 4 }], unassignedDeviceCount: 0, complete: true },
+      },
+    });
+    const inconsistent = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: `hob_product_session=${sessionToken}` },
+    });
+    const inconsistentHtml = await inconsistent.text();
+    assert.match(inconsistentHtml, /家庭地图尚未准备好/);
+    assert.equal(inconsistentHtml.includes('action="/setup/activate"'), false);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps the setup return path when activation is temporarily unavailable", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "activation-unavailable-private-product-session-token";
+  setupDrafts.seed(sessionToken, { draftId: "draft-activation-unavailable", revision: 4, stage: "map" });
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "START-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-product-session-token",
+    setupDrafts,
+  });
+  try {
+    const response = await fetch(`${ctx.productSetupHttp.origin}/setup/activate`, {
+      method: "POST",
+      headers: {
+        origin: ctx.productSetupHttp.origin,
+        cookie: `hob_product_session=${sessionToken}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ revision: "4" }),
+    });
+    assert.equal(response.status, 503);
+    const page = await response.text();
+    assert.match(page, /暂时无法完成启用，请稍后再试/);
+    assert.match(page, /href="\/setup"/);
+    assert.equal(page.includes("尚未配置"), false);
   } finally {
     await fiber.dispose();
     await ctx.fiber.dispose();
@@ -238,6 +628,7 @@ test("keeps the verified map actionable when product activation is temporarily u
       label: "家庭桥",
       endpoint: "fixture://home",
       summary: { states: 3, entities: 3, devices: 2, areas: 1 },
+      review: { areas: [{ name: "客厅", deviceCount: 2 }], unassignedDeviceCount: 0, complete: true },
     },
   });
   const fiber = await ctx.plugin(ProductSetupHttpService, {
@@ -257,7 +648,7 @@ test("keeps the verified map actionable when product activation is temporarily u
         cookie: `hob_product_session=${sessionToken}`,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: new URLSearchParams({ revision: "7" }),
+      body: new URLSearchParams({ revision: "7", mapReviewed: "confirmed" }),
     });
     const html = await response.text();
     assert.equal(response.status, 503);
@@ -318,6 +709,41 @@ test("gives the setup grid a definite width so the product card cannot collapse 
     await context.fiber.dispose();
   }
 });
+
+test("keeps setup links and completion labels legible in dark mode and gives check results a full touch target", async () => {
+  const context = new Context();
+  const fiber = await context.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "DARK-HOME",
+    pairingExpiresAt: new Date("2026-08-23T03:00:00.000Z"),
+    now: () => new Date("2026-08-23T02:00:00.000Z"),
+    createSessionToken: () => "dark-mode-review-session-token-with-enough-entropy",
+    setupDrafts: new MemorySetupDrafts(),
+  });
+  try {
+    const css = await (await fetch(`${context.productSetupHttp.origin}/setup/assets/setup.css`)).text();
+    assert.match(css, /@media\(prefers-color-scheme:dark\).*a\{color:#6eb4ff\}/s);
+    assert.match(css, /@media\(prefers-color-scheme:dark\).*\.eyebrow\.success\{color:#75d59a\}/s);
+    assert.ok(contrastRatio("#6eb4ff", "#1c1c1e") >= 4.5);
+    assert.ok(contrastRatio("#75d59a", "#1c1c1e") >= 4.5);
+    assert.match(css, /\.probe-result-link\{[^}]*display:inline-flex[^}]*min-height:44px/s);
+  } finally {
+    await fiber.dispose();
+    await context.fiber.dispose();
+  }
+});
+
+function contrastRatio(foreground: string, background: string): number {
+  const luminance = (hex: string) => {
+    const channels = hex.slice(1).match(/.{2}/g)?.map((channel) => Number.parseInt(channel, 16) / 255) ?? [];
+    const [red, green, blue] = channels.map((channel) => channel <= 0.04045
+      ? channel / 12.92
+      : ((channel + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+  };
+  const [lighter, darker] = [luminance(foreground), luminance(background)].sort((left, right) => right - left);
+  return (lighter! + 0.05) / (darker! + 0.05);
+}
 
 test("pairs one private setup device without exposing the launch code", async () => {
   const ctx = new Context();
@@ -409,14 +835,25 @@ test("pairs one private setup device without exposing the launch code", async ()
     assert.equal(probed.status, 303);
     assert.equal(probed.headers.get("location"), "/setup");
     assert.equal((await probed.text()).includes("model-test-secret"), false);
+    const modelHead = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      method: "HEAD",
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.equal(modelHead.status, 200);
+    assert.equal(await modelHead.text(), "");
     const bridgeStep = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
       headers: { cookie: cookie.split(";")[0] ?? "" },
     });
     const bridgeHtml = await bridgeStep.text();
     assert.match(bridgeHtml, /模型已连接/);
+    assert.match(bridgeHtml, /模型检查已完成，请查看当前步骤。/);
     assert.match(bridgeHtml, /接入家庭/);
     assert.match(bridgeHtml, /action="\/setup\/bridge\/probe"/);
     assert.equal(bridgeHtml.includes("model-test-secret"), false);
+    const bridgeStepAfterNotice = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.doesNotMatch(await bridgeStepAfterNotice.text(), /模型检查已完成，请查看当前步骤。/);
 
     const bridgeProbed = await fetch(`${ctx.productSetupHttp.origin}/setup/bridge/probe`, {
       method: "POST",
@@ -439,17 +876,28 @@ test("pairs one private setup device without exposing the launch code", async ()
       config: { baseUrl: "http://ha.local:8123" },
       credential: "ha-test-secret",
     }]);
+    const bridgeHead = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      method: "HEAD",
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.equal(bridgeHead.status, 200);
+    assert.equal(await bridgeHead.text(), "");
     const voiceStep = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
       headers: { cookie: cookie.split(";")[0] ?? "" },
     });
     const voiceHtml = await voiceStep.text();
     assert.match(voiceHtml, /设置私人语音/);
+    assert.match(voiceHtml, /家庭连接检查已完成，请查看当前步骤。/);
     assert.match(voiceHtml, /action="\/setup\/voice\/asr\/verify"/);
     assert.match(voiceHtml, /action="\/setup\/voice\/tts\/verify"/);
     assert.match(voiceHtml, /本次跳过/);
     assert.match(voiceHtml, /密钥写入本机凭据保险箱，页面不会回显；运行语音服务时由 Hob 读取/);
     assert.doesNotMatch(voiceHtml, /密钥只在验证时使用/);
     assert.equal(voiceHtml.includes("ha-test-secret"), false);
+    const voiceStepAfterNotice = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.doesNotMatch(await voiceStepAfterNotice.text(), /家庭连接检查已完成，请查看当前步骤。/);
 
     const asrChecked = await fetch(`${ctx.productSetupHttp.origin}/setup/voice/asr/verify`, {
       method: "POST",
@@ -468,15 +916,26 @@ test("pairs one private setup device without exposing the launch code", async ()
       }),
     });
     assert.equal(asrChecked.status, 303);
+    const asrHead = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      method: "HEAD",
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.equal(asrHead.status, 200);
+    assert.equal(await asrHead.text(), "");
     const ttsStep = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
       headers: { cookie: cookie.split(";")[0] ?? "" },
     });
     const ttsHtml = await ttsStep.text();
+    assert.match(ttsHtml, /语音检查已完成，请查看当前步骤。/);
     assert.match(ttsHtml, /语音输入已验证，启用产品时生效/);
     assert.match(ttsHtml, /语音输出/);
     assert.equal(ttsHtml.includes("voice-test-secret"), false);
     assert.equal(ttsHtml.includes("transport"), false);
     assert.equal(ttsHtml.includes("runtime"), false);
+    const ttsStepAfterNotice = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.doesNotMatch(await ttsStepAfterNotice.text(), /语音检查已完成，请查看当前步骤。/);
 
     const ttsChecked = await fetch(`${ctx.productSetupHttp.origin}/setup/voice/tts/verify`, {
       method: "POST",
@@ -512,15 +971,26 @@ test("pairs one private setup device without exposing the launch code", async ()
       voice: "alloy",
       model: "gpt-4o-mini-tts",
     }]);
+    const ttsHead = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      method: "HEAD",
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.equal(ttsHead.status, 200);
+    assert.equal(await ttsHead.text(), "");
     const mapStep = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
       headers: { cookie: cookie.split(";")[0] ?? "" },
     });
     const mapHtml = await mapStep.text();
+    assert.match(mapHtml, /语音检查已完成，请查看当前步骤。/);
     assert.match(mapHtml, /家庭连接已验证/);
     assert.match(mapHtml, /私人语音已验证，将和家庭助手一起启用/);
     assert.match(mapHtml, /<strong>8<\/strong><span>个设备/);
     assert.match(mapHtml, /<strong>4<\/strong><span>个空间/);
     assert.equal(mapHtml.includes("voice-test-secret"), false);
+    const mapStepAfterNotice = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    assert.doesNotMatch(await mapStepAfterNotice.text(), /语音检查已完成，请查看当前步骤。/);
 
     const reused = await fetch(`${ctx.productSetupHttp.origin}/setup/pair`, {
       method: "POST",

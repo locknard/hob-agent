@@ -6,7 +6,10 @@ import {
   type ProductBootstrapConfigStore,
   type ProductVoiceRuntimeConfig,
 } from "./product-bootstrap-config-store.js";
-import type { ProductVoiceCleanupLedger } from "./product-voice-cleanup-ledger.js";
+import {
+  ProductVoiceCleanupLedger,
+  type ProductVoiceCredentialLease,
+} from "./product-voice-cleanup-ledger.js";
 import type {
   ProductVoiceProbeOutcome,
   ProductVoiceSetup,
@@ -85,7 +88,10 @@ export type ProductOperationalVoiceProjection =
     });
 
 export class ProductOperationalVoiceSettings {
+  private closed = false;
   private mutationInFlight = false;
+  private mutationAbort: AbortController | undefined;
+  private mutationTask: Promise<unknown> | undefined;
   private readonly maintenance = new Set<Promise<void>>();
 
   constructor(private readonly options: ProductOperationalVoiceSettingsOptions) {}
@@ -124,6 +130,7 @@ export class ProductOperationalVoiceSettings {
   }
 
   retry(): Promise<ProductOperationalVoiceProjection["status"]> {
+    if (this.closed) return Promise.resolve(this.options.gateway.status);
     return this.options.gateway.retry();
   }
 
@@ -138,10 +145,9 @@ export class ProductOperationalVoiceSettings {
     readonly asr: Extract<ProductVoiceTrackInput, { readonly kind: "asr" }>;
     readonly tts: Extract<ProductVoiceTrackInput, { readonly kind: "tts" }>;
   }): Promise<ProductOperationalVoiceConfigureResult> {
-    if (isCancelled(input.signal)) return Promise.resolve({ status: "cancelled" });
+    if (this.closed || isCancelled(input.signal)) return Promise.resolve({ status: "cancelled" });
     if (this.mutationInFlight) return Promise.resolve({ status: "busy" });
-    this.mutationInFlight = true;
-    return this.configureCandidate(input).finally(() => { this.mutationInFlight = false; });
+    return this.runMutation(input.signal, (signal) => this.configureCandidate({ ...input, signal }));
   }
 
   private async configureCandidate(input: {
@@ -153,7 +159,11 @@ export class ProductOperationalVoiceSettings {
     const current = await this.options.configurationStore.load();
     if (isCancelled(input.signal)) return { status: "cancelled" };
     if (current === undefined || current.generation !== input.expectedGeneration) return { status: "conflict" };
-    await this.adoptCurrentVoice(current);
+    try {
+      await this.adoptCurrentVoice(current);
+    } catch {
+      return { status: "unavailable" };
+    }
     if (isCancelled(input.signal)) return { status: "cancelled" };
     const asr = await this.resolveCandidateTrack(current, input.asr);
     if (isCancelled(input.signal)) return { status: "cancelled" };
@@ -163,132 +173,132 @@ export class ProductOperationalVoiceSettings {
     const candidateId = this.options.createCandidateId();
     const stages: ProductVoiceSetupStage[] = [];
     const credentialStages: ProductVoiceSetupStage[] = [];
+    let configurationOwnsCandidate = false;
+    try {
+      for (const track of [asr.track, tts.track] as const) {
+        if (isCancelled(input.signal)) return { status: "cancelled" };
+        const preparation = this.options.voiceSetup.prepare({ setupId: candidateId, track });
+        if (preparation.status !== "prepared") return probeFailure(track.kind, preparation);
+        const stage = preparation.prepared.stage;
+        let credentialLease: ProductVoiceCredentialLease | undefined;
+        if (stage.credentialRef !== undefined) {
+          try {
+            credentialLease = await this.options.cleanupLedger.reserve({
+              candidateId,
+              track: stage.kind,
+              credentialRef: stage.credentialRef,
+              expectedGeneration: input.expectedGeneration,
+            });
+            credentialStages.push(stage);
+            if (isCancelled(input.signal)) return { status: "cancelled" };
+          } catch {
+            return { status: "unavailable" };
+          }
+        }
+        const outcome = await this.options.voiceSetup.execute({
+          prepared: preparation.prepared,
+          ...(credentialLease === undefined ? {} : { credentialLease }),
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        });
+        if (isCancelled(input.signal)) return { status: "cancelled" };
+        if (outcome.status !== "ready") return probeFailure(track.kind, outcome);
+        stages.push(outcome.staged);
+      }
 
-    for (const track of [asr.track, tts.track] as const) {
+      const voice = runtimeConfig(stages);
+      let runtime: ProductOperationalVoiceRuntime | undefined;
+      try {
+        runtime = this.options.createProviderRuntime(voice);
+        const started = await startCandidateRuntime(runtime, input.signal);
+        if (isCancelled(input.signal)) {
+          await runtime.dispose().catch(() => undefined);
+          return { status: "cancelled" };
+        }
+        if (started.status !== "active") throw new Error("Private voice candidate is unavailable");
+      } catch {
+        await runtime?.dispose().catch(() => undefined);
+        return isCancelled(input.signal) ? { status: "cancelled" } : { status: "unavailable" };
+      }
       if (isCancelled(input.signal)) {
-        await this.abandonCandidate(candidateId, credentialStages);
+        try { runtime.cancel(); } catch { /* Runtime disposal completes the candidate cleanup path. */ }
+        await runtime.dispose().catch(() => undefined);
         return { status: "cancelled" };
       }
-      const preparation = this.options.voiceSetup.prepare({ setupId: candidateId, track });
-      if (preparation.status !== "prepared") {
-        await this.abandonCandidate(candidateId, credentialStages);
-        return probeFailure(track.kind, preparation);
+
+      let committed: ProductBootstrapConfiguration;
+      try {
+        // commitVoice is the single durable linearization point. A cancellation
+        // observed before this call owns cleanup; once the write begins the
+        // committed generation owns its candidate and reports completion.
+        committed = await this.options.configurationStore.commitVoice(input.expectedGeneration, voice);
+        configurationOwnsCandidate = true;
+      } catch (error) {
+        await runtime.dispose().catch(() => undefined);
+        return error instanceof ProductBootstrapConfigurationConflictError
+          ? { status: "conflict" }
+          : { status: "unavailable" };
       }
-      const stage = preparation.prepared.stage;
-      if (stage.credentialRef !== undefined) {
+      for (const stage of stages) {
+        if (stage.credentialRef === undefined) continue;
         try {
-          await this.options.cleanupLedger.reserve({
+          await this.options.cleanupLedger.markCommitted({
             candidateId,
             track: stage.kind,
             credentialRef: stage.credentialRef,
             expectedGeneration: input.expectedGeneration,
+            committedGeneration: committed.generation,
           });
-          if (isCancelled(input.signal)) {
-            await this.abandonCandidate(candidateId, credentialStages);
-            return { status: "cancelled" };
-          }
         } catch {
-          await this.abandonCandidate(candidateId, credentialStages);
-          return { status: "unavailable" };
+          // Durable config is authoritative; cold-start reconciliation promotes this exact staged ref.
         }
-        credentialStages.push(stage);
       }
-      const outcome = await this.options.voiceSetup.execute({
-        prepared: preparation.prepared,
-        ...(stage.credentialRef === undefined ? {} : { credentialLease: { stage } }),
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      });
-      if (isCancelled(input.signal)) {
-        await this.abandonCandidate(candidateId, credentialStages);
-        return { status: "cancelled" };
-      }
-      if (outcome.status !== "ready") {
-        await this.abandonCandidate(candidateId, credentialStages);
-        return probeFailure(track.kind, outcome);
-      }
-      stages.push(outcome.staged);
-    }
-
-    const voice = runtimeConfig(stages);
-    let runtime: ProductOperationalVoiceRuntime | undefined;
-    try {
-      runtime = this.options.createProviderRuntime(voice);
-      const started = await startCandidateRuntime(runtime, input.signal);
-      if (isCancelled(input.signal)) {
+      if (this.closed && isCancelled(input.signal)) {
         await runtime.dispose().catch(() => undefined);
-        await this.abandonCandidate(candidateId, credentialStages);
-        return { status: "cancelled" };
+        return { status: "configured", generation: committed.generation };
       }
-      if (started.status !== "active") throw new Error("Private voice candidate is unavailable");
-    } catch {
-      await runtime?.dispose().catch(() => undefined);
-      await this.abandonCandidate(candidateId, credentialStages);
-      return isCancelled(input.signal) ? { status: "cancelled" } : { status: "unavailable" };
-    }
-    if (isCancelled(input.signal)) {
-      try { runtime.cancel(); } catch { /* Runtime disposal completes the candidate cleanup path. */ }
-      await runtime.dispose().catch(() => undefined);
-      await this.abandonCandidate(candidateId, credentialStages);
-      return { status: "cancelled" };
-    }
-    let committed: ProductBootstrapConfiguration;
-    try {
-      // commitVoice is the single durable linearization point. A cancellation
-      // observed before this call owns cleanup; once the write begins the
-      // committed generation owns its candidate and reports completion.
-      committed = await this.options.configurationStore.commitVoice(input.expectedGeneration, voice);
-    } catch (error) {
-      await runtime.dispose().catch(() => undefined);
-      await this.abandonCandidate(candidateId, credentialStages);
-      return error instanceof ProductBootstrapConfigurationConflictError
-        ? { status: "conflict" }
-        : { status: "unavailable" };
-    }
-    for (const stage of stages) {
-      if (stage.credentialRef === undefined) continue;
+      let transition: PrivateVoiceGatewayTransitionReceipt;
       try {
-        await this.options.cleanupLedger.markCommitted({
-          candidateId,
-          track: stage.kind,
-          credentialRef: stage.credentialRef,
-          expectedGeneration: input.expectedGeneration,
-          committedGeneration: committed.generation,
+        transition = await this.options.gateway.activate({
+          configGeneration: committed.generation,
+          providerGeneration: candidateId,
+          runtime,
         });
       } catch {
-        // Durable config is authoritative; cold-start reconciliation promotes this exact staged ref.
+        await runtime.dispose().catch(() => undefined);
+        return { status: "unavailable" };
       }
-    }
-    let transition: PrivateVoiceGatewayTransitionReceipt;
-    try {
-      transition = await this.options.gateway.activate({
-        configGeneration: committed.generation,
-        providerGeneration: candidateId,
-        runtime,
-      });
+      this.trackMaintenance(this.retireAfterDrain(current, transition.drained));
+      return { status: "configured", generation: committed.generation };
     } catch {
-      await runtime.dispose().catch(() => undefined);
-      return { status: "unavailable" };
+      return isCancelled(input.signal) ? { status: "cancelled" } : { status: "unavailable" };
+    } finally {
+      if (!configurationOwnsCandidate) await this.abandonCandidate(candidateId, credentialStages);
     }
-    this.trackMaintenance(this.retireAfterDrain(current, transition.drained));
-    return { status: "configured", generation: committed.generation };
   }
 
   disable(input: { readonly expectedGeneration: number }): Promise<ProductOperationalVoiceDisableResult> {
+    if (this.closed) return Promise.resolve({ status: "unavailable" });
     if (this.mutationInFlight) return Promise.resolve({ status: "busy" });
-    this.mutationInFlight = true;
-    return this.disableCurrent(input).finally(() => { this.mutationInFlight = false; });
+    return this.runMutation(undefined, (signal) => this.disableCurrent({ ...input, signal }));
   }
 
-  private async disableCurrent(input: { readonly expectedGeneration: number }): Promise<ProductOperationalVoiceDisableResult> {
+  private async disableCurrent(input: { readonly expectedGeneration: number; readonly signal: AbortSignal }): Promise<ProductOperationalVoiceDisableResult> {
     const current = await this.options.configurationStore.load();
+    if (isCancelled(input.signal)) return { status: "unavailable" };
     if (current === undefined || current.generation !== input.expectedGeneration) return { status: "conflict" };
-    await this.adoptCurrentVoice(current);
+    try {
+      await this.adoptCurrentVoice(current);
+    } catch {
+      return { status: "unavailable" };
+    }
     if (current.voice === undefined) {
+      if (isCancelled(input.signal)) return { status: "unavailable" };
       await this.options.gateway.disable().catch(() => undefined);
       return { status: "disabled", generation: current.generation };
     }
     let committed: ProductBootstrapConfiguration;
     try {
+      if (isCancelled(input.signal)) return { status: "unavailable" };
       committed = await this.options.configurationStore.commitVoice(input.expectedGeneration, undefined);
     } catch (error) {
       return error instanceof ProductBootstrapConfigurationConflictError
@@ -321,7 +331,7 @@ export class ProductOperationalVoiceSettings {
 
   private async adoptCurrentVoice(configuration: ProductBootstrapConfiguration): Promise<void> {
     for (const owner of voiceCredentialOwners(configuration)) {
-      await this.options.cleanupLedger.adoptCommitted(owner).catch(() => undefined);
+      await this.options.cleanupLedger.adoptCommitted(owner);
     }
   }
 
@@ -364,8 +374,19 @@ export class ProductOperationalVoiceSettings {
 
   private async retireAfterDrain(configuration: ProductBootstrapConfiguration, drained: Promise<void>): Promise<void> {
     await drained;
+    const entries = (await this.options.cleanupLedger.load()).entries;
     for (const owner of voiceCredentialOwners(configuration)) {
-      await this.options.cleanupLedger.retire(owner).catch(() => undefined);
+      const exact = entries.find((entry) => entry.phase === "active"
+        && entry.candidateId === owner.candidateId
+        && entry.track === owner.track
+        && entry.credentialRef === owner.credentialRef);
+      if (exact === undefined) continue;
+      await this.options.cleanupLedger.retire({
+        candidateId: exact.candidateId,
+        track: exact.track,
+        credentialRef: exact.credentialRef,
+        committedGeneration: exact.committedGeneration!,
+      });
     }
     await this.sweepCleanup();
   }
@@ -385,9 +406,43 @@ export class ProductOperationalVoiceSettings {
     }
   }
 
+  /** Closes request entry, cancels provider retry and configuration, then settles all owned retirement. */
+  async closeAndDrain(): Promise<void> {
+    this.closed = true;
+    this.options.gateway.cancelRetry();
+    this.mutationAbort?.abort();
+    while (this.mutationTask !== undefined) {
+      await this.mutationTask.catch(() => undefined);
+    }
+    await this.drainMaintenance();
+  }
+
+  /** Waits until every already-owned credential retirement has settled. */
+  async drainMaintenance(): Promise<void> {
+    while (this.maintenance.size > 0) {
+      await Promise.all(this.maintenance);
+    }
+  }
+
   private trackMaintenance(task: Promise<void>): void {
     const settled = task.catch(() => undefined).finally(() => { this.maintenance.delete(settled); });
     this.maintenance.add(settled);
+  }
+
+  private runMutation<T>(sourceSignal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const removeSourceAbort = followAbort(sourceSignal, controller);
+    this.mutationInFlight = true;
+    this.mutationAbort = controller;
+    let task: Promise<T>;
+    task = operation(controller.signal).finally(() => {
+      removeSourceAbort();
+      if (this.mutationAbort === controller) this.mutationAbort = undefined;
+      this.mutationInFlight = false;
+      if (this.mutationTask === task) this.mutationTask = undefined;
+    });
+    this.mutationTask = task;
+    return task;
   }
 }
 
@@ -439,6 +494,17 @@ function validSavedCredential(value: string | undefined): value is string {
 
 function isCancelled(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
+}
+
+function followAbort(source: AbortSignal | undefined, target: AbortController): () => void {
+  if (source === undefined) return () => undefined;
+  if (source.aborted) {
+    target.abort();
+    return () => undefined;
+  }
+  const abort = () => target.abort();
+  source.addEventListener("abort", abort, { once: true });
+  return () => source.removeEventListener("abort", abort);
 }
 
 async function startCandidateRuntime(

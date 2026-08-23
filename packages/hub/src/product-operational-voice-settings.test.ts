@@ -126,6 +126,17 @@ class RejectSecondReserveLedger extends ProductVoiceCleanupLedger {
   }
 }
 
+class AbortAfterReserveLedger extends ProductVoiceCleanupLedger {
+  constructor(directory: string, private readonly controller: AbortController) {
+    super(directory);
+  }
+
+  override async reserve(input: Parameters<ProductVoiceCleanupLedger["reserve"]>[0]): Promise<void> {
+    await super.reserve(input);
+    this.controller.abort();
+  }
+}
+
 const baseDraft = {
   householdName: "梧桐家",
   agentName: "小满",
@@ -400,6 +411,111 @@ test("cancels a hanging candidate probe and leaves the active household voice un
   }
 });
 
+test("retires a voice credential lease when cancellation lands immediately after reservation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-operational-voice-cancel-after-reserve-"));
+  const vault = new MemoryVault();
+  const configurationStore = new ProductBootstrapConfigStore(directory);
+  await configurationStore.commit(0, baseDraft);
+  const controller = new AbortController();
+  const ledger = new AbortAfterReserveLedger(directory, controller);
+  const gateway = new PrivateVoiceGateway();
+  const settings = new ProductOperationalVoiceSettings({
+    configurationStore,
+    gateway,
+    voiceSetup: new ProductVoiceSetup({
+      vault,
+      createStageNonce: () => "cancelled_after_reserve",
+      probe: async () => ({ status: "ready", latencyMs: 1 }),
+    }),
+    cleanupLedger: ledger,
+    vault,
+    createCandidateId: () => "cancel_after_reserve_candidate",
+    createProviderRuntime: (config) => new ReadyRuntime(config),
+  });
+
+  try {
+    assert.deepEqual(await settings.configure({
+      expectedGeneration: 1,
+      signal: controller.signal,
+      asr: {
+        kind: "asr",
+        transport: "openai_http",
+        endpoint: "http://127.0.0.1:9720",
+        credential: "candidate-asr",
+      },
+      tts: {
+        kind: "tts",
+        transport: "openai_http",
+        endpoint: "http://127.0.0.1:9721",
+        credential: "candidate-tts",
+        locale: "zh-CN",
+      },
+    }), { status: "cancelled" });
+    assert.deepEqual((await ledger.load()).entries, []);
+    assert.equal(vault.values.size, 0);
+    assert.equal((await configurationStore.load())?.generation, 1);
+  } finally {
+    await gateway.dispose({ force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retires the exact candidate credential when the voice transport throws", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-operational-voice-transport-throw-"));
+  const vault = new MemoryVault();
+  const configurationStore = new ProductBootstrapConfigStore(directory);
+  await configurationStore.commit(0, baseDraft);
+  const ledger = new ProductVoiceCleanupLedger(directory);
+  const gateway = new PrivateVoiceGateway();
+  const preparedVoice = new ProductVoiceSetup({
+    vault,
+    createStageNonce: () => "transport_throw",
+  });
+  const settings = new ProductOperationalVoiceSettings({
+    configurationStore,
+    gateway,
+    voiceSetup: {
+      prepare: (input) => preparedVoice.prepare(input),
+      execute: async (input) => {
+        const reference = input.prepared.stage.credentialRef;
+        const credential = input.prepared.credential;
+        if (reference !== undefined && credential !== undefined) await vault.write(reference, credential);
+        throw new Error("voice transport failed outside its bounded result");
+      },
+      discard: (stage) => preparedVoice.discard(stage),
+    },
+    cleanupLedger: ledger,
+    vault,
+    createCandidateId: () => "transport_throw_candidate",
+    createProviderRuntime: (config) => new ReadyRuntime(config),
+  });
+
+  try {
+    assert.deepEqual(await settings.configure({
+      expectedGeneration: 1,
+      asr: {
+        kind: "asr",
+        transport: "openai_http",
+        endpoint: "http://127.0.0.1:9730",
+        credential: "candidate-asr",
+      },
+      tts: {
+        kind: "tts",
+        transport: "openai_http",
+        endpoint: "http://127.0.0.1:9731",
+        credential: "candidate-tts",
+        locale: "zh-CN",
+      },
+    }), { status: "unavailable" });
+    assert.deepEqual((await ledger.load()).entries, []);
+    assert.equal(vault.values.size, 0);
+    assert.equal((await configurationStore.load())?.generation, 1);
+  } finally {
+    await gateway.dispose({ force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("keeps configuration busy through a slow credential write, then deletes the settled candidate exactly once", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-operational-voice-cancel-slow-write-"));
   const vault = new SlowWriteVault();
@@ -444,6 +560,55 @@ test("keeps configuration busy through a slow credential write, then deletes the
   } finally {
     vault.finishWrite();
     await gateway.dispose({ force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("closes an operational voice mutation before it can commit and waits for its credential cleanup", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-operational-voice-close-"));
+  const vault = new MemoryVault();
+  const configurationStore = new ProductBootstrapConfigStore(directory);
+  await configurationStore.commit(0, baseDraft);
+  let probeStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { probeStarted = resolve; });
+  let finishProbe: (() => void) | undefined;
+  const settings = new ProductOperationalVoiceSettings({
+    configurationStore,
+    gateway: new PrivateVoiceGateway(),
+    voiceSetup: new ProductVoiceSetup({
+      vault,
+      createStageNonce: () => "close",
+      probe: ({ signal }) => new Promise((resolve) => {
+        finishProbe = () => resolve({ status: "unavailable" });
+        probeStarted?.();
+        signal?.addEventListener("abort", () => resolve({ status: "unavailable" }), { once: true });
+      }),
+    }),
+    cleanupLedger: new ProductVoiceCleanupLedger(directory),
+    vault,
+    createCandidateId: () => "close_candidate",
+    createProviderRuntime: (config) => new ReadyRuntime(config),
+  });
+  const input = {
+    expectedGeneration: 1,
+    asr: { kind: "asr" as const, transport: "openai_http" as const, endpoint: "http://127.0.0.1:9715", credential: "candidate-asr" },
+    tts: { kind: "tts" as const, transport: "openai_http" as const, endpoint: "http://127.0.0.1:9716", credential: "candidate-tts", locale: "zh-CN" },
+  };
+  let pending: Promise<unknown> | undefined;
+  try {
+    pending = settings.configure(input);
+    await started;
+
+    await settings.closeAndDrain();
+
+    assert.deepEqual(await pending, { status: "cancelled" });
+    assert.deepEqual(await settings.configure(input), { status: "cancelled" });
+    assert.equal((await configurationStore.load())?.generation, 1);
+    assert.equal(vault.values.size, 0);
+    assert.deepEqual(await new ProductVoiceCleanupLedger(directory).listPending(), []);
+  } finally {
+    finishProbe?.();
+    await pending?.catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -677,9 +842,9 @@ test("disables new turns immediately and cleans the previous exact credentials a
     assert.equal(vault.values.size, 2);
 
     await lease.release();
-    await waitFor(async () => oldRuntime.disposeCalls === 1
-      && vault.values.size === 0
-      && (await ledger.load()).entries.length === 0);
+    await settings.drainMaintenance();
+    assert.equal(oldRuntime.disposeCalls, 1);
+    assert.equal(vault.values.size, 0);
     assert.deepEqual(new Set(vault.deleted), new Set([oldAsrRef, oldTtsRef]));
     assert.deepEqual((await ledger.load()).entries, []);
   } finally {
@@ -702,6 +867,16 @@ test("keeps an old voice turn on its provider while a reconfiguration serves new
   };
   const configurationStore = new ProductBootstrapConfigStore(directory);
   await configurationStore.commit(0, { ...baseDraft, voice: oldVoice });
+  await configurationStore.commitModel(1, {
+    modelReference: "custom/home-model",
+    modelBaseURL: "https://model.example.test/v1",
+    modelProfile: {
+      id: "custom:operational:unrelated_model",
+      provider: "custom",
+      kind: "api_key",
+      secretRef: "keychain:hob-agent/model:unrelated_model:credential",
+    },
+  });
   const ledger = new ProductVoiceCleanupLedger(directory);
   await ledger.adoptCommitted({ candidateId: "old_candidate", track: "asr", credentialRef: oldAsrRef, committedGeneration: 1 });
   await ledger.adoptCommitted({ candidateId: "old_candidate", track: "tts", credentialRef: oldTtsRef, committedGeneration: 1 });
@@ -721,10 +896,10 @@ test("keeps an old voice turn on its provider while a reconfiguration serves new
 
   try {
     assert.deepEqual(await settings.configure({
-      expectedGeneration: 1,
+      expectedGeneration: 2,
       asr: { kind: "asr", transport: "wyoming", endpoint: "wyoming://127.0.0.1:10400" },
       tts: { kind: "tts", transport: "wyoming", endpoint: "wyoming://127.0.0.1:10401", locale: "zh-CN", voice: "calm" },
-    }), { status: "configured", generation: 2 });
+    }), { status: "configured", generation: 3 });
     assert.equal(gateway.beginTurn()?.providerGeneration, "new_candidate");
     assert.deepEqual(await oldLease.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" }), {
       status: "transcribed",

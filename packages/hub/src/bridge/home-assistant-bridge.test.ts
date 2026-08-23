@@ -223,8 +223,61 @@ test("probes authenticated read access without subscribing or writing", async ()
     status: "connected",
     latencyMs: 85,
     summary: { states: 1, entities: 0, devices: 2, areas: 1 },
+    review: {
+      areas: [{ name: "客厅", deviceCount: 0 }],
+      unassignedDeviceCount: 2,
+      complete: true,
+    },
   });
   assert.deepEqual(socket.sent.filter((message) => (message as { type?: string }).type === "call_service"), []);
+});
+
+test("keeps a bounded review honest when Home Assistant registry records are malformed, duplicate, or overflow", async () => {
+  const socket = new FakeSocket();
+  const probing = probeHomeAssistantReadAccess({
+    baseUrl: "http://ha.local:8123",
+    accessToken: "request-local-token",
+    socketFactory: () => socket,
+  });
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  const areas = [
+    ...Array.from({ length: 65 }, (_, index) => ({ area_id: `area-${index}`, name: `Room ${index}` })),
+    { area_id: "area-1", name: "Duplicate room" },
+    { area_id: "malformed", name: "" },
+  ];
+  for (const command of commands) {
+    socket.receive({
+      id: command.id,
+      type: "result",
+      success: true,
+      result: command.type === "get_states" ? []
+        : command.type === "config/device_registry/list" ? [
+          { id: "kitchen-device", name: "Kettle", area_id: "area-0" },
+          { id: "overflow-device", area_id: "area-64" },
+          { id: "unassigned-named", name: "Fan", area_id: null },
+          { id: "unassigned-unnamed" },
+          { id: "malformed-device", area_id: 3 },
+          { id: "kitchen-device", area_id: "area-1" },
+        ]
+        : command.type === "config/area_registry/list" ? areas : [],
+    });
+  }
+
+  const result = await probing;
+  assert.equal(result.status, "connected");
+  if (result.status !== "connected") assert.fail("expected connected probe");
+  assert.deepEqual(result.review, {
+    areas: [
+      { name: "Room 0", deviceCount: 1 },
+      ...Array.from({ length: 63 }, (_, index) => ({ name: `Room ${index + 1}`, deviceCount: 0 })),
+    ],
+    unassignedDeviceCount: 5,
+    complete: false,
+  });
+  assert.equal(JSON.stringify(result.review).includes("area_id"), false);
+  assert.equal(JSON.stringify(result.review).includes("kitchen-device"), false);
 });
 
 test("maps rejected Home Assistant credentials to a closed probe outcome", async () => {

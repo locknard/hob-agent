@@ -326,3 +326,44 @@ test("rejects voice changes that have no current configuration or a stale genera
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("commits only a validated operational model while preserving the activated household configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-model-commit-"));
+  try {
+    const store = new ProductBootstrapConfigStore(directory, () => new Date("2026-08-24T10:00:00.000Z"));
+    const initial = await store.commit(0, {
+      householdName: "梧桐家", agentName: "小满", modelReference: "custom/old-model",
+      modelBaseURL: "https://old.example.test/v1", bridges: [],
+      modelProfile: { id: "custom:setup:initial", provider: "custom", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:initial:stage" },
+      voice: {
+        asr: { transport: "wyoming", endpoint: "wyoming://voice.local:10700" },
+        tts: { transport: "wyoming", endpoint: "wyoming://voice.local:10700", locale: "zh-CN" },
+      },
+    });
+
+    const committed = await store.commitModel(1, {
+      modelReference: "custom/new-model",
+      modelBaseURL: "https://models.example.test/v1/",
+      modelProfile: {
+        id: "custom:operational:candidate-next",
+        provider: "custom",
+        kind: "api_key",
+        secretRef: "keychain:hob-agent/model:candidate-next:nonce-next",
+      },
+    });
+
+    assert.equal(committed.generation, 2);
+    assert.equal(committed.activatedAt, initial.activatedAt);
+    assert.equal(committed.modelBaseURL, "https://models.example.test/v1");
+    assert.deepEqual(committed.voice, initial.voice);
+    assert.equal(committed.householdName, initial.householdName);
+    await assert.rejects(store.commitModel(2, {
+      modelReference: "gpt/gpt-5", modelProfile: {
+        id: "custom:operational:candidate-next", provider: "custom", kind: "api_key",
+        secretRef: "keychain:hob-agent/model:candidate-next:nonce-next",
+      },
+    }), /Model profile is invalid/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

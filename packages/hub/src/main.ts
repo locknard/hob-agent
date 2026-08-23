@@ -6,6 +6,7 @@ import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
 import {
   MacOSKeychainSecretVault,
   type SecretVault,
+  type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
 
 import {
@@ -14,7 +15,6 @@ import {
   type HomeHubRuntime,
   type RunningHomeHubProcess,
   type SignalProcess,
-  type StartHomeHubProcessOptions,
 } from "./process-entry.js";
 import { mountHomeAgentProductBundle } from "./home-agent-runtime.js";
 import {
@@ -50,14 +50,12 @@ export interface HomeHubMainOptions {
   readonly forceExit?: (code: number) => void;
   readonly complete?: (code: number) => void;
   readonly shutdownTimeoutMs?: number;
-  /** Test seam; production uses the repository's DSH composition root. */
-  readonly createRuntime?: StartHomeHubProcessOptions["createRuntime"];
   /** Test seam for the unified setup and operational product composition root. */
   readonly createProductRuntime?: (options: ProductRuntimeSupervisorOptions) => Promise<HomeHubRuntime> | HomeHubRuntime;
   /** Test seam for the operational product bundle mounted below the supervisor's Cordis root. */
   readonly mountProductBundle?: typeof mountHomeAgentProductBundle;
   /** Test seam; production resolves selected profiles from macOS Keychain. */
-  readonly modelCredentialVault?: SecretVault;
+  readonly modelCredentialVault?: WritableSecretVault;
   /** Local terminal presentation for the short-lived setup and recovery pairing codes. */
   readonly writeProductTerminal?: (message: string) => void;
 }
@@ -227,8 +225,7 @@ async function resolveCandidateHomeHubProcessOptions(
 async function prepareProductLaunch(environment: LaunchEnvironment): Promise<PreparedProductLaunch> {
   const { dataDirectory } = readProductBootstrapLaunchConfig(environment);
   const activated = await new ProductBootstrapConfigStore(dataDirectory).load();
-  const hasDirectOperationalConfig = hasValue(environment.HOB_MODEL) && hasValue(environment.HOB_BRIDGES);
-  if (activated === undefined && !hasDirectOperationalConfig) {
+  if (activated === undefined) {
     return { selection: { state: "setup", dataDirectory } };
   }
   return {
@@ -239,10 +236,6 @@ async function prepareProductLaunch(environment: LaunchEnvironment): Promise<Pre
     },
     ...(activated === undefined ? {} : { activated }),
   };
-}
-
-function hasValue(value: string | undefined): boolean {
-  return value !== undefined && value.trim() !== "";
 }
 
 async function loadActionAuthorityConfigurationIfConfigured(
@@ -271,62 +264,58 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
     complete: options.complete,
     shutdownTimeoutMs: options.shutdownTimeoutMs,
   };
-  if (prepared.selection.state === "setup" || prepared.activated !== undefined) {
-    const dataDirectory = prepared.selection.dataDirectory;
-    const mountProductBundle = options.mountProductBundle ?? mountHomeAgentProductBundle;
-    const writeProductTerminal = options.writeProductTerminal ?? ((message: string) => { process.stdout.write(message); });
-    const productOptions: ProductRuntimeSupervisorOptions = {
-      dataDirectory,
-      port: productSetupPort(environment.HOB_SETUP_PORT),
-      announce: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("setup", announcement)),
-      announceRecovery: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("recovery", announcement)),
-      mountOperational: async (input) => {
-        const processOptions = await resolveCandidateHomeHubProcessOptions(
-          environment,
-          dataDirectory,
-          input.candidate,
-          options.modelCredentialVault,
-        );
-        const bundle = await mountProductBundle(input.context, {
-          ...processOptions.runtime,
-          inboxHttp: {
-            host: input.host,
-            requestAuthenticator: input.authenticateProductSession,
-            sessionRecovery: input.recoverProductSession,
-            principal: PRODUCT_HOUSEHOLD_ACTOR,
-            privateVoice: input.privateVoice,
-            voiceSettings: input.voiceSettings,
+  const dataDirectory = prepared.selection.dataDirectory;
+  const mountProductBundle = options.mountProductBundle ?? mountHomeAgentProductBundle;
+  const writeProductTerminal = options.writeProductTerminal ?? ((message: string) => { process.stdout.write(message); });
+  const productModelCredentialVault = options.modelCredentialVault ?? new MacOSKeychainSecretVault();
+  const productOptions: ProductRuntimeSupervisorOptions = {
+    dataDirectory,
+    port: productSetupPort(environment.HOB_SETUP_PORT),
+    modelCredentialVault: productModelCredentialVault,
+    announce: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("setup", announcement)),
+    announceRecovery: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("recovery", announcement)),
+    mountOperational: async (input) => {
+      const processOptions = await resolveCandidateHomeHubProcessOptions(
+        environment,
+        dataDirectory,
+        input.candidate,
+        productModelCredentialVault,
+      );
+      const bundle = await mountProductBundle(input.context, {
+        ...processOptions.runtime,
+        agent: {
+          ...processOptions.runtime.agent,
+          modelProviderResolver: input.modelProviderResolver,
+        },
+        inboxHttp: {
+          host: input.host,
+          requestAuthenticator: input.authenticateProductSession,
+          sessionRecovery: input.recoverProductSession,
+          principal: PRODUCT_HOUSEHOLD_ACTOR,
+          privateVoice: input.privateVoice,
+          voiceSettings: input.voiceSettings,
+          modelSettings: input.modelSettings,
+        },
+        homeViewRecipeDrafts: { path: join(dataDirectory, "layout-drafts.sqlite") },
+        homeOnboarding: {
+          ...processOptions.runtime.homeOnboarding,
+          bootstrapHousehold: {
+            householdName: input.candidate.householdName,
+            agentName: input.candidate.agentName,
           },
-          homeViewRecipeDrafts: { path: join(dataDirectory, "layout-drafts.sqlite") },
-          homeOnboarding: {
-            ...processOptions.runtime.homeOnboarding,
-            bootstrapHousehold: {
-              householdName: input.candidate.householdName,
-              agentName: input.candidate.agentName,
-            },
-          },
-        });
-        return {
-          attach: () => bundle.context.homeInboxHttp.attach(),
-          dispose: () => bundle.dispose(),
-        };
-      },
-    };
-    return startHomeHubProcess({
-      ...lifecycle,
-      createRuntime: () => options.createProductRuntime?.(productOptions)
-        ?? startProductRuntimeSupervisor(productOptions),
-    });
-  }
-  const processOptions = await resolveHomeHubProcessOptions(environment, options.modelCredentialVault);
-  if (options.createRuntime) {
-    return startHomeHubProcess({
-      ...processOptions,
-      ...lifecycle,
-      createRuntime: options.createRuntime,
-    });
-  }
-  return startHomeAgentProcess({ ...processOptions, ...lifecycle });
+        },
+      });
+      return {
+        attach: () => bundle.context.homeInboxHttp.attach(),
+        dispose: () => bundle.dispose(),
+      };
+    },
+  };
+  return startHomeHubProcess({
+    ...lifecycle,
+    createRuntime: () => options.createProductRuntime?.(productOptions)
+      ?? startProductRuntimeSupervisor(productOptions),
+  });
 }
 
 const PRODUCT_HOUSEHOLD_ACTOR = Object.freeze({

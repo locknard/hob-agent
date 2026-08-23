@@ -1,0 +1,36 @@
+/* Operational model settings extend the shared product shell without carrying provider or credential detail. */
+.product-operational-model {
+  display: grid;
+  grid-template-columns: minmax(12rem, .7fr) minmax(0, 1.3fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+.product-operational-model-configuration { margin-block-start: .85rem; }
+.product-operational-model-configuration > summary { min-height: 2.75rem; display: flex; align-items: center; padding: .5rem 0; color: var(--shell-blue); cursor: pointer; font-weight: 700; }
+.product-operational-model-configuration[open] > summary { margin-block-end: .55rem; }
+.product-operational-model-configuration form { display: grid; gap: .8rem; margin-block-start: .85rem; }
+.product-operational-model-configuration label { display: grid; gap: .38rem; color: var(--shell-muted); font-size: .86rem; font-weight: 680; }
+.product-operational-model-configuration input { width: 100%; min-width: 0; min-height: 2.75rem; box-sizing: border-box; padding: .5rem .65rem; border: 1px solid var(--shell-rule); border-radius: .7rem; background: var(--shell-surface); color: var(--shell-ink); font: inherit; }
+.product-operational-model-configuration input:focus-visible { outline: 3px solid color-mix(in srgb, var(--shell-blue) 32%, transparent); outline-offset: 2px; border-color: var(--shell-blue); }
+.product-operational-model-configuration small { color: var(--shell-subtle); font-size: .78rem; font-weight: 500; line-height: 1.45; }
+.product-operational-model-configuration-notice { margin-block: 0 .8rem; }
+.product-operational-model-configuration .product-primary-action { min-height: 2.75rem; justify-self: start; }
+
+@media (max-width: 56rem) {
+  .product-operational-model { grid-template-columns: 1fr; gap: .8rem; }
+  .product-operational-model-configuration > summary { min-height: 2.75rem; }
+  .product-operational-model-configuration .product-primary-action { width: 100%; justify-content: center; }
+}
+
+@media (prefers-color-scheme: dark) {
+  .product-operational-model-configuration { border-color: var(--shell-rule); }
+}
+
+@media (prefers-contrast: more) {
+  .product-operational-model-configuration input { border-width: 2px; }
+  .product-operational-model-configuration > summary { text-decoration: underline; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .product-operational-model *, .product-operational-model *::before, .product-operational-model *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}

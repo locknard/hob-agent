@@ -23,7 +23,8 @@
     "./model-reference": "./src/model/model-reference.ts",
     "./model-credentials": "./src/model/model-credentials.ts",
     "./model-credential-probe": "./src/model/model-credential-probe.ts",
-    "./model-providers": "./src/model/model-providers.ts"
+    "./model-providers": "./src/model/model-providers.ts",
+    "./model-provider-resolver": "./src/model/model-provider-resolver.ts"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",

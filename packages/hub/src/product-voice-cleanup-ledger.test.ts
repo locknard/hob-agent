@@ -89,6 +89,40 @@ test("adopts a generation-one voice locator as idempotent active ownership", asy
   }
 });
 
+test("keeps exact active voice ownership when a model change advances the global generation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-voice-cleanup-ledger-unrelated-generation-"));
+  try {
+    const ledger = new ProductVoiceCleanupLedger(directory);
+    await ledger.reserve({
+      candidateId: "candidate-a",
+      track: "asr",
+      credentialRef: asrRef,
+      expectedGeneration: 1,
+    });
+    await ledger.markCommitted({
+      candidateId: "candidate-a",
+      track: "asr",
+      credentialRef: asrRef,
+      expectedGeneration: 1,
+      committedGeneration: 2,
+    });
+
+    await ledger.adoptCommitted({
+      candidateId: "candidate-a",
+      track: "asr",
+      credentialRef: asrRef,
+      committedGeneration: 8,
+    });
+
+    const [entry] = (await ledger.load()).entries;
+    assert.equal(entry?.phase, "active");
+    assert.equal(entry?.expectedGeneration, 1);
+    assert.equal(entry?.committedGeneration, 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects invalid or conflicting adoption of committed voice ownership", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-voice-cleanup-ledger-adopt-conflict-"));
   try {
@@ -98,7 +132,6 @@ test("rejects invalid or conflicting adoption of committed voice ownership", asy
     await assert.rejects(ledger.adoptCommitted({
       candidateId: "candidate-a", track: "asr", credentialRef: "keychain:hob-agent/voice:asr:candidate-b:credential-a", committedGeneration: 2,
     }), /invalid/i);
-    await assert.rejects(ledger.adoptCommitted({ candidateId: "candidate-a", track: "asr", credentialRef: asrRef, committedGeneration: 2 }), /conflict|unavailable/i);
     await assert.rejects(ledger.adoptCommitted({
       candidateId: "candidate-b", track: "asr", credentialRef: "keychain:hob-agent/voice:asr:candidate-b:credential-a", committedGeneration: 1,
     }), /conflict|owner/i);

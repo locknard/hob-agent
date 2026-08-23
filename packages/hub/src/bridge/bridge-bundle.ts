@@ -43,8 +43,17 @@ export type ProductBridgeSetupProbeResult =
       readonly status: "connected";
       readonly latencyMs: number;
       readonly summary: { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number };
+      /** Optional so generic catalog entries can defer map review until a later phase. */
+      readonly review?: ProductBridgeSetupMapReview;
     }
   | { readonly status: "credential_rejected" | "endpoint_unreachable" | "incompatible" | "timed_out" };
+
+/** Adapter-neutral, bounded aggregate suitable for household map confirmation. */
+export interface ProductBridgeSetupMapReview {
+  readonly areas: readonly { readonly name: string; readonly deviceCount: number }[];
+  readonly unassignedDeviceCount: number;
+  readonly complete: boolean;
+}
 
 export interface ProductBridgeSetupRegistration {
   readonly adapterType: string;
@@ -56,6 +65,8 @@ export interface ProductBridgeSetupRegistration {
   probe(input: {
     readonly config: Readonly<Record<string, unknown>>;
     readonly credential: string;
+    /** Cancels this bounded read-only setup probe. */
+    readonly signal?: AbortSignal;
   }): Promise<ProductBridgeSetupProbeResult>;
 }
 
@@ -76,10 +87,11 @@ export function createBuiltinProductBridgeSetupCatalog(): readonly ProductBridge
     displayEndpoint(config: Readonly<Record<string, unknown>>) {
       return String(config.baseUrl);
     },
-    async probe(input: { readonly config: Readonly<Record<string, unknown>>; readonly credential: string }) {
+    async probe(input: { readonly config: Readonly<Record<string, unknown>>; readonly credential: string; readonly signal?: AbortSignal }) {
       return probeHomeAssistantReadAccess({
         baseUrl: String(input.config.baseUrl),
         accessToken: input.credential,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     },
   })]);

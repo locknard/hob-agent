@@ -16,6 +16,7 @@ export const VOICE_SURFACE_STATES = Object.freeze([
   "cancelled",
   "failed",
   "indeterminate",
+  "model_unavailable",
   "text_mode",
 ] as const);
 
@@ -29,7 +30,7 @@ export interface VoiceSurfaceIntent {
 }
 export type PrivateVoiceAvailability =
   | { readonly status: "active" }
-  | { readonly status: "retryable" | "unavailable" };
+  | { readonly status: "recovering" | "retryable" | "unavailable" };
 export interface VoiceSurfaceRenderOptions {
   readonly transcript?: string;
   readonly transcriptKind?: "partial" | "final";
@@ -121,14 +122,14 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
       eyebrow: "正在执行",
       heading: "正在执行已确认的动作",
       status: "动作进行中",
-      detail: "Hub 正在处理这项已确认请求。",
+      detail: "这项已确认的动作正在进行。完成后会显示结果。",
       recovery: { href: "/conversation", label: "改用文字" },
     },
     verifying: {
       eyebrow: "确认结果",
       heading: "正在确认动作结果",
-      status: "验证结果",
-      detail: "只有读回真实状态后，界面才会报告完成。",
+      status: "确认结果",
+      detail: "正在检查动作是否完成。确认后会显示结果。",
       recovery: { href: "/conversation", label: "改用文字" },
     },
     speaking: {
@@ -149,7 +150,7 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
       eyebrow: "已停止",
       heading: "这次请求已经取消",
       status: "对话已经停止",
-      detail: "Hub 已接管的动作仍会在活动记录中显示真实结果。",
+      detail: "这次对话已停止。已经开始的动作会继续在活动记录中显示结果。",
       recovery: { href: "/conversation", label: "改用文字" },
     },
     failed: {
@@ -161,10 +162,17 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
     },
     indeterminate: {
       eyebrow: "结果待确认",
-      heading: "正在重新确认播放器状态",
-      status: "保持诚实等待",
-      detail: "确认结果前，界面会持续显示真实的不确定状态。",
+      heading: "正在确认实际状态",
+      status: "结果尚未确认",
+      detail: "结果确认前会如实显示为尚未确认。结果会显示在活动记录中。",
       recovery: { href: "/conversation", label: "改用文字" },
+    },
+    model_unavailable: {
+      eyebrow: "家庭助手模型",
+      heading: "模型连接正在恢复",
+      status: "等待模型恢复",
+      detail: "家庭助手模型正在恢复。私人语音已经完成转写，模型恢复后可以继续这次请求。",
+      recovery: { href: "/settings#operational-model", label: "检查模型连接" },
     },
     text_mode: {
       eyebrow: "文字对话",
@@ -243,9 +251,10 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     ],
     cancelled: [
       "已停止",
-      "对话已经停止；Hub 已接管的动作仍会在活动记录中显示真实结果。",
+      "这次对话已停止。已经开始的动作会继续在活动记录中显示结果。",
     ],
     failed: ["语音暂时没有完成", "可以再试一次，或直接改用文字。"],
+    model_unavailable: ["等待模型恢复", "私人语音已经完成转写。请先检查家庭助手模型连接。"],
     text_mode: ["文字对话可用", "私人语音暂时不可用。文字对话现在就能继续。"],
   };
   const labels = {
@@ -260,6 +269,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     playback_failed: ["回答已完成", "文字回答已经准备好"],
     cancelled: ["已停止", "这次请求已经取消"],
     failed: ["语音暂时没有完成", "这次没有得到可用结果"],
+    model_unavailable: ["家庭助手模型", "模型连接正在恢复"],
     text_mode: ["文字对话", "用文字继续和家沟通"],
   };
   const setText = (node, value) => {
@@ -284,10 +294,10 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
           : "product-secondary-action";
     }
     if (textExitNode instanceof HTMLElement)
-      textExitNode.hidden = next === "text_mode";
+      textExitNode.hidden = next === "text_mode" || next === "model_unavailable";
     if (transcriptNode instanceof HTMLElement)
       transcriptNode.hidden =
-        next === "text_mode" &&
+        (next === "text_mode" || next === "model_unavailable") &&
         transcriptNode.dataset.voiceTranscriptKind === "empty";
     if (startButton instanceof HTMLButtonElement)
       startButton.hidden =
@@ -447,7 +457,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       }
     } catch {}
     if (generation === cancelledGeneration)
-      setState("thinking", "处理仍在后台继续。请在文字对话中查看进度。", {
+      setState("thinking", "这次请求仍在继续处理。请在文字对话中查看进度。", {
         href: "/conversation/" + encodeURIComponent(adviceId),
         label: "打开文字对话",
       });
@@ -626,7 +636,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
         setState("failed", "语音服务正在处理上一句，请在 " + seconds + " 秒后再试一次，或改用文字。");
         return;
       }
-      if (!response.ok || result === undefined)
+      if (result === undefined)
         throw new Error("asr_unavailable");
       if (
         result.status === "accepted" &&
@@ -646,6 +656,12 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       } else if (result.status === "unavailable") {
         releaseLease();
         setState("text_mode", "私人语音暂时不可用；可以直接改用文字。");
+      } else if (result.status === "model_unavailable") {
+        releaseLease();
+        setState("model_unavailable", "家庭助手模型正在恢复。请先检查模型连接。", {
+          href: "/settings#operational-model",
+          label: "检查模型连接",
+        });
       } else if (result.status === "failed") {
         releaseLease();
         setState("failed");
@@ -881,12 +897,12 @@ export function renderVoiceSurface(
     : "还没有转写";
   const initialTranscriptKind = safeTranscript ? transcriptKind : "empty";
   const transcriptMarkup =
-    renderedState === "text_mode" && !safeTranscript
+    (renderedState === "text_mode" || renderedState === "model_unavailable") && !safeTranscript
       ? ""
       : `<p class="product-voice-transcript" data-voice-transcript data-voice-transcript-kind="${initialTranscriptKind}" aria-live="polite" aria-atomic="true">${initialTranscript}</p>`;
-  const textExitHidden = renderedState === "text_mode" ? " hidden" : "";
+  const textExitHidden = renderedState === "text_mode" || renderedState === "model_unavailable" ? " hidden" : "";
   const recoveryClass =
-    renderedState === "text_mode"
+    renderedState === "text_mode" || renderedState === "model_unavailable"
       ? "product-primary-action"
       : "product-secondary-action";
   const fallbackMarkup =
@@ -899,18 +915,21 @@ export function renderVoiceSurface(
     options.intent,
   );
   const voiceStartHidden =
-    privateVoice.status !== "active" || renderedState === "text_mode"
+    privateVoice.status !== "active" || renderedState === "text_mode" || renderedState === "model_unavailable"
       ? " hidden"
       : "";
   const retry = privateVoice.status === "retryable"
     ? '<form class="product-action-form" method="post" action="/voice/retry"><button class="product-primary-action" type="submit">重新连接私人语音</button></form>'
+    : "";
+  const recovery = privateVoice.status === "recovering"
+    ? '<p class="product-notice" role="status" aria-live="polite">正在恢复私人语音。文字对话始终可用。</p><form class="product-action-form" method="post" action="/voice/cancel-retry"><button class="product-secondary-action" type="submit">停止这次恢复</button></form>'
     : "";
   const notice = options.notice === "recovered"
     ? '<p class="product-notice" data-one-shot-notice role="status">私人语音已重新连接。现在可以开始说话。</p>'
     : options.notice === "unavailable"
       ? '<p class="product-notice" data-one-shot-notice role="status">私人语音仍在恢复中。文字对话现在就能继续。</p>'
       : "";
-  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。任何动作仍由 Hub 的确认和审计流程决定。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
+  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${recovery}${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。需要确认的动作会先等待你的确认，结果会保留在活动记录中。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
 }
 function renderVoiceIntent(
   transcript: string,
@@ -933,7 +952,7 @@ function renderVoiceIntent(
     visible.length > 0
       ? `<dl class="product-side-list">${visible.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`
       : "";
-  return `<section class="product-card product-voice-intent" data-voice-intent-source="real" aria-label="当前理解"><p class="product-kicker">当前理解</p>${quote}${values}<p class="product-muted">语音转写只会进入受管控的对话；任何动作仍由 Hub 负责确认和执行。</p></section>`;
+  return `<section class="product-card product-voice-intent" data-voice-intent-source="real" aria-label="当前理解"><p class="product-kicker">当前理解</p>${quote}${values}<p class="product-muted">语音内容会进入这次对话；需要确认的动作会先等待你的确认，结果会保留在活动记录中。</p></section>`;
 }
 function normalizeSurfaceText(value: unknown): string {
   return typeof value === "string" ? value.trim().slice(0, 2_000) : "";

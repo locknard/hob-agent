@@ -8,6 +8,7 @@ const MAX_FILE_BYTES = 16_384;
 const LOCK_STALE_AFTER_MS = 30_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const VOICE_REF = /^keychain:hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+const LEASE_AUTHORITY = Symbol("product-voice-cleanup-ledger");
 
 export type ProductVoiceCleanupTrack = "asr" | "tts";
 export type ProductVoiceCleanupPhase = "staged" | "active" | "pending_cleanup";
@@ -29,6 +30,26 @@ export interface ProductVoiceCleanupEntry {
 export interface ProductVoiceCleanupLedgerState {
   readonly version: typeof LEDGER_VERSION;
   readonly entries: readonly ProductVoiceCleanupEntry[];
+}
+
+/** An unforgeable, single-use authorization for one durably reserved voice locator. */
+export class ProductVoiceCredentialLease {
+  #consumed = false;
+
+  constructor(
+    private readonly track: ProductVoiceCleanupTrack,
+    private readonly credentialRef: string,
+    authority: symbol,
+  ) {
+    if (authority !== LEASE_AUTHORITY) throw new TypeError("Voice credential lease is invalid");
+  }
+
+  consume(stage: { readonly kind: ProductVoiceCleanupTrack; readonly credentialRef?: string }): void {
+    if (this.#consumed || stage.kind !== this.track || stage.credentialRef !== this.credentialRef) {
+      throw new TypeError("Voice credential lease is invalid");
+    }
+    this.#consumed = true;
+  }
 }
 
 export class ProductVoiceCleanupLedger {
@@ -64,7 +85,7 @@ export class ProductVoiceCleanupLedger {
     readonly track: ProductVoiceCleanupTrack;
     readonly credentialRef: string;
     readonly expectedGeneration: number;
-  }): Promise<void> {
+  }): Promise<ProductVoiceCredentialLease> {
     const reference = validateReferenceInput(input);
     await this.mutate(async (state) => {
       if (state.entries.some((entry) => entry.credentialRef === reference.credentialRef)) {
@@ -79,6 +100,7 @@ export class ProductVoiceCleanupLedger {
         attempts: 0,
       }));
     });
+    return new ProductVoiceCredentialLease(reference.track, reference.credentialRef, LEASE_AUTHORITY);
   }
 
   /** Marks the staged candidate locator as the active owner after its configuration generation commits. */
@@ -124,9 +146,9 @@ export class ProductVoiceCleanupLedger {
       const exactIndex = exactEntryIndex(state.entries, reference);
       const exact = state.entries[exactIndex];
       if (exact !== undefined) {
-        if (exact.phase === "active" && exact.expectedGeneration === expectedGeneration && exact.committedGeneration === committedGeneration) {
-          return state;
-        }
+        // The exact track locator remains authoritative when an unrelated
+        // product setting advances the shared configuration generation.
+        if (exact.phase === "active") return state;
         throw new Error("Voice cleanup ledger active owner conflicts");
       }
       if (state.entries.some((entry) => entry.track === reference.track && entry.committedGeneration === committedGeneration)) {

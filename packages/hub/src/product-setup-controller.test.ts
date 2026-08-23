@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { ProductModelSetupInput, ProductModelSetupStage } from "./product-model-setup.js";
+import { ProductModelSetup } from "./product-model-setup.js";
 import { ProductVoiceSetup, type ProductVoiceSetupStage } from "./product-voice-setup.js";
 import { ProductSetupController } from "./product-setup-controller.js";
 import { ProductSetupDraftStore } from "./product-setup-draft-store.js";
@@ -14,7 +15,14 @@ test("binds a ready model probe to the exact durable setup revision", async () =
   const token = "controller-private-setup-session-token-value";
   const probed: ProductModelSetupInput[] = [];
   const discarded: ProductModelSetupStage[] = [];
-  const bridgeCalls: unknown[] = [];
+  const bridgeCalls: string[] = [];
+  const bridgeStage = {
+    bridgeId: "bridge-fedcba9876543210",
+    adapterType: "fixture-peer",
+    label: "Fixture peer",
+    config: { endpoint: "fixture://peer.local" },
+    credentialRefs: { session: "keychain:hob-agent/bridge:bridge-fedcba9876543210:session" },
+  };
   const stage: ProductModelSetupStage = {
     profile: {
       id: "custom:setup:draft-controller",
@@ -28,23 +36,53 @@ test("binds a ready model probe to the exact durable setup revision", async () =
   const controller = new ProductSetupController(
     new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-controller"),
     {
-      probe: async (input) => { probed.push(input); return { status: "ready", latencyMs: 35, staged: stage }; },
+      prepare: (input) => {
+        probed.push(input);
+        return { status: "prepared" as const, prepared: {
+          provider: "custom" as const,
+          modelId: "deepseek-v4-flash-0731",
+          baseURL: "https://model.example.test/v1",
+          apiKey: "request-local-model-secret",
+        } };
+      },
+      stageSetup: () => stage,
+      execute: async ({ stage: staged, credentialLease }) => {
+        assert.equal(staged, stage);
+        assert.equal(credentialLease.stage, stage);
+        return { status: "ready" as const, latencyMs: 35, staged: stage };
+      },
       discard: async (input) => { discarded.push(input); },
     },
     {
-      probe: async (input) => {
-        bridgeCalls.push(input);
+      prepare: (input) => {
+        bridgeCalls.push("prepare");
+        assert.deepEqual(input, {
+          setupId: "draft-controller", adapterType: "fixture-peer",
+          config: { endpoint: "fixture://peer.local" }, credential: "request-local-bridge-secret",
+        });
+        return { status: "prepared" as const, prepared: {
+          adapterType: "fixture-peer", label: "Fixture peer", config: { endpoint: "fixture://peer.local" },
+          credentialAlias: "session", credential: "request-local-bridge-secret",
+        } };
+      },
+      stageSetup: () => {
+        bridgeCalls.push("stage");
+        return bridgeStage;
+      },
+      execute: async ({ stage, credentialLease }) => {
+        bridgeCalls.push("execute");
+        assert.equal(stage, bridgeStage);
+        assert.equal(credentialLease.stage, bridgeStage);
         return {
           status: "ready" as const,
           latencyMs: 22,
           summary: { states: 10, entities: 9, devices: 4, areas: 2 },
-          stage: {
-            bridgeId: "bridge-fedcba9876543210",
-            adapterType: "fixture-peer",
-            label: "Fixture peer",
-            config: { endpoint: "fixture://peer.local" },
-            credentialRefs: { session: "keychain:hob-agent/bridge:bridge-fedcba9876543210:session" },
+          review: {
+            areas: [{ name: "客厅", deviceCount: 3 }, { name: "卧室", deviceCount: 0 }],
+            unassignedDeviceCount: 1,
+            complete: true,
           },
+          stage: bridgeStage,
         };
       },
       discard: async () => undefined,
@@ -90,13 +128,12 @@ test("binds a ready model probe to the exact durable setup revision", async () =
       credential: "request-local-bridge-secret",
     });
     assert.equal(bridge.status, "ready");
-    assert.equal(bridgeCalls.length, 1);
-    assert.deepEqual(bridgeCalls, [{
-      setupId: "draft-controller",
-      adapterType: "fixture-peer",
-      config: { endpoint: "fixture://peer.local" },
-      credential: "request-local-bridge-secret",
-    }]);
+    assert.deepEqual(bridgeCalls, ["prepare", "stage", "execute"]);
+    assert.deepEqual(bridge.status === "ready" ? bridge.draft.bridge?.review : undefined, {
+      areas: [{ name: "客厅", deviceCount: 3 }, { name: "卧室", deviceCount: 0 }],
+      unassignedDeviceCount: 1,
+      complete: true,
+    });
     const skipped = await controller.skipVoice({ sessionToken: token, expectedRevision: 4 });
     assert.equal(skipped.stage, "map");
     assert.deepEqual(await controller.activationCandidateForSession(token, 5), {
@@ -118,6 +155,208 @@ test("binds a ready model probe to the exact durable setup revision", async () =
   }
 });
 
+test("cancelling a model setup probe waits for its provider and removes the exact staged credential", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-setup-controller-model-cancel-"));
+  const token = "controller-model-cancel-private-token";
+  const stage: ProductModelSetupStage = {
+    profile: {
+      id: "custom:setup:draft-model-cancel",
+      provider: "custom",
+      kind: "api_key",
+      secretRef: "keychain:hob-agent/setup-model:draft-model-cancel:stage-1",
+    },
+    modelId: "fixture-model",
+  };
+  let signalSeen: AbortSignal | undefined;
+  let beginProbe: (() => void) | undefined;
+  let finishProbe: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { beginProbe = resolve; });
+  const settled = new Promise<void>((resolve) => { finishProbe = resolve; });
+  const discarded: ProductModelSetupStage[] = [];
+  try {
+    const drafts = new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-model-cancel");
+    await drafts.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
+    await drafts.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const controller = new ProductSetupController(
+      drafts,
+      {
+        prepare: () => ({ status: "prepared" as const, prepared: { provider: "custom" as const, modelId: "fixture-model", apiKey: "request-local-model-secret" } }),
+        stageSetup: () => stage,
+        execute: async ({ signal }) => {
+          signalSeen = signal;
+          beginProbe?.();
+          await settled;
+          return { status: "ready" as const, latencyMs: 12, staged: stage };
+        },
+        discard: async (candidate) => { discarded.push(candidate); },
+      },
+      unavailableBridgeSetup(),
+    );
+    const abort = new AbortController();
+    const probing = controller.probeModel({
+      sessionToken: token,
+      expectedRevision: 2,
+      provider: "custom",
+      modelId: "fixture-model",
+      apiKey: "request-local-model-secret",
+      signal: abort.signal,
+    });
+    await started;
+    abort.abort();
+    let complete = false;
+    void probing.finally(() => { complete = true; }).catch(() => undefined);
+    await Promise.resolve();
+    assert.equal(complete, false);
+    finishProbe?.();
+
+    assert.deepEqual(await probing, { status: "unavailable" });
+    assert.equal(signalSeen, abort.signal);
+    assert.deepEqual(discarded, [stage]);
+    assert.deepEqual(await drafts.loadForSession(token), {
+      draftId: "draft-model-cancel",
+      revision: 2,
+      stage: "model",
+      householdName: "测试家",
+      agentName: "测试助手",
+    });
+  } finally {
+    finishProbe?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retires the exact bridge lease when its probe does not produce durable bridge evidence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-setup-controller-bridge-cleanup-"));
+  const token = "controller-bridge-cleanup-private-token";
+  const stage = {
+    bridgeId: "bridge-0123456789abcdef", adapterType: "fixture-peer", label: "Fixture peer",
+    config: { endpoint: "fixture://peer.local" },
+    credentialRefs: { session: "keychain:hob-agent/bridge:bridge-0123456789abcdef:session" },
+  };
+  const discarded: typeof stage[] = [];
+  try {
+    const drafts = new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-bridge-cleanup");
+    await drafts.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
+    await drafts.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const model = { profile: { id: "custom:setup:draft-bridge-cleanup", provider: "custom" as const, kind: "api_key" as const, secretRef: "keychain:hob-agent/setup-model:draft-bridge-cleanup:one" }, modelId: "fixture" };
+    await drafts.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: model });
+    await drafts.recordModelProbe({ sessionToken: token, expectedRevision: 2, stage: model, latencyMs: 1 });
+    const controller = new ProductSetupController(drafts, unavailableModelSetup(), {
+      prepare: () => ({ status: "prepared" as const, prepared: {
+        adapterType: "fixture-peer", label: "Fixture peer", config: stage.config,
+        credentialAlias: "session", credential: "request-local-bridge-secret",
+      } }),
+      stageSetup: () => stage,
+      execute: async () => ({ status: "credential_rejected" as const }),
+      discard: async (candidate) => { discarded.push(candidate); },
+    }, unavailableVoiceSetup(() => undefined));
+
+    assert.deepEqual(await controller.probeBridge({
+      sessionToken: token, expectedRevision: 3, adapterType: "fixture-peer",
+      config: stage.config, credential: "request-local-bridge-secret",
+    }), { status: "credential_rejected" });
+    assert.deepEqual(discarded, [stage]);
+    assert.deepEqual(await drafts.pendingBridgeStagingForRecovery(), []);
+    assert.deepEqual(await drafts.pendingBridgeCleanupForMaintenance(), []);
+    assert.equal((await drafts.loadForSession(token))?.stage, "bridge");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("moves a failed model probe to durable cleanup when its immediate delete fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-setup-controller-model-cleanup-"));
+  const sessionToken = "controller-model-cleanup-private-session-token";
+  const vault = new ToggleModelVault();
+  vault.deleteAvailable = false;
+  try {
+    const drafts = new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-model-cleanup");
+    await drafts.establishSession({ sessionToken, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
+    await drafts.saveIdentity({ sessionToken, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const failing = new ProductSetupController(
+      drafts,
+      new ProductModelSetup({
+        vault,
+        createStageNonce: () => "delete-fails",
+        probe: async () => ({ model: "gpt/gpt-5", status: "auth", latencyMs: 4 }),
+      }),
+      unavailableBridgeSetup(),
+      unavailableVoiceSetup(() => undefined),
+    );
+
+    assert.deepEqual(await failing.probeModel({
+      sessionToken,
+      expectedRevision: 2,
+      provider: "gpt",
+      modelId: "gpt-5",
+      apiKey: "request-local-model-secret",
+    }), { status: "rejected" });
+    const stage: ProductModelSetupStage = {
+      profile: { id: "gpt:setup:draft-model-cleanup", provider: "gpt", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:draft-model-cleanup:delete-fails" },
+      modelId: "gpt-5",
+    };
+    assert.deepEqual(await drafts.pendingModelCleanupForMaintenance(), [stage]);
+
+    vault.deleteAvailable = true;
+    const restarted = new ProductSetupController(
+      new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "unused-id"),
+      new ProductModelSetup({ vault }),
+      unavailableBridgeSetup(),
+      unavailableVoiceSetup(() => undefined),
+    );
+    await restarted.loadForSession(sessionToken);
+    assert.deepEqual(await drafts.pendingModelCleanupForMaintenance(), []);
+    assert.equal(vault.values.has(stage.profile.secretRef!), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("serializes concurrent model probes for one draft behind the durable staging lease", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-setup-controller-model-concurrency-"));
+  const sessionToken = "controller-model-concurrency-private-session-token";
+  const vault = new ToggleModelVault();
+  let releaseProbe: (() => void) | undefined;
+  let signalProbeStarted: (() => void) | undefined;
+  const probeStarted = new Promise<void>((resolve) => { signalProbeStarted = resolve; });
+  const probeReleased = new Promise<void>((resolve) => { releaseProbe = resolve; });
+  try {
+    const drafts = new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-model-concurrency");
+    await drafts.establishSession({ sessionToken, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
+    await drafts.saveIdentity({ sessionToken, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const controller = new ProductSetupController(
+      drafts,
+      new ProductModelSetup({
+        vault,
+        createStageNonce: () => "in-flight",
+        probe: async () => {
+          signalProbeStarted?.();
+          await probeReleased;
+          return { model: "gpt/gpt-5", status: "ok", latencyMs: 4 };
+        },
+      }),
+      unavailableBridgeSetup(),
+      unavailableVoiceSetup(() => undefined),
+    );
+    const input = { sessionToken, expectedRevision: 2, provider: "gpt", modelId: "gpt-5", apiKey: "request-local-model-secret" } as const;
+    const first = controller.probeModel(input);
+    await probeStarted;
+    const second = controller.probeModel(input);
+    let secondSettled = false;
+    void second.finally(() => { secondSettled = true; }).catch(() => undefined);
+    await Promise.resolve();
+    assert.equal(secondSettled, false);
+    releaseProbe?.();
+    assert.equal((await first).status, "ready");
+    assert.deepEqual(await second, { status: "conflict" });
+    assert.equal(vault.values.size, 1);
+    assert.deepEqual(await drafts.pendingModelCleanupForMaintenance(), []);
+  } finally {
+    releaseProbe?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("removes a newly staged credential when its setup revision changes before voice evidence is recorded", async () => {
   const asrStage: ProductVoiceSetupStage = {
     kind: "asr",
@@ -135,7 +374,7 @@ test("removes a newly staged credential when its setup revision changes before v
   } as unknown as ProductSetupDraftStore;
   const controller = new ProductSetupController(
     drafts,
-    { probe: async () => ({ status: "unavailable" as const }), discard: async () => undefined },
+    unavailableModelSetup(),
     { probe: async () => ({ status: "incompatible" as const }), discard: async () => undefined },
     {
       prepare: (input) => {
@@ -194,14 +433,19 @@ test("recovers an exact credential written before a process stops before voice e
       track: { kind: "asr", transport: "openai_http", endpoint: "http://127.0.0.1:9880", credential: "request-local-secret" },
     });
     if (preparation.status !== "prepared") assert.fail("expected prepared voice credential");
-    await drafts.reserveVoiceCredential({
+    await assert.rejects(
+      setup.execute({ prepared: preparation.prepared, credentialLease: { stage: preparation.prepared.stage } as never }),
+      /durable staging lease/,
+    );
+    assert.equal(vault.values.size, 0);
+    const credentialLease = await drafts.reserveVoiceCredential({
       sessionToken: token,
       expectedRevision: 4,
       stage: preparation.prepared.stage,
     });
     const probed = await setup.execute({
       prepared: preparation.prepared,
-      credentialLease: { stage: preparation.prepared.stage },
+      credentialLease,
     });
     assert.equal(probed.status, "ready");
     assert.equal(vault.values.has(preparation.prepared.stage.credentialRef!), true);
@@ -345,8 +589,8 @@ test("keeps an in-flight staging lease intact while another setup request sweeps
       track: { kind: "asr", transport: "openai_http", endpoint: "http://127.0.0.1:9880", credential: "request-local-secret" },
     });
     if (preparation.status !== "prepared") assert.fail("expected prepared voice credential");
-    await drafts.reserveVoiceCredential({ sessionToken: token, expectedRevision: 4, stage: preparation.prepared.stage });
-    await voice.execute({ prepared: preparation.prepared, credentialLease: { stage: preparation.prepared.stage } });
+    const credentialLease = await drafts.reserveVoiceCredential({ sessionToken: token, expectedRevision: 4, stage: preparation.prepared.stage });
+    await voice.execute({ prepared: preparation.prepared, credentialLease });
 
     const concurrentRequest = new ProductSetupController(drafts, unavailableModelSetup(), unavailableBridgeSetup(), voice);
     await concurrentRequest.loadForSession(token);
@@ -448,7 +692,7 @@ test("keeps the verified voice result when cleanup of an older credential fails"
   } as unknown as ProductSetupDraftStore;
   const controller = new ProductSetupController(
     drafts,
-    { probe: async () => ({ status: "unavailable" as const }), discard: async () => undefined },
+    unavailableModelSetup(),
     { probe: async () => ({ status: "incompatible" as const }), discard: async () => undefined },
     {
       prepare: () => ({ status: "prepared" as const, prepared: { stage: asrStage } }),
@@ -619,11 +863,21 @@ test("sweeps retired voice credentials after an expired setup session and retrie
 });
 
 function unavailableModelSetup() {
-  return { probe: async () => ({ status: "unavailable" as const }), discard: async () => undefined };
+  return {
+    prepare: () => ({ status: "unavailable" as const }),
+    stageSetup: () => { throw new Error("not reached"); },
+    execute: async () => ({ status: "unavailable" as const }),
+    discard: async () => undefined,
+  };
 }
 
 function unavailableBridgeSetup() {
-  return { probe: async () => ({ status: "incompatible" as const }), discard: async () => undefined };
+  return {
+    prepare: () => ({ status: "incompatible" as const }),
+    stageSetup: () => { throw new Error("not reached"); },
+    execute: async () => ({ status: "incompatible" as const }),
+    discard: async () => undefined,
+  };
 }
 
 function unavailableVoiceSetup(discard: (stage: ProductVoiceSetupStage) => Promise<void> | void) {
@@ -651,20 +905,37 @@ class ToggleVoiceVault extends VoiceMemoryVault {
   }
 }
 
+class ToggleModelVault {
+  readonly values = new Map<string, string>();
+  deleteAvailable = true;
+
+  read(reference: string): Promise<string | undefined> { return Promise.resolve(this.values.get(reference)); }
+  write(reference: string, value: string): Promise<void> { this.values.set(reference, value); return Promise.resolve(); }
+  delete(reference: string): Promise<void> {
+    if (!this.deleteAvailable) return Promise.reject(new Error("Keychain is temporarily unavailable"));
+    this.values.delete(reference);
+    return Promise.resolve();
+  }
+}
+
 async function prepareVoiceDraft(store: ProductSetupDraftStore, token: string, draftId: string): Promise<void> {
   await store.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
   await store.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+  const modelStage = { profile: { id: `custom:setup:${draftId}`, provider: "custom" as const, kind: "api_key" as const, secretRef: `keychain:hob-agent/setup-model:${draftId}:stage-1` }, modelId: "fixture-model" };
+  await store.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: modelStage });
   await store.recordModelProbe({
     sessionToken: token,
     expectedRevision: 2,
     latencyMs: 20,
-    stage: { profile: { id: `custom:setup:${draftId}`, provider: "custom", kind: "api_key", secretRef: `keychain:hob-agent/setup-model:${draftId}:stage-1` }, modelId: "fixture-model" },
+    stage: modelStage,
   });
+  const bridgeStage = { bridgeId: "bridge-abcdef0123456789", adapterType: "fixture-peer", label: "Fixture peer", config: { room: "lab" }, credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" } };
+  await store.reserveBridgeCredential({ sessionToken: token, expectedRevision: 3, stage: bridgeStage });
   await store.recordBridgeProbe({
     sessionToken: token,
     expectedRevision: 3,
     latencyMs: 25,
     summary: { states: 5, entities: 4, devices: 3, areas: 2 },
-    stage: { bridgeId: "bridge-abcdef0123456789", adapterType: "fixture-peer", label: "Fixture peer", config: { room: "lab" }, credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" } },
+    stage: bridgeStage,
   });
 }

@@ -34,20 +34,22 @@ test("persists one private setup session and resumes its identity stage after re
       agentName: "小满",
     });
 
+    const modelStage = {
+      profile: {
+        id: "custom:setup:draft-stable-id",
+        provider: "custom" as const,
+        kind: "api_key" as const,
+        secretRef: "keychain:hob-agent/setup-model:draft-stable-id:stage-1",
+      },
+      modelId: "deepseek-v4-flash-0731",
+      baseURL: "http://127.0.0.1:8081/v1/",
+    };
+    await store.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: modelStage });
     const modelReady = await store.recordModelProbe({
       sessionToken: token,
       expectedRevision: 2,
       latencyMs: 42,
-      stage: {
-        profile: {
-          id: "custom:setup:draft-stable-id",
-          provider: "custom",
-          kind: "api_key",
-          secretRef: "keychain:hob-agent/setup-model:draft-stable-id:stage-1",
-        },
-        modelId: "deepseek-v4-flash-0731",
-        baseURL: "http://127.0.0.1:8081/v1/",
-      },
+      stage: modelStage,
     });
     assert.deepEqual(modelReady, {
       ...named,
@@ -59,19 +61,40 @@ test("persists one private setup session and resumes its identity stage after re
         baseURL: "http://127.0.0.1:8081/v1",
       },
     });
+    const bridgeStage = {
+      bridgeId: "bridge-0123456789abcdef", adapterType: "home-assistant", label: "Home Assistant",
+      endpoint: "http://ha.local:8123", config: { baseUrl: "http://ha.local:8123" },
+      credentialRefs: { "access-token": "keychain:hob-agent/bridge:bridge-0123456789abcdef:access-token" },
+    };
+    await store.reserveBridgeCredential({ sessionToken: token, expectedRevision: 3, stage: bridgeStage });
+    await assert.rejects(store.recordBridgeProbe({
+      sessionToken: token,
+      expectedRevision: 3,
+      latencyMs: 30,
+      summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+      review: {
+        areas: [{ name: "客厅", deviceCount: 4 }],
+        unassignedDeviceCount: 0,
+        complete: true,
+      },
+      stage: bridgeStage,
+    }), /review is invalid/);
     const bridgeReady = await store.recordBridgeProbe({
       sessionToken: token,
       expectedRevision: 3,
       latencyMs: 30,
       summary: { states: 21, entities: 20, devices: 8, areas: 4 },
-      stage: {
-        bridgeId: "bridge-0123456789abcdef",
-        adapterType: "home-assistant",
-        label: "Home Assistant",
-        endpoint: "http://ha.local:8123",
-        config: { baseUrl: "http://ha.local:8123" },
-        credentialRefs: { "access-token": "keychain:hob-agent/bridge:bridge-0123456789abcdef:access-token" },
+      review: {
+        areas: [
+          { name: "客厅", deviceCount: 4 },
+          { name: "厨房", deviceCount: 2 },
+          { name: "卧室", deviceCount: 1 },
+          { name: "书房", deviceCount: 0 },
+        ],
+        unassignedDeviceCount: 1,
+        complete: true,
       },
+      stage: bridgeStage,
     });
     assert.deepEqual(bridgeReady, {
       ...modelReady,
@@ -82,6 +105,16 @@ test("persists one private setup session and resumes its identity stage after re
         label: "Home Assistant",
         endpoint: "http://ha.local:8123",
         summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+        review: {
+          areas: [
+            { name: "客厅", deviceCount: 4 },
+            { name: "厨房", deviceCount: 2 },
+            { name: "卧室", deviceCount: 1 },
+            { name: "书房", deviceCount: 0 },
+          ],
+          unassignedDeviceCount: 1,
+          complete: true,
+        },
       },
     });
     const skipped = await store.skipVoice({ sessionToken: token, expectedRevision: 4 });
@@ -140,34 +173,35 @@ test("retains a fixture peer's exact non-secret activation configuration without
     const store = new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-peer-id");
     await store.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
     await store.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const modelStage = {
+      profile: {
+        id: "custom:setup:draft-peer-id",
+        provider: "custom" as const,
+        kind: "api_key" as const,
+        secretRef: "keychain:hob-agent/setup-model:draft-peer-id:stage-1",
+      },
+      modelId: "fixture-model",
+      baseURL: "https://model.example.test/v1",
+    };
+    await store.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: modelStage });
     await store.recordModelProbe({
       sessionToken: token,
       expectedRevision: 2,
       latencyMs: 20,
-      stage: {
-        profile: {
-          id: "custom:setup:draft-peer-id",
-          provider: "custom",
-          kind: "api_key",
-          secretRef: "keychain:hob-agent/setup-model:draft-peer-id:stage-1",
-        },
-        modelId: "fixture-model",
-        baseURL: "https://model.example.test/v1",
-      },
+      stage: modelStage,
     });
+    const bridgeStage = {
+      bridgeId: "bridge-abcdef0123456789", adapterType: "fixture-peer", label: "Fixture peer",
+      endpoint: "fixture://peer.local", config: { serverAddress: "fixture://peer.local", room: "lab" },
+      credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" },
+    };
+    await store.reserveBridgeCredential({ sessionToken: token, expectedRevision: 3, stage: bridgeStage });
     await store.recordBridgeProbe({
       sessionToken: token,
       expectedRevision: 3,
       latencyMs: 25,
       summary: { states: 5, entities: 4, devices: 3, areas: 2 },
-      stage: {
-        bridgeId: "bridge-abcdef0123456789",
-        adapterType: "fixture-peer",
-        label: "Fixture peer",
-        endpoint: "fixture://peer.local",
-        config: { serverAddress: "fixture://peer.local", room: "lab" },
-        credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" },
-      },
+      stage: bridgeStage,
     });
 
     await store.skipVoice({ sessionToken: token, expectedRevision: 4 });
@@ -297,6 +331,58 @@ test("keeps a setup draft in the voice stage while a credential staging lease is
     );
     assert.equal((await store.loadForSession(token))?.stage, "voice");
     assert.equal(await store.activationCandidateForSession(token, 4), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("moves an interrupted bridge credential lease to durable cleanup while preserving the resumable draft", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-setup-draft-bridge-staging-retire-"));
+  const token = "bridge-staging-retire-private-setup-session-token";
+  const bridge = {
+    bridgeId: "bridge-0123456789abcdef",
+    adapterType: "fixture-peer",
+    label: "Fixture peer",
+    config: { room: "lab" },
+    credentialRefs: { session: "keychain:hob-agent/bridge:bridge-0123456789abcdef:session" },
+  };
+  try {
+    const store = new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-bridge-staging-retire");
+    await store.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
+    await store.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const model = { profile: { id: "custom:setup:draft-bridge-staging-retire", provider: "custom" as const, kind: "api_key" as const, secretRef: "keychain:hob-agent/setup-model:draft-bridge-staging-retire:one" }, modelId: "fixture" };
+    await store.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: model });
+    await store.recordModelProbe({ sessionToken: token, expectedRevision: 2, stage: model, latencyMs: 1 });
+
+    await store.reserveBridgeCredential({ sessionToken: token, expectedRevision: 3, stage: bridge });
+    assert.deepEqual(await store.pendingBridgeStagingForRecovery(), [bridge]);
+    assert.equal(await store.retireBridgeStagingForRecovery(), 1);
+    assert.deepEqual(await store.pendingBridgeCleanupForMaintenance(), [bridge]);
+    assert.equal((await store.loadForSession(token))?.stage, "bridge");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("accepts only non-secret bridge staging metadata", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-setup-draft-bridge-stage-shape-"));
+  const token = "bridge-stage-shape-private-setup-session-token";
+  try {
+    const store = new ProductSetupDraftStore(directory, () => new Date("2026-08-23T02:00:00.000Z"), () => "draft-bridge-stage-shape");
+    await store.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
+    await store.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const model = { profile: { id: "custom:setup:draft-bridge-stage-shape", provider: "custom" as const, kind: "api_key" as const, secretRef: "keychain:hob-agent/setup-model:draft-bridge-stage-shape:one" }, modelId: "fixture" };
+    await store.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: model });
+    await store.recordModelProbe({ sessionToken: token, expectedRevision: 2, stage: model, latencyMs: 1 });
+    await assert.rejects(store.reserveBridgeCredential({
+      sessionToken: token,
+      expectedRevision: 3,
+      stage: {
+        bridgeId: "bridge-0123456789abcdef", adapterType: "fixture-peer", label: "Fixture peer",
+        config: { room: "lab" }, credentialRefs: { session: "keychain:hob-agent/bridge:bridge-0123456789abcdef:session" },
+        credential: "must-not-persist",
+      } as never,
+    }), /Bridge setup stage is invalid/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -528,18 +614,22 @@ test("resumes v1 identity and bridge drafts through the new voice setup path", a
     const resumedIdentity = new ProductSetupDraftStore(directory, now, () => "unused-id");
     assert.equal((await resumedIdentity.loadForSession(token))?.stage, "identity");
     await resumedIdentity.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+    const modelStage = { profile: { id: "custom:setup:draft-legacy-resume-id", provider: "custom" as const, kind: "api_key" as const, secretRef: "keychain:hob-agent/setup-model:draft-legacy-resume-id:stage-1" }, modelId: "fixture-model" };
+    await resumedIdentity.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: modelStage });
     await resumedIdentity.recordModelProbe({
       sessionToken: token, expectedRevision: 2, latencyMs: 20,
-      stage: { profile: { id: "custom:setup:draft-legacy-resume-id", provider: "custom", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:draft-legacy-resume-id:stage-1" }, modelId: "fixture-model" },
+      stage: modelStage,
     });
     const bridge = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
     bridge.version = "hob.setup-draft/v1";
     await writeFile(path, `${JSON.stringify(bridge)}\n`, { mode: 0o600 });
     const resumedBridge = new ProductSetupDraftStore(directory, now, () => "unused-id");
     assert.equal((await resumedBridge.loadForSession(token))?.stage, "bridge");
+    const bridgeStage = { bridgeId: "bridge-abcdef0123456789", adapterType: "fixture-peer", label: "Fixture peer", config: { room: "lab" }, credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" } };
+    await resumedBridge.reserveBridgeCredential({ sessionToken: token, expectedRevision: 3, stage: bridgeStage });
     assert.equal((await resumedBridge.recordBridgeProbe({
       sessionToken: token, expectedRevision: 3, latencyMs: 25, summary: { states: 5, entities: 4, devices: 3, areas: 2 },
-      stage: { bridgeId: "bridge-abcdef0123456789", adapterType: "fixture-peer", label: "Fixture peer", config: { room: "lab" }, credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" } },
+      stage: bridgeStage,
     })).stage, "voice");
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -549,13 +639,17 @@ test("resumes v1 identity and bridge drafts through the new voice setup path", a
 async function prepareVoiceStage(store: ProductSetupDraftStore, token: string, draftId = "draft-voice-id"): Promise<void> {
   await store.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
   await store.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+  const modelStage = { profile: { id: `custom:setup:${draftId}`, provider: "custom" as const, kind: "api_key" as const, secretRef: `keychain:hob-agent/setup-model:${draftId}:stage-1` }, modelId: "fixture-model" };
+  await store.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: modelStage });
   await store.recordModelProbe({
     sessionToken: token, expectedRevision: 2, latencyMs: 20,
-    stage: { profile: { id: `custom:setup:${draftId}`, provider: "custom", kind: "api_key", secretRef: `keychain:hob-agent/setup-model:${draftId}:stage-1` }, modelId: "fixture-model" },
+    stage: modelStage,
   });
+  const bridgeStage = { bridgeId: "bridge-abcdef0123456789", adapterType: "fixture-peer", label: "Fixture peer", config: { room: "lab" }, credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" } };
+  await store.reserveBridgeCredential({ sessionToken: token, expectedRevision: 3, stage: bridgeStage });
   const bridge = await store.recordBridgeProbe({
     sessionToken: token, expectedRevision: 3, latencyMs: 25, summary: { states: 5, entities: 4, devices: 3, areas: 2 },
-    stage: { bridgeId: "bridge-abcdef0123456789", adapterType: "fixture-peer", label: "Fixture peer", config: { room: "lab" }, credentialRefs: { session: "keychain:hob-agent/bridge:bridge-abcdef0123456789:session" } },
+    stage: bridgeStage,
   });
   assert.equal(bridge.stage, "voice");
 }

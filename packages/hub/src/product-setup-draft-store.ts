@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import type {
   ProductSetupDraftProjection,
+  ProductSetupMapReview,
 } from "@hob-agent/inbox-web/setup";
 import { validateCustomModelBaseURL } from "@hob-agent/agent-layer/model-providers";
 import type {
@@ -22,8 +23,55 @@ const LEGACY_DRAFT_VERSION = "hob.setup-draft/v1" as const;
 const MAX_DRAFT_BYTES = 16_384;
 const MAX_PENDING_VOICE_CLEANUPS = 8;
 const MAX_VOICE_STAGING_LEASES = 8;
+const MAX_PENDING_MODEL_CLEANUPS = 8;
+const MAX_PENDING_BRIDGE_CLEANUPS = 8;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const SECRET_KEY = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
+const MODEL_LEASE_AUTHORITY = Symbol("product-setup-model-lease");
+const BRIDGE_LEASE_AUTHORITY = Symbol("product-setup-bridge-lease");
+const VOICE_LEASE_AUTHORITY = Symbol("product-setup-voice-lease");
+
+/** A single-use authorization issued only after the setup draft owns this exact model locator. */
+export class ProductSetupModelCredentialLease {
+  #consumed = false;
+
+  constructor(private readonly stage: ProductModelSetupStage, authority: symbol) {
+    if (authority !== MODEL_LEASE_AUTHORITY) throw new TypeError("Setup model credential lease is invalid");
+  }
+
+  consume(stage: ProductModelSetupStage): void {
+    if (this.#consumed || this.stage !== stage) throw new TypeError("Setup model credential lease is invalid");
+    this.#consumed = true;
+  }
+}
+
+/** A single-use authorization issued only after the setup draft owns this exact bridge locator. */
+export class ProductSetupBridgeCredentialLease {
+  #consumed = false;
+
+  constructor(private readonly stage: ProductBridgeSetupStage, authority: symbol) {
+    if (authority !== BRIDGE_LEASE_AUTHORITY) throw new TypeError("Setup bridge credential lease is invalid");
+  }
+
+  consume(stage: ProductBridgeSetupStage): void {
+    if (this.#consumed || this.stage !== stage) throw new TypeError("Setup bridge credential lease is invalid");
+    this.#consumed = true;
+  }
+}
+
+/** A single-use authorization issued only after the setup draft owns this exact voice locator. */
+export class ProductSetupVoiceCredentialLease {
+  #consumed = false;
+
+  constructor(private readonly stage: ProductVoiceSetupStage, authority: symbol) {
+    if (authority !== VOICE_LEASE_AUTHORITY) throw new TypeError("Setup voice credential lease is invalid");
+  }
+
+  consume(stage: ProductVoiceSetupStage): void {
+    if (this.#consumed || this.stage !== stage) throw new TypeError("Setup voice credential lease is invalid");
+    this.#consumed = true;
+  }
+}
 
 interface StoredSetupDraft extends Omit<ProductSetupDraftProjection, "voice"> {
   readonly version: typeof DRAFT_VERSION;
@@ -32,10 +80,18 @@ interface StoredSetupDraft extends Omit<ProductSetupDraftProjection, "voice"> {
   readonly modelCredentialRef?: string;
   readonly modelProfileId?: string;
   readonly modelProbeLatencyMs?: number;
+  /** Credential-backed model evidence that was superseded or could not be acknowledged after deletion. */
+  readonly modelCleanup?: readonly ProductModelSetupStage[];
+  /** The one exact model locator reserved before the provider probe may write it. */
+  readonly modelStaging?: readonly ProductModelSetupStage[];
   readonly bridgeId?: string;
   readonly bridgeConfig?: Readonly<Record<string, unknown>>;
   readonly bridgeCredentialRefs?: Readonly<Record<string, string>>;
   readonly bridgeProbeLatencyMs?: number;
+  /** Credential-backed bridge stages that were retired before they became setup evidence. */
+  readonly bridgeCleanup?: readonly ProductBridgeSetupStage[];
+  /** The one exact bridge locator reserved before a probe may write it. */
+  readonly bridgeStaging?: readonly ProductBridgeSetupStage[];
   readonly voice?: {
     readonly asr?: ProductBootstrapVoiceAsrConfig;
     readonly tts?: ProductBootstrapVoiceTtsConfig;
@@ -82,11 +138,15 @@ export class ProductSetupDraftStore {
         ...(current?.modelCredentialRef === undefined ? {} : { modelCredentialRef: current.modelCredentialRef }),
         ...(current?.modelProfileId === undefined ? {} : { modelProfileId: current.modelProfileId }),
         ...(current?.modelProbeLatencyMs === undefined ? {} : { modelProbeLatencyMs: current.modelProbeLatencyMs }),
+        ...(current?.modelCleanup === undefined ? {} : { modelCleanup: current.modelCleanup }),
+        ...(current?.modelStaging === undefined ? {} : { modelStaging: current.modelStaging }),
         ...(current?.bridge === undefined ? {} : { bridge: current.bridge }),
         ...(current?.bridgeId === undefined ? {} : { bridgeId: current.bridgeId }),
         ...(current?.bridgeConfig === undefined ? {} : { bridgeConfig: current.bridgeConfig }),
         ...(current?.bridgeCredentialRefs === undefined ? {} : { bridgeCredentialRefs: current.bridgeCredentialRefs }),
         ...(current?.bridgeProbeLatencyMs === undefined ? {} : { bridgeProbeLatencyMs: current.bridgeProbeLatencyMs }),
+        ...(current?.bridgeCleanup === undefined ? {} : { bridgeCleanup: current.bridgeCleanup }),
+        ...(current?.bridgeStaging === undefined ? {} : { bridgeStaging: current.bridgeStaging }),
         ...(current?.voice === undefined ? {} : { voice: current.voice }),
         ...(current?.voiceProbeLatencyMs === undefined ? {} : { voiceProbeLatencyMs: current.voiceProbeLatencyMs }),
         ...(current?.voiceSkipped === undefined ? {} : { voiceSkipped: current.voiceSkipped }),
@@ -129,6 +189,193 @@ export class ProductSetupDraftStore {
     return stored?.voiceStaging ?? Object.freeze([]);
   }
 
+  /** Lists retired model credentials for bounded maintenance without touching active evidence. */
+  async pendingModelCleanupForMaintenance(): Promise<readonly ProductModelSetupStage[]> {
+    const stored = await this.loadStored();
+    return stored?.modelCleanup ?? Object.freeze([]);
+  }
+
+  /** Lists retired bridge locators for bounded maintenance without touching selected bridge evidence. */
+  async pendingBridgeCleanupForMaintenance(): Promise<readonly ProductBridgeSetupStage[]> {
+    const stored = await this.loadStored();
+    return stored?.bridgeCleanup ?? Object.freeze([]);
+  }
+
+  /** Lists bridge writes that cold start moves into durable cleanup before any new request runs. */
+  async pendingBridgeStagingForRecovery(): Promise<readonly ProductBridgeSetupStage[]> {
+    const stored = await this.loadStored();
+    return stored?.bridgeStaging ?? Object.freeze([]);
+  }
+
+  /** Atomically transfers interrupted bridge writes to cleanup before maintenance deletes them. */
+  retireBridgeStagingForRecovery(): Promise<number> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      const staging = stored?.bridgeStaging;
+      if (stored === undefined || staging === undefined) return 0;
+      const bridgeCleanup = appendBridgeCleanup(stored.bridgeCleanup, staging, stored.bridgeCredentialRefs);
+      const { bridgeStaging: _bridgeStaging, bridgeCleanup: _bridgeCleanup, ...withoutPending } = stored;
+      await this.writeStored(Object.freeze({
+        ...withoutPending,
+        ...(bridgeCleanup.length === 0 ? {} : { bridgeCleanup }),
+      }));
+      return staging.length;
+    });
+  }
+
+  /** Persists the exact bridge locator before ProductBridgeSetup receives authority to write it. */
+  reserveBridgeCredential(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+    readonly stage: ProductBridgeSetupStage;
+  }): Promise<ProductSetupBridgeCredentialLease> {
+    return this.exclusive(async () => {
+      const sessionToken = boundedSessionToken(input.sessionToken);
+      if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) throw new TypeError("Setup draft revision is invalid");
+      const stored = await this.loadStored();
+      requireActiveSession(stored, sessionToken, this.now());
+      if (stored!.revision !== input.expectedRevision) throw new Error("Setup draft revision conflict");
+      if (stored!.stage !== "bridge") throw new Error("Setup draft stage conflict");
+      validateBridgeStage(input.stage, emptyBridgeSummary());
+      if (stored!.bridge !== undefined || stored!.bridgeCredentialRefs !== undefined
+        || stored!.bridgeCleanup?.some((candidate) => sameBridgeStage(candidate, input.stage))) {
+        throw new Error("Bridge credential staging lease is invalid");
+      }
+      if ((stored!.bridgeCleanup?.length ?? 0) >= MAX_PENDING_BRIDGE_CLEANUPS) {
+        throw new Error("Setup bridge cleanup backlog is full");
+      }
+      const bridgeStaging = appendBridgeStage(stored!.bridgeStaging, input.stage);
+      if (bridgeStaging.length === (stored!.bridgeStaging?.length ?? 0)) {
+        throw new Error("Bridge credential staging lease is unavailable");
+      }
+      await this.writeStored(Object.freeze({ ...stored!, bridgeStaging }));
+      return new ProductSetupBridgeCredentialLease(input.stage, BRIDGE_LEASE_AUTHORITY);
+    });
+  }
+
+  /** Acknowledges an exact retired bridge locator after a maintenance delete succeeds. */
+  ackBridgeCleanupForMaintenance(stage: ProductBridgeSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      validateBridgeStage(stage, emptyBridgeSummary());
+      await this.ackBridgeStageInStored(stored, stage, "cleanup");
+    });
+  }
+
+  /** Acknowledges an exact bridge staging lease after its request owner deletes it. */
+  ackBridgeStaging(stage: ProductBridgeSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      validateBridgeStage(stage, emptyBridgeSummary());
+      await this.ackBridgeStageInStored(stored, stage, "staging");
+    });
+  }
+
+  /** Moves one failed bridge staging lease to durable cleanup when immediate cleanup cannot be acknowledged. */
+  retireBridgeStaging(stage: ProductBridgeSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      validateBridgeStage(stage, emptyBridgeSummary());
+      const staging = stored.bridgeStaging ?? [];
+      if (!staging.some((candidate) => sameBridgeStage(candidate, stage))) return;
+      const bridgeCleanup = appendBridgeCleanup(stored.bridgeCleanup, [stage], stored.bridgeCredentialRefs);
+      const remaining = staging.filter((candidate) => !sameBridgeStage(candidate, stage));
+      const { bridgeStaging: _bridgeStaging, bridgeCleanup: _bridgeCleanup, ...withoutPending } = stored;
+      await this.writeStored(Object.freeze({
+        ...withoutPending,
+        ...(bridgeCleanup.length === 0 ? {} : { bridgeCleanup }),
+        ...(remaining.length === 0 ? {} : { bridgeStaging: Object.freeze(remaining) }),
+      }));
+    });
+  }
+
+  /** Atomically transfers every interrupted model write lease to durable cleanup on cold start. */
+  retireModelStagingForRecovery(): Promise<number> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      const staging = stored?.modelStaging;
+      if (stored === undefined || staging === undefined) return 0;
+      const modelCleanup = appendModelCleanup(stored.modelCleanup, staging, stored.modelCredentialRef);
+      const { modelStaging: _modelStaging, modelCleanup: _modelCleanup, ...withoutPending } = stored;
+      await this.writeStored(Object.freeze({
+        ...withoutPending,
+        ...(modelCleanup.length === 0 ? {} : { modelCleanup }),
+      }));
+      return staging.length;
+    });
+  }
+
+  /** Persists the exact model locator before ProductModelSetup receives authority to write it. */
+  reserveModelCredential(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+    readonly stage: ProductModelSetupStage;
+  }): Promise<ProductSetupModelCredentialLease> {
+    return this.exclusive(async () => {
+      const sessionToken = boundedSessionToken(input.sessionToken);
+      if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) throw new TypeError("Setup draft revision is invalid");
+      const stored = await this.loadStored();
+      requireActiveSession(stored, sessionToken, this.now());
+      if (stored!.revision !== input.expectedRevision) throw new Error("Setup draft revision conflict");
+      if (stored!.stage !== "model") throw new Error("Setup draft stage conflict");
+      validateModelStage(stored!.draftId, input.stage);
+      if (stored!.modelCredentialRef !== undefined || stored!.modelCleanup?.some((candidate) => sameModelStage(candidate, input.stage))) {
+        throw new Error("Model credential staging lease is invalid");
+      }
+      if ((stored!.modelCleanup?.length ?? 0) >= MAX_PENDING_MODEL_CLEANUPS) {
+        throw new Error("Setup model cleanup backlog is full");
+      }
+      const modelStaging = appendModelStage(stored!.modelStaging, input.stage);
+      if (modelStaging.length === (stored!.modelStaging?.length ?? 0)) {
+        throw new Error("Model credential staging lease is unavailable");
+      }
+      await this.writeStored(Object.freeze({ ...stored!, modelStaging }));
+      return new ProductSetupModelCredentialLease(input.stage, MODEL_LEASE_AUTHORITY);
+    });
+  }
+
+  /** Acknowledges an exact model locator after maintenance deleted it. */
+  ackModelCleanupForMaintenance(stage: ProductModelSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      validateModelStage(stored.draftId, stage);
+      await this.ackModelStageInStored(stored, stage, "cleanup");
+    });
+  }
+
+  /** Acknowledges an exact staging lease after its request-local owner deleted it. */
+  ackModelStaging(stage: ProductModelSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      validateModelStage(stored.draftId, stage);
+      await this.ackModelStageInStored(stored, stage, "staging");
+    });
+  }
+
+  /** Retires one failed staging lease when its immediate delete cannot be acknowledged. */
+  retireModelStaging(stage: ProductModelSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      validateModelStage(stored.draftId, stage);
+      const staging = stored.modelStaging ?? [];
+      if (!staging.some((candidate) => sameModelStage(candidate, stage))) return;
+      const modelCleanup = appendModelCleanup(stored.modelCleanup, [stage], stored.modelCredentialRef);
+      const remaining = staging.filter((candidate) => !sameModelStage(candidate, stage));
+      const { modelStaging: _modelStaging, modelCleanup: _modelCleanup, ...withoutPending } = stored;
+      await this.writeStored(Object.freeze({
+        ...withoutPending,
+        ...(modelCleanup.length === 0 ? {} : { modelCleanup }),
+        ...(remaining.length === 0 ? {} : { modelStaging: Object.freeze(remaining) }),
+      }));
+    });
+  }
+
   /** Atomically retires every cold-start staging lease before normal cleanup resumes. */
   retireVoiceStagingForRecovery(): Promise<number> {
     return this.exclusive(async () => {
@@ -150,7 +397,7 @@ export class ProductSetupDraftStore {
     readonly sessionToken: string;
     readonly expectedRevision: number;
     readonly stage: ProductVoiceSetupStage;
-  }): Promise<void> {
+  }): Promise<ProductSetupVoiceCredentialLease> {
     return this.exclusive(async () => {
       const sessionToken = boundedSessionToken(input.sessionToken);
       if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
@@ -170,8 +417,11 @@ export class ProductSetupDraftStore {
         throw new Error("Setup voice cleanup backlog is full");
       }
       const voiceStaging = appendVoiceStage(stored!.voiceStaging, stage);
-      if (voiceStaging.length === (stored!.voiceStaging?.length ?? 0)) return;
+      if (voiceStaging.length === (stored!.voiceStaging?.length ?? 0)) {
+        throw new Error("Voice credential staging lease is unavailable");
+      }
       await this.writeStored(Object.freeze({ ...stored!, voiceStaging }));
+      return new ProductSetupVoiceCredentialLease(input.stage, VOICE_LEASE_AUTHORITY);
     });
   }
 
@@ -258,14 +508,20 @@ export class ProductSetupDraftStore {
       if (stored!.revision !== input.expectedRevision) throw new Error("Setup draft revision conflict");
       if (stored!.stage !== "model") throw new Error("Setup draft stage conflict");
       const model = validateModelStage(stored!.draftId, input.stage);
+      if (!stored!.modelStaging?.some((candidate) => sameModelStage(candidate, input.stage))) {
+        throw new Error("Model credential staging lease is missing");
+      }
+      const modelStaging = stored!.modelStaging.filter((candidate) => !sameModelStage(candidate, input.stage));
+      const { modelStaging: _modelStaging, ...withoutModelStaging } = stored!;
       const updated: StoredSetupDraft = Object.freeze({
-        ...stored!,
+        ...withoutModelStaging,
         revision: stored!.revision + 1,
         stage: "bridge",
         model: model.projection,
         modelCredentialRef: model.credentialRef,
         modelProfileId: model.profileId,
         modelProbeLatencyMs: input.latencyMs,
+        ...(modelStaging.length === 0 ? {} : { modelStaging: Object.freeze(modelStaging) }),
       });
       await this.writeStored(updated);
       return project(updated);
@@ -278,6 +534,8 @@ export class ProductSetupDraftStore {
     readonly stage: ProductBridgeSetupStage;
     readonly latencyMs: number;
     readonly summary: { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number };
+    /** Optional adapter-projected map review; generic bridge setup remains ecosystem-neutral. */
+    readonly review?: ProductSetupMapReview;
   }): Promise<ProductSetupDraftProjection> {
     return this.exclusive(async () => {
       const sessionToken = boundedSessionToken(input.sessionToken);
@@ -287,9 +545,14 @@ export class ProductSetupDraftStore {
       requireActiveSession(stored, sessionToken, this.now());
       if (stored.revision !== input.expectedRevision) throw new Error("Setup draft revision conflict");
       if (stored.stage !== "bridge") throw new Error("Setup draft stage conflict");
-      const bridge = validateBridgeStage(input.stage, input.summary);
+      const bridge = validateBridgeStage(input.stage, input.summary, input.review);
+      if (!stored.bridgeStaging?.some((candidate) => sameBridgeStage(candidate, input.stage))) {
+        throw new Error("Bridge credential staging lease is missing");
+      }
+      const bridgeStaging = stored.bridgeStaging.filter((candidate) => !sameBridgeStage(candidate, input.stage));
+      const { bridgeStaging: _bridgeStaging, ...withoutBridgeStaging } = stored;
       const updated: StoredSetupDraft = Object.freeze({
-        ...stored,
+        ...withoutBridgeStaging,
         revision: stored.revision + 1,
         stage: "voice",
         bridge: bridge.projection,
@@ -297,6 +560,7 @@ export class ProductSetupDraftStore {
         bridgeConfig: bridge.config,
         bridgeCredentialRefs: bridge.credentialRefs,
         bridgeProbeLatencyMs: input.latencyMs,
+        ...(bridgeStaging.length === 0 ? {} : { bridgeStaging: Object.freeze(bridgeStaging) }),
       });
       await this.writeStored(updated);
       return project(updated);
@@ -434,6 +698,40 @@ export class ProductSetupDraftStore {
     });
     await this.writeStored(updated);
   }
+
+  private async ackModelStageInStored(
+    stored: StoredSetupDraft,
+    stage: ProductModelSetupStage,
+    kind: "cleanup" | "staging",
+  ): Promise<void> {
+    const pending = kind === "cleanup" ? stored.modelCleanup ?? [] : stored.modelStaging ?? [];
+    if (!pending.some((candidate) => sameModelStage(candidate, stage))) return;
+    const remaining = pending.filter((candidate) => !sameModelStage(candidate, stage));
+    const field = kind === "cleanup" ? "modelCleanup" : "modelStaging";
+    const { [field]: _removed, ...withoutPending } = stored;
+    const updated: StoredSetupDraft = Object.freeze({
+      ...withoutPending,
+      ...(remaining.length === 0 ? {} : { [field]: Object.freeze(remaining) }),
+    });
+    await this.writeStored(updated);
+  }
+
+  private async ackBridgeStageInStored(
+    stored: StoredSetupDraft,
+    stage: ProductBridgeSetupStage,
+    kind: "cleanup" | "staging",
+  ): Promise<void> {
+    const pending = kind === "cleanup" ? stored.bridgeCleanup ?? [] : stored.bridgeStaging ?? [];
+    if (!pending.some((candidate) => sameBridgeStage(candidate, stage))) return;
+    const remaining = pending.filter((candidate) => !sameBridgeStage(candidate, stage));
+    const field = kind === "cleanup" ? "bridgeCleanup" : "bridgeStaging";
+    const { [field]: _removed, ...withoutPending } = stored;
+    const updated: StoredSetupDraft = Object.freeze({
+      ...withoutPending,
+      ...(remaining.length === 0 ? {} : { [field]: Object.freeze(remaining) }),
+    });
+    await this.writeStored(updated);
+  }
 }
 
 function project(stored: StoredSetupDraft): ProductSetupDraftProjection {
@@ -477,7 +775,9 @@ function validateStored(value: unknown): StoredSetupDraft {
   if (!isRecord(value) || (value.version !== DRAFT_VERSION && value.version !== LEGACY_DRAFT_VERSION)) throw new Error("Setup draft header is invalid");
   const legacy = value.version === LEGACY_DRAFT_VERSION;
   if (legacy && (value.stage === "voice" || hasOwn(value, "voice") || hasOwn(value, "voiceProbeLatencyMs")
-    || hasOwn(value, "voiceSkipped") || hasOwn(value, "voiceCleanup") || hasOwn(value, "voiceStaging"))) {
+    || hasOwn(value, "voiceSkipped") || hasOwn(value, "voiceCleanup") || hasOwn(value, "voiceStaging")
+    || hasOwn(value, "modelCleanup") || hasOwn(value, "modelStaging")
+    || hasOwn(value, "bridgeCleanup") || hasOwn(value, "bridgeStaging"))) {
     throw new Error("Setup voice evidence is invalid");
   }
   const draftId = validDraftId(value.draftId);
@@ -498,11 +798,15 @@ function validateStored(value: unknown): StoredSetupDraft {
   const modelCredentialRef = value.modelCredentialRef === undefined ? undefined : boundedString(value.modelCredentialRef, 512, "Model credential reference");
   const modelProfileId = value.modelProfileId === undefined ? undefined : boundedString(value.modelProfileId, 256, "Model profile id");
   const modelProbeLatencyMs = value.modelProbeLatencyMs === undefined ? undefined : Number(value.modelProbeLatencyMs);
+  const modelCleanup = value.modelCleanup === undefined ? undefined : validateModelCleanup(draftId, value.modelCleanup, MAX_PENDING_MODEL_CLEANUPS);
+  const modelStaging = value.modelStaging === undefined ? undefined : validateModelCleanup(draftId, value.modelStaging, 1);
   const bridge = value.bridge === undefined ? undefined : validateStoredBridge(value.bridge);
   const bridgeId = value.bridgeId === undefined ? undefined : validBridgeId(value.bridgeId);
   const bridgeConfig = value.bridgeConfig === undefined ? undefined : validateBridgeConfig(value.bridgeConfig);
   const bridgeCredentialRefs = value.bridgeCredentialRefs === undefined ? undefined : validateBridgeCredentialRefs(bridgeId, value.bridgeCredentialRefs);
   const bridgeProbeLatencyMs = value.bridgeProbeLatencyMs === undefined ? undefined : Number(value.bridgeProbeLatencyMs);
+  const bridgeCleanup = value.bridgeCleanup === undefined ? undefined : validateBridgeCleanup(value.bridgeCleanup, MAX_PENDING_BRIDGE_CLEANUPS);
+  const bridgeStaging = value.bridgeStaging === undefined ? undefined : validateBridgeCleanup(value.bridgeStaging, 1);
   if ((value.stage === "bridge" || value.stage === "voice" || value.stage === "map") && (model === undefined || modelCredentialRef === undefined || modelProfileId === undefined
     || typeof modelProbeLatencyMs !== "number" || !Number.isSafeInteger(modelProbeLatencyMs)
     || modelProbeLatencyMs < 0 || modelProbeLatencyMs > 120_000)) {
@@ -511,10 +815,27 @@ function validateStored(value: unknown): StoredSetupDraft {
   if (model !== undefined && modelCredentialRef !== undefined && modelProfileId !== undefined) {
     validateModelProfileEvidence(draftId, model, modelCredentialRef, modelProfileId);
   }
+  if (modelCleanup?.some((stage) => stage.profile.secretRef === modelCredentialRef)
+    || modelStaging?.some((stage) => stage.profile.secretRef === modelCredentialRef)
+    || modelCleanup?.some((stage) => modelStaging?.some((candidate) => sameModelStage(candidate, stage)) ?? false)) {
+    throw new Error("Setup model cleanup is invalid");
+  }
+  if (modelStaging !== undefined && (value.stage !== "model" || model !== undefined || modelCredentialRef !== undefined || modelProfileId !== undefined)) {
+    throw new Error("Setup model credential staging is invalid");
+  }
   if ((value.stage === "voice" || value.stage === "map") && (bridge === undefined || bridgeId === undefined || bridgeConfig === undefined || bridgeCredentialRefs === undefined
     || typeof bridgeProbeLatencyMs !== "number" || !Number.isSafeInteger(bridgeProbeLatencyMs)
     || bridgeProbeLatencyMs < 0 || bridgeProbeLatencyMs > 120_000)) {
     throw new Error("Setup bridge evidence is incomplete");
+  }
+  if (bridgeCleanup?.some((stage) => sameBridgeCredentialRefs(stage.credentialRefs, bridgeCredentialRefs))
+    || bridgeStaging?.some((stage) => sameBridgeCredentialRefs(stage.credentialRefs, bridgeCredentialRefs))
+    || bridgeCleanup?.some((stage) => bridgeStaging?.some((candidate) => sameBridgeStage(candidate, stage)) ?? false)) {
+    throw new Error("Setup bridge cleanup is invalid");
+  }
+  if (bridgeStaging !== undefined && (value.stage !== "bridge" || bridge !== undefined || bridgeId !== undefined
+    || bridgeConfig !== undefined || bridgeCredentialRefs !== undefined || bridgeProbeLatencyMs !== undefined)) {
+    throw new Error("Bridge credential staging lease is invalid");
   }
   const voice = value.voice === undefined ? undefined : validateStoredVoice(draftId, value.voice);
   const voiceProbeLatencyMs = value.voiceProbeLatencyMs === undefined ? undefined : validateVoiceProbeLatencies(value.voiceProbeLatencyMs, voice);
@@ -555,11 +876,15 @@ function validateStored(value: unknown): StoredSetupDraft {
     ...(modelCredentialRef === undefined ? {} : { modelCredentialRef }),
     ...(modelProfileId === undefined ? {} : { modelProfileId }),
     ...(modelProbeLatencyMs === undefined ? {} : { modelProbeLatencyMs }),
+    ...(modelCleanup === undefined ? {} : { modelCleanup }),
+    ...(modelStaging === undefined ? {} : { modelStaging }),
     ...(bridge === undefined ? {} : { bridge }),
     ...(bridgeId === undefined ? {} : { bridgeId }),
     ...(bridgeConfig === undefined ? {} : { bridgeConfig }),
     ...(bridgeCredentialRefs === undefined ? {} : { bridgeCredentialRefs }),
     ...(bridgeProbeLatencyMs === undefined ? {} : { bridgeProbeLatencyMs }),
+    ...(bridgeCleanup === undefined ? {} : { bridgeCleanup }),
+    ...(bridgeStaging === undefined ? {} : { bridgeStaging }),
     ...(voice === undefined ? {} : { voice }),
     ...(voiceProbeLatencyMs === undefined ? {} : { voiceProbeLatencyMs }),
     ...(voiceSkipped === undefined ? {} : { voiceSkipped }),
@@ -572,7 +897,7 @@ function activationCandidate(stored: StoredSetupDraft): ProductBootstrapConfigDr
   if (stored.stage !== "map" || stored.householdName === undefined || stored.agentName === undefined
     || stored.model === undefined || stored.modelCredentialRef === undefined || stored.modelProfileId === undefined
     || stored.bridge === undefined || stored.bridgeId === undefined || stored.bridgeConfig === undefined || stored.bridgeCredentialRefs === undefined
-    || stored.voiceStaging !== undefined) {
+    || stored.voiceStaging !== undefined || stored.modelStaging !== undefined || stored.bridgeStaging !== undefined) {
     throw new Error("Setup activation candidate is incomplete");
   }
   const modelProfile = validateModelProfileEvidence(
@@ -762,29 +1087,105 @@ function voiceLabel(value: unknown): string {
 
 function validateBridgeStage(stage: ProductBridgeSetupStage, summary: {
   readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number;
-}): {
+}, review?: ProductSetupMapReview): {
   readonly projection: NonNullable<ProductSetupDraftProjection["bridge"]>;
   readonly bridgeId: string;
   readonly config: Readonly<Record<string, unknown>>;
   readonly credentialRefs: Readonly<Record<string, string>>;
 } {
+  if (!isRecord(stage) || Object.keys(stage).some((key) => key !== "bridgeId" && key !== "adapterType"
+    && key !== "label" && key !== "endpoint" && key !== "config" && key !== "credentialRefs")) {
+    throw new TypeError("Bridge setup stage is invalid");
+  }
   const adapterType = boundedBridgeAdapterType(stage.adapterType);
   const label = boundedBridgeLabel(stage.label);
   const bridgeId = validBridgeId(stage.bridgeId);
   const config = validateBridgeConfig(stage.config);
   const credentialRefs = validateBridgeCredentialRefs(bridgeId, stage.credentialRefs);
   const counts = validateBridgeSummary(summary);
+  const validatedReview = review === undefined ? undefined : validateBridgeReview(review);
+  if (validatedReview?.complete === true) {
+    const reviewedDeviceCount = validatedReview.areas.reduce((total, area) => total + area.deviceCount, 0)
+      + validatedReview.unassignedDeviceCount;
+    if (validatedReview.areas.length !== counts.areas || reviewedDeviceCount !== counts.devices) {
+      throw new TypeError("Setup bridge review is invalid");
+    }
+  }
   return {
     projection: Object.freeze({
       adapterType,
       label,
       ...(stage.endpoint === undefined ? {} : { endpoint: boundedBridgeEndpoint(stage.endpoint) }),
       summary: counts,
+      ...(validatedReview === undefined ? {} : { review: validatedReview }),
     }),
     bridgeId,
     config,
     credentialRefs,
   };
+}
+
+function emptyBridgeSummary(): { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number } {
+  return Object.freeze({ states: 0, entities: 0, devices: 0, areas: 0 });
+}
+
+function validateBridgeCleanup(value: unknown, maximum: number): readonly ProductBridgeSetupStage[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) {
+    throw new Error("Setup bridge cleanup is invalid");
+  }
+  const seen = new Set<string>();
+  const stages = value.map((candidate) => {
+    const stage = validateBridgeStage(candidate as ProductBridgeSetupStage, emptyBridgeSummary());
+    const reference = Object.values(stage.credentialRefs)[0]!;
+    if (seen.has(reference)) throw new Error("Setup bridge cleanup is invalid");
+    seen.add(reference);
+    return candidate as ProductBridgeSetupStage;
+  });
+  return Object.freeze(stages);
+}
+
+function appendBridgeCleanup(
+  pending: readonly ProductBridgeSetupStage[] | undefined,
+  removed: readonly ProductBridgeSetupStage[],
+  activeRefs?: Readonly<Record<string, string>>,
+): readonly ProductBridgeSetupStage[] {
+  const cleanup = [...(pending ?? [])];
+  const references = new Set(cleanup.flatMap((stage) => Object.values(stage.credentialRefs)));
+  for (const stage of removed) {
+    const [reference] = Object.values(stage.credentialRefs);
+    if (reference === undefined || sameBridgeCredentialRefs(stage.credentialRefs, activeRefs) || references.has(reference)) continue;
+    if (cleanup.length >= MAX_PENDING_BRIDGE_CLEANUPS) throw new Error("Setup bridge cleanup backlog is full");
+    cleanup.push(stage);
+    references.add(reference);
+  }
+  return Object.freeze(cleanup);
+}
+
+function appendBridgeStage(
+  pending: readonly ProductBridgeSetupStage[] | undefined,
+  stage: ProductBridgeSetupStage,
+): readonly ProductBridgeSetupStage[] {
+  if (pending?.some((candidate) => sameBridgeStage(candidate, stage))) return pending;
+  if ((pending?.length ?? 0) >= 1) throw new Error("Setup bridge cleanup backlog is full");
+  return Object.freeze([...(pending ?? []), stage]);
+}
+
+function sameBridgeStage(left: ProductBridgeSetupStage, right: ProductBridgeSetupStage): boolean {
+  return left.bridgeId === right.bridgeId && left.adapterType === right.adapterType
+    && left.label === right.label && left.endpoint === right.endpoint
+    && JSON.stringify(left.config) === JSON.stringify(right.config)
+    && sameBridgeCredentialRefs(left.credentialRefs, right.credentialRefs);
+}
+
+function sameBridgeCredentialRefs(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>> | undefined,
+): boolean {
+  if (right === undefined) return false;
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+  return leftEntries.length === rightEntries.length
+    && leftEntries.every(([alias, reference]) => right[alias] === reference);
 }
 
 function validateModelProfileEvidence(
@@ -878,7 +1279,46 @@ function validateStoredBridge(value: unknown): NonNullable<ProductSetupDraftProj
     label: boundedBridgeLabel(value.label),
     ...(value.endpoint === undefined ? {} : { endpoint: boundedBridgeEndpoint(value.endpoint) }),
     summary: validateBridgeSummary(value.summary),
+    ...(value.review === undefined ? {} : { review: validateBridgeReview(value.review) }),
   });
+}
+
+/** Allows only the compact, display-safe review contract inside durable setup state. */
+function validateBridgeReview(value: unknown): ProductSetupMapReview {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "areas" && key !== "unassignedDeviceCount" && key !== "complete")) {
+    throw new TypeError("Setup bridge review is invalid");
+  }
+  if (!Array.isArray(value.areas) || value.areas.length > 64
+    || !Number.isSafeInteger(value.unassignedDeviceCount) || Number(value.unassignedDeviceCount) < 0
+    || Number(value.unassignedDeviceCount) > 100_000 || typeof value.complete !== "boolean") {
+    throw new TypeError("Setup bridge review is invalid");
+  }
+  const seenNames = new Set<string>();
+  const areas = value.areas.map((area) => {
+    if (!isRecord(area) || Object.keys(area).some((key) => key !== "name" && key !== "deviceCount")) {
+      throw new TypeError("Setup bridge review is invalid");
+    }
+    const name = boundedBridgeReviewAreaName(area.name);
+    if (seenNames.has(name) || !Number.isSafeInteger(area.deviceCount) || Number(area.deviceCount) < 0 || Number(area.deviceCount) > 100_000) {
+      throw new TypeError("Setup bridge review is invalid");
+    }
+    seenNames.add(name);
+    return Object.freeze({ name, deviceCount: Number(area.deviceCount) });
+  });
+  return Object.freeze({
+    areas: Object.freeze(areas),
+    unassignedDeviceCount: Number(value.unassignedDeviceCount),
+    complete: value.complete,
+  });
+}
+
+function boundedBridgeReviewAreaName(value: unknown): string {
+  if (typeof value !== "string") throw new TypeError("Setup bridge review is invalid");
+  const name = value.trim();
+  if (name.length === 0 || Array.from(name).length > 80 || /[\u0000-\u001f\u007f]/u.test(name)) {
+    throw new TypeError("Setup bridge review is invalid");
+  }
+  return name;
 }
 
 function validateBridgeSummary(value: unknown): { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number } {
@@ -918,6 +1358,61 @@ function validateModelStage(draftId: string, stage: ProductModelSetupStage): {
     credentialRef,
     profileId,
   };
+}
+
+function validateModelCleanup(draftId: string, value: unknown, maximum: number): readonly ProductModelSetupStage[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) throw new Error("Setup model cleanup is invalid");
+  const references = new Set<string>();
+  const stages = value.map((candidate) => {
+    const stage = validateModelStage(draftId, candidate as ProductModelSetupStage);
+    if (references.has(stage.credentialRef)) throw new Error("Setup model cleanup is invalid");
+    references.add(stage.credentialRef);
+    return Object.freeze({
+      profile: Object.freeze({
+        id: stage.profileId,
+        provider: stage.projection.provider,
+        kind: "api_key" as const,
+        secretRef: stage.credentialRef,
+      }),
+      modelId: stage.projection.modelId,
+      ...(stage.projection.baseURL === undefined ? {} : { baseURL: stage.projection.baseURL }),
+    });
+  });
+  return Object.freeze(stages);
+}
+
+function appendModelCleanup(
+  pending: readonly ProductModelSetupStage[] | undefined,
+  removed: readonly ProductModelSetupStage[],
+  activeCredentialRef: string | undefined,
+): readonly ProductModelSetupStage[] {
+  const cleanup = [...(pending ?? [])];
+  const references = new Set(cleanup.map((stage) => stage.profile.secretRef));
+  for (const stage of removed) {
+    const reference = stage.profile.secretRef;
+    if (reference === undefined || reference === activeCredentialRef || references.has(reference)) continue;
+    if (cleanup.length >= MAX_PENDING_MODEL_CLEANUPS) throw new Error("Setup model cleanup backlog is full");
+    cleanup.push(stage);
+    references.add(reference);
+  }
+  return Object.freeze(cleanup);
+}
+
+function appendModelStage(
+  pending: readonly ProductModelSetupStage[] | undefined,
+  stage: ProductModelSetupStage,
+): readonly ProductModelSetupStage[] {
+  if (stage.profile.secretRef === undefined) throw new TypeError("Model credential staging lease is invalid");
+  if (pending?.some((candidate) => sameModelStage(candidate, stage))) return pending;
+  if ((pending?.length ?? 0) >= 1) throw new Error("Setup model credential staging is active");
+  return Object.freeze([...(pending ?? []), stage]);
+}
+
+function sameModelStage(left: ProductModelSetupStage, right: ProductModelSetupStage): boolean {
+  return left.profile.secretRef === right.profile.secretRef
+    && left.profile.id === right.profile.id
+    && left.profile.provider === right.profile.provider
+    && left.modelId === right.modelId;
 }
 
 function validateStoredModel(value: unknown): NonNullable<ProductSetupDraftProjection["model"]> {

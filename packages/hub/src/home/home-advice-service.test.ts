@@ -96,6 +96,10 @@ class BusyAdviceAgent extends Service {
   async requestAdvice() { return report; }
 }
 
+class DegradedAdviceAgent extends AdviceAgent {
+  readonly modelStatus = { state: "degraded" as const };
+}
+
 class DeferredAdviceAgent extends Service {
   readonly observationStatus = "idle" as const;
   calls = 0;
@@ -120,6 +124,10 @@ class DeferredAdviceAgent extends Service {
     this.releaseRequest?.();
     this.releaseRequest = undefined;
   }
+}
+
+class DegradedDeferredAdviceAgent extends DeferredAdviceAgent {
+  modelStatus: { state: "active" | "degraded" } = { state: "degraded" };
 }
 
 class RecordingActorScope extends Service {
@@ -229,6 +237,18 @@ test("does not advertise a question form while the home is unready or the Agent 
   await busy.plugin(HomeAdviceService, { path: ":memory:" });
   assert.equal(busy.homeAdvice.canAsk(), false);
   await busy.fiber.dispose();
+});
+
+test("reports model_unavailable before creating an advice request while the mounted Agent is degraded", async () => {
+  const ctx = new Context();
+  await ctx.plugin(ReadyWorld);
+  await ctx.plugin(DegradedAdviceAgent);
+  await ctx.plugin(HomeAdviceService, { path: ":memory:" });
+
+  assert.deepEqual(ctx.homeAdvice.availability(), { status: "model_unavailable" });
+  await assert.rejects(ctx.homeAdvice.ask("Can I ask again later?"), /model_unavailable/i);
+  assert.deepEqual(ctx.homeAdvice.list(), []);
+  await ctx.fiber.dispose();
 });
 
 test("reports a closed availability state instead of only a boolean", async () => {
@@ -500,6 +520,33 @@ test("keeps a background recovery coordinator waiting through startup connection
   await eventually(() => second.homeAdvice.activeRequestId() === original.id);
   assert.equal(second.homeAgent.calls, 1);
   assert.equal(second.homeAdvice.get(original.id)?.status, "background");
+  second.homeAgent.release();
+  await eventually(() => second.homeAdvice.get(original.id)?.status === "completed");
+  await second.fiber.dispose();
+});
+
+test("keeps a durable background advice untouched until the mounted Agent model recovers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-advice-service-model-recovery-"));
+  const path = join(directory, "advice.sqlite");
+  const first = new Context();
+  await first.plugin(ReadyWorld);
+  await first.plugin(DeferredAdviceAgent);
+  await first.plugin(HomeAdviceService, { path, idFactory: () => "advice-model-recovery" });
+  const original = await first.homeAdvice.ask("Why did the window open?");
+  assert.equal(first.homeAdvice.background(original.id), true);
+  await first.fiber.dispose();
+
+  const second = new Context();
+  await second.plugin(ReadyWorld);
+  await second.plugin(DegradedDeferredAdviceAgent);
+  await second.plugin(HomeAdviceService, { path, backgroundRecoveryIntervalMs: 5 });
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(second.homeAdvice.activeRequestId(), undefined);
+  assert.equal(second.homeAdvice.get(original.id)?.status, "background");
+  assert.equal(second.homeAgent.calls, 0);
+
+  second.homeAgent.modelStatus = { state: "active" };
+  await eventually(() => second.homeAdvice.activeRequestId() === original.id);
   second.homeAgent.release();
   await eventually(() => second.homeAdvice.get(original.id)?.status === "completed");
   await second.fiber.dispose();

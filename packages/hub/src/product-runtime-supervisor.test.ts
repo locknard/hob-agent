@@ -8,6 +8,8 @@ import test from "node:test";
 
 import type { InboxRequestAuthenticator } from "@hob-agent/inbox-web/http";
 import type { WritableSecretVault } from "@hob-agent/agent-layer/model-credentials";
+import { ModelProviderResolver, type ModelProviderGeneration } from "@hob-agent/agent-layer/model-provider-resolver";
+import type { StreamChunk } from "@deepseek-ai/dsh-llm";
 import type {
   ProductSetupDraftPort,
   ProductSetupDraftProjection,
@@ -19,6 +21,8 @@ import { ProductSetupDraftStore } from "./product-setup-draft-store.js";
 import { ProductSessionStore } from "./product-session-store.js";
 import { ProductVoiceCleanupLedger } from "./product-voice-cleanup-ledger.js";
 import { ProductOperationalVoiceSettings } from "./product-operational-voice-settings.js";
+import { ProductOperationalModelSettings } from "./product-operational-model-settings.js";
+import { ProductModelCleanupLedger } from "./product-model-cleanup-ledger.js";
 import { PrivateVoiceGateway } from "./voice/private-voice-gateway.js";
 import {
   ProductRuntimeSupervisor,
@@ -39,6 +43,178 @@ const draft: ProductBootstrapConfigDraft = {
   },
   bridges: [],
 };
+
+test("mounts one degraded model resolver and settings owner for the exact operational bundle", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-model-owner-"));
+  const credentials = new Map<string, string>();
+  let endpointAvailable = false;
+  let observedResolver: ModelProviderResolver | undefined;
+  let observedSettings: ProductOperationalModelSettings | undefined;
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    modelCredentialVault: {
+      read: async (reference) => credentials.get(reference),
+      write: async (reference, value) => { credentials.set(reference, value); },
+      delete: async (reference) => { credentials.delete(reference); },
+    },
+    createModelProviderResolver: (context) => new ModelProviderResolver(context, {
+      createGeneration: async (): Promise<ModelProviderGeneration> => ({
+        provider: "custom",
+        model: "home-model",
+        runtime: {
+          resolveModelInfo: async () => {
+            if (!endpointAvailable) throw new Error("endpoint unavailable");
+            return { provider: "custom", id: "home-model", name: "home-model" };
+          },
+          stream: async function* (): AsyncIterable<StreamChunk> { yield { type: "finish", reason: { kind: "stop" } }; },
+        },
+        dispose: async () => undefined,
+      }),
+    }),
+    mountOperational: async (input) => {
+      assert.equal(input.modelProviderResolver.status().state, "degraded");
+      assert.equal(input.modelSettings.constructor, ProductOperationalModelSettings);
+      observedResolver = input.modelProviderResolver;
+      observedSettings = input.modelSettings;
+      return mountedBundle().bundle;
+    },
+  });
+  try {
+    await new ProductBootstrapConfigStore(directory).commit(0, draft);
+    await runtime.start();
+    assert.equal(runtime.mode, "operational");
+    endpointAvailable = true;
+    assert.equal(await observedSettings?.retry(), "active");
+    assert.equal(observedResolver?.status().state, "ready");
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps the active model ledger owner when a later voice generation changes global configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-model-recovery-"));
+  const store = new ProductBootstrapConfigStore(directory);
+  const ledger = new ProductModelCleanupLedger(directory);
+  const reference = "keychain:hob-agent/model:model-current:nonce-current";
+  const deleted: string[] = [];
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    modelCredentialVault: {
+      read: async () => "active-key",
+      write: async () => undefined,
+      delete: async (value) => { deleted.push(value); },
+    },
+    createModelProviderResolver: (context) => new ModelProviderResolver(context, {
+      createGeneration: async (): Promise<ModelProviderGeneration> => ({
+        provider: "custom",
+        model: "home-model",
+        runtime: {
+          resolveModelInfo: async () => { throw new Error("endpoint unavailable"); },
+          stream: async function* (): AsyncIterable<StreamChunk> { yield { type: "finish", reason: { kind: "stop" } }; },
+        },
+        dispose: async () => undefined,
+      }),
+    }),
+    mountOperational: async () => mountedBundle().bundle,
+  });
+  try {
+    await store.commit(0, draft);
+    await store.commitModel(1, {
+      modelReference: "custom/home-model",
+      modelBaseURL: "https://model.example.test/v1",
+      modelProfile: { id: "custom:operational:model-current", provider: "custom", kind: "api_key", secretRef: reference },
+    });
+    await ledger.reserve({ candidateId: "model-current", credentialRef: reference, expectedGeneration: 1 });
+    await ledger.markCommitted({ candidateId: "model-current", credentialRef: reference, expectedGeneration: 1, committedGeneration: 2 });
+    await store.commitVoice(2, undefined);
+
+    await runtime.start();
+
+    assert.deepEqual((await ledger.load()).entries.map((entry) => entry.phase), ["active"]);
+    assert.deepEqual(deleted, []);
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retries a retired first-generation setup model credential after restart without deleting the active replacement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-setup-model-cleanup-"));
+  const store = new ProductBootstrapConfigStore(directory);
+  const ledger = new ProductModelCleanupLedger(directory);
+  const setupReference = "keychain:hob-agent/setup-model:first-home:setup-nonce";
+  const replacementReference = "keychain:hob-agent/model:replacement-home:replacement-nonce";
+  const deleted: string[] = [];
+  let deleteAvailable = false;
+  const vault: WritableSecretVault = {
+    read: async () => undefined,
+    write: async () => undefined,
+    delete: async (reference) => {
+      deleted.push(reference);
+      if (!deleteAvailable) throw new Error("keychain unavailable");
+    },
+  };
+  const first = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    modelCredentialVault: vault,
+    createModelProviderResolver: readyModelResolver,
+    mountOperational: async () => mountedBundle().bundle,
+  });
+  const second = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    modelCredentialVault: vault,
+    createModelProviderResolver: readyModelResolver,
+    mountOperational: async () => mountedBundle().bundle,
+  });
+  try {
+    await store.commit(0, {
+      ...draft,
+      modelProfile: {
+        id: "custom:setup:first-home",
+        provider: "custom",
+        kind: "api_key",
+        secretRef: setupReference,
+      },
+    });
+    await ledger.adoptCommitted({ candidateId: "first-home", credentialRef: setupReference, committedGeneration: 1 });
+    await store.commitModel(1, {
+      modelReference: "custom/home-model",
+      modelBaseURL: "https://model.example.test/v1",
+      modelProfile: {
+        id: "custom:operational:replacement-home",
+        provider: "custom",
+        kind: "api_key",
+        secretRef: replacementReference,
+      },
+    });
+    await ledger.adoptCommitted({ candidateId: "replacement-home", credentialRef: replacementReference, committedGeneration: 2 });
+
+    await first.start();
+    assert.deepEqual(deleted, [setupReference]);
+    assert.equal((await ledger.listPending())[0]?.credentialRef, setupReference);
+    await first.stop();
+
+    deleteAvailable = true;
+    await second.start();
+    assert.equal(second.mode, "operational");
+    assert.deepEqual(deleted, [setupReference, setupReference]);
+    assert.deepEqual(await ledger.listPending(), []);
+    assert.equal(deleted.includes(replacementReference), false);
+  } finally {
+    await first.stop();
+    await second.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("mounts a stable disabled private voice gateway when voice is not configured", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-disabled-voice-"));
@@ -268,11 +444,13 @@ test("keeps product mounting when operational voice cleanup fails", async () => 
   }
 });
 
-test("recovers persisted voice staging once before the setup surface becomes available", async () => {
+test("recovers persisted bridge and voice staging before the setup surface becomes available", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-voice-staging-"));
   const events: string[] = [];
   const setup = new MapSetupDrafts(draft);
   Object.assign(setup, {
+    recoverBridgeCredentialStaging: async () => { events.push("recover-bridge-staging"); },
+    sweepBridgeCredentialCleanup: async () => { events.push("sweep-bridge-retired"); },
     recoverVoiceCredentialStaging: async () => { events.push("recover-staging"); },
     sweepVoiceCredentialCleanup: async () => { events.push("sweep-retired"); },
   });
@@ -286,7 +464,7 @@ test("recovers persisted voice staging once before the setup surface becomes ava
   });
   try {
     await runtime.start();
-    assert.deepEqual(events, ["recover-staging", "sweep-retired", "setup-surface"]);
+    assert.deepEqual(events, ["recover-bridge-staging", "sweep-bridge-retired", "recover-staging", "sweep-retired", "setup-surface"]);
   } finally {
     await runtime.stop();
     await rm(directory, { recursive: true, force: true });
@@ -330,7 +508,7 @@ test("activates the exact mapped draft and rotates the short-lived setup token i
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
 
     assert.equal(response.status, 303);
@@ -353,6 +531,40 @@ test("activates the exact mapped draft and rotates the short-lived setup token i
     }), true);
     await runtime.stop();
     assert.equal(mounted.disposeCalls(), 1);
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("does not commit an activation candidate when its prepared operational child cannot mount", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-candidate-mount-failure-"));
+  const configurationStore = new ProductBootstrapConfigStore(directory);
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    setupDrafts: new MapSetupDrafts(draft),
+    configurationStore,
+    createModelProviderResolver: readyModelResolver,
+    mountOperational: async () => undefined,
+    announce: () => undefined,
+  });
+  try {
+    await runtime.start();
+    const response = await fetch(`${runtime.origin}/setup/activate`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        origin: runtime.origin,
+        cookie: "hob_product_session=paired-session-token-which-is-long-enough",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "revision=7&mapReviewed=confirmed",
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal(await configurationStore.load(), undefined);
   } finally {
     await runtime.stop();
     await rm(directory, { recursive: true, force: true });
@@ -396,7 +608,7 @@ test("restores a durable operational session after restart even when setup would
         cookie: `hob_product_session=${setupToken}`,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
     assert.equal(activation.status, 303);
     await first.stop();
@@ -452,7 +664,7 @@ test("clears an uncommitted operational session before reopening setup", async (
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
 
     assert.equal(response.status, 303);
@@ -506,7 +718,7 @@ test("announces one recovery code after restart and lets exactly one local recov
         cookie: `hob_product_session=${setupToken}`,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
     assert.equal(activation.status, 303);
     await first.stop();
@@ -568,7 +780,7 @@ test("keeps a committed generation recoverable after both immediate attachments 
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
     assert.equal(response.status, 503);
     assert.equal(response.headers.get("set-cookie"), null);
@@ -637,7 +849,7 @@ test("remounts the committed generation before returning the activation receipt 
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
 
     assert.equal(response.status, 303);
@@ -675,7 +887,7 @@ test("keeps setup live and leaves configuration absent when the candidate cannot
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
 
     assert.equal(response.status, 503);
@@ -764,30 +976,32 @@ test("uses the one Cordis-mounted voice setup owner for the real first-run contr
     householdName: "梧桐家",
     agentName: "小满",
   });
+  const modelStage = {
+    profile: {
+      id: "custom:setup:voice-controller-draft",
+      provider: "custom" as const,
+      kind: "api_key" as const,
+      secretRef: "keychain:hob-agent/setup-model:voice-controller-draft:model-stage",
+    },
+    modelId: "local-model",
+  };
+  await store.reserveModelCredential({ sessionToken, expectedRevision: 2, stage: modelStage });
   await store.recordModelProbe({
     sessionToken,
     expectedRevision: 2,
-    stage: {
-      profile: {
-        id: "custom:setup:voice-controller-draft",
-        provider: "custom",
-        kind: "api_key",
-        secretRef: "keychain:hob-agent/setup-model:voice-controller-draft:model-stage",
-      },
-      modelId: "local-model",
-    },
+    stage: modelStage,
     latencyMs: 3,
   });
+  const bridgeStage = {
+    bridgeId: "bridge-0123456789abcdef", adapterType: "fixture-peer", label: "Fixture peer",
+    config: { endpoint: "fixture://peer.local" },
+    credentialRefs: { session: "keychain:hob-agent/bridge:bridge-0123456789abcdef:session" },
+  };
+  await store.reserveBridgeCredential({ sessionToken, expectedRevision: 3, stage: bridgeStage });
   await store.recordBridgeProbe({
     sessionToken,
     expectedRevision: 3,
-    stage: {
-      bridgeId: "bridge-0123456789abcdef",
-      adapterType: "fixture-peer",
-      label: "Fixture peer",
-      config: { endpoint: "fixture://peer.local" },
-      credentialRefs: { session: "keychain:hob-agent/bridge:bridge-0123456789abcdef:session" },
-    },
+    stage: bridgeStage,
     latencyMs: 4,
     summary: { states: 5, entities: 4, devices: 3, areas: 2 },
   });
@@ -820,7 +1034,54 @@ test("uses the one Cordis-mounted voice setup owner for the real first-run contr
       body: "revision=4&service=wyoming&endpoint=wyoming%3A%2F%2F127.0.0.1%3A10300",
     });
     assert.equal(response.status, 303);
+    await waitForSetupProbe(runtime.origin, `hob_product_session=${sessionToken}`);
     assert.deepEqual(calls, ["asr"]);
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovers interrupted model staging before the setup surface attaches", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-model-staging-"));
+  const now = new Date("2026-08-24T00:30:00.000Z");
+  const sessionToken = "model-staging-cold-start-private-session-token";
+  const credentials = new Map<string, string>();
+  const deleted: string[] = [];
+  const store = new ProductSetupDraftStore(directory, () => now, () => "model-staging-cold-start");
+  const stage = {
+    profile: {
+      id: "gpt:setup:model-staging-cold-start",
+      provider: "gpt" as const,
+      kind: "api_key" as const,
+      secretRef: "keychain:hob-agent/setup-model:model-staging-cold-start:interrupted",
+    },
+    modelId: "gpt-5",
+  };
+  await store.establishSession({ sessionToken, sessionExpiresAt: new Date("2026-08-24T12:30:00.000Z") });
+  await store.saveIdentity({ sessionToken, expectedRevision: 1, householdName: "梧桐家", agentName: "小满" });
+  await store.reserveModelCredential({ sessionToken, expectedRevision: 2, stage });
+  credentials.set(stage.profile.secretRef, "request-local-model-secret");
+  let announcedAfterCleanup = false;
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    now: () => now,
+    pairingCode: "LIVE-HOME",
+    modelCredentialVault: {
+      read: async (reference) => credentials.get(reference),
+      write: async (reference, value) => { credentials.set(reference, value); },
+      delete: async (reference) => { deleted.push(reference); credentials.delete(reference); },
+    },
+    mountOperational: async () => undefined,
+    announce: () => { announcedAfterCleanup = credentials.has(stage.profile.secretRef) === false; },
+  });
+  try {
+    await runtime.start();
+    assert.equal(announcedAfterCleanup, true);
+    assert.deepEqual(deleted, [stage.profile.secretRef]);
+    assert.deepEqual(await store.pendingModelCleanupForMaintenance(), []);
+    assert.equal(await store.activationCandidateForSession(sessionToken, 2), undefined);
   } finally {
     await runtime.stop();
     await rm(directory, { recursive: true, force: true });
@@ -881,7 +1142,7 @@ test("activates the configured private voice providers before handing over the p
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
     assert.equal(response.status, 303);
     assert.equal((await new ProductBootstrapConfigStore(directory).load())?.voice?.tts.model, "local-tts");
@@ -928,7 +1189,7 @@ test("activates the household product with text available when private voice is 
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
 
     assert.equal(response.status, 303);
@@ -1050,6 +1311,7 @@ test("cleans a retired voice credential when a mapped setup draft becomes operat
     pairingCode: "LIVE-HOME",
     createOperationalSessionToken: () => "voice-activation-operational-token-with-enough-entropy",
     voiceSetup: { vault, probe: async () => ({ status: "unavailable" }) },
+    createModelProviderResolver: readyModelResolver,
     mountOperational: async () => mountedBundle().bundle,
     announce: () => undefined,
   });
@@ -1066,7 +1328,7 @@ test("cleans a retired voice credential when a mapped setup draft becomes operat
         cookie: `hob_product_session=${setupToken}`,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=6",
+      body: "revision=6&mapReviewed=confirmed",
     });
     assert.equal(response.status, 303);
     assert.deepEqual(deleted, [retired.credentialRef, retired.credentialRef]);
@@ -1128,7 +1390,7 @@ test("cancels private voice work before waiting for the operational product to f
         cookie: "hob_product_session=paired-session-token-which-is-long-enough",
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "revision=7",
+      body: "revision=7&mapReviewed=confirmed",
     });
     assert.equal(activation.status, 303);
     const started = new Promise<void>((resolve) => { operationStarted = resolve; });
@@ -1153,6 +1415,17 @@ test("cancels private voice work before waiting for the operational product to f
   }
 });
 
+async function waitForSetupProbe(origin: string, cookie: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const response = await fetch(`${origin}/setup/probe-status`, { headers: { cookie } });
+    assert.equal(response.status, 200);
+    const status = await response.json() as { readonly status: "pending" | "completed" | "idle" };
+    if (status.status === "completed") return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("setup probe did not complete within its bounded wait");
+}
+
 class MapSetupDrafts implements ProductSetupDraftPort {
   private readonly projection: ProductSetupDraftProjection = {
     draftId: "runtime-supervisor",
@@ -1160,6 +1433,12 @@ class MapSetupDrafts implements ProductSetupDraftPort {
     stage: "map",
     householdName: "梧桐家",
     agentName: "小满",
+    bridge: {
+      adapterType: "fixture-peer",
+      label: "Fixture peer",
+      summary: { states: 0, entities: 0, devices: 0, areas: 0 },
+      review: { areas: [], unassignedDeviceCount: 0, complete: true },
+    },
   };
 
   constructor(private readonly candidate: ProductBootstrapConfigDraft) {}
@@ -1174,6 +1453,20 @@ class MapSetupDrafts implements ProductSetupDraftPort {
   async activationCandidateForSession(token: string, revision: number): Promise<ProductBootstrapConfigDraft | undefined> {
     return token === "paired-session-token-which-is-long-enough" && revision === 7 ? this.candidate : undefined;
   }
+}
+
+function readyModelResolver(context: Context): ModelProviderResolver {
+  return new ModelProviderResolver(context, {
+    createGeneration: async (): Promise<ModelProviderGeneration> => ({
+      provider: "custom",
+      model: "home-model",
+      runtime: {
+        resolveModelInfo: async (provider, model) => ({ provider, id: model, name: model }),
+        stream: async function* (): AsyncIterable<StreamChunk> { yield { type: "finish", reason: { kind: "stop" } }; },
+      },
+      dispose: async () => undefined,
+    }),
+  });
 }
 
 function mountedBundle(): {
@@ -1215,32 +1508,35 @@ async function prepareRetiredVoiceCredential(
   };
   await store.establishSession({ sessionToken: token, sessionExpiresAt: new Date("2026-08-23T14:00:00.000Z") });
   await store.saveIdentity({ sessionToken: token, expectedRevision: 1, householdName: "测试家", agentName: "测试助手" });
+  const modelStage = {
+    profile: {
+      id: "custom:setup:runtime-voice-cleanup",
+      provider: "custom" as const,
+      kind: "api_key" as const,
+      secretRef: "keychain:hob-agent/setup-model:runtime-voice-cleanup:model-stage",
+    },
+    modelId: "local-model",
+  };
+  await store.reserveModelCredential({ sessionToken: token, expectedRevision: 2, stage: modelStage });
   await store.recordModelProbe({
     sessionToken: token,
     expectedRevision: 2,
     latencyMs: 10,
-    stage: {
-      profile: {
-        id: "custom:setup:runtime-voice-cleanup",
-        provider: "custom",
-        kind: "api_key",
-        secretRef: "keychain:hob-agent/setup-model:runtime-voice-cleanup:model-stage",
-      },
-      modelId: "local-model",
-    },
+    stage: modelStage,
   });
+  const bridgeStage = {
+    bridgeId: "bridge-0123456789abcdef", adapterType: "fixture-peer", label: "Fixture peer",
+    config: { endpoint: "fixture://peer.local" },
+    credentialRefs: { session: "keychain:hob-agent/bridge:bridge-0123456789abcdef:session" },
+  };
+  await store.reserveBridgeCredential({ sessionToken: token, expectedRevision: 3, stage: bridgeStage });
   await store.recordBridgeProbe({
     sessionToken: token,
     expectedRevision: 3,
     latencyMs: 10,
     summary: { states: 1, entities: 1, devices: 1, areas: 1 },
-    stage: {
-      bridgeId: "bridge-0123456789abcdef",
-      adapterType: "fixture-peer",
-      label: "Fixture peer",
-      config: { endpoint: "fixture://peer.local" },
-      credentialRefs: { session: "keychain:hob-agent/bridge:bridge-0123456789abcdef:session" },
-    },
+    review: { areas: [{ name: "测试室", deviceCount: 1 }], unassignedDeviceCount: 0, complete: true },
+    stage: bridgeStage,
   });
   await store.reserveVoiceCredential({ sessionToken: token, expectedRevision: 4, stage: retired });
   await store.recordVoiceProbe({ sessionToken: token, expectedRevision: 4, stage: retired, latencyMs: 10 });

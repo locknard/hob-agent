@@ -25,6 +25,8 @@ export type {
 
 interface AdviceAgentPort {
   readonly observationStatus: "idle" | "running";
+  /** The mounted Home Agent projects its Hub-owned resolver status without exposing provider details. */
+  readonly modelStatus?: { readonly state: "active" | "degraded" | "retrying" | "switching" };
   requestAdvice(question: string, signal?: AbortSignal): Promise<HomeAdviceReport>;
   /** Safe, already-redacted DSH metadata. Prompt text and tool payloads are never exposed here. */
   traceSnapshot?(): AgentLoopTrace | undefined;
@@ -178,6 +180,9 @@ export class HomeAdviceService extends Service {
     const agent = this.ctx.get("homeAgent") as unknown as AdviceAgentPort | undefined;
     if (world === undefined || agent === undefined) return { status: "setup_required" };
     if (!isHomeWorldReady(world.snapshot())) return { status: "home_connecting" };
+    if (agent.modelStatus?.state === "degraded" || agent.modelStatus?.state === "retrying") {
+      return { status: "model_unavailable" };
+    }
     if (agent.observationStatus !== "idle") return { status: "agent_busy" };
     return { status: "ready" };
   }
@@ -316,7 +321,12 @@ export class HomeAdviceService extends Service {
     if (this.closed || this.active !== undefined) return false;
     const world = this.ctx.get("homeWorld") as unknown as AdviceWorldPort | undefined;
     const agent = this.ctx.get("homeAgent") as unknown as AdviceAgentPort | undefined;
-    if (world === undefined || agent === undefined || !isHomeWorldReady(world.snapshot()) || agent.observationStatus !== "idle") {
+    if (world === undefined
+      || agent === undefined
+      || !isHomeWorldReady(world.snapshot())
+      || agent.modelStatus?.state === "degraded"
+      || agent.modelStatus?.state === "retrying"
+      || agent.observationStatus !== "idle") {
       return false;
     }
     const record = this.store.list({ limit: 1, status: "background" })[0];

@@ -6,9 +6,10 @@ import test from "node:test";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 import { assembleContextFor } from "@deepseek-ai/dsh-agent";
-import { credentialRef } from "@deepseek-ai/dsh-credentials";
+import { createUserMessage, type StreamChunk } from "@deepseek-ai/dsh-llm";
 import { renderContextSnapshot, renderPrompt } from "@deepseek-ai/dsh-system-prompt";
 
+import { ModelProviderResolver, type ModelProviderGeneration } from "../model/model-provider-resolver.js";
 import { mountDshHomeAgent } from "./home-agent-composition.js";
 
 class StubWorldService extends Service {
@@ -25,6 +26,162 @@ class StubProposalService extends Service {
   }
 }
 
+test("uses the Hub-owned prepared resolver identity without creating another Agent or loop", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  let disposed = 0;
+  const resolver = new ModelProviderResolver(ctx, {
+    createGeneration: async (): Promise<ModelProviderGeneration> => ({
+      provider: "deepseek",
+      model: "hub-selected-model",
+      runtime: {
+        resolveModelInfo: async (provider, model) => ({ provider, id: model, name: model }),
+        stream: async function* (): AsyncIterable<StreamChunk> {
+          yield { type: "finish", reason: { kind: "stop" } };
+        },
+      },
+      dispose: async () => { disposed += 1; },
+    }),
+  });
+  resolver.activate(await resolver.prepare({ provider: "deepseek", model: "hub-selected-model" }));
+
+  const fiber = await mountDshHomeAgent(ctx, {
+    provider: "deepseek",
+    model: "ignored-by-injected-resolver",
+    sessionId: "hub-owned-resolver",
+    modelProviderResolver: resolver,
+  });
+
+  assert.equal(String(ctx.homeAgent.agent.id), "hub-owned-resolver");
+  assert.deepEqual(ctx.llm.listProviders().map((provider) => provider.id), ["hob-home-active"]);
+  assert.equal(JSON.stringify(ctx.homeAgent.agent.session.header).includes("hub-selected-model"), false);
+  await fiber.dispose();
+  assert.equal(disposed, 0);
+  await resolver.dispose();
+  assert.equal(disposed, 1);
+  await ctx.fiber.dispose();
+});
+
+test("keeps the one Home Agent loop mounted while its injected resolver is degraded", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  const resolver = new ModelProviderResolver(ctx, {
+    createGeneration: async (): Promise<ModelProviderGeneration> => {
+      throw new Error("not available during cold start");
+    },
+  });
+
+  const fiber = await mountDshHomeAgent(ctx, {
+    provider: "deepseek",
+    model: "hub-owned-model",
+    sessionId: "hub-owned-degraded-resolver",
+    modelProviderResolver: resolver,
+  });
+
+  assert.equal(String(ctx.homeAgent.agent.id), "hub-owned-degraded-resolver");
+  assert.deepEqual(ctx.homeAgent.modelStatus, { state: "degraded" });
+  await fiber.dispose();
+  await resolver.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("keeps pressure compaction on the turn's prior generation after a synchronous swap", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  const calls: Array<{ generation: string; purpose: string | undefined }> = [];
+  const metadataSignals: string[] = [];
+  const disposed: string[] = [];
+  let normalCalls = 0;
+  const resolver = new ModelProviderResolver(ctx, {
+    createGeneration: async (selected): Promise<ModelProviderGeneration> => ({
+      provider: `physical-${selected.model}`,
+      model: selected.model,
+      runtime: {
+        resolveModelInfo: async (provider, model, signal) => {
+          if (signal !== undefined) metadataSignals.push(selected.model);
+          return {
+            provider,
+            id: model,
+            name: model,
+            context: { contextWindow: 100 },
+          };
+        },
+        stream: async function* (options): AsyncIterable<StreamChunk> {
+          calls.push({ generation: selected.model, purpose: options.purpose });
+          if (options.purpose === "compaction") {
+            yield { type: "block-start", index: 0, blockType: "text" };
+            yield { type: "text-delta", index: 0, text: "Compact household checkpoint." };
+            yield { type: "block-end", index: 0, block: { type: "text", text: "Compact household checkpoint." } };
+            yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+            yield { type: "finish", reason: { kind: "stop" } };
+            return;
+          }
+          normalCalls += 1;
+          if (normalCalls === 1) {
+            const argumentsJson = JSON.stringify({ limit: 1 });
+            yield { type: "block-start", index: 0, blockType: "tool-call" };
+            yield {
+              type: "tool-call-delta",
+              index: 0,
+              id: "inventory-for-compaction",
+              name: "get_home_inventory",
+              argumentsDelta: argumentsJson,
+            };
+            yield {
+              type: "block-end",
+              index: 0,
+              block: {
+                type: "tool-call",
+                id: "inventory-for-compaction",
+                name: "get_home_inventory",
+                arguments: argumentsJson,
+              },
+            };
+            yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+            yield { type: "finish", reason: { kind: "tool-calls" } };
+            return;
+          }
+          yield { type: "finish", reason: { kind: "stop" } };
+        },
+      },
+      dispose: async () => { disposed.push(selected.model); },
+    }),
+  });
+  resolver.activate(await resolver.prepare({ provider: "deepseek", model: "generation-one" }));
+  const second = await resolver.prepare({ provider: "deepseek", model: "generation-two" });
+  const fiber = await mountDshHomeAgent(ctx, {
+    provider: "deepseek",
+    model: "ignored-by-injected-resolver",
+    sessionId: "compaction-generation-owner",
+    modelProviderResolver: resolver,
+  });
+  let transition: ReturnType<ModelProviderResolver["activate"]> | undefined;
+  const disposeSwap = ctx.on("session/event", (session, event) => {
+    if (session !== ctx.homeAgent.agent.session || event.type !== "step/end" || transition !== undefined) return;
+    transition = resolver.activate(second);
+  }, { global: true });
+
+  ctx.homeAgent.agent.followup(createUserMessage({
+    content: [{ type: "text", text: "Inspect the home inventory and continue with a compact answer." }],
+    source: { kind: "user" },
+  }));
+  await ctx.homeAgent.agent.whenIdle();
+  disposeSwap();
+
+  assert.ok(transition);
+  await transition.drained;
+  assert.equal(calls.some((call) => call.generation === "generation-one" && call.purpose === "compaction"), true);
+  assert.equal(calls.some((call) => call.generation === "generation-two"), false);
+  assert.equal(metadataSignals.includes("generation-one"), true);
+  assert.deepEqual(disposed, ["generation-one"]);
+  await fiber.dispose();
+  await resolver.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("mounts the official DSH pi-ai adapter for a product provider route", async () => {
   const ctx = new Context();
   await ctx.plugin(StubWorldService);
@@ -36,16 +193,16 @@ test("mounts the official DSH pi-ai adapter for a product provider route", async
     sessionId: "home-provider-test",
   });
 
-  assert.deepEqual(ctx.llm.listProviders().map((provider) => provider.id), ["deepseek"]);
+  assert.deepEqual(ctx.llm.listProviders().map((provider) => provider.id), ["hob-home-active"]);
   assert.equal(String(ctx.homeAgent.agent.id), "home-provider-test");
-  assert.equal((await ctx.llm.listModels("deepseek")).some((model) => model.id === "deepseek-v4-flash"), true);
-  assert.ok((await ctx.llm.resolveModelInfo("deepseek", "deepseek-v4-flash")).context?.contextWindow);
+  assert.deepEqual((await ctx.llm.listModels("hob-home-active")).map((model) => model.id), ["hob-home-active"]);
+  assert.equal((await ctx.llm.resolveModelInfo("hob-home-active", "hob-home-active")).provider, "hob-home-active");
 
   await fiber.dispose();
   await ctx.fiber.dispose();
 });
 
-test("bridges a selected API-key profile into the official DSH credential seam", async () => {
+test("keeps selected API-key profile details outside the root DSH runtime", async () => {
   const ctx = new Context();
   await ctx.plugin(StubWorldService);
   await ctx.plugin(StubProposalService);
@@ -67,8 +224,9 @@ test("bridges a selected API-key profile into the official DSH credential seam",
     },
   });
 
-  assert.equal((await ctx.credentials.resolve(credentialRef("DEEPSEEK_API_KEY")))?.value, "profile-key");
-  assert.deepEqual(reads, ["keychain:hob-agent/deepseek:primary"]);
+  assert.equal(JSON.stringify(ctx.homeAgent.agent.session.header).includes("keychain:"), false);
+  assert.equal(JSON.stringify(ctx.homeAgent.agent.session.header).includes("deepseek:primary"), false);
+  assert.deepEqual(reads, []);
 
   await fiber.dispose();
   await ctx.fiber.dispose();
@@ -92,18 +250,10 @@ test("mounts a hand-declared OpenAI-compatible custom deployment", async () => {
     sessionId: "custom-provider-test",
   });
 
-  assert.deepEqual(ctx.llm.listProviders().map((provider) => provider.id), ["hob-custom-openai"]);
-  assert.deepEqual((await ctx.llm.listModels("hob-custom-openai")).map((model) => model.id), [
-    "deepseek-v4-flash-0731",
-  ]);
-  assert.equal(
-    (await ctx.credentials.resolve(credentialRef("HOB_CUSTOM_MODEL_API_KEY")))?.value,
-    "custom-profile-key",
-  );
-  assert.equal(
-    (await ctx.llm.resolveModelInfo("hob-custom-openai", "deepseek-v4-flash-0731")).provider,
-    "hob-custom-openai",
-  );
+  assert.deepEqual(ctx.llm.listProviders().map((provider) => provider.id), ["hob-home-active"]);
+  assert.deepEqual((await ctx.llm.listModels("hob-home-active")).map((model) => model.id), ["hob-home-active"]);
+  assert.equal(JSON.stringify(ctx.homeAgent.agent.session.header).includes("models.example.test"), false);
+  assert.equal(JSON.stringify(ctx.homeAgent.agent.session.header).includes("keychain:"), false);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

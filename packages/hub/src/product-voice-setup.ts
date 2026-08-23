@@ -10,6 +10,8 @@ import {
   type PrivateVoiceTransport,
 } from "./voice/private-voice-endpoint.js";
 import { WyomingVoiceTransport } from "./voice/wyoming-voice-transport.js";
+import { ProductVoiceCredentialLease as ProductOperationalVoiceCredentialLease } from "./product-voice-cleanup-ledger.js";
+import { ProductSetupVoiceCredentialLease } from "./product-setup-draft-store.js";
 
 const SETUP_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const STAGE_NONCE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -77,11 +79,6 @@ export type ProductVoicePrepareOutcome =
   | { readonly status: "prepared"; readonly prepared: ProductVoicePreparedProbe }
   | Exclude<ProductVoiceProbeOutcome, { readonly status: "ready" }>;
 
-/** A durable setup-draft owner issues this exact locator lease before a credential write. */
-export interface ProductVoiceCredentialLease {
-  readonly stage: ProductVoiceSetupStage;
-}
-
 /**
  * The transport adapter receives metadata plus a short-lived credential only
  * while probing. It exposes a deliberately small, provider-neutral result.
@@ -139,13 +136,17 @@ export class ProductVoiceSetup {
   /** Executes a prepared probe. Credential-backed probes require their persisted exact locator lease. */
   async execute(input: {
     readonly prepared: ProductVoicePreparedProbe;
-    readonly credentialLease?: ProductVoiceCredentialLease;
+    readonly credentialLease?: ProductSetupVoiceCredentialLease | ProductOperationalVoiceCredentialLease;
     readonly signal?: AbortSignal;
   }): Promise<ProductVoiceProbeOutcome> {
     const staged = input.prepared.stage;
     const credential = input.prepared.credential;
     if (credential !== undefined && staged.credentialRef !== undefined) {
-      if (input.credentialLease === undefined || input.credentialLease.stage !== staged) {
+      if (input.credentialLease instanceof ProductSetupVoiceCredentialLease) {
+        input.credentialLease.consume(staged);
+      } else if (input.credentialLease instanceof ProductOperationalVoiceCredentialLease) {
+        input.credentialLease.consume(staged);
+      } else {
         throw new TypeError("Voice credential execution requires a durable staging lease");
       }
       try {

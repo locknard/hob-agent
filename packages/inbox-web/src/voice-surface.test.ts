@@ -21,6 +21,7 @@ const ACTIVE_STATES = [
   "cancelled",
   "failed",
   "indeterminate",
+  "model_unavailable",
   "text_mode",
 ] as const;
 
@@ -74,7 +75,11 @@ test("renders every governed voice state with an honest availability boundary", 
     assert.match(html, /aria-live="polite"/);
     assert.match(
       html,
-      state === "text_mode" ? /打开文字对话/ : /改用文字/,
+      state === "text_mode"
+        ? /打开文字对话/
+        : state === "model_unavailable"
+          ? /检查模型连接/
+          : /改用文字/,
     );
     assert.doesNotMatch(
       html,
@@ -97,6 +102,23 @@ test("renders every governed voice state with an honest availability boundary", 
   }
 });
 
+test("uses household action language for active, cancelled, and unconfirmed results", async () => {
+  const { VOICE_INTERACTION_JS, renderVoiceSurface } = await loadVoiceSurface();
+  const acting = renderVoiceSurface("acting") ?? "";
+  const cancelled = renderVoiceSurface("cancelled") ?? "";
+  const indeterminate = renderVoiceSurface("indeterminate") ?? "";
+
+  assert.match(acting, /这项已确认的动作正在进行。完成后会显示结果。/);
+  assert.match(cancelled, /这次对话已停止。已经开始的动作会继续在活动记录中显示结果。/);
+  assert.match(indeterminate, /结果尚未确认/);
+  assert.match(indeterminate, /结果会显示在活动记录中。/);
+
+  for (const html of [acting, cancelled, indeterminate]) {
+    assert.doesNotMatch(html, /\bHub\b/);
+  }
+  assert.doesNotMatch(VOICE_INTERACTION_JS, /\bHub\b/);
+});
+
 test("gives unavailable private voice one clear text continuation", async () => {
   const { renderVoiceSurface } = await loadVoiceSurface();
   const html =
@@ -114,7 +136,21 @@ test("gives unavailable private voice one clear text continuation", async () => 
   assert.match(html, /请求结束后从内存丢弃/);
   assert.match(html, /回答播报音频只在本机内存中保留最多 30 秒/);
   assert.match(html, /当前对话重播/);
-  assert.match(html, /确认和审计流程决定/);
+  assert.match(html, /需要确认的动作会先等待你的确认/);
+  assert.match(html, /结果会保留在活动记录中/);
+});
+
+test("keeps a working private voice distinct from a recovering household model", async () => {
+  const { renderVoiceSurface } = await loadVoiceSurface();
+  const html = renderVoiceSurface("model_unavailable", {
+    privateVoice: { status: "active", captureMode: "encoded_audio" },
+  }) ?? "";
+
+  assert.match(html, /家庭助手模型正在恢复/);
+  assert.match(html, /href="\/settings#operational-model"/);
+  assert.match(html, /data-voice-start hidden/);
+  assert.doesNotMatch(html, /私人语音暂时不可用/);
+  assert.doesNotMatch(html, /打开文字对话/);
 });
 
 test("describes the input recording and short answer replay cache as separate private audio lifecycles", async () => {
@@ -284,6 +320,14 @@ test("uses only bounded private ASR and TTS routes, never browser speech recogni
   assert.match(retryable, /action="\/voice\/retry"/);
   assert.match(retryable, />重新连接私人语音</);
   assert.match(retryable, /data-voice-start hidden/);
+
+  const recovering =
+    renderVoiceSurface("idle", { privateVoice: { status: "recovering" } }) ??
+    "";
+  assert.match(recovering, /data-private-voice-status="recovering"/);
+  assert.match(recovering, /正在恢复私人语音/);
+  assert.match(recovering, /action="\/voice\/cancel-retry"/);
+  assert.match(recovering, /href="\/conversation"/);
 });
 
 test("animates the voice indicator only while a household member is speaking", () => {

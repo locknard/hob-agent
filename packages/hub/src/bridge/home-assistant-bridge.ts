@@ -126,11 +126,22 @@ export type HomeAssistantReadProbeResult =
       readonly status: "connected";
       readonly latencyMs: number;
       readonly summary: { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number };
+      /** Bounded household-readable structure derived from the authenticated registry snapshot. */
+      readonly review: HomeAssistantSetupMapReview;
     }
   | { readonly status: "credential_rejected" | "endpoint_unreachable" | "incompatible" | "timed_out" };
 
+export interface HomeAssistantSetupMapReview {
+  readonly areas: readonly { readonly name: string; readonly deviceCount: number }[];
+  readonly unassignedDeviceCount: number;
+  /** False means the registry snapshot cannot support a complete, unambiguous household review. */
+  readonly complete: boolean;
+}
+
 export interface HomeAssistantReadProbeOptions extends HomeAssistantBridgeOptions {
   readonly clock?: () => number;
+  /** Cancels this bounded authenticated setup read without retaining a bridge connection. */
+  readonly signal?: AbortSignal;
 }
 
 interface ResultMessage {
@@ -224,8 +235,12 @@ export async function probeHomeAssistantReadAccess(
   const clock = options.clock ?? Date.now;
   const startedAt = clock();
   const bridge = new HomeAssistantBridge(options);
+  const onAbort = () => bridge.close();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
   try {
+    if (isProbeCancelled(options.signal)) return { status: "endpoint_unreachable" };
     const snapshot = await bridge.connect({ subscribeEvents: false });
+    if (isProbeCancelled(options.signal)) return { status: "endpoint_unreachable" };
     return {
       status: "connected",
       latencyMs: Math.max(0, clock() - startedAt),
@@ -235,6 +250,7 @@ export async function probeHomeAssistantReadAccess(
         devices: snapshot.deviceRegistry.length,
         areas: snapshot.areaRegistry.length,
       },
+      review: reviewHomeAssistantSetupMap(snapshot),
     };
   } catch (error) {
     if (error instanceof BridgeStreamError && error.reason === "authentication_failed") {
@@ -246,8 +262,98 @@ export async function probeHomeAssistantReadAccess(
     if (error instanceof Error && /timed out|timeout/iu.test(error.message)) return { status: "timed_out" };
     return { status: "endpoint_unreachable" };
   } finally {
+    options.signal?.removeEventListener("abort", onAbort);
     bridge.close();
   }
+}
+
+function isProbeCancelled(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+const MAX_HOME_ASSISTANT_SETUP_REVIEW_AREAS = 64;
+const MAX_HOME_ASSISTANT_SETUP_REVIEW_AREA_NAME_SCALARS = 80;
+
+/** Projects only room labels and aggregate counts; native identifiers never cross this setup seam. */
+function reviewHomeAssistantSetupMap(snapshot: HomeAssistantSnapshot): HomeAssistantSetupMapReview {
+  const listedAreas = new Map<string, { name: string; deviceCount: number }>();
+  const knownAreaIds = new Set<string>();
+  const seenAreaIds = new Set<string>();
+  const seenNames = new Set<string>();
+  let complete = true;
+
+  for (const raw of snapshot.areaRegistry) {
+    if (!isRecord(raw)) {
+      complete = false;
+      continue;
+    }
+    const id = setupRegistryText(raw.area_id ?? raw.id, 256);
+    const name = setupAreaName(raw.name);
+    if (id === undefined) {
+      complete = false;
+      continue;
+    }
+    knownAreaIds.add(id);
+    if (name === undefined) {
+      complete = false;
+      continue;
+    }
+    if (seenAreaIds.has(id) || seenNames.has(name)) {
+      complete = false;
+      continue;
+    }
+    seenAreaIds.add(id);
+    seenNames.add(name);
+    if (listedAreas.size >= MAX_HOME_ASSISTANT_SETUP_REVIEW_AREAS) {
+      complete = false;
+      continue;
+    }
+    listedAreas.set(id, { name, deviceCount: 0 });
+  }
+
+  const seenDeviceIds = new Set<string>();
+  let unassignedDeviceCount = 0;
+  for (const raw of snapshot.deviceRegistry) {
+    if (!isRecord(raw)) {
+      complete = false;
+      unassignedDeviceCount += 1;
+      continue;
+    }
+    const id = setupRegistryText(raw.id, 256);
+    if (id === undefined || seenDeviceIds.has(id)) {
+      complete = false;
+      unassignedDeviceCount += 1;
+      continue;
+    }
+    seenDeviceIds.add(id);
+    const areaId = raw.area_id === undefined || raw.area_id === null ? undefined : setupRegistryText(raw.area_id, 256);
+    if (raw.area_id !== undefined && raw.area_id !== null && areaId === undefined) complete = false;
+    if (areaId === undefined || !knownAreaIds.has(areaId)) {
+      unassignedDeviceCount += 1;
+      continue;
+    }
+    const area = listedAreas.get(areaId);
+    if (area === undefined) unassignedDeviceCount += 1;
+    else area.deviceCount += 1;
+  }
+
+  return Object.freeze({
+    areas: Object.freeze([...listedAreas.values()].map((area) => Object.freeze({ ...area }))),
+    unassignedDeviceCount,
+    complete,
+  });
+}
+
+function setupRegistryText(value: unknown, maximumScalars: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text === "" || Array.from(text).length > maximumScalars || /[\u0000-\u001f\u007f]/u.test(text)
+    ? undefined
+    : text;
+}
+
+function setupAreaName(value: unknown): string | undefined {
+  return setupRegistryText(value, MAX_HOME_ASSISTANT_SETUP_REVIEW_AREA_NAME_SCALARS);
 }
 
 export class HomeAssistantBridge {

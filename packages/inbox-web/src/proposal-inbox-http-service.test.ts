@@ -55,18 +55,15 @@ function speakVoiceTurn(origin: string, turnId: string, headers: Record<string, 
   return fetch(`${origin}/voice/turns/${encodeURIComponent(turnId)}/speech`, { headers });
 }
 
-async function completedPrivateVoiceConfigurationReceipt(
+async function completedPrivateVoiceConfigurationPage(
   origin: string,
   headers: Record<string, string>,
 ): Promise<string> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const response = await fetch(`${origin}/settings/private-voice/configuration-status`, { headers });
+    const response = await fetch(`${origin}/settings`, { headers });
     assert.equal(response.status, 200);
-    const body = await response.json() as { readonly status: string; readonly receipt?: string };
-    if (body.status === "completed") {
-      assert.match(body.receipt ?? "", /^[a-f0-9]{32}$/);
-      return body.receipt!;
-    }
+    const html = await response.text();
+    if (/data-one-shot-notice/.test(html)) return html;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
   assert.fail("background private voice configuration did not settle");
@@ -389,7 +386,7 @@ class StubRetryableInbox extends StubInbox {
 }
 
 class StructuredAdviceInbox extends StubInbox {
-  availability: "ready" | "active_request" | "setup_required" = "ready";
+  availability: "ready" | "active_request" | "setup_required" | "model_unavailable" = "ready";
   readonly started: string[] = [];
   readonly cancelled: string[] = [];
   readonly backgrounded: string[] = [];
@@ -543,20 +540,22 @@ function testVoiceSpeechHandler(ctx: Context): (
   response: unknown,
   adviceId: string,
 ) => Promise<void> {
-  const service = ctx.homeInboxHttp as unknown as {
-    options: { privateVoice?: { beginTurn(): unknown } };
-    privateVoiceTurns: Map<string, unknown>;
-    privateVoiceSessionKey(request: unknown): string;
-    handleVoiceSpeech(request: unknown, response: unknown, token: string): Promise<void>;
-  };
+  const controller = (ctx.homeInboxHttp as unknown as {
+    privateVoiceHttp: {
+      options: { privateVoice?: { beginTurn(): unknown } };
+      turns: Map<string, unknown>;
+      sessionKey(request: unknown): string;
+      handleVoiceSpeech(request: unknown, response: unknown, token: string): Promise<void>;
+    };
+  }).privateVoiceHttp;
   const token = "t".repeat(43);
   return (request, response) => {
-    if (!service.privateVoiceTurns.has(token)) {
-      const lease = service.options.privateVoice?.beginTurn();
+    if (!controller.turns.has(token)) {
+      const lease = controller.options.privateVoice?.beginTurn();
       if (lease === undefined) throw new Error("Voice test lease is unavailable");
-      service.privateVoiceTurns.set(token, {
+      controller.turns.set(token, {
         token,
-        sessionKey: service.privateVoiceSessionKey(request),
+        sessionKey: controller.sessionKey(request),
         lease,
         phase: "awaiting_advice",
         uploadUsed: true,
@@ -564,7 +563,7 @@ function testVoiceSpeechHandler(ctx: Context): (
         expiresAt: Date.now() + 60_000,
       });
     }
-    return service.handleVoiceSpeech(request, response, token);
+    return controller.handleVoiceSpeech(request, response, token);
   };
 }
 
@@ -1424,11 +1423,12 @@ test("operational private voice settings stay authenticated, same-origin, creden
   const inboxFiber = await ctx.plugin(StubInbox);
   const calls: unknown[] = [];
   let projectionCalls = 0;
+  let retrying = false;
   const operationalPrivateVoice = {
     async projection() {
       projectionCalls += 1;
       return {
-        status: "active" as const,
+        status: retrying ? "retrying" as const : "active" as const,
         generation: 8,
         configured: true as const,
         asr: { transport: "wyoming" as const, endpoint: "http://voice.local/asr", model: "whisper", credentialConfigured: true },
@@ -1445,10 +1445,12 @@ test("operational private voice settings stay authenticated, same-origin, creden
     },
     async retry() {
       calls.push({ type: "retry" });
+      retrying = true;
       return "retrying" as const;
     },
     cancelRetry() {
       calls.push({ type: "cancel-retry" });
+      retrying = false;
     },
   };
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -1525,12 +1527,10 @@ test("operational private voice settings stay authenticated, same-origin, creden
         tts: { kind: "tts", transport: "openai_http", endpoint: "http://voice.local/tts", model: "speak", locale: "zh-CN", voice: "calm", credential: ttsCredential },
       },
     });
-    const receipt = await completedPrivateVoiceConfigurationReceipt(ctx.homeInboxHttp.origin, { authorization });
-    const received = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
-    const receivedHtml = await received.text();
+    const receivedHtml = await completedPrivateVoiceConfigurationPage(ctx.homeInboxHttp.origin, { authorization });
     assert.match(receivedHtml, /语音服务已检查并保存。/);
     assert.doesNotMatch(receivedHtml, /private-(?:asr|tts)-secret/);
-    const replayed = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
+    const replayed = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
     assert.doesNotMatch(await replayed.text(), /语音服务已检查并保存。/);
 
     const disabled = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/disable`, {
@@ -1573,6 +1573,73 @@ test("operational private voice settings stay authenticated, same-origin, creden
     await inboxFiber.dispose();
     await ctx.fiber.dispose();
   }
+});
+
+test("operational model routes delegate only to the local settings port and keep the submitted key out of the shell", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const inputs: unknown[] = [];
+  const modelSettings = {
+    async projection() {
+      return { status: "active" as const, generation: 3, configured: true as const, modelReference: "custom/home-model", modelBaseURL: "https://models.example.test/v1", credentialConfigured: true };
+    },
+    async configure(input: unknown) { inputs.push(input); return { status: "configured" as const, generation: 4 }; },
+    async retry() { return "active" as const; },
+    cancelRetry() {},
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, { port: 0, authenticate: createInboxBasicAuthenticator(token), principal: adminPrincipal, modelSettings });
+  const secret = "operational-model-secret";
+  const headers = { authorization, origin: ctx.homeInboxHttp.origin, "content-type": "application/x-www-form-urlencoded" };
+  try {
+    const configured = await fetch(`${ctx.homeInboxHttp.origin}/settings/model/configure`, {
+      method: "POST", redirect: "manual", headers,
+      body: new URLSearchParams({ expectedGeneration: "3", provider: "custom", modelId: "home-model", baseURL: "https://models.example.test/v1", apiKey: secret }).toString(),
+    });
+    assert.equal(configured.status, 303);
+    assert.equal(configured.headers.get("location"), "/settings#operational-model");
+    for (let attempt = 0; attempt < 20 && inputs.length === 0; attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(inputs.length, 1);
+    const settings = await fetch(`${ctx.homeInboxHttp.origin}/settings`, { headers: { authorization } });
+    const html = await settings.text();
+    assert.match(html, /家庭助手模型/);
+    assert.doesNotMatch(html, new RegExp(secret));
+    const asset = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, { headers: { authorization } });
+    assert.match(await asset.text(), /operational-model/);
+    const stylesheet = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.css`, { headers: { authorization } });
+    assert.match(await stylesheet.text(), /\.product-operational-model\s*\{/);
+  } finally { await fiber.dispose(); await inboxFiber.dispose(); await ctx.fiber.dispose(); }
+});
+
+test("HTTP disposal waits for an operational model candidate to settle before it releases the service", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  let resolveConfigure: ((result: { readonly status: "cancelled" }) => void) | undefined;
+  let aborted = false;
+  const modelSettings = {
+    async projection() { return { status: "active" as const, generation: 3, configured: true as const, modelReference: "custom/home-model", modelBaseURL: "https://models.example.test/v1", credentialConfigured: true }; },
+    configure(input: { readonly signal?: AbortSignal }) {
+      input.signal?.addEventListener("abort", () => { aborted = true; });
+      return new Promise<{ readonly status: "cancelled" }>((resolve) => { resolveConfigure = resolve; });
+    },
+    async retry() { return "active" as const; },
+    cancelRetry() {},
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, { port: 0, authenticate: createInboxBasicAuthenticator(token), principal: adminPrincipal, modelSettings });
+  try {
+    const response = await fetch(`${ctx.homeInboxHttp.origin}/settings/model/configure`, {
+      method: "POST", redirect: "manual", headers: { authorization, origin: ctx.homeInboxHttp.origin, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ expectedGeneration: "3", provider: "custom", modelId: "home-model", baseURL: "https://models.example.test/v1", apiKey: "" }).toString(),
+    });
+    assert.equal(response.status, 303);
+    let disposed = false;
+    const disposal = fiber.dispose().then(() => { disposed = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(aborted, true);
+    assert.equal(disposed, false);
+    resolveConfigure?.({ status: "cancelled" });
+    await disposal;
+    assert.equal(disposed, true);
+  } finally { await inboxFiber.dispose(); await ctx.fiber.dispose(); }
 });
 
 test("operational private voice starts one credential-private configuration check in the background", async () => {
@@ -1653,23 +1720,33 @@ test("operational private voice starts one credential-private configuration chec
     const configurationId = /data-private-voice-configuration-id="([a-f0-9]{32})"/.exec(pendingHtml)?.[1];
     assert.ok(configurationId !== undefined);
 
-    const anonymousStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`);
+    const anonymousStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status?configurationId=${configurationId}`);
     assert.equal(anonymousStatus.status, 401);
-    const crossOriginStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`, {
+    const crossOriginStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status?configurationId=${configurationId}`, {
       headers: { authorization, origin: "http://elsewhere.invalid" },
     });
     assert.equal(crossOriginStatus.status, 403);
-    const pendingStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`, { headers: { authorization } });
+    const pendingStatus = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status?configurationId=${configurationId}`, { headers: { authorization } });
     assert.equal(pendingStatus.status, 200);
     assert.deepEqual(await pendingStatus.json(), {
       status: "pending",
       configurationId,
     });
+    const malformedStatus = await fetch(
+      `${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status?configurationId=${configurationId}&unexpected=1`,
+      { headers: { authorization } },
+    );
+    assert.equal(malformedStatus.status, 400);
+    const forgedStatus = await fetch(
+      `${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status?configurationId=forged`,
+      { headers: { authorization } },
+    );
+    assert.equal(forgedStatus.status, 400);
 
     resolveConfiguration?.({ status: "configured", generation: 9 });
     let completion: { readonly status: string; readonly receipt?: string } | undefined;
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      const status = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status`, { headers: { authorization } });
+      const status = await fetch(`${ctx.homeInboxHttp.origin}/settings/private-voice/configuration-status?configurationId=${configurationId}`, { headers: { authorization } });
       completion = await status.json() as { readonly status: string; readonly receipt?: string };
       if (completion.status === "completed") break;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -1810,9 +1887,7 @@ test("operational private voice cancels only its exact background check and keep
     });
     assert.equal(stopped.status, 303);
     assert.equal(stopped.headers.get("location"), "/settings#private-voice");
-    const receipt = await completedPrivateVoiceConfigurationReceipt(ctx.homeInboxHttp.origin, { authorization });
-    const complete = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
-    const completeHtml = await complete.text();
+    const completeHtml = await completedPrivateVoiceConfigurationPage(ctx.homeInboxHttp.origin, { authorization });
     assert.match(completeHtml, /已停止这次检查，原来的语音设置保持不变。/);
     assert.match(completeHtml, /name="expectedGeneration" value="3"/);
     assert.equal(configurationSignal?.aborted, true);
@@ -1918,9 +1993,7 @@ test("operational private voice returns family-facing receipts for busy, conflic
       });
       assert.equal(response.status, 303);
       assert.equal(response.headers.get("location"), "/settings#private-voice");
-      const receipt = await completedPrivateVoiceConfigurationReceipt(ctx.homeInboxHttp.origin, { authorization });
-      const settings = await fetch(`${ctx.homeInboxHttp.origin}/settings?voice=${receipt}`, { headers: { authorization } });
-      const html = await settings.text();
+      const html = await completedPrivateVoiceConfigurationPage(ctx.homeInboxHttp.origin, { authorization });
       assert.match(html, expected);
       assert.match(html, /id="private-voice"/, "the recovery entry stays available");
     }
@@ -2433,6 +2506,74 @@ test("reports typed advice availability and redirects duplicate requests to the 
   await fiber.dispose();
   await inboxFiber.dispose();
   await ctx.fiber.dispose();
+});
+
+test("keeps one model-unavailable household question private until its model is ready", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const inbox = ctx.homeInbox as unknown as StructuredAdviceInbox;
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = {
+    authorization,
+    origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  const question = "窗帘为什么今天开得太早？";
+  try {
+    inbox.availability = "model_unavailable";
+    const submitted = await fetch(`${origin}/conversation`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ question }),
+      redirect: "manual",
+    });
+    assert.equal(submitted.status, 303);
+    const location = submitted.headers.get("location");
+    assert.match(location ?? "", /^\/conversation\?draft=[a-f0-9]{32}$/u);
+    assert.equal(location?.includes(encodeURIComponent(question)), false);
+    assert.equal(location?.includes(question), false);
+    assert.deepEqual(inbox.started, []);
+
+    const head = await fetch(`${origin}${location}`, { method: "HEAD", headers: { authorization } });
+    assert.equal(head.status, 200);
+
+    const unavailable = await fetch(`${origin}${location}`, { headers: { authorization } });
+    const unavailableHtml = await unavailable.text();
+    assert.equal(unavailable.status, 200);
+    assert.match(unavailableHtml, /家庭助手模型正在恢复/);
+    assert.match(unavailableHtml, /href="\/settings#operational-model"/);
+    assert.match(unavailableHtml, /value="窗帘为什么今天开得太早？"/);
+    assert.match(unavailableHtml, /id="conversation-question"[^>]*disabled/);
+    assert.doesNotMatch(unavailableHtml, /我在这里，告诉我家里的情况/);
+
+    inbox.availability = "ready";
+    const ready = await fetch(`${origin}${location}`, { headers: { authorization } });
+    const readyHtml = await ready.text();
+    assert.match(readyHtml, /value="窗帘为什么今天开得太早？"/);
+    assert.doesNotMatch(readyHtml, /id="conversation-question"[^>]*disabled/);
+    assert.match(readyHtml, /<button type="submit">发送<\/button>/);
+
+    const accepted = await fetch(`${origin}/conversation`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ question }),
+      redirect: "manual",
+    });
+    assert.equal(accepted.headers.get("location"), "/conversation/advice-stream");
+    assert.deepEqual(inbox.started, [question]);
+
+    const replay = await fetch(`${origin}${location}`, { headers: { authorization } });
+    assert.doesNotMatch(await replay.text(), /value="窗帘为什么今天开得太早？"/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
 });
 
 test("accepts an advice start immediately and streams only bounded replayable household events", async () => {
@@ -4103,6 +4244,65 @@ test("accepts bounded private encoded audio only from the product session and st
   }
 });
 
+test("uses the established decoded advice id contract for private voice turns", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let releases = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: "active",
+      beginTurn() {
+        return {
+          captureMode: "encoded_audio" as const,
+          async transcribe() {
+            return { status: "transcribed" as const, text: "客厅现在怎么样？" };
+          },
+          async synthesize() {
+            return { status: "failed" as const, reason: "unavailable" as const };
+          },
+          async release() { releases += 1; },
+        };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization, origin, "content-type": "audio/wav" };
+  const inbox = ctx.homeInbox as unknown as StructuredAdviceInbox;
+
+  try {
+    inbox.adviceId = "a".repeat(201);
+    const tooLong = await transcribeVoiceTurn(
+      origin,
+      await leaseVoiceTurn(origin, headers),
+      headers,
+      new Uint8Array([1, 2]),
+    );
+    assert.equal(tooLong.status, 502);
+    assert.equal(releases, 1, "an invalid advice id releases the completed ASR turn");
+
+    inbox.adviceId = "advice%20with%20space";
+    const encoded = await transcribeVoiceTurn(
+      origin,
+      await leaseVoiceTurn(origin, headers),
+      headers,
+      new Uint8Array([1, 2]),
+    );
+    assert.equal(encoded.status, 202);
+    assert.deepEqual(await encoded.json(), {
+      status: "accepted",
+      adviceId: "advice%20with%20space",
+      transcript: "客厅现在怎么样？",
+    });
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("leases one opaque, session-bound browser turn and releases only its local provider lease", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
@@ -4204,12 +4404,14 @@ test("expires a private voice capability by releasing its local lease", async ()
   const origin = ctx.homeInboxHttp.origin;
   try {
     const token = await leaseVoiceTurn(origin, { authorization, origin });
-    const service = ctx.homeInboxHttp as unknown as {
-      privateVoiceTurns: Map<string, { expiresAt: number }>;
-      schedulePrivateVoiceExpiry(): void;
-    };
-    service.privateVoiceTurns.get(token)!.expiresAt = 0;
-    service.schedulePrivateVoiceExpiry();
+    const controller = (ctx.homeInboxHttp as unknown as {
+      privateVoiceHttp: {
+        turns: Map<string, { expiresAt: number }>;
+        scheduleExpiry(): void;
+      };
+    }).privateVoiceHttp;
+    controller.turns.get(token)!.expiresAt = 0;
+    controller.scheduleExpiry();
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
     assert.equal(releases, 1);
   } finally {
@@ -4963,6 +5165,9 @@ test("retries a degraded private voice provider through the authenticated same-o
   let status: "active" | "degraded" = "degraded";
   let retries = 0;
   let retrySucceeds = true;
+  let retryBlocks = false;
+  let resolveRetry: (() => void) | undefined;
+  let cancellations = 0;
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
     port: 0,
     authenticate: createInboxBasicAuthenticator(token),
@@ -4970,7 +5175,13 @@ test("retries a degraded private voice provider through the authenticated same-o
     privateVoice: {
       get status() { return status; },
       beginTurn() { return undefined; },
-      async retry() { retries += 1; if (retrySucceeds) status = "active"; },
+      async retry() {
+        retries += 1;
+        if (retryBlocks)
+          await new Promise<void>((resolve) => { resolveRetry = resolve; });
+        if (retrySucceeds) status = "active";
+      },
+      cancelRetry() { cancellations += 1; },
     },
   } as ProposalInboxHttpOptions);
   const origin = ctx.homeInboxHttp.origin;
@@ -4985,26 +5196,31 @@ test("retries a degraded private voice provider through the authenticated same-o
     assert.equal(foreign.status, 403);
     const retry = await fetch(`${origin}/voice/retry`, { method: "POST", headers, body: "", redirect: "manual" });
     assert.equal(retry.status, 303);
-    assert.equal(retry.headers.get("location"), "/voice?notice=voice_retry_result");
+    assert.equal(retry.headers.get("location"), "/voice");
     assert.equal(retries, 1);
     const recovered = await fetch(`${origin}${retry.headers.get("location")}`, { headers: { authorization } });
     const recoveredHtml = await recovered.text();
-    assert.match(recoveredHtml, /私人语音已重新连接。现在可以开始说话。/u);
     assert.match(recoveredHtml, /data-private-voice-status="active"/u);
-    assert.match(recoveredHtml, /data-one-shot-notice/u);
     assert.match(recoveredHtml, /href="\/conversation"[^>]*>改用文字</u);
 
     status = "degraded";
     retrySucceeds = false;
+    retryBlocks = true;
     const unavailable = await fetch(`${origin}/voice/retry`, { method: "POST", headers, body: "", redirect: "manual" });
     assert.equal(unavailable.status, 303);
-    assert.equal(unavailable.headers.get("location"), "/voice?notice=voice_retry_result");
+    assert.equal(unavailable.headers.get("location"), "/voice");
     const stillUnavailable = await fetch(`${origin}${unavailable.headers.get("location")}`, { headers: { authorization } });
     const unavailableHtml = await stillUnavailable.text();
-    assert.match(unavailableHtml, /私人语音仍在恢复中。文字对话现在就能继续。/u);
-    assert.match(unavailableHtml, /data-private-voice-status="retryable"/u);
-    assert.match(unavailableHtml, /data-one-shot-notice/u);
+    assert.match(unavailableHtml, /data-private-voice-status="recovering"/u);
+    assert.match(unavailableHtml, /正在恢复私人语音/u);
+    assert.match(unavailableHtml, /action="\/voice\/cancel-retry"/u);
     assert.match(unavailableHtml, />打开文字对话</u);
+    const cancelled = await fetch(`${origin}/voice/cancel-retry`, { method: "POST", headers, body: "", redirect: "manual" });
+    assert.equal(cancelled.status, 303);
+    assert.equal(cancelled.headers.get("location"), "/voice");
+    assert.equal(cancellations, 1);
+    resolveRetry?.();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     const forged = await fetch(`${origin}/voice?notice=voice_recovered`, { headers: { authorization }, redirect: "manual" });
     assert.equal(forged.status, 303);

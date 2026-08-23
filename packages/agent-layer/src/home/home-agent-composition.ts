@@ -2,14 +2,17 @@ import { join } from "node:path";
 
 import { Context, Service } from "@deepseek-ai/cordis";
 import LlmRuntime from "@deepseek-ai/dsh-llm";
-import * as PiAiPlugin from "@deepseek-ai/dsh-llm-pi-ai";
 
 import type { AuthProfile } from "../auth/profiles/auth-profiles.js";
 import { DshHomeAgentService } from "./home-agent-service.js";
-import { DshProfileCredentialProvider } from "../model/dsh-profile-credential-provider.js";
 import { loadHouseholdPromptContext } from "../prompt/household-prompt-context.js";
-import { providerSetup, type SupportedModelProvider } from "../model/model-providers.js";
+import { type SupportedModelProvider } from "../model/model-providers.js";
 import type { SecretVault } from "../auth/secrets/secret-vault.js";
+import {
+  HOME_ACTIVE_MODEL,
+  HOME_ACTIVE_PROVIDER_ROUTE,
+  ModelProviderResolver,
+} from "../model/model-provider-resolver.js";
 
 export interface DshHomeAgentCompositionOptions {
   readonly provider: SupportedModelProvider;
@@ -19,6 +22,8 @@ export interface DshHomeAgentCompositionOptions {
   /** Optional explicit API-key profile; requires vault and takes precedence over ambient env. */
   readonly profile?: AuthProfile;
   readonly vault?: SecretVault;
+  /** Hub-owned resolver already prepared and activated through durable config CAS. */
+  readonly modelProviderResolver?: ModelProviderResolver;
   readonly sessionId?: string;
   readonly sessionPersistencePath?: string;
   readonly householdDirectory?: string;
@@ -32,43 +37,28 @@ class DshHomeAgentComposition extends Service {
   }
 
   protected async [Service.init](): Promise<void> {
-    const setup = providerSetup(
-      this.options.provider,
-      this.options.baseURL === undefined ? undefined : { baseURL: this.options.baseURL },
-    );
     const householdContext = this.options.householdDirectory === undefined
       ? undefined
       : await loadHouseholdPromptContext(this.options.householdDirectory);
-    if ((this.options.profile === undefined) !== (this.options.vault === undefined)) {
-      throw new Error("Selected profile and SecretVault must be provided together");
-    }
-    if (this.options.profile && this.options.vault) {
-      if (this.options.profile.provider !== this.options.provider || this.options.profile.kind !== "api_key") {
-        throw new Error("Selected profile cannot authenticate this DSH provider route");
-      }
-      if (!this.options.profile.secretRef) throw new Error("Selected API-key profile is missing a secret reference");
-      await this.ctx.plugin(DshProfileCredentialProvider, {
-        references: { [setup.credentialEnv]: this.options.profile.secretRef },
-        vault: this.options.vault,
+    const resolver = this.options.modelProviderResolver ?? new ModelProviderResolver(this.ctx);
+    if (this.options.modelProviderResolver === undefined) {
+      const prepared = await resolver.prepare({
+        provider: this.options.provider,
+        model: this.options.model,
+        ...(this.options.baseURL === undefined ? {} : { baseURL: this.options.baseURL }),
+        ...(this.options.profile === undefined ? {} : { profile: this.options.profile }),
+        ...(this.options.vault === undefined ? {} : { vault: this.options.vault }),
       });
+      resolver.activate(prepared);
     }
     await this.ctx.plugin(LlmRuntime);
-    await this.ctx.plugin(PiAiPlugin, {
-      providers: {
-        [setup.runtimeProviderId]: setup.baseURL === undefined
-          ? { apiKeyEnv: setup.credentialEnv }
-          : {
-              displayName: "Custom OpenAI-compatible deployment",
-              apiKeyEnv: setup.credentialEnv,
-              api: "openai-completions",
-              baseURL: setup.baseURL,
-              models: [{ id: this.options.model, name: this.options.model }],
-            },
-      },
-    });
+    const llm = this.ctx.get("llm");
+    if (llm === undefined) throw new Error("Root DSH LlmRuntime did not initialize");
+    llm.registerAdapter([HOME_ACTIVE_PROVIDER_ROUTE], resolver.adapter);
     await this.ctx.plugin(DshHomeAgentService, {
-      provider: setup.runtimeProviderId,
-      model: this.options.model,
+      provider: HOME_ACTIVE_PROVIDER_ROUTE,
+      model: HOME_ACTIVE_MODEL,
+      modelProviderResolver: resolver,
       ...(this.options.sessionId === undefined ? {} : { sessionId: this.options.sessionId }),
       ...(this.options.sessionPersistencePath === undefined
         ? {}

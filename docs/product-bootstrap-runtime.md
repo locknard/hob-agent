@@ -1,22 +1,22 @@
 # Product bootstrap runtime
 
 Date: 2026-08-22
-Status: accepted target; setup, exact-generation activation, and the in-process
-Product Host handoff are implemented. Local browser-session recovery is
-implemented; continuous starting and generation-recovery feedback remain the
-next milestone.
+Status: current Phase 0 runtime. The single supervisor serves first-run setup,
+active generations, local session recovery, and operational model and voice
+maintenance.
 
 ## Decision
 
-HobAgent starts as one Cordis process with one Product Shell. The process moves
-through explicit `pairing`, `setup`, `starting`, `operational`, and `recovery`
-states. Each state mounts the services it owns inside the same composition root.
-The DSH Agent, bridge adapters, observation scheduler, and action plane mount from
-one activated configuration generation.
+HobAgent starts as one Cordis process with one Product Host. The
+`ProductRuntimeSupervisor` owns the local listener and presents pairing, setup,
+starting, operational, and recovery product states from one composition root.
+The DSH Agent, bridge adapters, observation scheduler, and action plane mount
+from one activated configuration generation.
 
-This replaces the current startup assumption that model, bridge, product login,
-and storage configuration already exist in the environment. A first-time household
-can therefore open the product and complete setup before the Agent becomes active.
+A first-time household opens the product and completes setup before the Agent
+becomes active. An activated household starts from its saved generation; launch
+environment model and bridge values remain available to diagnostic CLI commands
+and do not form a production direct-start path.
 
 ## Product journey
 
@@ -26,7 +26,8 @@ can therefore open the product and complete setup before the Agent becomes activ
 2. The household names its home and assistant. This preserves the existing Hob
    self-introduction ritual as the first product moment.
 3. Model setup offers supported providers and a custom OpenAI-compatible option.
-   The form collects provider, model id, optional HTTPS endpoint, and credential.
+   The form collects provider, model id, a validated private endpoint when the
+   provider requires one, and credential.
    The server performs one bounded paid probe and returns a household-readable
    result.
 4. Bridge setup is catalog-driven. The current product screen offers Home Assistant;
@@ -44,8 +45,9 @@ can therefore open the product and complete setup before the Agent becomes activ
 7. Activation mounts the selected generation, commits it, rotates the short setup
    cookie into a durable local product session, and switches the same Product Host
    to the operational Product Shell. A lost browser session returns to a local,
-   rate-limited one-time pairing flow without remounting the Agent. Named
-   `starting` and generation `recovery` progress remain the next product slice.
+   rate-limited one-time pairing flow without remounting the Agent. Model and
+   private-voice checks, recovery, cancellation, and reconfiguration continue in
+   the background with a current-state receipt for the paired browser.
 
 ## Configuration ownership
 
@@ -66,11 +68,10 @@ can therefore open the product and complete setup before the Agent becomes activ
   the active reference. The previous value remains available until activation
   succeeds.
 
-## Target runtime composition
+## Runtime composition
 
-The following table defines the accepted end state. The current branch owns the
-`pairing`, `setup`, and operational handoff rows. Continuous `starting` and
-`recovery` presentation remains the next implementation slice.
+The Product Host presents the following states while the supervisor retains one
+listener and one lifecycle owner.
 
 | State | Mounted ownership |
 | --- | --- |
@@ -80,7 +81,7 @@ The following table defines the accepted end state. The current branch owns the
 | `operational` | HomeWorld, DSH Agent, review center, advice, media, observation, safety, Product Shell |
 | `recovery` | Product Shell, local session pairing or last stable generation, classified repair actions |
 
-In the target runtime, state changes occur at the composition root. One persistent Product Host owns the
+State changes occur at the composition root. One persistent Product Host owns the
 loopback listener and the private-device session. Setup and operational services
 mount as mutually exclusive child fibers behind that Host; neither child owns a
 second listener. A configuration activation first mounts the selected generation,
@@ -98,9 +99,9 @@ Basic-authentication prompt after setup.
 
 Concrete setup support belongs to the ecosystem product bundle. The Hub setup
 controller consumes a neutral catalog of registered bridge setup adapters and
-stores only their validated config and credential references. Home Assistant,
-Xiaomi, and future peers never add product-specific branches to the controller or
-HomeWorld.
+stores only their validated configuration and credential references. Home
+Assistant is available in the current product catalog; an authorized adapter
+joins through the same catalog seam.
 
 ## HTTP and security boundary
 
@@ -117,46 +118,52 @@ HomeWorld.
 - Provider and adapter names remain data from registered catalogs. Form input can
   select only registered runtime packages, tools, schemas, and authority classes.
 
-## Implementation slices
+## Delivered runtime slices
 
-1. **Implemented on the product-bootstrap branch:** the versioned non-secret configuration store commits an
+1. The versioned non-secret configuration store commits an
    owner-only, bounded, atomically replaced generation with optimistic revision,
    canonical credential references, secret-shaped field rejection, crash-resilient
-   lock recovery, and deterministic tests. The single production `main` reads
-   this activated generation whenever deployment environment values leave model
-   or bridges unspecified.
-2. **Implemented on the product-bootstrap branch:** launch parsing exposes a bootstrap minimum containing only the
+   lock recovery, and deterministic tests. The single production `main` always
+   starts the ProductRuntimeSupervisor, which selects setup or the saved active
+   generation.
+2. Launch parsing exposes a bootstrap minimum containing only the
    validated private data directory. The composition root classifies `setup` or
    `operational` from non-secret metadata and reports only the activated generation.
    The operational parser composes model, bridges, credentials, policy and services
-   from that generation while retaining one `main` and one `HomeAgentRuntime` root.
-3. **Implemented on the product-bootstrap branch:** pairing/setup-session ownership and
+   from that generation while retaining one `main` and one
+   `ProductRuntimeSupervisor` root. The operational Home Agent is one mounted child
+   bundle, not a second runtime owner.
+3. Pairing/setup-session ownership and
    the `/setup` workspace cover the one-time pairing claim, household identity,
    restartable non-secret draft, bounded forms, and a local attempt limiter.
-4. **Implemented on the product-bootstrap branch:** model setup stages a scoped
+4. Model setup stages a scoped
    Keychain reference and runs a DSH profile-scoped probe without replacing the
    active model profile.
-5. **Implemented on the product-bootstrap branch:** a neutral bridge setup catalog
+5. A neutral bridge setup catalog
    stages bridge-scoped credentials and runs a Home Assistant authenticated,
    read-only map probe without subscribing or writing.
-6. **Implemented on the product-activation branch:** one `ProductRuntimeSupervisor`
+6. One `ProductRuntimeSupervisor`
    owns the Cordis root and loopback listener. It mounts the exact map revision before
    committing it, atomically hands the Host to the Product Shell, reuses the paired
    product session without Basic authentication, disposes the setup surface, restores
    an active generation after restart, and carries household identity into onboarding.
    The retired standalone setup runtime has been removed.
-7. **Implemented on main:** optional private voice setup independently verifies
+7. Optional private voice setup independently verifies
    ASR and TTS, commits only credential references, mounts one provider-neutral
    runtime, and sends final transcripts through the existing DSH advice loop. A
    provider outage on restart degrades voice while text and the household product
    remain operational.
-8. **Implemented on main:** activation rotates the setup cookie into an owner-only
+8. Activation rotates the setup cookie into an owner-only
    durable product session. A one-time, same-origin local recovery route rotates a
    lost browser token; malformed cookies, parallel code redemption, and repeated
    failures remain bounded.
-9. Add continuous `starting`/generation-`recovery` events, operational voice
-   reconfiguration, credential rotation, and real
-   HA/custom-model acceptance before declaring the complete bootstrap milestone.
+9. Operational model and private-voice settings verify a candidate in the
+   background, allow cancellation, retain the active generation during a failed
+   candidate, and replace a ready generation without remounting the DSH Agent.
+   Each retiring credential has an exact cleanup ledger entry. The active
+   runtime performs a bounded cleanup pass after drain; a stop leaves any
+   pending exact entries durable, and the next startup continues them in a
+   bounded pass.
 
 ## Acceptance gates
 

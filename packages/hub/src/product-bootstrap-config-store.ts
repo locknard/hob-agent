@@ -54,6 +54,13 @@ export interface ProductBootstrapConfiguration extends ProductBootstrapConfigDra
   readonly activatedAt: string;
 }
 
+/** The only model fields an operational settings change may replace. */
+export interface ProductBootstrapModelConfig {
+  readonly modelReference: string;
+  readonly modelBaseURL?: string;
+  readonly modelProfile: AuthProfile;
+}
+
 export class ProductBootstrapConfigurationConflictError extends Error {
   constructor() {
     super("Product configuration generation conflict");
@@ -112,6 +119,24 @@ export class ProductBootstrapConfigStore {
         activatedAt,
         ...draft,
         ...(validatedVoice === undefined ? {} : { voice: validatedVoice }),
+      }));
+    });
+  }
+
+  /** Replaces only the active model after its operational credential has been verified. */
+  async commitModel(expectedGeneration: number, model: ProductBootstrapModelConfig): Promise<ProductBootstrapConfiguration> {
+    if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) throw new TypeError("Expected generation is invalid");
+    const validated = validateModelConfig(model, "operational");
+    return this.exclusive(async () => {
+      const current = await this.load();
+      if (current === undefined || current.generation !== expectedGeneration) throw new ProductBootstrapConfigurationConflictError();
+      const { version: _version, generation: _generation, activatedAt, modelReference: _reference, modelBaseURL: _baseURL, modelProfile: _profile, ...preserved } = current;
+      return this.writeConfiguration(Object.freeze({
+        version: CONFIG_VERSION,
+        generation: expectedGeneration + 1,
+        activatedAt,
+        ...preserved,
+        ...validated,
       }));
     });
   }
@@ -229,13 +254,9 @@ function validateConfiguration(value: unknown): ProductBootstrapConfiguration {
 
 function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unknown>): ProductBootstrapConfigDraft {
   if (!isRecord(value)) throw new TypeError("Product configuration draft is invalid");
-  const modelReference = boundedString(value.modelReference, 300, "Model reference");
-  if (/\s/u.test(modelReference) || !modelReference.includes("/")) throw new TypeError("Model reference is invalid");
+  const { modelReference, modelBaseURL, modelProfile } = validateModelConfig(value);
   const householdName = boundedName(value.householdName, "Household name");
   const agentName = boundedName(value.agentName, "Agent name");
-  const provider = modelReference.slice(0, modelReference.indexOf("/"));
-  const modelProfile = validateModelProfile(value.modelProfile, provider);
-  const modelBaseURL = value.modelBaseURL === undefined ? undefined : customModelBaseURL(provider, value.modelBaseURL);
   const voice = value.voice === undefined ? undefined : validateVoiceRuntimeConfig(value.voice);
   if (!Array.isArray(value.bridges) || value.bridges.length > 16) throw new TypeError("Bridge configuration list is invalid");
   const seen = new Set<string>();
@@ -267,6 +288,20 @@ function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unkno
     modelProfile,
     bridges: Object.freeze(bridges),
     ...(voice === undefined ? {} : { voice }),
+  });
+}
+
+function validateModelConfig(value: Pick<ProductBootstrapModelConfig, "modelReference" | "modelBaseURL" | "modelProfile"> | Record<string, unknown>, profileScope?: "operational"): ProductBootstrapModelConfig {
+  const modelReference = boundedString(value.modelReference, 300, "Model reference");
+  if (/\s/u.test(modelReference) || !modelReference.includes("/")) throw new TypeError("Model reference is invalid");
+  const provider = modelReference.slice(0, modelReference.indexOf("/"));
+  if (!/^(?:gpt|claude|deepseek|kimi|glm|custom)$/u.test(provider)) throw new TypeError("Model reference is invalid");
+  const modelProfile = validateModelProfile(value.modelProfile, provider, profileScope);
+  const modelBaseURL = value.modelBaseURL === undefined ? undefined : customModelBaseURL(provider, value.modelBaseURL);
+  return Object.freeze({
+    modelReference,
+    ...(modelBaseURL === undefined ? {} : { modelBaseURL }),
+    modelProfile,
   });
 }
 
@@ -346,15 +381,20 @@ function assertExactKeys(value: Record<string, unknown>, allowed: readonly strin
   if (Object.keys(value).some((key) => !allowed.includes(key))) throw new TypeError(message);
 }
 
-function validateModelProfile(value: unknown, provider: string): AuthProfile {
+function validateModelProfile(value: unknown, provider: string, requiredScope?: "operational"): AuthProfile {
   if (!isRecord(value) || value.provider !== provider || value.kind !== "api_key"
     || typeof value.id !== "string" || typeof value.secretRef !== "string") {
     throw new TypeError("Model profile is invalid");
   }
-  const match = /^([A-Za-z0-9_-]+):setup:([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(value.id);
-  if (match === null || match[1] !== provider
-    || !value.secretRef.startsWith(`keychain:hob-agent/setup-model:${match[2]}:`)
-    || !/^keychain:hob-agent\/setup-model:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/u.test(value.secretRef)) {
+  const setup = /^([A-Za-z0-9_-]+):setup:([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(value.id);
+  const operational = /^([A-Za-z0-9_-]+):operational:([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(value.id);
+  const validSetup = setup !== null && setup[1] === provider
+    && value.secretRef.startsWith(`keychain:hob-agent/setup-model:${setup[2]}:`)
+    && /^keychain:hob-agent\/setup-model:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/u.test(value.secretRef);
+  const validOperational = operational !== null && operational[1] === provider
+    && value.secretRef.startsWith(`keychain:hob-agent/model:${operational[2]}:`)
+    && /^keychain:hob-agent\/model:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/u.test(value.secretRef);
+  if ((requiredScope === "operational" ? !validOperational : !(validSetup || validOperational))) {
     throw new TypeError("Model profile is invalid");
   }
   return Object.freeze({ id: value.id, provider: value.provider, kind: "api_key", secretRef: value.secretRef });

@@ -28,6 +28,23 @@ class StubProposalService extends Service {
   }
 }
 
+class MutableModelResolver extends Service {
+  state: "ready" | "degraded" = "degraded";
+  boundAgents = 0;
+
+  constructor(ctx: Context) {
+    super(ctx, "modelProviderResolver");
+  }
+
+  status() {
+    return { state: this.state };
+  }
+
+  bindAgent() {
+    this.boundAgents += 1;
+  }
+}
+
 class StubMediaCatalogService extends Service {
   constructor(ctx: Context) {
     super(ctx, "homeMediaCatalog");
@@ -596,6 +613,34 @@ test("returns one structured advice report for a bounded untrusted household que
   await assert.rejects(ctx.homeAgent.requestAdvice("x".repeat(1_001)), /question/i);
   assert.equal(ctx.homeAgent.observationStatus, "idle");
 
+  await ctx.fiber.dispose();
+});
+
+test("fails a degraded advice request before governance begins and admits the next ready request", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubWorldService);
+  await ctx.plugin(StubProposalService);
+  await ctx.plugin(MutableModelResolver);
+  const adapter = new AdviceReportingAdapter();
+  await ctx.plugin(DshHomeAgentService, {
+    provider: "test-provider",
+    model: "test-model",
+    adapter,
+    sessionId: "leased-advice-home",
+  });
+
+  await assert.rejects(
+    ctx.homeAgent.requestAdvice("Why does the curtain open too early or too late?"),
+    /model provider is unavailable/i,
+  );
+
+  const resolver = ctx.get("modelProviderResolver") as unknown as MutableModelResolver;
+  resolver.state = "ready";
+  const report = await ctx.homeAgent.requestAdvice("Why does the curtain open too early or too late?");
+
+  assert.equal(report.confidence, "partial");
+  assert.equal(resolver.boundAgents, 1);
+  assert.equal(adapter.requests.length, 2);
   await ctx.fiber.dispose();
 });
 

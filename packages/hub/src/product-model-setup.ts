@@ -11,6 +11,8 @@ import {
   providerSetup,
   type SupportedModelProvider,
 } from "@hob-agent/agent-layer/model-providers";
+import { ProductModelCredentialLease as ProductOperationalModelCredentialLease } from "./product-model-cleanup-ledger.js";
+import { ProductSetupModelCredentialLease } from "./product-setup-draft-store.js";
 
 const SETUP_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const MODEL_ID = /^\S{1,256}$/u;
@@ -36,6 +38,18 @@ export interface ProductModelSetupStage {
   readonly baseURL?: string;
 }
 
+/** Request-local validated material; the API key never enters a durable draft. */
+export interface ProductModelPreparedProbe {
+  readonly provider: SupportedModelProvider;
+  readonly modelId: string;
+  readonly apiKey: string;
+  readonly baseURL?: string;
+}
+
+export type ProductModelPrepareOutcome =
+  | { readonly status: "prepared"; readonly prepared: ProductModelPreparedProbe }
+  | Exclude<ProductModelProbeOutcome, ProductModelProbeReady>;
+
 export interface ProductModelSetupInput {
   /** A durable, non-secret draft identifier; never pass the session token here. */
   readonly setupId: string;
@@ -51,6 +65,7 @@ type ProductModelLiveProbe = (input: {
   readonly vault: WritableSecretVault;
   readonly modelId: string;
   readonly baseURL?: string;
+  readonly signal?: AbortSignal;
 }) => Promise<ProviderProbeResult>;
 
 export interface ProductModelSetupOptions {
@@ -79,56 +94,103 @@ export class ProductModelSetup {
     this.createStageNonce = options.createStageNonce ?? cryptoRandomStageNonce;
   }
 
-  async probe(input: ProductModelSetupInput): Promise<ProductModelProbeOutcome> {
+  /** Validates request-local model material without writing its credential. */
+  prepare(input: ProductModelSetupInput): ProductModelPrepareOutcome {
     const prepared = prepareInput(input);
     if ("status" in prepared) return prepared;
+    const { setupId: _setupId, ...candidate } = prepared;
+    return Object.freeze({ status: "prepared", prepared: Object.freeze(candidate) });
+  }
 
-    const stage = createStage(prepared, this.createStageNonce());
+  /** Creates the metadata-only setup locator that the draft must reserve before execution. */
+  stageSetup(prepared: ProductModelPreparedProbe, setupId: string): ProductModelSetupStage {
+    validatePrepared(prepared);
+    validateSetupId(setupId);
+    return createSetupStage(setupId, prepared, this.createStageNonce());
+  }
+
+  /** Creates the strict metadata-only profile that operational settings can reserve before writing. */
+  stageOperational(prepared: ProductModelPreparedProbe, candidateId: string): ProductModelSetupStage {
+    validatePrepared(prepared);
+    const nonce = this.createStageNonce();
+    if (!SETUP_ID.test(candidateId) || !SETUP_ID.test(nonce)) throw new TypeError("Operational model staging identity is invalid");
+    return Object.freeze({
+      profile: Object.freeze({
+        id: `${prepared.provider}:operational:${candidateId}`,
+        provider: prepared.provider,
+        kind: "api_key",
+        secretRef: `keychain:hob-agent/model:${candidateId}:${nonce}`,
+      }),
+      modelId: prepared.modelId,
+      ...(prepared.baseURL === undefined ? {} : { baseURL: prepared.baseURL }),
+    });
+  }
+
+  /** Executes a prepared model probe after its exact staged credential lease has been persisted. */
+  async execute(input: {
+    readonly prepared: ProductModelPreparedProbe;
+    readonly stage: ProductModelSetupStage;
+    readonly credentialLease: ProductSetupModelCredentialLease | ProductOperationalModelCredentialLease;
+    readonly signal?: AbortSignal;
+  }): Promise<ProductModelProbeOutcome> {
+    validatePrepared(input.prepared);
+    validateStage(input.stage);
+    if (input.credentialLease instanceof ProductOperationalModelCredentialLease) {
+      input.credentialLease.consume(input.stage.profile.secretRef!);
+    } else if (input.credentialLease instanceof ProductSetupModelCredentialLease) {
+      input.credentialLease.consume(input.stage);
+    } else {
+      throw new TypeError("Model credential execution requires a durable staging lease");
+    }
+    if (input.stage.profile.provider !== input.prepared.provider || input.stage.modelId !== input.prepared.modelId || input.stage.baseURL !== input.prepared.baseURL) {
+      throw new TypeError("Model credential stage does not match its prepared candidate");
+    }
+    if (isCancelled(input.signal)) return { status: "unavailable" };
     try {
-      await this.vault.write(stage.profile.secretRef!, prepared.apiKey);
+      await this.vault.write(input.stage.profile.secretRef!, input.prepared.apiKey);
     } catch {
-      await deleteStagedCredential(this.vault, stage.profile.secretRef!);
       return { status: "unavailable" };
     }
+    if (isCancelled(input.signal)) return { status: "unavailable" };
 
     let result: ProviderProbeResult;
     try {
       result = await this.liveProbe({
-        profile: stage.profile,
+        profile: input.stage.profile,
         vault: this.vault,
-        modelId: stage.modelId,
-        ...(stage.baseURL === undefined ? {} : { baseURL: stage.baseURL }),
+        modelId: input.stage.modelId,
+        ...(input.stage.baseURL === undefined ? {} : { baseURL: input.stage.baseURL }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     } catch {
-      await deleteStagedCredential(this.vault, stage.profile.secretRef!);
       return { status: "unavailable" };
     }
 
     const failure = probeFailure(result.status);
-    if (failure !== undefined) {
-      await deleteStagedCredential(this.vault, stage.profile.secretRef!);
-      return failure;
-    }
+    if (failure !== undefined) return failure;
 
-    return { status: "ready", latencyMs: result.latencyMs, staged: stage };
+    return { status: "ready", latencyMs: result.latencyMs, staged: input.stage };
   }
 
   /** Deletes one explicit staged credential after cancel or failed persistence. */
   async discard(stage: ProductModelSetupStage): Promise<void> {
-    setupIdFromStage(stage);
+    validateStage(stage);
     await deleteStagedCredential(this.vault, stage.profile.secretRef!);
   }
 }
 
-function setupIdFromStage(stage: ProductModelSetupStage): string {
+function validateStage(stage: ProductModelSetupStage): void {
   const reference = stage.profile.secretRef;
   if (stage.profile.kind !== "api_key" || reference === undefined) throw new TypeError("Setup model stage is invalid");
-  const match = /^keychain:hob-agent\/setup-model:([^:]+):[A-Za-z0-9_-]+$/u.exec(reference);
-  if (match === null || stage.profile.id !== `${stage.profile.provider}:setup:${match[1]}`) {
+  const setup = /^keychain:hob-agent\/setup-model:([^:]+):[A-Za-z0-9_-]+$/u.exec(reference);
+  const operational = /^keychain:hob-agent\/model:([^:]+):[A-Za-z0-9_-]+$/u.exec(reference);
+  const validSetup = setup !== null && stage.profile.id === `${stage.profile.provider}:setup:${setup[1]}`;
+  const validOperational = operational !== null && stage.profile.id === `${stage.profile.provider}:operational:${operational[1]}`;
+  if (!validSetup && !validOperational) {
     throw new TypeError("Setup model stage is invalid");
   }
-  validateSetupId(match[1]);
-  return match[1];
+  validateSetupId((setup ?? operational)![1]);
+  validatePrepared({ provider: stage.profile.provider as SupportedModelProvider, modelId: stage.modelId, apiKey: "validated", ...(stage.baseURL === undefined ? {} : { baseURL: stage.baseURL }) });
 }
 
 function prepareInput(input: ProductModelSetupInput): ProductModelSetupInput | Exclude<ProductModelProbeOutcome, ProductModelProbeReady> {
@@ -155,12 +217,12 @@ function prepareInput(input: ProductModelSetupInput): ProductModelSetupInput | E
   }
 }
 
-function createStage(input: ProductModelSetupInput, nonce: string): ProductModelSetupStage {
+function createSetupStage(setupId: string, input: ProductModelPreparedProbe, nonce: string): ProductModelSetupStage {
   if (!SETUP_ID.test(nonce)) throw new TypeError("Setup model staging nonce is invalid");
-  const secretRef = `keychain:hob-agent/setup-model:${input.setupId}:${nonce}`;
+  const secretRef = `keychain:hob-agent/setup-model:${setupId}:${nonce}`;
   return Object.freeze({
     profile: Object.freeze({
-      id: `${input.provider}:setup:${input.setupId}`,
+      id: `${input.provider}:setup:${setupId}`,
       provider: input.provider,
       kind: "api_key",
       secretRef,
@@ -168,6 +230,11 @@ function createStage(input: ProductModelSetupInput, nonce: string): ProductModel
     modelId: input.modelId,
     ...(input.baseURL === undefined ? {} : { baseURL: input.baseURL }),
   });
+}
+
+function validatePrepared(input: ProductModelPreparedProbe): void {
+  const outcome = prepareInput({ setupId: "prepared-model", ...input });
+  if ("status" in outcome) throw new TypeError("Prepared model candidate is invalid");
 }
 
 function probeFailure(status: ProviderProbeResult["status"]): Exclude<ProductModelProbeOutcome, ProductModelProbeReady> | undefined {
@@ -191,4 +258,8 @@ function validateSetupId(value: unknown): asserts value is string {
 
 function cryptoRandomStageNonce(): string {
   return globalThis.crypto.randomUUID().replace(/-/g, "");
+}
+
+function isCancelled(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer, type AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { Context } from "@deepseek-ai/cordis";
@@ -11,6 +14,7 @@ import {
   type ProductVoiceProbeOutcome,
   type ProductVoiceTrackInput,
 } from "./product-voice-setup.js";
+import { ProductVoiceCleanupLedger } from "./product-voice-cleanup-ledger.js";
 
 class MemoryVault {
   readonly values = new Map<string, string>();
@@ -209,19 +213,24 @@ test("waits for a credential write to settle before a cancelled execute returns 
   });
   if (preparation.status !== "prepared") assert.fail("expected a prepared credential stage");
   const controller = new AbortController();
+  const durableLease = await createDurableCredentialLease("family-cancelled-write", preparation.prepared.stage);
 
-  const execution = setup.execute({
-    prepared: preparation.prepared,
-    credentialLease: { stage: preparation.prepared.stage },
-    signal: controller.signal,
-  });
-  await writeStarted;
-  controller.abort();
-  releaseWrite?.();
+  try {
+    const execution = setup.execute({
+      prepared: preparation.prepared,
+      credentialLease: durableLease.lease,
+      signal: controller.signal,
+    });
+    await writeStarted;
+    controller.abort();
+    releaseWrite?.();
 
-  assert.deepEqual(await execution, { status: "unavailable" });
-  assert.equal(probeCalls, 0);
-  assert.equal(values.get("keychain:hob-agent/voice:asr:family-cancelled-write:cancelled_write"), "candidate-secret");
+    assert.deepEqual(await execution, { status: "unavailable" });
+    assert.equal(probeCalls, 0);
+    assert.equal(values.get("keychain:hob-agent/voice:asr:family-cancelled-write:cancelled_write"), "candidate-secret");
+  } finally {
+    await durableLease.dispose();
+  }
 });
 
 test("passes a private cancellation signal into the selected provider probe", async () => {
@@ -441,8 +450,34 @@ async function probeCredentialed(
 ): Promise<ProductVoiceProbeOutcome> {
   const preparation = setup.prepare(input);
   if (preparation.status !== "prepared") return preparation;
-  return setup.execute({
-    prepared: preparation.prepared,
-    credentialLease: { stage: preparation.prepared.stage },
-  });
+  const durableLease = await createDurableCredentialLease(input.setupId, preparation.prepared.stage);
+  try {
+    return await setup.execute({
+      prepared: preparation.prepared,
+      credentialLease: durableLease.lease,
+    });
+  } finally {
+    await durableLease.dispose();
+  }
+}
+
+async function createDurableCredentialLease(
+  candidateId: string,
+  stage: { readonly kind: "asr" | "tts"; readonly credentialRef?: string },
+) {
+  if (stage.credentialRef === undefined) throw new TypeError("expected a credential-backed voice stage");
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-voice-lease-"));
+  try {
+    const ledger = new ProductVoiceCleanupLedger(directory);
+    const lease = await ledger.reserve({
+      candidateId,
+      track: stage.kind,
+      credentialRef: stage.credentialRef,
+      expectedGeneration: 0,
+    });
+    return Object.freeze({ lease, dispose: () => rm(directory, { recursive: true, force: true }) });
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
 }

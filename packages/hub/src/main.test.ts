@@ -67,7 +67,7 @@ test("classifies first-run and activated product launch without exposing secrets
       activatedGeneration: 1,
     });
     assert.deepEqual(await resolveProductLaunchSelection(ENV), {
-      state: "operational",
+      state: "setup",
       dataDirectory: ENV.HOB_DATA_DIR,
     });
   } finally {
@@ -327,26 +327,15 @@ test("importing the executable module does not install process signal handlers",
   assert.equal(signalCount("SIGTERM"), before.sigterm);
 });
 
-test("main fails closed before creating a Cordis runtime when neutral bridge config is missing", async () => {
-  await assert.rejects(
-    main({
-      env: { ...ENV, HOB_BRIDGES: "{" },
-      createRuntime: async () => ({ context: new Context(), stop: async () => undefined }),
-    }),
-    /HOB_BRIDGES/,
-  );
-});
-
-test("main starts the unified first-run product runtime without parsing operational configuration", async () => {
+test("main routes direct model and bridge environment input through product setup", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-first-run-"));
-  let operationalStarts = 0;
   let productStarts = 0;
   try {
     const running = await main({
-      env: { HOB_DATA_DIR: dataDirectory },
-      createRuntime: async () => {
-        operationalStarts += 1;
-        return { context: new Context(), stop: async () => undefined };
+      env: {
+        ...ENV,
+        HOB_DATA_DIR: dataDirectory,
+        HOB_BRIDGES: "{",
       },
       createProductRuntime: async (input) => {
         productStarts += 1;
@@ -357,7 +346,6 @@ test("main starts the unified first-run product runtime without parsing operatio
     });
 
     assert.equal(productStarts, 1);
-    assert.equal(operationalStarts, 0);
     await running.shutdown.shutdown(0);
   } finally {
     await rm(dataDirectory, { recursive: true, force: true });
@@ -399,7 +387,7 @@ test("routes setup and recovery pairing codes through the dedicated local termin
   }
 });
 
-test("main restores an activated product through the same supervisor instead of the legacy runtime", async () => {
+test("main restores an activated product through the same supervisor", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-activated-product-"));
   await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
     householdName: "梧桐家",
@@ -414,15 +402,10 @@ test("main restores an activated product through the same supervisor instead of 
     },
     bridges: [],
   });
-  let legacyStarts = 0;
   let productStarts = 0;
   try {
     const running = await main({
       env: { HOB_DATA_DIR: dataDirectory },
-      createRuntime: async () => {
-        legacyStarts += 1;
-        return { context: new Context(), stop: async () => undefined };
-      },
       createProductRuntime: async (input) => {
         productStarts += 1;
         assert.equal(input.dataDirectory, dataDirectory);
@@ -430,7 +413,6 @@ test("main restores an activated product through the same supervisor instead of 
       },
     });
     assert.equal(productStarts, 1);
-    assert.equal(legacyStarts, 0);
     await running.shutdown.shutdown(0);
   } finally {
     await rm(dataDirectory, { recursive: true, force: true });
@@ -473,10 +455,14 @@ test("mounts the supervisor's exact stable private voice gateway into the operat
     runtime: privateVoiceProvider,
   });
   const voiceSettings = {} as never;
+  const modelProviderResolver = {} as never;
+  const modelSettings = {} as never;
   let productOptions: ProductRuntimeSupervisorOptions | undefined;
   let mountedVoice: unknown;
   let mountedVoiceSettings: unknown;
   let mountedRecovery: unknown;
+  let mountedModelResolver: unknown;
+  let mountedModelSettings: unknown;
   let running: Awaited<ReturnType<typeof main>> | undefined;
   const host = new ProductHttpHost({ port: 0 });
   try {
@@ -488,6 +474,8 @@ test("mounts the supervisor's exact stable private voice gateway into the operat
         mountedVoice = options.inboxHttp?.privateVoice;
         mountedVoiceSettings = options.inboxHttp?.voiceSettings;
         mountedRecovery = options.inboxHttp?.sessionRecovery;
+        mountedModelResolver = options.agent.modelProviderResolver;
+        mountedModelSettings = (options.inboxHttp as { readonly modelSettings?: unknown } | undefined)?.modelSettings;
         return {
           context: { homeInboxHttp: { attach: () => undefined } },
           dispose: async () => undefined,
@@ -519,10 +507,14 @@ test("mounts the supervisor's exact stable private voice gateway into the operat
       recoverProductSession: { recover: async () => ({ status: "invalid" as const }) },
       privateVoice,
       voiceSettings,
+      modelProviderResolver,
+      modelSettings,
     });
     assert.notEqual(bundle, undefined);
     assert.equal(mountedVoice, privateVoice);
     assert.equal(mountedVoiceSettings, voiceSettings);
+    assert.equal(mountedModelResolver, modelProviderResolver);
+    assert.equal(mountedModelSettings, modelSettings);
     assert.notEqual(mountedRecovery, undefined);
     await bundle?.dispose();
   } finally {

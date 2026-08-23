@@ -5,6 +5,7 @@ import {
   MacOSKeychainSecretVault,
   type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
+import { ModelProviderResolver, type ModelProviderCandidate } from "@hob-agent/agent-layer/model-provider-resolver";
 import {
   ProductSetupHttpService,
   type ProductSetupDraftPort,
@@ -27,6 +28,9 @@ import {
   type ProductBootstrapConfiguration,
 } from "./product-bootstrap-config-store.js";
 import { ProductSetupController } from "./product-setup-controller.js";
+import { ProductModelSetup } from "./product-model-setup.js";
+import { ProductModelCleanupLedger, type ProductModelCleanupEntry } from "./product-model-cleanup-ledger.js";
+import { ProductOperationalModelSettings } from "./product-operational-model-settings.js";
 import { ProductSetupDraftStore } from "./product-setup-draft-store.js";
 import { ProductSessionStore } from "./product-session-store.js";
 import {
@@ -76,6 +80,10 @@ export interface ProductRuntimeOperationalMountInput {
   readonly privateVoice: PrivateVoiceGateway;
   /** Operational configuration owner backed by this bundle's exact voice gateway and credential ledger. */
   readonly voiceSettings: ProductOperationalVoiceSettings;
+  /** The one resolver identity retained by the product root, initially degraded when unavailable. */
+  readonly modelProviderResolver: ModelProviderResolver;
+  /** The one operational settings owner backed by the resolver and durable model lifecycle. */
+  readonly modelSettings: ProductOperationalModelSettings;
 }
 
 /** Setup drafts additionally provide an exact, verified activation candidate. */
@@ -86,14 +94,23 @@ export interface ProductRuntimeSetupDrafts extends ProductSetupDraftPort {
   ): Promise<ProductBootstrapConfigDraft | undefined>;
   /** Runs one bounded pass over retired setup credentials when this owner supports maintenance. */
   sweepVoiceCredentialCleanup?(): Promise<void>;
+  /** Runs one bounded pass over retired setup model credentials when this owner supports maintenance. */
+  sweepModelCredentialCleanup?(): Promise<void>;
+  /** Runs one bounded pass over retired setup bridge credentials when this owner supports maintenance. */
+  sweepBridgeCredentialCleanup?(): Promise<void>;
   /** Runs once during cold start before either setup or operational HTTP surfaces attach. */
   recoverVoiceCredentialStaging?(): Promise<void>;
+  /** Moves interrupted setup model writes to cleanup before ordinary maintenance. */
+  recoverModelCredentialStaging?(): Promise<void>;
+  /** Moves interrupted setup bridge writes to cleanup before ordinary maintenance. */
+  recoverBridgeCredentialStaging?(): Promise<void>;
 }
 
 interface ProductRuntimeConfigurationStore {
   load(): Promise<ProductBootstrapConfiguration | undefined>;
   commit: ProductBootstrapConfigStore["commit"];
   commitVoice: ProductBootstrapConfigStore["commitVoice"];
+  commitModel: ProductBootstrapConfigStore["commitModel"];
 }
 
 interface ProductRuntimeSessionStore {
@@ -121,6 +138,12 @@ export interface ProductRuntimeSupervisorOptions {
   readonly announceRecovery?: (announcement: ProductSessionRecoveryAnnouncement) => void;
   /** Provider-neutral ASR/TTS setup capability. It remains idle until a caller probes a track. */
   readonly voiceSetup?: ProductVoiceSetupOptions;
+  /** Durable model credential owner shared by setup and operational settings. */
+  readonly modelCredentialVault?: WritableSecretVault;
+  /** Test seam for the one resolver identity created under this product root. */
+  readonly createModelProviderResolver?: (context: Context) => ModelProviderResolver;
+  /** Test seam for the one model setup owner shared by setup and operational settings. */
+  readonly modelSetup?: ProductModelSetup;
   /** Test seam and one durable owner for paired setup progress. */
   readonly setupDrafts?: ProductRuntimeSetupDrafts;
   /** Test seam and the single durable active-generation owner. */
@@ -141,6 +164,11 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
   readonly context = new Context();
   private readonly now: () => Date;
   private readonly voiceCredentialVault: WritableSecretVault;
+  private readonly modelCredentialVault: WritableSecretVault;
+  private readonly modelSetup: ProductModelSetup;
+  private readonly modelCleanupLedger: ProductModelCleanupLedger;
+  private readonly modelProviderResolver: ModelProviderResolver;
+  private readonly modelSettings: ProductOperationalModelSettings;
   private readonly setupDraftStore: ProductSetupDraftStore | undefined;
   private setupDrafts: ProductRuntimeSetupDrafts | undefined;
   private readonly configurationStore: ProductRuntimeConfigurationStore;
@@ -163,6 +191,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
   constructor(private readonly options: ProductRuntimeSupervisorOptions) {
     this.now = options.now ?? (() => new Date());
     this.voiceCredentialVault = options.voiceSetup?.vault ?? new MacOSKeychainSecretVault();
+    this.modelCredentialVault = options.modelCredentialVault ?? new MacOSKeychainSecretVault();
     this.setupDrafts = options.setupDrafts;
     this.setupDraftStore = options.setupDrafts === undefined
       ? new ProductSetupDraftStore(options.dataDirectory, this.now)
@@ -170,6 +199,18 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     this.configurationStore = options.configurationStore ?? new ProductBootstrapConfigStore(options.dataDirectory, this.now);
     this.productSessions = options.productSessions ?? new ProductSessionStore(options.dataDirectory, this.now);
     this.voiceCleanupLedger = new ProductVoiceCleanupLedger(options.dataDirectory, this.now);
+    this.modelCleanupLedger = new ProductModelCleanupLedger(options.dataDirectory, this.now);
+    this.modelSetup = options.modelSetup ?? new ProductModelSetup({ vault: this.modelCredentialVault });
+    this.modelProviderResolver = options.createModelProviderResolver?.(this.context)
+      ?? new ModelProviderResolver(this.context);
+    this.modelSettings = new ProductOperationalModelSettings({
+      configurationStore: this.configurationStore,
+      resolver: this.modelProviderResolver,
+      modelSetup: this.modelSetup,
+      cleanupLedger: this.modelCleanupLedger,
+      vault: this.modelCredentialVault,
+      createCandidateId: () => `m${randomBytes(24).toString("base64url")}`,
+    });
     this.host = new ProductHttpHost({ port: options.port });
     this.activation = new ProductActivationController({
       configurationStore: this.configurationStore,
@@ -203,6 +244,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     this.statusValue = "starting";
     try {
       const active = await this.configurationStore.load();
+      await this.recoverOperationalModelCleanup(active).catch(() => undefined);
       await this.recoverOperationalVoiceCleanup(active).catch(() => undefined);
       await this.host.listen();
       await this.context.plugin(ProductVoiceSetupService, {
@@ -214,11 +256,15 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
         if (store === undefined) throw new Error("Product setup draft owner is unavailable");
         this.setupDrafts = new ProductSetupController(
           store,
-          undefined,
+          this.modelSetup,
           undefined,
           this.context.productVoiceSetup,
         );
       }
+      await this.recoverModelCredentialStaging();
+      await this.sweepModelCredentialCleanup();
+      await this.recoverBridgeCredentialStaging();
+      await this.sweepBridgeCredentialCleanup();
       await this.recoverVoiceCredentialStaging();
       await this.sweepVoiceCredentialCleanup();
       if (active === undefined) {
@@ -329,6 +375,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     // fiber-disposal failure cannot revoke its committed configuration/session
     // or suppress the cookie receipt needed to reach that live handler.
     await this.disposeSetupSurface().catch(() => undefined);
+    await this.sweepBridgeCredentialCleanup();
     await this.sweepVoiceCredentialCleanup();
     return true;
   }
@@ -338,9 +385,29 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     await this.setupDrafts.sweepVoiceCredentialCleanup().catch(() => undefined);
   }
 
+  private async sweepModelCredentialCleanup(): Promise<void> {
+    if (this.setupDrafts?.sweepModelCredentialCleanup === undefined) return;
+    await this.setupDrafts.sweepModelCredentialCleanup().catch(() => undefined);
+  }
+
+  private async sweepBridgeCredentialCleanup(): Promise<void> {
+    if (this.setupDrafts?.sweepBridgeCredentialCleanup === undefined) return;
+    await this.setupDrafts.sweepBridgeCredentialCleanup().catch(() => undefined);
+  }
+
   private async recoverVoiceCredentialStaging(): Promise<void> {
     if (this.setupDrafts?.recoverVoiceCredentialStaging === undefined) return;
     await this.setupDrafts.recoverVoiceCredentialStaging().catch(() => undefined);
+  }
+
+  private async recoverModelCredentialStaging(): Promise<void> {
+    if (this.setupDrafts?.recoverModelCredentialStaging === undefined) return;
+    await this.setupDrafts.recoverModelCredentialStaging().catch(() => undefined);
+  }
+
+  private async recoverBridgeCredentialStaging(): Promise<void> {
+    if (this.setupDrafts?.recoverBridgeCredentialStaging === undefined) return;
+    await this.setupDrafts.recoverBridgeCredentialStaging().catch(() => undefined);
   }
 
   private readonly authenticateProductSession: InboxRequestAuthenticator = async (
@@ -358,6 +425,20 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
   private async mountOperationalCandidate(
     candidate: ProductBootstrapConfigDraft,
   ): Promise<RuntimeProductBundle | undefined> {
+    const candidateIsCommitted = isCommittedConfiguration(candidate);
+    try {
+      const prepared = await this.modelProviderResolver.prepare(modelCandidate(candidate, this.modelCredentialVault));
+      // Activation is deliberately synchronous after the exact candidate has
+      // been prepared. A setup candidate therefore cannot reach config CAS
+      // unless this resolver can serve the same candidate its child receives.
+      this.modelProviderResolver.activate(prepared);
+    } catch {
+      // A durable configuration is still allowed to start its household
+      // surfaces in a transparent degraded state; settings.retry() owns later
+      // recovery on this same resolver identity. A setup candidate has no
+      // durable authority yet, so its activation must not commit.
+      if (!candidateIsCommitted) return undefined;
+    }
     const recovery = this.createSessionRecovery();
     const configGeneration = await this.operationalGeneration(candidate);
     let provider: PrivateVoiceProviderRuntime | undefined;
@@ -398,22 +479,66 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
         recoverProductSession: recovery.port,
         privateVoice,
         voiceSettings,
+        modelProviderResolver: this.modelProviderResolver,
+        modelSettings: this.modelSettings,
       });
     } catch (error) {
       await privateVoice.dispose({ force: true });
+      await this.modelProviderResolver.degrade().catch(() => undefined);
       throw error;
     }
     if (mounted === undefined) {
       await privateVoice.dispose({ force: true });
+      await this.modelProviderResolver.degrade().catch(() => undefined);
       return undefined;
     }
     this.pendingRecoveryAnnouncement = recovery.announcement;
-    return operationalBundleWithPrivateVoice(mounted, privateVoice);
+    return operationalBundleWithPrivateVoice(
+      mounted,
+      privateVoice,
+      voiceSettings,
+      this.modelProviderResolver,
+    );
   }
 
   private async operationalGeneration(candidate: ProductBootstrapConfigDraft): Promise<number> {
     if (isCommittedConfiguration(candidate)) return candidate.generation;
     return ((await this.configurationStore.load())?.generation ?? 0) + 1;
+  }
+
+  /** Reconciles the model lifecycle ledger against the durable config before any child can use it. */
+  private async recoverOperationalModelCleanup(configuration: ProductBootstrapConfiguration | undefined): Promise<void> {
+    const activeRef = configuration?.modelProfile.secretRef;
+    const owner = activeModelCredentialOwner(configuration);
+    if (owner !== undefined) {
+      await this.modelCleanupLedger.adoptCommitted(owner).catch(() => undefined);
+    }
+    for (const entry of (await this.modelCleanupLedger.load()).entries) {
+      try {
+        if (entry.phase === "staged") {
+          if (configuration !== undefined
+            && entry.credentialRef === activeRef) {
+            await this.modelCleanupLedger.markCommitted({
+              candidateId: entry.candidateId,
+              credentialRef: entry.credentialRef,
+              expectedGeneration: entry.expectedGeneration,
+              committedGeneration: entry.expectedGeneration + 1,
+            });
+          } else {
+            await this.modelCleanupLedger.abandonStaged(entry);
+          }
+        } else if (entry.phase === "active" && !activeModelEntryOwnsConfiguration(entry, configuration)) {
+          await this.modelCleanupLedger.retire({
+            candidateId: entry.candidateId,
+            credentialRef: entry.credentialRef,
+            committedGeneration: entry.committedGeneration!,
+          });
+        }
+      } catch {
+        // The authoritative record remains available for the next bounded recovery pass.
+      }
+    }
+    await this.modelSettings.sweepCleanup().catch(() => undefined);
   }
 
   /** Reconciles metadata-only ownership before HTTP surfaces attach, then makes one bounded cleanup pass. */
@@ -431,14 +556,13 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
       try {
         if (entry.phase === "staged") {
           if (configuration !== undefined
-            && entry.expectedGeneration + 1 === configuration.generation
             && activeRefs.has(entry.credentialRef)) {
             await this.voiceCleanupLedger.markCommitted({
               candidateId: entry.candidateId,
               track: entry.track,
               credentialRef: entry.credentialRef,
               expectedGeneration: entry.expectedGeneration,
-              committedGeneration: configuration.generation,
+              committedGeneration: entry.expectedGeneration + 1,
             });
           } else {
             await this.voiceCleanupLedger.abandonStaged(entry);
@@ -527,6 +651,10 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
 
   private async disposeRuntime(): Promise<void> {
     let failure: unknown;
+    // Closing first establishes the shutdown boundary before either HTTP
+    // surface or runtime generation begins to drain. The model resolver then
+    // releases any retirement receipts that the closed settings owner awaits.
+    const modelSettingsClose = this.modelSettings.closeAndDrain();
     try {
       await this.disposeSetupSurface();
     } catch (error) {
@@ -538,6 +666,18 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
       failure ??= error;
     } finally {
       this.activeBundle = undefined;
+    }
+    try {
+      // The product child releases all Home Agent activities before this waits
+      // for the resolver's retired generation drain.
+      await this.modelProviderResolver.dispose();
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
+      await modelSettingsClose;
+    } catch (error) {
+      failure ??= error;
     }
     try {
       await this.context.fiber.dispose();
@@ -572,6 +712,8 @@ export function createPairingCode(): string {
 function operationalBundleWithPrivateVoice(
   mounted: RuntimeProductBundle,
   privateVoice: PrivateVoiceGateway,
+  voiceSettings: ProductOperationalVoiceSettings,
+  modelProviderResolver: ModelProviderResolver,
 ): RuntimeProductBundle {
   let disposeTask: Promise<void> | undefined;
   return {
@@ -579,6 +721,9 @@ function operationalBundleWithPrivateVoice(
     dispose: () => {
       disposeTask ??= (async () => {
         let failure: unknown;
+        // This call closes HTTP-originated mutations synchronously, then
+        // awaits their cleanup after the force drain below releases leases.
+        const voiceSettingsClose = voiceSettings.closeAndDrain();
         try {
           await privateVoice.dispose({ force: true });
         } catch (error) {
@@ -586,6 +731,16 @@ function operationalBundleWithPrivateVoice(
         }
         try {
           await mounted.dispose();
+        } catch (error) {
+          failure ??= error;
+        }
+        try {
+          await voiceSettingsClose;
+        } catch (error) {
+          failure ??= error;
+        }
+        try {
+          await modelProviderResolver.degrade();
         } catch (error) {
           failure ??= error;
         }
@@ -599,6 +754,26 @@ function operationalBundleWithPrivateVoice(
 function isCommittedConfiguration(candidate: ProductBootstrapConfigDraft): candidate is ProductBootstrapConfiguration {
   const generation = (candidate as { readonly generation?: unknown }).generation;
   return Number.isSafeInteger(generation) && Number(generation) >= 1;
+}
+
+function modelCandidate(
+  candidate: ProductBootstrapConfigDraft,
+  vault: WritableSecretVault,
+): ModelProviderCandidate {
+  const separator = candidate.modelReference.indexOf("/");
+  const provider = candidate.modelReference.slice(0, separator);
+  if (separator < 1 || !isModelProvider(provider)) throw new Error("Configured model provider is invalid");
+  return {
+    provider,
+    model: candidate.modelReference.slice(separator + 1),
+    ...(candidate.modelBaseURL === undefined ? {} : { baseURL: candidate.modelBaseURL }),
+    profile: candidate.modelProfile,
+    vault,
+  };
+}
+
+function isModelProvider(provider: string): provider is ModelProviderCandidate["provider"] {
+  return provider === "gpt" || provider === "claude" || provider === "deepseek" || provider === "kimi" || provider === "glm" || provider === "custom";
 }
 
 function activeVoiceCredentialRefs(configuration: ProductBootstrapConfiguration | undefined): ReadonlySet<string> {
@@ -638,8 +813,29 @@ function activeVoiceEntryOwnsConfiguration(
   activeRefs: ReadonlySet<string>,
 ): boolean {
   return configuration !== undefined
-    && entry.committedGeneration === configuration.generation
     && activeRefs.has(entry.credentialRef);
+}
+
+function activeModelCredentialOwner(configuration: ProductBootstrapConfiguration | undefined): {
+  readonly candidateId: string;
+  readonly credentialRef: string;
+  readonly committedGeneration: number;
+} | undefined {
+  if (configuration === undefined) return undefined;
+  const reference = configuration.modelProfile.secretRef;
+  if (typeof reference !== "string") return undefined;
+  const match = /^keychain:hob-agent\/(model|setup-model):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(reference);
+  if (match === null || match[1] === undefined || match[2] === undefined) return undefined;
+  const profileKind = match[1] === "model" ? "operational" : "setup";
+  if (configuration.modelProfile.id !== `${configuration.modelProfile.provider}:${profileKind}:${match[2]}`) return undefined;
+  return { candidateId: match[2], credentialRef: reference, committedGeneration: configuration.generation };
+}
+
+function activeModelEntryOwnsConfiguration(
+  entry: ProductModelCleanupEntry,
+  configuration: ProductBootstrapConfiguration | undefined,
+): boolean {
+  return entry.credentialRef === configuration?.modelProfile.secretRef;
 }
 
 function cookieValue(header: string | undefined, name: string): string | undefined {

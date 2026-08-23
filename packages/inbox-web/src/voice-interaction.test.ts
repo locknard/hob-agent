@@ -474,6 +474,33 @@ test("respects an ASR retry window while keeping the text exit visible", async (
   assert.equal(h.recovery.href, "/conversation");
 });
 
+test("routes a recovered transcript to model settings when the household model is unavailable", async () => {
+  const h = createHarness({
+    fetch: (url) => {
+      if (url === "/test/transcribe") {
+        return {
+          ok: false,
+          status: 503,
+          headers: { get: () => null },
+          json: async () => ({ status: "model_unavailable" }),
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+
+  assert.equal(h.root.dataset.voiceState, "model_unavailable");
+  assert.match(h.detail.textContent, /家庭助手模型正在恢复/);
+  assert.equal(h.recovery.href, "/settings#operational-model");
+  assert.equal(h.recovery.textContent, "检查模型连接");
+  assert.equal(h.start.hidden, true);
+});
+
 test("preserves a full fifteen-second PCM turn at 96 kHz", async () => {
   const h = createHarness({
     mode: "pcm_s16le",
@@ -607,6 +634,10 @@ test("confirms a committed turn cancellation with the service before showing can
   stopped.resolve({ status: 303, ok: false });
   await flush();
   assert.equal(h.root.dataset.voiceState, "cancelled");
+  assert.match(
+    h.detail.textContent,
+    /这次对话已停止。已经开始的动作会继续在活动记录中显示结果。/,
+  );
 });
 
 test("keeps a committed turn visibly running when its cancellation cannot be confirmed", async () => {
@@ -630,7 +661,7 @@ test("keeps a committed turn visibly running when its cancellation cannot be con
   await flush();
 
   assert.equal(h.root.dataset.voiceState, "thinking");
-  assert.match(h.detail.textContent, /处理仍在后台继续/);
+  assert.match(h.detail.textContent, /这次请求仍在继续处理/);
   assert.equal(h.recovery.href, "/conversation/turn_background");
 });
 

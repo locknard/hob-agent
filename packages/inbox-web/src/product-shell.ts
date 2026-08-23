@@ -410,12 +410,20 @@ export interface ProductPrivateVoiceConfigurationPending {
   readonly startedAt: number;
 }
 
+/** A controller-owned recovery that has not yet reached a household-visible outcome. */
+export interface ProductPrivateVoiceRecoveryPending {
+  readonly id: string;
+  readonly startedAt: number;
+}
+
 interface ProductPrivateVoiceBase {
   readonly generation: number;
   /** One redirect-scoped, household-readable outcome. */
   readonly notice?: string;
   /** A server-owned candidate check that has not changed the active voice generation. */
   readonly configurationPending?: ProductPrivateVoiceConfigurationPending;
+  /** A server-owned reconnect that preserves the text and household-status exits. */
+  readonly recoveryPending?: ProductPrivateVoiceRecoveryPending;
 }
 
 /** Read-only settings projection. Credential references and values never cross this boundary. */
@@ -450,6 +458,10 @@ export interface ProductShellModel {
   readonly concern?: ProductConcern;
   readonly agentNote?: string;
   readonly activeTurn?: ProductTurn;
+  /** The conversation entry follows the model availability visible to this household. */
+  readonly conversationAvailability?: "ready" | "active_request" | "setup_required" | "home_connecting" | "agent_busy" | "model_unavailable" | "stopped" | "unavailable";
+  /** A bounded server-held question that returns after the model recovers. */
+  readonly conversationDraft?: string;
   readonly completionNotification?: ProductAdviceCompletionNotification;
   readonly undo?: ProductUndo;
   readonly controlFeedback?: ProductControlFeedback;
@@ -474,6 +486,8 @@ export interface ProductShellModel {
     readonly savedNotice?: string;
   };
   readonly privateVoice?: ProductPrivateVoice;
+  /** The Hub-owned operational model projection. It contains no credential value or reference. */
+  readonly operationalModel?: ProductOperationalModel;
 }
 
 export interface ProductShellRenderOptions {
@@ -822,7 +836,7 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
-  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderOverviewConcern(model.concern)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer(model.connection.state === "disconnected")}`;
+  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderOverviewConcern(model.concern)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer(model.connection.state === "disconnected", model.conversationAvailability === "model_unavailable")}`;
 }
 
 function renderOverviewHeader(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -879,7 +893,8 @@ function renderOverviewEnergy(model: NormalizedProductShellModel): string {
   return energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`;
 }
 
-function renderOverviewComposer(disconnected = false): string {
+function renderOverviewComposer(disconnected = false, modelUnavailable = false): string {
+  if (modelUnavailable) return `<section class="product-composer-unavailable" role="status" aria-live="polite"><p>家庭助手模型正在恢复。恢复后可以继续提问。</p><a class="product-primary-action" href="/settings#operational-model">检查模型连接</a></section>`;
   const placeholder = disconnected ? "可以提问；涉及设备的动作会等连接恢复" : "问问家，或说出你想做的事…";
   const helper = disconnected ? "设备动作会在连接恢复后回到这里。" : "快捷句会把这句话交给它：低风险直接做，其余走该走的闸门。";
   const phrase = (question: string) => `<form method="post" action="/conversation"><button type="submit" name="question" value="${escapeHtml(question)}">${escapeHtml(question)}</button></form>`;
@@ -923,10 +938,16 @@ function renderSpaceCard(space: ProductSpace, stale = false): string {
 function renderConversation(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const turn = model.activeTurn;
   const agentName = model.household.agentName ?? "家庭助手";
-  const thread = turn === undefined
+  const modelUnavailable = model.conversationAvailability === "model_unavailable";
+  const thread = modelUnavailable
+    ? `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><p>家庭助手模型正在恢复。${model.conversationDraft === undefined ? "恢复后可以继续提问。" : "你的问题已经保留，恢复后可以发送。"}</p><a class="product-secondary-action" href="/settings#operational-model">检查模型连接</a></div></div>`
+    : turn === undefined
     ? `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><p>我在这里，告诉我家里的情况或想做的事。</p></div></div>`
     : `<div class="product-message product-message--user"><div class="product-message-bubble"><p>${escapeHtml(turn.question)}</p></div></div>${renderTurn(turn, agentName)}`;
-  return `<header class="product-page-header product-conversation-header"><div><p class="product-kicker">对话</p><h1>和${escapeHtml(agentName)}对话</h1><p class="product-muted">问我家里的状态、刚刚发生的变化，或下一步怎么做。</p></div><a class="product-view-switcher" href="${routeHref("overview", options)}">回到总览</a></header><div class="product-conversation"><section class="product-card product-conversation-main" aria-label="对话内容"><div class="product-conversation-thread" aria-live="polite">${thread}</div><form class="product-conversation-composer" method="post" action="/conversation"><label class="product-sr-only" for="conversation-question">继续对话</label><input id="conversation-question" name="question" autocomplete="off" placeholder="继续吩咐，或问它为什么这样选…" /><a class="product-voice-entry" href="/voice" aria-label="使用语音">语音</a><button type="submit">发送</button></form><p class="product-helper-copy">处理进度和结果会显示在这里。</p>${renderUndo(model.undo)}</section><aside class="product-conversation-side"><section class="product-card" aria-labelledby="conversation-scope-heading"><h2 id="conversation-scope-heading">本次问题</h2><ul class="product-side-list"><li><span>家庭</span><strong>${escapeHtml(model.household.name ?? "家庭名称待设置")}</strong></li><li><span>来源</span><strong>家庭状态</strong></li></ul></section><section class="product-card product-card--flat"><h2>动作说明</h2><p class="product-muted">需要确认的动作会先等你同意；每次动作的验证和撤销入口会显示在结果里。</p></section></aside></div>`;
+  const draft = model.conversationDraft === undefined ? "" : ` value="${escapeHtml(model.conversationDraft)}"`;
+  const disabled = modelUnavailable ? " disabled" : "";
+  const voice = modelUnavailable ? "" : `<a class="product-voice-entry" href="/voice" aria-label="使用语音">语音</a>`;
+  return `<header class="product-page-header product-conversation-header"><div><p class="product-kicker">对话</p><h1>和${escapeHtml(agentName)}对话</h1><p class="product-muted">问我家里的状态、刚刚发生的变化，或下一步怎么做。</p></div><a class="product-view-switcher" href="${routeHref("overview", options)}">回到总览</a></header><div class="product-conversation"><section class="product-card product-conversation-main" aria-label="对话内容"><div class="product-conversation-thread" aria-live="polite">${thread}</div><form class="product-conversation-composer" method="post" action="/conversation"><label class="product-sr-only" for="conversation-question">继续对话</label><input id="conversation-question" name="question" autocomplete="off" placeholder="继续吩咐，或问它为什么这样选…"${draft}${disabled} />${voice}<button type="submit"${disabled}>发送</button></form><p class="product-helper-copy">${modelUnavailable ? "恢复后会保留这条问题，继续发送。" : "处理进度和结果会显示在这里。"}</p>${renderUndo(model.undo)}</section><aside class="product-conversation-side"><section class="product-card product-conversation-side" aria-labelledby="conversation-scope-heading"><h2 id="conversation-scope-heading">本次问题</h2><ul class="product-side-list"><li><span>家庭</span><strong>${escapeHtml(model.household.name ?? "家庭名称待设置")}</strong></li><li><span>来源</span><strong>家庭状态</strong></li></ul></section><section class="product-card product-card--flat"><h2>动作说明</h2><p class="product-muted">需要确认的动作会先等你同意；每次动作的验证和撤销入口会显示在结果里。</p></section></aside></div>`;
 }
 
 function renderTurn(turn: ProductTurn, agentName: string): string {
@@ -1389,10 +1410,17 @@ function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string 
   if (voice === undefined) return "";
   const notice = voice.notice === undefined ? "" : `<p class="product-enable-notice" role="status" aria-live="polite" data-one-shot-notice>${escapeHtml(voice.notice)}</p>`;
   const textExit = `<a class="product-secondary-action" href="/conversation">使用文字对话</a>`;
+  const homeExit = `<a class="product-secondary-action" href="/home">查看家庭状态</a>`;
+  const activityExit = `<a class="product-secondary-action" href="/activity">查看活动记录</a>`;
   const pending = voice.configurationPending;
   if (pending !== undefined) {
     const cancel = `<form method="post" action="/settings/private-voice/cancel-configure" data-private-voice-cancel-configure-form><input type="hidden" name="configurationId" value="${escapeHtml(pending.id)}"><button class="product-secondary-action" type="submit">停止这次检查</button></form>`;
     return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" data-private-voice-configuration-pending data-private-voice-configuration-id="${escapeHtml(pending.id)}" data-private-voice-pending-started-at="${escapeHtml(String(pending.startedAt))}" data-private-voice-configuration-status-url="/settings/private-voice/configuration-status" aria-busy="true" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}<p class="product-private-voice-state" role="progressbar" aria-label="语音设置检查进度" aria-valuetext="正在检查语音识别与回复服务" aria-live="polite">正在检查语音识别与回复服务</p><p class="product-private-voice-pending-exit" data-private-voice-pending-exit hidden>可以离开此页，我会继续检查。</p><div class="product-private-voice-actions">${cancel}${textExit}</div></div></section>`;
+  }
+  const recovery = voice.recoveryPending;
+  if (recovery !== undefined) {
+    const cancel = `<form method="post" action="/settings/private-voice/cancel-retry" data-private-voice-cancel-retry-form><input type="hidden" name="expectedGeneration" value="${voice.generation}"><button class="product-secondary-action" type="submit">停止这次恢复</button></form>`;
+    return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" data-private-voice-recovery-pending data-private-voice-recovery-id="${escapeHtml(recovery.id)}" data-private-voice-recovery-started-at="${escapeHtml(String(recovery.startedAt))}" data-private-voice-configuration-status-url="/settings/private-voice/configuration-status" aria-busy="true" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">语音正在恢复，文字对话、家庭状态和活动记录始终可用。</p></div><div>${notice}<p class="product-private-voice-state" role="progressbar" aria-label="语音恢复进度" aria-valuetext="正在恢复私有语音" aria-live="polite">正在恢复私有语音</p><p class="product-private-voice-pending-exit" data-private-voice-recovery-exit hidden>可以离开此页，我会继续恢复。</p><div class="product-private-voice-actions">${cancel}${textExit}${homeExit}${activityExit}</div></div></section>`;
   }
   if (!voice.configured) {
     const configuration = renderPrivateVoiceConfiguration(voice, true);
@@ -1416,17 +1444,85 @@ function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string 
   return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}${content}</div></section>`;
 }
 
+export type ProductOperationalModelStatus = "active" | "degraded" | "retrying" | "switching";
+
+/** A server-owned one-shot model outcome. Its kind drives product behavior; its message only serves the household. */
+export type ProductOperationalModelNotice = {
+  readonly kind: "status" | "configuration_attention";
+  readonly message: string;
+};
+
+export interface ProductOperationalModel {
+  readonly status: ProductOperationalModelStatus;
+  readonly generation: number;
+  readonly configured: true;
+  /** Current configured provider label. The editable entry remains custom OpenAI-compatible in Phase 0. */
+  readonly provider: string;
+  readonly modelId: string;
+  readonly baseURL?: string;
+  readonly credentialConfigured: boolean;
+  readonly notice?: ProductOperationalModelNotice;
+  readonly configurationPending?: { readonly id: string; readonly startedAt: number };
+  /** A server-owned retry that has not yet reached a household-visible outcome. */
+  readonly recoveryPending?: { readonly id: string; readonly startedAt: number };
+}
+
+function modelConfigurationNeedsAttention(model: ProductOperationalModel): boolean {
+  return model.status === "degraded" || model.notice?.kind === "configuration_attention";
+}
+
+function renderOperationalModelConfiguration(model: ProductOperationalModel, open: boolean, failureNotice?: string): string {
+  const credentialHint = model.provider === "custom" && model.credentialConfigured
+    ? "地址不变时可留空以保留现有密钥；更换地址时请重新输入。"
+    : "请输入这个服务的访问密钥。";
+  const notice = failureNotice === undefined ? "" : `<p class="product-enable-notice product-operational-model-configuration-notice" role="alert" data-one-shot-notice>${escapeHtml(failureNotice)}</p>`;
+  return `<details class="product-operational-model-configuration"${open ? " open" : ""}><summary>连接或更换模型服务</summary>${notice}<form method="post" action="/settings/model/configure" data-operational-model-form><input type="hidden" name="expectedGeneration" value="${model.generation}"><input type="hidden" name="provider" value="custom"><label for="operational-model-id">模型名称<input id="operational-model-id" name="modelId" value="${escapeHtml(model.modelId)}" autocomplete="off" maxlength="256" required></label><label for="operational-model-key">访问密钥<input id="operational-model-key" name="apiKey" type="password" autocomplete="new-password"><small>${credentialHint}</small></label><label for="operational-model-url">OpenAI 兼容接口地址<input id="operational-model-url" name="baseURL" type="url" value="${escapeHtml(model.baseURL ?? "")}" autocomplete="url" maxlength="2048" required></label><p class="product-private-voice-form-status" role="status" aria-live="polite" data-operational-model-form-status></p><button class="product-primary-action" type="submit">检查并启用</button></form></details>`;
+}
+
+function renderOperationalModelSettings(model: NormalizedProductShellModel): string {
+  const operational = model.operationalModel;
+  if (operational === undefined) return "";
+  const configurationNeedsAttention = modelConfigurationNeedsAttention(operational);
+  const configurationFailure = operational.notice?.kind === "configuration_attention";
+  const notice = operational.notice === undefined || configurationFailure ? "" : `<p class="product-enable-notice" role="status" aria-live="polite" data-one-shot-notice>${escapeHtml(operational.notice.message)}</p>`;
+  const historyExit = `<a class="product-secondary-action" href="/activity">查看活动记录</a>`;
+  const homeExit = `<a class="product-secondary-action" href="/home">返回家庭状态</a>`;
+  const pending = operational.configurationPending;
+  if (pending !== undefined) {
+    return `<section class="product-settings-section product-operational-model" id="operational-model" data-operational-model-status="${operational.status}" data-operational-model-configuration-pending data-operational-model-configuration-id="${escapeHtml(pending.id)}" data-operational-model-pending-started-at="${escapeHtml(String(pending.startedAt))}" data-operational-model-configuration-status-url="/settings/model/configuration-status" aria-busy="true" aria-labelledby="operational-model-heading"><div><h2 id="operational-model-heading">家庭助手模型</h2><p class="product-muted">模型用于理解问题，并生成答复和新建议。更换前会先检查新模型，当前模型会继续工作。</p></div><div>${notice}<p class="product-private-voice-state" role="progressbar" aria-label="模型检查进度" aria-valuetext="正在检查新的家庭助手模型" aria-live="polite">正在检查新的家庭助手模型</p><p class="product-private-voice-pending-exit" data-operational-model-pending-exit hidden>可以离开此页，我会继续检查。</p><div class="product-private-voice-actions"><form method="post" action="/settings/model/cancel-configure" data-operational-model-cancel-configure-form><input type="hidden" name="configurationId" value="${escapeHtml(pending.id)}"><button class="product-secondary-action" type="submit">停止这次检查</button></form>${homeExit}${historyExit}</div></div></section>`;
+  }
+  const recovery = operational.recoveryPending;
+  if (recovery !== undefined) {
+    return `<section class="product-settings-section product-operational-model" id="operational-model" data-operational-model-status="${operational.status}" data-operational-model-recovery-pending data-operational-model-recovery-id="${escapeHtml(recovery.id)}" data-operational-model-recovery-started-at="${escapeHtml(String(recovery.startedAt))}" data-operational-model-configuration-status-url="/settings/model/configuration-status" aria-busy="true" aria-labelledby="operational-model-heading"><div><h2 id="operational-model-heading">家庭助手模型</h2><p class="product-muted">模型用于理解问题，并生成答复和新建议。家庭状态、活动记录和设置会继续可用。</p></div><div>${notice}<p class="product-private-voice-state" role="progressbar" aria-label="模型恢复进度" aria-valuetext="正在恢复家庭助手模型" aria-live="polite">正在恢复家庭助手模型</p><p class="product-private-voice-pending-exit" data-operational-model-recovery-exit hidden>可以离开此页，我会继续恢复。</p><div class="product-private-voice-actions"><form method="post" action="/settings/model/cancel-retry" data-operational-model-cancel-retry-form><input type="hidden" name="expectedGeneration" value="${operational.generation}"><button class="product-secondary-action" type="submit">停止这次恢复</button></form>${homeExit}${historyExit}</div></div></section>`;
+  }
+  const configuration = renderOperationalModelConfiguration(
+    operational,
+    configurationNeedsAttention,
+    configurationFailure ? operational.notice.message : undefined,
+  );
+  const retry = `<form method="post" action="/settings/model/retry" data-operational-model-retry-form><input type="hidden" name="expectedGeneration" value="${operational.generation}"><button class="product-primary-action" type="submit">再次连接</button></form>`;
+  const cancel = `<form method="post" action="/settings/model/cancel-retry" data-operational-model-cancel-retry-form><input type="hidden" name="expectedGeneration" value="${operational.generation}"><button class="product-secondary-action" type="submit">停止这次恢复</button></form>`;
+  const content = operational.status === "active"
+    ? `<p class="product-private-voice-state">家庭助手正在使用 ${escapeHtml(operational.modelId)}</p>${configuration}`
+    : operational.status === "degraded"
+      ? `<p class="product-private-voice-state">新建议暂时不可用。家庭状态、活动记录和设置仍然可用。</p><div class="product-private-voice-actions">${retry}${homeExit}${historyExit}</div>${configuration}`
+      : operational.status === "retrying"
+        ? `<p class="product-private-voice-state" role="progressbar" aria-label="模型恢复进度" aria-valuetext="正在恢复家庭助手模型">正在恢复家庭助手模型</p><div class="product-private-voice-actions">${cancel}${homeExit}${historyExit}</div>`
+        : `<p class="product-private-voice-state" role="progressbar" aria-label="模型切换进度" aria-valuetext="正在切换家庭助手模型">正在切换家庭助手模型</p><div class="product-private-voice-actions">${homeExit}${historyExit}</div>`;
+  return `<section class="product-settings-section product-operational-model" id="operational-model" data-operational-model-status="${operational.status}" aria-labelledby="operational-model-heading"><div><h2 id="operational-model-heading">家庭助手模型</h2><p class="product-muted">模型用于理解问题，并生成答复和新建议。更换不会中断当前家庭状态。</p></div><div>${notice}${content}</div></section>`;
+}
+
 function renderManagedSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const memberName = model.household.memberName ?? "待设置";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接与设备细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>家人与设备</h2><p class="product-muted">需要确认的动作推送到绑定本人的私人手机。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}${renderPrivateVoiceSettings(model)}<section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">常用选择在前，连接与设备细节保持完整。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-sheet">${renderOperationalModelSettings(model)}${renderPrivateVoiceSettings(model)}${renderDeviceViewPreference(model.view!)}${renderViewPresentationPreferences(model.view!)}<section class="product-settings-section"><div><h2>家庭连接</h2><p class="product-muted">连接状态与家庭变化分别表达。</p></div><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-settings-section"><div><h2>家人与设备</h2><p class="product-muted">需要确认的动作推送到绑定本人的私人手机。</p></div><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}<section class="product-settings-section"><div><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作写入活动记录。</p></div></section></div>`;
 }
 
 function renderSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   if (model.view !== undefined) return renderManagedSettings(model, options);
   const memberName = model.household.memberName ?? "待设置";
   const changeLabel = model.connection.lastChanged ?? (model.connection.state === "quiet" ? "家中暂无变化" : "等待首次更新");
-  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、家人与设备和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid"><section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>家人与设备</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}${renderPrivateVoiceSettings(model)}<section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">设置</p><h1>家庭设置</h1><p class="product-muted">管理家庭连接、家人与设备和显示方式。</p></div><a class="product-view-switcher" href="${routeHref("onboarding", options)}">继续首次设置</a></header><div class="product-settings-grid">${renderOperationalModelSettings(model)}${renderPrivateVoiceSettings(model)}<section class="product-card"><h2>家庭连接</h2><ul class="product-settings-list"><li><span>当前状态</span><strong>${escapeHtml(connectionLabel(model.connection))}</strong></li><li><span>数据变化</span><strong>${escapeHtml(changeLabel)}</strong></li></ul></section><section class="product-card"><h2>家人与设备</h2><ul class="product-settings-list"><li><span>当前成员</span><strong>${escapeHtml(memberName)}</strong></li><li><span>高影响动作</span><strong>在绑定本人的私人手机上确认</strong></li></ul></section>${renderActionPolicyEditor(model)}<section class="product-card"><h2>数据与隐私</h2><p class="product-muted">家庭数据保存在本地。已完成的动作会写入活动记录。</p></section><section class="product-card"><h2>视图偏好</h2><p class="product-muted">手机优先显示生活视图，桌面和墙面屏可切换到控制视图。</p><a class="product-secondary-action" href="${routeHref("control", options)}">打开控制视图</a></section></div>`;
 }
 
 function onboardingSteps(model: NormalizedProductShellModel): readonly ProductOnboardingStepData[] {
@@ -1633,7 +1729,7 @@ function renderProductViewRecipeSlot(
     case "overview.review-summary": return renderOverviewReviewSummary(model, options);
     case "overview.agent-note": return renderOverviewAgentNote(model);
     case "overview.energy": return renderOverviewEnergy(model);
-    case "overview.composer": return renderOverviewComposer(model.connection.state === "disconnected");
+    case "overview.composer": return renderOverviewComposer(model.connection.state === "disconnected", model.conversationAvailability === "model_unavailable");
     case "conversation.workspace": return renderConversation(model, options);
     case "reviews.workspace": return renderReviews(model, options);
     case "activity.workspace": return renderActivity(model);
@@ -1683,7 +1779,7 @@ export function renderProductShell(source: ProductShellModel = {}, options: Prod
  * same-origin product asset; forms still navigate normally when script is absent.
  */
 export const PRODUCT_PRIVATE_VOICE_JS = String.raw`
-for (const voiceForm of document.querySelectorAll("[data-private-voice-form], [data-private-voice-disable-form], [data-private-voice-retry-form], [data-private-voice-cancel-form], [data-private-voice-cancel-configure-form]")) {
+for (const voiceForm of document.querySelectorAll("[data-private-voice-form], [data-private-voice-disable-form], [data-private-voice-retry-form], [data-private-voice-cancel-form], [data-private-voice-cancel-retry-form], [data-private-voice-cancel-configure-form]")) {
   if (!(voiceForm instanceof HTMLFormElement)) continue;
   const voiceSection = voiceForm.closest("[data-private-voice-status]");
   const formStatus = voiceSection?.querySelector("[data-private-voice-form-status]");
@@ -1693,9 +1789,11 @@ for (const voiceForm of document.querySelectorAll("[data-private-voice-form], [d
     : voiceForm.hasAttribute("data-private-voice-disable-form")
       ? "正在关闭语音…"
       : voiceForm.hasAttribute("data-private-voice-retry-form")
-        ? "正在重新连接语音…"
+      ? "正在重新连接语音…"
         : voiceForm.hasAttribute("data-private-voice-cancel-configure-form")
           ? "正在停止这次检查…"
+          : voiceForm.hasAttribute("data-private-voice-cancel-retry-form")
+            ? "正在停止这次恢复…"
           : "正在停止连接…";
   voiceForm.addEventListener("submit", (event) => {
     const submit = event.submitter;
@@ -1725,7 +1823,9 @@ for (const pendingSection of document.querySelectorAll("[data-private-voice-conf
   let pollTimer;
   const poll = async () => {
     try {
-      const response = await fetch(statusUrl, { credentials: "same-origin", headers: { accept: "application/json" } });
+      const taskStatusUrl = new URL(statusUrl, window.location.origin);
+      taskStatusUrl.searchParams.set("configurationId", configurationId);
+      const response = await fetch(taskStatusUrl, { credentials: "same-origin", headers: { accept: "application/json" } });
       if (!response.ok) return;
       const result = await response.json();
       if (typeof result !== "object" || result === null) return;
@@ -1740,6 +1840,122 @@ for (const pendingSection of document.querySelectorAll("[data-private-voice-conf
     } catch {
       // The normal server-rendered pending state and its cancel/text exits remain available.
     }
+  };
+  void poll();
+  pollTimer = window.setInterval(() => { void poll(); }, 2_000);
+  window.addEventListener("pagehide", () => window.clearInterval(pollTimer), { once: true });
+}
+
+for (const pendingSection of document.querySelectorAll("[data-private-voice-recovery-pending]")) {
+  if (!(pendingSection instanceof HTMLElement)) continue;
+  const recoveryId = pendingSection.dataset.privateVoiceRecoveryId;
+  const statusUrl = pendingSection.dataset.privateVoiceConfigurationStatusUrl;
+  if (recoveryId === undefined || statusUrl === undefined) continue;
+  const longWaitExit = pendingSection.querySelector("[data-private-voice-recovery-exit]");
+  const startedAt = Number(pendingSection.dataset.privateVoiceRecoveryStartedAt);
+  const revealAfter = Number.isFinite(startedAt)
+    ? Math.max(0, 10_000 - Math.max(0, Date.now() - startedAt))
+    : 10_000;
+  window.setTimeout(() => {
+    if (longWaitExit instanceof HTMLElement) longWaitExit.hidden = false;
+  }, revealAfter);
+
+  let reloaded = false;
+  let pollTimer;
+  const poll = async () => {
+    try {
+      const taskStatusUrl = new URL(statusUrl, window.location.origin);
+      taskStatusUrl.searchParams.set("recoveryId", recoveryId);
+      const response = await fetch(taskStatusUrl, { credentials: "same-origin", headers: { accept: "application/json" } });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (typeof result !== "object" || result === null || result.recoveryId !== recoveryId) return;
+      if (result.status !== "completed" || typeof result.receipt !== "string" || !/^[a-f0-9]{32}$/.test(result.receipt) || reloaded) return;
+      reloaded = true;
+      window.clearInterval(pollTimer);
+      location.replace("/settings?voice=" + encodeURIComponent(result.receipt) + "#private-voice");
+    } catch {
+      // The server-rendered progress and household exits remain usable.
+    }
+  };
+  void poll();
+  pollTimer = window.setInterval(() => { void poll(); }, 2_000);
+  window.addEventListener("pagehide", () => window.clearInterval(pollTimer), { once: true });
+}
+`;
+
+export const PRODUCT_OPERATIONAL_MODEL_JS = String.raw`
+for (const modelForm of document.querySelectorAll("[data-operational-model-form], [data-operational-model-retry-form], [data-operational-model-cancel-retry-form], [data-operational-model-cancel-configure-form]")) {
+  if (!(modelForm instanceof HTMLFormElement)) continue;
+  const section = modelForm.closest("[data-operational-model-status]");
+  const status = section?.querySelector("[data-operational-model-form-status], .product-private-voice-state");
+  modelForm.addEventListener("submit", (event) => {
+    const submit = event.submitter;
+    if (!(submit instanceof HTMLButtonElement)) return;
+    submit.disabled = true;
+    section?.setAttribute("aria-busy", "true");
+    if (status instanceof HTMLElement) status.textContent = modelForm.hasAttribute("data-operational-model-cancel-configure-form")
+      ? "正在停止这次检查…"
+      : modelForm.hasAttribute("data-operational-model-cancel-retry-form")
+        ? "正在停止这次恢复…"
+        : "正在处理模型设置…";
+  }, { once: true });
+}
+
+for (const pendingSection of document.querySelectorAll("[data-operational-model-configuration-pending]")) {
+  if (!(pendingSection instanceof HTMLElement)) continue;
+  const configurationId = pendingSection.dataset.operationalModelConfigurationId;
+  const statusUrl = pendingSection.dataset.operationalModelConfigurationStatusUrl;
+  if (configurationId === undefined || statusUrl === undefined) continue;
+  const longWaitExit = pendingSection.querySelector("[data-operational-model-pending-exit]");
+  const startedAt = Number(pendingSection.dataset.operationalModelPendingStartedAt);
+  const revealAfter = Number.isFinite(startedAt) ? Math.max(0, 10_000 - Math.max(0, Date.now() - startedAt)) : 10_000;
+  window.setTimeout(() => { if (longWaitExit instanceof HTMLElement) longWaitExit.hidden = false; }, revealAfter);
+  let reloaded = false;
+  let pollTimer;
+  const poll = async () => {
+    try {
+      const taskStatusUrl = new URL(statusUrl, window.location.origin);
+      taskStatusUrl.searchParams.set("configurationId", configurationId);
+      const response = await fetch(taskStatusUrl, { credentials: "same-origin", headers: { accept: "application/json" } });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (typeof result !== "object" || result === null || result.configurationId !== configurationId) return;
+      if (result.status !== "completed" || typeof result.receipt !== "string" || !/^[a-f0-9]{32}$/.test(result.receipt) || reloaded) return;
+      reloaded = true;
+      window.clearInterval(pollTimer);
+      location.replace("/settings?model=" + encodeURIComponent(result.receipt) + "#operational-model");
+    } catch { /* The server-rendered progress and exits remain usable. */ }
+  };
+  void poll();
+  pollTimer = window.setInterval(() => { void poll(); }, 2_000);
+  window.addEventListener("pagehide", () => window.clearInterval(pollTimer), { once: true });
+}
+
+for (const pendingSection of document.querySelectorAll("[data-operational-model-recovery-pending]")) {
+  if (!(pendingSection instanceof HTMLElement)) continue;
+  const recoveryId = pendingSection.dataset.operationalModelRecoveryId;
+  const statusUrl = pendingSection.dataset.operationalModelConfigurationStatusUrl;
+  if (recoveryId === undefined || statusUrl === undefined) continue;
+  const longWaitExit = pendingSection.querySelector("[data-operational-model-recovery-exit]");
+  const startedAt = Number(pendingSection.dataset.operationalModelRecoveryStartedAt);
+  const revealAfter = Number.isFinite(startedAt) ? Math.max(0, 10_000 - Math.max(0, Date.now() - startedAt)) : 10_000;
+  window.setTimeout(() => { if (longWaitExit instanceof HTMLElement) longWaitExit.hidden = false; }, revealAfter);
+  let reloaded = false;
+  let pollTimer;
+  const poll = async () => {
+    try {
+      const taskStatusUrl = new URL(statusUrl, window.location.origin);
+      taskStatusUrl.searchParams.set("recoveryId", recoveryId);
+      const response = await fetch(taskStatusUrl, { credentials: "same-origin", headers: { accept: "application/json" } });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (typeof result !== "object" || result === null || result.recoveryId !== recoveryId) return;
+      if (result.status !== "completed" || typeof result.receipt !== "string" || !/^[a-f0-9]{32}$/.test(result.receipt) || reloaded) return;
+      reloaded = true;
+      window.clearInterval(pollTimer);
+      location.replace("/settings?model=" + encodeURIComponent(result.receipt) + "#operational-model");
+    } catch { /* The server-rendered progress and exits remain usable. */ }
   };
   void poll();
   pollTimer = window.setInterval(() => { void poll(); }, 2_000);

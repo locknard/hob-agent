@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -6,12 +7,15 @@ import {
   renderProductHost,
   renderProductShell,
   renderProductViewRecipeContent,
+  PRODUCT_OPERATIONAL_MODEL_JS,
   PRODUCT_PRIVATE_VOICE_JS,
   type ProductConnectionState,
   type ProductControlFeedback,
   type ProductShellModel,
 } from "./product-shell.js";
 import { PRODUCT_SHELL_CSS } from "./product-shell-styles.js";
+
+const PRODUCT_OPERATIONAL_MODEL_CSS = readFileSync(new URL("./product.css", import.meta.url), "utf8");
 
 function model(overrides: Partial<ProductShellModel> = {}): ProductShellModel {
   return {
@@ -188,6 +192,29 @@ test("projects unknown household facts and connection states without inventing a
   assert.doesNotMatch(conversation, /阿灶|小海的家/);
   assert.match(conversation, /处理进度和结果会显示在这里/);
   assert.doesNotMatch(conversation, /可撤销窗口|告诉你已完成的动作|10 秒/);
+});
+
+test("keeps conversation entry honest while the household model reconnects", () => {
+  const conversation = renderProductShell(model({
+    route: "conversation",
+    conversationAvailability: "model_unavailable",
+    conversationDraft: "窗帘为什么今天开得太早？",
+  }));
+  assert.match(conversation, /家庭助手模型正在恢复/);
+  assert.match(conversation, /href="\/settings#operational-model"/);
+  assert.match(conversation, /value="窗帘为什么今天开得太早？"/);
+  assert.match(conversation, /id="conversation-question"[^>]*disabled/);
+  assert.doesNotMatch(conversation, /我在这里，告诉我家里的情况/);
+  assert.doesNotMatch(conversation, /href="\/voice"/);
+
+  const overview = renderProductShell(model({
+    route: "overview",
+    conversationAvailability: "model_unavailable",
+  }));
+  assert.match(overview, /家庭助手模型正在恢复/);
+  assert.match(overview, /href="\/settings#operational-model"/);
+  assert.doesNotMatch(overview, /id="overview-question"/);
+  assert.doesNotMatch(overview, /问问家，或说出你想做的事/);
 });
 
 test("renders the bounded activity projection without inert filter controls", () => {
@@ -435,6 +462,7 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.match(PRODUCT_SHELL_CSS, /-apple-system/);
   assert.match(PRODUCT_SHELL_CSS, /touch-action:\s*manipulation/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-skip-link\s*\{[^}]*min-height:\s*2\.75rem/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-view-switcher\s*\{[^}]*min-height:\s*2\.75rem/);
   assert.match(PRODUCT_SHELL_CSS, /nav\[data-host-view-shortcuts\]\s+a\s*\{[^}]*min-height:\s*2\.75rem/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-host-view-menu summary\s*\{[^}]*min-height:\s*2\.75rem/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-primary-action, \.product-secondary-action, \.product-danger-action\s*\{[^}]*min-height:\s*2\.75rem/);
@@ -1117,6 +1145,41 @@ test("renders private voice setup in both settings layouts without exposing cred
   }
 });
 
+test("keeps the household model and private voice together at the start of settings", () => {
+  const operationalModel = {
+    status: "active" as const,
+    generation: 4,
+    configured: true as const,
+    provider: "custom" as const,
+    modelId: "household-model",
+    baseURL: "https://models.example.test/v1",
+    credentialConfigured: true,
+  };
+  const privateVoice = {
+    status: "active" as const,
+    generation: 4,
+    configured: true as const,
+    asr: { transport: "openai_http", endpoint: "https://voice.example.test/v1", credentialConfigured: true },
+    tts: { transport: "wyoming", endpoint: "wyoming://127.0.0.1:10200", locale: "zh-CN", credentialConfigured: false },
+  };
+  const fallback = renderProductShell(model({ route: "settings", operationalModel, privateVoice }));
+  const managed = renderProductShell(model({
+    route: "settings",
+    operationalModel,
+    privateVoice,
+    view: { activeId: "builtin.life", currentPath: "/settings", choices: [{ id: "builtin.life", label: "生活视图" }] },
+  }));
+
+  for (const html of [fallback, managed]) {
+    const modelHeading = html.indexOf("家庭助手模型</h2>");
+    const voiceHeading = html.indexOf("私有语音</h2>");
+    const connectionHeading = html.indexOf("家庭连接</h2>");
+    assert.ok(modelHeading >= 0);
+    assert.ok(voiceHeading > modelHeading);
+    assert.ok(connectionHeading > voiceHeading);
+  }
+});
+
 test("renders configured private voice service state, change controls, and an explicit close confirmation", () => {
   const html = renderProductShell(model({
     route: "settings",
@@ -1197,10 +1260,36 @@ test("renders a cancellable background private voice check without treating it a
   assert.match(pending, /使用文字对话/);
   assert.doesNotMatch(pending, /action="\/settings\/private-voice\/configure"/);
   assert.match(pending, /data-private-voice-configuration-status-url="\/settings\/private-voice\/configuration-status"/);
-  assert.match(PRODUCT_PRIVATE_VOICE_JS, /fetch\(statusUrl/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /fetch\(taskStatusUrl/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /searchParams\.set\("configurationId", configurationId\)/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /searchParams\.set\("recoveryId", recoveryId\)/);
   assert.match(PRODUCT_PRIVATE_VOICE_JS, /10_000/);
   assert.match(PRODUCT_PRIVATE_VOICE_JS, /location\.replace/);
   assert.match(PRODUCT_PRIVATE_VOICE_JS, /result\.configurationId !== configurationId\)\s*\{\s*window\.clearInterval\(pollTimer\)/s);
+});
+
+test("keeps a private voice recovery visible with text, household, and activity exits", () => {
+  const html = renderProductShell(model({
+    route: "settings",
+    privateVoice: {
+      status: "retrying",
+      generation: 9,
+      configured: true,
+      asr: { transport: "wyoming", endpoint: "tcp://voice.local:10300", credentialConfigured: false },
+      tts: { transport: "wyoming", endpoint: "tcp://voice.local:10200", locale: "zh-CN", credentialConfigured: false },
+      recoveryPending: { id: "e".repeat(32), startedAt: 1_777_777_777_000 },
+    },
+  }));
+
+  assert.match(html, /data-private-voice-recovery-pending/);
+  assert.match(html, /正在恢复私有语音/);
+  assert.match(html, /action="\/settings\/private-voice\/cancel-retry"/);
+  assert.match(html, />使用文字对话</);
+  assert.match(html, />查看家庭状态</);
+  assert.match(html, />查看活动记录</);
+  assert.match(html, /可以离开此页，我会继续恢复。/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /data-private-voice-recovery-pending/);
+  assert.match(PRODUCT_PRIVATE_VOICE_JS, /result\.recoveryId !== recoveryId/);
 });
 
 test("styles private voice forms as touch-safe, responsive settings rows", () => {
@@ -1220,6 +1309,146 @@ test("ships progressive private voice submission feedback without replacing serv
   assert.match(PRODUCT_PRIVATE_VOICE_JS, /正在检查并保存/);
   assert.match(PRODUCT_PRIVATE_VOICE_JS, /正在重新连接语音/);
   assert.doesNotMatch(PRODUCT_PRIVATE_VOICE_JS, /preventDefault/);
+});
+
+test("renders operational model settings without ever reflecting the password", () => {
+  const secret = "model-password-must-not-render";
+  const html = renderProductShell(model({
+    route: "settings",
+    operationalModel: {
+      status: "active",
+      generation: 7,
+      configured: true,
+      provider: "custom",
+      modelId: "household-model",
+      baseURL: "https://models.example.test/v1",
+      credentialConfigured: true,
+    },
+  }));
+
+  assert.match(html, /<h2[^>]*>家庭助手模型<\/h2>/);
+  assert.match(html, /OpenAI 兼容接口/);
+  assert.match(html, /action="\/settings\/model\/configure"/);
+  assert.match(html, /name="apiKey" type="password"/);
+  assert.match(html, /地址不变时可留空/);
+  assert.match(html, /<details[^>]*>.*连接或更换模型服务/s);
+  assert.match(html, /name="expectedGeneration" value="7"/);
+  assert.doesNotMatch(html, new RegExp(secret));
+  assert.doesNotMatch(html, /secretRef|keychain:/i);
+});
+
+test("renders degraded operational model recovery with a household-status-preserving exit", () => {
+  const html = renderProductShell(model({
+    route: "settings",
+    operationalModel: {
+      status: "degraded",
+      generation: 7,
+      configured: true,
+      provider: "custom",
+      modelId: "household-model",
+      baseURL: "https://models.example.test/v1",
+      credentialConfigured: true,
+    },
+  }));
+
+  assert.match(html, /新建议暂时不可用/);
+  assert.match(html, /action="\/settings\/model\/retry"/);
+  assert.match(html, /href="\/home"/);
+  assert.match(html, /href="\/activity"/);
+});
+
+test("opens the model configuration beside a failed configuration or recovery", () => {
+  const configurationFailure = renderProductShell(model({
+    route: "settings",
+    operationalModel: {
+      status: "active",
+      generation: 7,
+      configured: true,
+      provider: "custom",
+      modelId: "household-model",
+      baseURL: "https://models.example.test/v1",
+      credentialConfigured: true,
+      notice: {
+        kind: "configuration_attention",
+        message: "模型服务未接受访问密钥，请更新后再试。",
+      },
+    },
+  }));
+  const recoveryFailure = renderProductShell(model({
+    route: "settings",
+    operationalModel: {
+      status: "degraded",
+      generation: 7,
+      configured: true,
+      provider: "custom",
+      modelId: "household-model",
+      baseURL: "https://models.example.test/v1",
+      credentialConfigured: true,
+      notice: {
+        kind: "status",
+        message: "家庭助手模型仍不可用。家庭状态、活动记录和设置仍然可用。",
+      },
+    },
+  }));
+
+  assert.match(configurationFailure, /<details[^>]*open[^>]*>[\s\S]*模型服务未接受访问密钥[\s\S]*检查并启用/);
+  assert.match(recoveryFailure, /家庭助手模型仍不可用[\s\S]*再次连接[\s\S]*<details[^>]*open/s);
+});
+
+test("keeps model settings touch-safe and adapts their detail surface to every display preference", () => {
+  assert.match(PRODUCT_OPERATIONAL_MODEL_CSS, /\.product-operational-model-configuration > summary\s*\{[^}]*min-height:\s*2\.75rem/s);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_CSS, /\.product-operational-model-configuration input\s*\{[^}]*min-height:\s*2\.75rem/s);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_CSS, /@media \(max-width:\s*56rem\)[\s\S]*\.product-operational-model-configuration > summary/s);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_CSS, /@media \(prefers-color-scheme:\s*dark\)[\s\S]*\.product-operational-model-configuration/s);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_CSS, /@media \(prefers-contrast:\s*more\)[\s\S]*\.product-operational-model-configuration/s);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_CSS, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*\.product-operational-model/s);
+});
+
+test("renders a cancellable model recovery that continues in the background", () => {
+  const html = renderProductShell(model({
+    route: "settings",
+    operationalModel: {
+      status: "retrying",
+      generation: 7,
+      configured: true,
+      provider: "custom",
+      modelId: "household-model",
+      baseURL: "https://models.example.test/v1",
+      credentialConfigured: true,
+      recoveryPending: { id: "a".repeat(32), startedAt: 0 },
+    },
+  }));
+
+  assert.match(html, /模型用于理解问题，并生成答复和新建议。/);
+  assert.match(html, /data-operational-model-recovery-pending/);
+  assert.match(html, /action="\/settings\/model\/cancel-retry"/);
+  assert.match(html, /停止这次恢复/);
+  assert.match(html, /可以离开此页，我会继续恢复。/);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_JS, /data-operational-model-cancel-configure-form/);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_JS, /正在停止这次检查…/);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_JS, /data-operational-model-recovery-pending/);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_JS, /recoveryId !== recoveryId/);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_JS, /searchParams\.set\("configurationId", configurationId\)/);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_JS, /searchParams\.set\("recoveryId", recoveryId\)/);
+  assert.match(PRODUCT_OPERATIONAL_MODEL_JS, /10_000/);
+});
+
+test("labels the model-service form by its household purpose", () => {
+  const html = renderProductShell(model({
+    route: "settings",
+    operationalModel: {
+      status: "active",
+      generation: 7,
+      configured: true,
+      provider: "custom",
+      modelId: "household-model",
+      baseURL: "https://models.example.test/v1",
+      credentialConfigured: true,
+    },
+  }));
+
+  assert.match(html, /连接或更换模型服务/);
+  assert.doesNotMatch(html, /<summary>高级设置<\/summary>/);
 });
 
 

@@ -52,6 +52,7 @@ import {
   type AgentLoopTrace,
 } from "../runtime/dsh-agent-loop-trace.js";
 import type { HouseholdPromptContext } from "../prompt/household-prompt-context.js";
+import type { ModelProviderResolver } from "../model/model-provider-resolver.js";
 import { HomeCompactionEngine } from "./home-compaction.js";
 
 const DEFAULT_SESSION_ID = "home-main";
@@ -93,6 +94,8 @@ export interface DshHomeAgentOptions {
   readonly model: string;
   /** Test/custom adapter. Omit when a provider plugin already owns the route. */
   readonly adapter?: LlmAdapter;
+  /** Product composition supplies the exact resolver that owns the root adapter. */
+  readonly modelProviderResolver?: Pick<ModelProviderResolver, "bindAgent" | "status">;
   readonly sessionId?: string;
   /** Official DSH SQLite store. Omit only for isolated in-memory tests. */
   readonly sessionPersistencePath?: string;
@@ -133,10 +136,17 @@ export class DshHomeAgentService extends Service {
     return this.observationTask === undefined && this.agent.status === "idle" ? "idle" : "running";
   }
 
+  /** Projects the Hub-owned provider state without exposing a provider or credential. */
+  get modelStatus(): { readonly state: "active" | "degraded" } {
+    const resolver = this.modelProviderResolver();
+    return resolver?.status().state === "degraded" ? { state: "degraded" } : { state: "active" };
+  }
+
   /** Starts one trusted product observation turn through the canonical DSH loop. */
   async requestObservation(signal?: AbortSignal): Promise<HomeObservationDisposition | undefined> {
     if (this.observationStatus !== "idle") throw new Error("Home Agent is busy");
     if (signal?.aborted) throw new Error("Home observation was cancelled");
+    this.assertModelAvailable();
     this.lastObservationMetrics = undefined;
     const priorTurns = new Set(this.traceSnapshot()?.turns.map((turn) => turn.turn) ?? []);
     const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
@@ -212,6 +222,7 @@ export class DshHomeAgentService extends Service {
     const boundedQuestion = validateAdviceQuestion(question);
     if (this.observationStatus !== "idle") throw new Error("Home Agent is busy");
     if (signal?.aborted) throw new Error("Home advice was cancelled");
+    this.assertModelAvailable();
     this.lastObservationMetrics = undefined;
     const priorTurns = new Set(this.traceSnapshot()?.turns.map((turn) => turn.turn) ?? []);
     const inventoryCoverage = this.ctx.get("homeInventoryCoverage");
@@ -305,6 +316,16 @@ export class DshHomeAgentService extends Service {
       toolCalls: tools.length,
       failedToolCalls: tools.filter((tool) => tool.status === "failed").length,
     };
+  }
+
+  private modelProviderResolver(): Pick<ModelProviderResolver, "bindAgent" | "status"> | undefined {
+    return this.options.modelProviderResolver ?? this.ctx.get("modelProviderResolver");
+  }
+
+  private assertModelAvailable(): void {
+    if (this.modelProviderResolver()?.status().state === "degraded") {
+      throw new Error("Home model provider is unavailable");
+    }
   }
 
   constructor(ctx: Context, private readonly options: DshHomeAgentOptions) {
@@ -424,6 +445,7 @@ export class DshHomeAgentService extends Service {
       ? await agents.resume({ resumeSessionId: sessionId, agentOptions })
       : await agents.create({ sessionId, agentOptions });
     this.agent = handle.agent;
+    this.modelProviderResolver()?.bindAgent(this.agent);
     this.ctx.effect(() => () => handle.dispose(), "home-agent.dispose");
   }
 }
