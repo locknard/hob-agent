@@ -1189,11 +1189,13 @@ function projectMediaClarification(value: unknown): Extract<ProductMediaActionTu
   return {
     slot: value.slot,
     reason: value.reason,
-    options: value.options.flatMap((option) => {
+    options: value.options.flatMap<
+      Extract<ProductMediaActionTurn, { readonly status: "clarification" }>["clarification"]["options"][number]
+    >((option) => {
       if (!isRecord(option)) throw new TypeError("media_action_clarification_invalid");
       if (value.slot === "queueMode") {
         const title = productMediaQueueModeTitle(option.queueMode);
-        return title === undefined ? [] : [{ title }];
+        return title === undefined ? [] : [{ title, suggestion: title }];
       }
       const title = productMediaOptionText(option.title);
       const sourceLabel = productMediaOptionText(option.sourceLabel);

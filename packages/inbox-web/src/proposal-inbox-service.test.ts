@@ -941,9 +941,9 @@ test("projects an explicit media action through the Hub owner without exposing o
       slot: "queueMode",
       reason: "missing",
       options: [
-        { title: "现在播放" },
-        { title: "下一首播放" },
-        { title: "加入队列" },
+        { title: "现在播放", suggestion: "现在播放" },
+        { title: "下一首播放", suggestion: "下一首播放" },
+        { title: "加入队列", suggestion: "加入队列" },
       ],
     },
   });

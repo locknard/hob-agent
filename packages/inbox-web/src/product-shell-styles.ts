@@ -749,6 +749,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-composer, .product-conversation-composer { grid-template-columns: minmax(0, 1fr) auto; }
   .product-composer > button, .product-conversation-composer > button { min-height: 2.75rem; }
   .product-composer .product-media-command-action, .product-conversation-composer .product-media-command-action { grid-column: 1 / -1; width: 100%; min-height: 2.75rem; justify-content: center; }
+  .product-media-clarification-options .product-quiet-action { min-height: 2.75rem; }
   .product-undo { align-items: start; flex-direction: column; }
   .product-undo button { width: 100%; }
   .product-activity-item { grid-template-columns: minmax(0, 1fr); }

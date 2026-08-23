@@ -330,6 +330,8 @@ test("renders an explicit media command separately from read-only household advi
 
   const queueClarification = renderProductShell(model({
     route: "conversation",
+    mediaActionAvailability: "ready",
+    mediaActionIdempotencyKey: "a".repeat(32),
     activeTurn: {
       kind: "media_action",
       id: "media-queue-1",
@@ -338,7 +340,11 @@ test("renders an explicit media command separately from read-only household advi
       clarification: {
         slot: "queueMode",
         reason: "missing",
-        options: [{ title: "现在播放" }, { title: "下一首播放" }, { title: "加入队列" }],
+        options: [
+          { title: "现在播放", suggestion: "现在播放" },
+          { title: "下一首播放", suggestion: "下一首播放" },
+          { title: "加入队列", suggestion: "加入队列" },
+        ],
       },
     },
   }));
@@ -346,6 +352,9 @@ test("renders an explicit media command separately from read-only household advi
   assert.match(queueClarification, /现在播放/);
   assert.match(queueClarification, /下一首播放/);
   assert.match(queueClarification, /加入队列/);
+  assert.match(queueClarification, /data-media-clarification-suggestion="在多媒体室放 Jazz Evening，下一首播放"/);
+  assert.match(queueClarification, />填入这项选择<\/button>/);
+  assert.match(queueClarification, /formaction="\/conversation\/media" name="mediaActionIdempotencyKey" value="a{32}">作为媒体命令/);
   assert.doesNotMatch(queueClarification, /replace_and_play|play_next|add_to_queue/);
 
   const pending = renderProductShell(model({
@@ -438,6 +447,15 @@ test("keeps the media command submit touch-safe at the 390px layout", () => {
   assert.match(
     mobileStyles,
     /\.product-composer \.product-media-command-action, \.product-conversation-composer \.product-media-command-action \{[^}]*min-height:\s*2\.75rem;/,
+  );
+});
+
+test("keeps media clarification choices touch-safe at the 390px layout", () => {
+  const mobileStyles = PRODUCT_SHELL_CSS.slice(PRODUCT_SHELL_CSS.indexOf("@media (max-width: 28rem)"));
+
+  assert.match(
+    mobileStyles,
+    /\.product-media-clarification-options \.product-quiet-action \{[^}]*min-height:\s*2\.75rem;/,
   );
 });
 

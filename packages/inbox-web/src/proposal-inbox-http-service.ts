@@ -214,6 +214,19 @@ for (const policyForm of document.querySelectorAll("[data-policy-form]")) {
   }, { once: true });
 }
 
+// Clarification choices only copy a household-safe phrase into the ordinary
+// composer. They never submit, authorize, or carry opaque Hub references.
+for (const choice of document.querySelectorAll("[data-media-clarification-suggestion]")) {
+  if (!(choice instanceof HTMLButtonElement)) continue;
+  choice.addEventListener("click", () => {
+    const input = document.querySelector("#conversation-question");
+    const suggestion = choice.dataset.mediaClarificationSuggestion;
+    if (!(input instanceof HTMLInputElement) || input.disabled || !suggestion) return;
+    input.value = suggestion;
+    input.focus();
+  });
+}
+
 // A one-shot notice cleans its query parameter after display, so a refresh
 // or a shared link never replays it. Runs from this asset because the page
 // CSP (script-src 'self') forbids inline scripts.

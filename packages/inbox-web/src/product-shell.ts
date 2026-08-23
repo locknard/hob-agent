@@ -216,6 +216,8 @@ export interface ProductMediaActionClarification {
     readonly title?: string;
     readonly sourceLabel?: string;
     readonly playable?: boolean;
+    /** Household-safe phrase that may be copied into the composer; never an opaque provider value. */
+    readonly suggestion?: string;
   }[];
 }
 
@@ -1120,7 +1122,13 @@ function renderMediaActionTurn(turn: ProductMediaActionTurn, agentName: string):
   }
   if (turn.status === "clarification") {
     const options = turn.clarification.options
-      .map((option) => option.title === undefined ? "" : `<li><strong>${escapeHtml(option.title)}</strong>${option.sourceLabel === undefined ? "" : `<span>${escapeHtml(option.sourceLabel)}</span>`}${option.playable === false ? "<span>当前不可播放</span>" : ""}</li>`)
+      .map((option) => {
+        if (option.title === undefined) return "";
+        const suggestion = option.suggestion === undefined
+          ? ""
+          : `<button class="product-quiet-action" type="button" data-media-clarification-suggestion="${escapeHtml(`${turn.question}，${option.suggestion}`)}">填入这项选择</button>`;
+        return `<li><strong>${escapeHtml(option.title)}</strong>${option.sourceLabel === undefined ? "" : `<span>${escapeHtml(option.sourceLabel)}</span>`}${option.playable === false ? "<span>当前不可播放</span>" : ""}${suggestion}</li>`;
+      })
       .filter(Boolean)
       .join("");
     return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><section class="product-media-action-turn product-media-action-turn--clarification"><p class="product-kicker">媒体命令</p><h2>还需要确认${mediaClarificationLabel(turn.clarification.slot)}</h2><p>${mediaClarificationReason(turn.clarification.reason)} 请重新明确输入，再选择“作为媒体命令”。</p>${options === "" ? "" : `<ul class="product-media-clarification-options">${options}</ul>`}</section></div></div>`;
