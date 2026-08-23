@@ -37,6 +37,8 @@ import {
 import {
   DEFAULT_PRODUCT_SETUP_PORT,
   startProductRuntimeSupervisor,
+  type ProductSessionRecoveryAnnouncement,
+  type ProductSetupAnnouncement,
   type ProductRuntimeSupervisorOptions,
 } from "./product-runtime-supervisor.js";
 
@@ -52,8 +54,12 @@ export interface HomeHubMainOptions {
   readonly createRuntime?: StartHomeHubProcessOptions["createRuntime"];
   /** Test seam for the unified setup and operational product composition root. */
   readonly createProductRuntime?: (options: ProductRuntimeSupervisorOptions) => Promise<HomeHubRuntime> | HomeHubRuntime;
+  /** Test seam for the operational product bundle mounted below the supervisor's Cordis root. */
+  readonly mountProductBundle?: typeof mountHomeAgentProductBundle;
   /** Test seam; production resolves selected profiles from macOS Keychain. */
   readonly modelCredentialVault?: SecretVault;
+  /** Local terminal presentation for the short-lived setup and recovery pairing codes. */
+  readonly writeProductTerminal?: (message: string) => void;
 }
 
 export interface HomeHubProcessOptions {
@@ -267,9 +273,13 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
   };
   if (prepared.selection.state === "setup" || prepared.activated !== undefined) {
     const dataDirectory = prepared.selection.dataDirectory;
+    const mountProductBundle = options.mountProductBundle ?? mountHomeAgentProductBundle;
+    const writeProductTerminal = options.writeProductTerminal ?? ((message: string) => { process.stdout.write(message); });
     const productOptions: ProductRuntimeSupervisorOptions = {
       dataDirectory,
       port: productSetupPort(environment.HOB_SETUP_PORT),
+      announce: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("setup", announcement)),
+      announceRecovery: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("recovery", announcement)),
       mountOperational: async (input) => {
         const processOptions = await resolveCandidateHomeHubProcessOptions(
           environment,
@@ -277,12 +287,14 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
           input.candidate,
           options.modelCredentialVault,
         );
-        const bundle = await mountHomeAgentProductBundle(input.context, {
+        const bundle = await mountProductBundle(input.context, {
           ...processOptions.runtime,
           inboxHttp: {
             host: input.host,
             requestAuthenticator: input.authenticateProductSession,
+            sessionRecovery: input.recoverProductSession,
             principal: PRODUCT_HOUSEHOLD_ACTOR,
+            ...(input.privateVoice === undefined ? {} : { privateVoice: input.privateVoice }),
           },
           homeViewRecipeDrafts: { path: join(dataDirectory, "layout-drafts.sqlite") },
           homeOnboarding: {
@@ -325,6 +337,15 @@ const PRODUCT_HOUSEHOLD_ACTOR = Object.freeze({
     boundPrincipalId: "household-owner",
   },
 });
+
+function renderProductPairingAnnouncement(
+  purpose: "setup" | "recovery",
+  announcement: ProductSetupAnnouncement | ProductSessionRecoveryAnnouncement,
+): string {
+  const path = purpose === "setup" ? "/setup" : "/pair";
+  const title = purpose === "setup" ? "Hob 本机设置配对" : "Hob 本机会话恢复";
+  return `\n${title}\n打开：${announcement.origin}${path}\n配对码：${announcement.pairingCode}\n有效至：${announcement.expiresAt.toISOString()}\n`;
+}
 
 function productSetupPort(value: string | undefined): number {
   if (value === undefined || value.trim() === "") return DEFAULT_PRODUCT_SETUP_PORT;

@@ -2,8 +2,9 @@
 
 Date: 2026-08-22
 Status: accepted target; setup, exact-generation activation, and the in-process
-Product Host handoff are implemented. Continuous starting and recovery feedback
-remain the next milestone.
+Product Host handoff are implemented. Local browser-session recovery is
+implemented; continuous starting and generation-recovery feedback remain the
+next milestone.
 
 ## Decision
 
@@ -31,22 +32,27 @@ can therefore open the product and complete setup before the Agent becomes activ
 4. Bridge setup is catalog-driven. The current product screen offers Home Assistant;
    Xiaomi joins the same choice list when an authorized production transport and its
    setup registration are present. Each adapter supplies its own normalized config,
-   display endpoint and scoped credential references.
-5. The read-only bridge probe returns a verified connection summary. Activation
-   mounts HomeWorld from that exact staged revision, then continues in the real
+   display endpoint and scoped credential references. Its read-only probe returns a
+   verified connection summary before setup advances.
+5. Private voice is optional. A household can verify independent ASR and TTS
+   tracks through Wyoming or local OpenAI-compatible endpoints, or choose to
+   continue with text. Credentials remain track-scoped in the system vault.
+6. Activation mounts HomeWorld from that exact staged revision, then continues in the real
    onboarding flow at bridge preflight, household map, action policy,
    observation consent, and the first question. The household and assistant names
    already accepted during setup are carried forward once and are not requested again.
-6. Activation mounts the selected generation, commits it, and switches the same
-   Product Host to the operational Product Shell. Named `starting` and `recovery`
-   progress remain the next product slice.
+7. Activation mounts the selected generation, commits it, rotates the short setup
+   cookie into a durable local product session, and switches the same Product Host
+   to the operational Product Shell. A lost browser session returns to a local,
+   rate-limited one-time pairing flow without remounting the Agent. Named
+   `starting` and generation `recovery` progress remain the next product slice.
 
 ## Configuration ownership
 
 - Hub owns a versioned non-secret configuration document under `HOB_DATA_DIR`.
   The file uses owner-only permissions and contains model references, custom
-  endpoint metadata, bridge registrations, credential references, and the active
-  generation. Commits use an owner-token lock; a fresh owner preserves exclusive
+  endpoint metadata, bridge registrations, optional ASR/TTS references, and the
+  active generation. Commits use an owner-token lock; a fresh owner preserves exclusive
   activation, while an abandoned lock is atomically isolated and recovered after
   a bounded 30-second lease.
 - The operating-system credential vault owns model and bridge secret material.
@@ -72,7 +78,7 @@ The following table defines the accepted end state. The current branch owns the
 | `setup` | Product Shell, configuration drafts, credential vault, provider and bridge catalogs |
 | `starting` | activated configuration, stage stream, bounded recovery controller |
 | `operational` | HomeWorld, DSH Agent, review center, advice, media, observation, safety, Product Shell |
-| `recovery` | Product Shell, last stable generation, classified repair actions |
+| `recovery` | Product Shell, local session pairing or last stable generation, classified repair actions |
 
 In the target runtime, state changes occur at the composition root. One persistent Product Host owns the
 loopback listener and the private-device session. Setup and operational services
@@ -82,11 +88,13 @@ then commits it as active, then switches the Host surface. A failed mount dispos
 the candidate child and leaves the previous active generation unchanged. The Host
 keeps the same origin and authenticated device session throughout the change.
 
-The setup cookie is scoped to `/` and the runtime treats it as
-the product session; its
-durable record contains only a digest, expiry, and the bound local principal. The
-operational Product Shell accepts that session directly; the product journey does
-not introduce a second Basic-authentication prompt after setup.
+The setup cookie is scoped to `/`. Successful activation rotates it into a
+longer-lived operational token; the durable session record contains only a digest,
+expiry, and the bound local principal/device. The operational Product Shell accepts
+that session directly. A missing or expired cookie redirects a read request to the
+same-origin `/pair` recovery page; redeeming the short-lived code atomically rotates
+the token and invalidates the old one. The product journey does not introduce a
+Basic-authentication prompt after setup.
 
 Concrete setup support belongs to the ecosystem product bundle. The Hub setup
 controller consumes a neutral catalog of registered bridge setup adapters and
@@ -137,7 +145,17 @@ HomeWorld.
    product session without Basic authentication, disposes the setup surface, restores
    an active generation after restart, and carries household identity into onboarding.
    The retired standalone setup runtime has been removed.
-7. Add continuous `starting`/`recovery` events, credential rotation, and real
+7. **Implemented on main:** optional private voice setup independently verifies
+   ASR and TTS, commits only credential references, mounts one provider-neutral
+   runtime, and sends final transcripts through the existing DSH advice loop. A
+   provider outage on restart degrades voice while text and the household product
+   remain operational.
+8. **Implemented on main:** activation rotates the setup cookie into an owner-only
+   durable product session. A one-time, same-origin local recovery route rotates a
+   lost browser token; malformed cookies, parallel code redemption, and repeated
+   failures remain bounded.
+9. Add continuous `starting`/generation-`recovery` events, operational voice
+   reconfiguration, credential rotation, and real
    HA/custom-model acceptance before declaring the complete bootstrap milestone.
 
 ## Acceptance gates

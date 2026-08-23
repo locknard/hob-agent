@@ -18,6 +18,15 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
     readonly config: Readonly<Record<string, unknown>>;
     readonly credential: string;
   }> = [];
+  readonly voiceChecks: Array<{
+    readonly kind: "asr" | "tts";
+    readonly transport: "wyoming" | "openai_http";
+    readonly endpoint: string;
+    readonly credential?: string;
+    readonly locale?: string;
+    readonly voice?: string;
+    readonly model?: string;
+  }> = [];
 
   seed(sessionToken: string, projection: ProductSetupDraftProjection): void {
     this.token = sessionToken;
@@ -97,7 +106,7 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
     this.projection = {
       ...this.projection,
       revision: input.expectedRevision + 1,
-      stage: "map",
+      stage: "voice" as const,
       bridge: {
         adapterType: input.adapterType,
         label: "Home Assistant",
@@ -106,6 +115,56 @@ class MemorySetupDrafts implements ProductSetupDraftPort {
       },
     };
     return Promise.resolve({ status: "ready" as const, draft: this.projection });
+  }
+
+  probeVoice(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+    readonly track: {
+      readonly kind: "asr" | "tts";
+      readonly transport: "wyoming" | "openai_http";
+      readonly endpoint: string;
+      readonly credential?: string;
+      readonly locale?: string;
+      readonly voice?: string;
+      readonly model?: string;
+    };
+  }) {
+    if (input.sessionToken !== this.token || input.expectedRevision !== this.projection?.revision || this.projection.stage !== "voice") {
+      return Promise.resolve({ status: "conflict" as const });
+    }
+    if (input.track.credential !== "voice-test-secret") return Promise.resolve({ status: "credential_rejected" as const });
+    this.voiceChecks.push(input.track);
+    const voice = {
+      ...(this.projection.voice ?? {}),
+      [input.track.kind]: {
+        transport: input.track.transport,
+        endpoint: input.track.endpoint,
+        ...(input.track.model === undefined ? {} : { model: input.track.model }),
+        ...(input.track.kind === "tts" ? {
+          locale: input.track.locale,
+          ...(input.track.voice === undefined ? {} : { voice: input.track.voice }),
+        } : {}),
+        probeLatencyMs: 18,
+      },
+    };
+    const complete = voice.asr !== undefined && voice.tts !== undefined;
+    this.projection = {
+      ...this.projection,
+      revision: input.expectedRevision + 1,
+      stage: complete ? "map" : "voice",
+      voice,
+    };
+    return Promise.resolve({ status: "ready" as const, draft: this.projection });
+  }
+
+  skipVoice(input: { readonly sessionToken: string; readonly expectedRevision: number }) {
+    if (input.sessionToken !== this.token || input.expectedRevision !== this.projection?.revision || this.projection.stage !== "voice") {
+      throw new Error("Setup draft conflict");
+    }
+    const { voice: _voice, ...withoutVoice } = this.projection;
+    this.projection = { ...withoutVoice, revision: input.expectedRevision + 1, stage: "map", voiceSkipped: true };
+    return Promise.resolve(this.projection);
   }
 }
 
@@ -380,14 +439,88 @@ test("pairs one private setup device without exposing the launch code", async ()
       config: { baseUrl: "http://ha.local:8123" },
       credential: "ha-test-secret",
     }]);
+    const voiceStep = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    const voiceHtml = await voiceStep.text();
+    assert.match(voiceHtml, /设置私人语音/);
+    assert.match(voiceHtml, /action="\/setup\/voice\/asr\/verify"/);
+    assert.match(voiceHtml, /action="\/setup\/voice\/tts\/verify"/);
+    assert.match(voiceHtml, /本次跳过/);
+    assert.match(voiceHtml, /密钥写入本机凭据保险箱，页面不会回显；运行语音服务时由 Hob 读取/);
+    assert.doesNotMatch(voiceHtml, /密钥只在验证时使用/);
+    assert.equal(voiceHtml.includes("ha-test-secret"), false);
+
+    const asrChecked = await fetch(`${ctx.productSetupHttp.origin}/setup/voice/asr/verify`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        origin: ctx.productSetupHttp.origin,
+        cookie: cookie.split(";")[0] ?? "",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        revision: "4",
+        service: "openai_http",
+        endpoint: "http://voice.local",
+        credential: "voice-test-secret",
+        model: "gpt-4o-mini-transcribe",
+      }),
+    });
+    assert.equal(asrChecked.status, 303);
+    const ttsStep = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
+      headers: { cookie: cookie.split(";")[0] ?? "" },
+    });
+    const ttsHtml = await ttsStep.text();
+    assert.match(ttsHtml, /语音输入已验证，启用产品时生效/);
+    assert.match(ttsHtml, /语音输出/);
+    assert.equal(ttsHtml.includes("voice-test-secret"), false);
+    assert.equal(ttsHtml.includes("transport"), false);
+    assert.equal(ttsHtml.includes("runtime"), false);
+
+    const ttsChecked = await fetch(`${ctx.productSetupHttp.origin}/setup/voice/tts/verify`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        origin: ctx.productSetupHttp.origin,
+        cookie: cookie.split(";")[0] ?? "",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        revision: "5",
+        service: "openai_http",
+        endpoint: "http://voice.local",
+        credential: "voice-test-secret",
+        locale: "zh-CN",
+        voice: "alloy",
+        model: "gpt-4o-mini-tts",
+      }),
+    });
+    assert.equal(ttsChecked.status, 303);
+    assert.deepEqual(setupDrafts.voiceChecks, [{
+      kind: "asr",
+      transport: "openai_http",
+      endpoint: "http://voice.local",
+      credential: "voice-test-secret",
+      model: "gpt-4o-mini-transcribe",
+    }, {
+      kind: "tts",
+      transport: "openai_http",
+      endpoint: "http://voice.local",
+      credential: "voice-test-secret",
+      locale: "zh-CN",
+      voice: "alloy",
+      model: "gpt-4o-mini-tts",
+    }]);
     const mapStep = await fetch(`${ctx.productSetupHttp.origin}/setup`, {
       headers: { cookie: cookie.split(";")[0] ?? "" },
     });
     const mapHtml = await mapStep.text();
     assert.match(mapHtml, /家庭连接已验证/);
+    assert.match(mapHtml, /私人语音已验证，将和家庭助手一起启用/);
     assert.match(mapHtml, /<strong>8<\/strong><span>个设备/);
     assert.match(mapHtml, /<strong>4<\/strong><span>个空间/);
-    assert.equal(mapHtml.includes("ha-test-secret"), false);
+    assert.equal(mapHtml.includes("voice-test-secret"), false);
 
     const reused = await fetch(`${ctx.productSetupHttp.origin}/setup/pair`, {
       method: "POST",
@@ -525,6 +658,61 @@ test("bounds incorrect pairing attempts and oversized setup forms with recoverab
     assert.equal(oversized.status, 413);
     assert.match(await oversized.text(), /内容太长/);
     assert.match(oversized.headers.get("content-type") ?? "", /^text\/html/u);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("accepts only one allowed value for each private voice form field", async () => {
+  const ctx = new Context();
+  const setupDrafts = new MemorySetupDrafts();
+  const sessionToken = "voice-form-private-product-session-token";
+  setupDrafts.seed(sessionToken, { draftId: "draft-voice-form", revision: 4, stage: "voice" });
+  const fiber = await ctx.plugin(ProductSetupHttpService, {
+    port: 0,
+    pairingCode: "VOICE-HOME",
+    pairingExpiresAt: new Date("2026-08-23T02:10:00.000Z"),
+    now: () => new Date("2026-08-23T02:01:00.000Z"),
+    createSessionToken: () => "unused-private-product-session-token",
+    setupDrafts,
+  });
+  const request = (body: URLSearchParams, origin = ctx.productSetupHttp.origin, cookie = `hob_product_session=${sessionToken}`) => fetch(
+    `${ctx.productSetupHttp.origin}/setup/voice/asr/verify`,
+    { method: "POST", redirect: "manual", headers: { origin, cookie, "content-type": "application/x-www-form-urlencoded" }, body },
+  );
+
+  try {
+    const unknownField = await request(new URLSearchParams({
+      revision: "4", service: "openai_http", endpoint: "http://voice.local", credential: "voice-test-secret", model: "whisper", extra: "ignored",
+    }));
+    assert.equal(unknownField.status, 400);
+
+    const duplicateService = new URLSearchParams({ revision: "4", service: "openai_http", endpoint: "http://voice.local", credential: "voice-test-secret" });
+    duplicateService.append("service", "wyoming");
+    assert.equal((await request(duplicateService)).status, 400);
+    assert.equal((await request(new URLSearchParams({ revision: "4", service: "other", endpoint: "http://voice.local" }))).status, 400);
+    assert.equal((await request(new URLSearchParams({ revision: "4", service: "openai_http", endpoint: "http://voice.local", credential: "x".repeat(4097) }))).status, 400);
+    assert.equal((await request(new URLSearchParams({ revision: "4", service: "openai_http", endpoint: "http://voice.local" }), "https://foreign.example")).status, 403);
+    assert.equal((await request(new URLSearchParams({ revision: "4", service: "openai_http", endpoint: "http://voice.local" }), ctx.productSetupHttp.origin, "")).status, 401);
+    assert.equal(setupDrafts.voiceChecks.length, 0);
+
+    const invalidSkip = await fetch(`${ctx.productSetupHttp.origin}/setup/voice/skip`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie: `hob_product_session=${sessionToken}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ revision: "4", continue: "now" }),
+    });
+    assert.equal(invalidSkip.status, 400);
+    const skipped = await fetch(`${ctx.productSetupHttp.origin}/setup/voice/skip`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ctx.productSetupHttp.origin, cookie: `hob_product_session=${sessionToken}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ revision: "4" }),
+    });
+    assert.equal(skipped.status, 303);
+    const map = await fetch(`${ctx.productSetupHttp.origin}/setup`, { headers: { cookie: `hob_product_session=${sessionToken}` } });
+    assert.match(await map.text(), /本次不连接私人语音；文字对话仍可使用/);
   } finally {
     await fiber.dispose();
     await ctx.fiber.dispose();

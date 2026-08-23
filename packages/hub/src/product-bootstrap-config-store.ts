@@ -3,8 +3,10 @@ import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/prom
 import { join } from "node:path";
 
 import type { AuthProfile } from "@hob-agent/agent-layer/model-credentials";
+import { normalizePrivateVoiceEndpoint } from "./voice/private-voice-endpoint.js";
 
-const CONFIG_VERSION = "hob.product-config/v2" as const;
+const CONFIG_VERSION = "hob.product-config/v3" as const;
+const LEGACY_CONFIG_VERSION = "hob.product-config/v2" as const;
 const SECRET_KEY = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const MAX_FILE_BYTES = 65_536;
@@ -17,6 +19,24 @@ export interface ProductBootstrapBridgeConfig {
   readonly credentialRefs: Readonly<Record<string, string>>;
 }
 
+export interface ProductBootstrapVoiceAsrConfig {
+  readonly transport: "wyoming" | "openai_http";
+  readonly endpoint: string;
+  readonly credentialRef?: string;
+  readonly model?: string;
+}
+
+export interface ProductBootstrapVoiceTtsConfig extends ProductBootstrapVoiceAsrConfig {
+  readonly locale: string;
+  readonly voice?: string;
+}
+
+/** Complete, probe-verified runtime configuration for the optional private voice path. */
+export interface ProductVoiceRuntimeConfig {
+  readonly asr: ProductBootstrapVoiceAsrConfig;
+  readonly tts: ProductBootstrapVoiceTtsConfig;
+}
+
 export interface ProductBootstrapConfigDraft {
   readonly householdName: string;
   readonly agentName: string;
@@ -24,6 +44,7 @@ export interface ProductBootstrapConfigDraft {
   readonly modelBaseURL?: string;
   readonly modelProfile: AuthProfile;
   readonly bridges: readonly ProductBootstrapBridgeConfig[];
+  readonly voice?: ProductVoiceRuntimeConfig;
 }
 
 export interface ProductBootstrapConfiguration extends ProductBootstrapConfigDraft {
@@ -156,17 +177,22 @@ async function releaseConfigurationLock(lockPath: string, lock: ConfigurationLoc
 }
 
 function validateConfiguration(value: unknown): ProductBootstrapConfiguration {
-  if (!isRecord(value) || value.version !== CONFIG_VERSION || !Number.isSafeInteger(value.generation) || Number(value.generation) < 1) {
+  if (!isRecord(value) || (value.version !== CONFIG_VERSION && value.version !== LEGACY_CONFIG_VERSION)
+    || !Number.isSafeInteger(value.generation) || Number(value.generation) < 1) {
     throw new Error("Product configuration header is invalid");
   }
   if (typeof value.activatedAt !== "string" || !Number.isFinite(Date.parse(value.activatedAt))) {
     throw new Error("Product configuration activation time is invalid");
   }
+  const draft = validateDraft(value);
+  if (value.version === LEGACY_CONFIG_VERSION && draft.voice !== undefined) {
+    throw new Error("Product configuration header is invalid");
+  }
   return Object.freeze({
     version: CONFIG_VERSION,
     generation: Number(value.generation),
     activatedAt: value.activatedAt,
-    ...validateDraft(value),
+    ...draft,
   });
 }
 
@@ -179,6 +205,7 @@ function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unkno
   const provider = modelReference.slice(0, modelReference.indexOf("/"));
   const modelProfile = validateModelProfile(value.modelProfile, provider);
   const modelBaseURL = value.modelBaseURL === undefined ? undefined : safeHttpsURL(value.modelBaseURL);
+  const voice = value.voice === undefined ? undefined : validateVoiceRuntimeConfig(value.voice);
   if (!Array.isArray(value.bridges) || value.bridges.length > 16) throw new TypeError("Bridge configuration list is invalid");
   const seen = new Set<string>();
   const bridges = value.bridges.map((bridge) => {
@@ -208,7 +235,84 @@ function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unkno
     ...(modelBaseURL === undefined ? {} : { modelBaseURL }),
     modelProfile,
     bridges: Object.freeze(bridges),
+    ...(voice === undefined ? {} : { voice }),
   });
+}
+
+function validateVoiceRuntimeConfig(value: unknown): ProductVoiceRuntimeConfig {
+  if (!isRecord(value)) throw new TypeError("Voice configuration is invalid");
+  assertExactKeys(value, ["asr", "tts"], "Voice configuration is invalid");
+  return Object.freeze({
+    asr: validateVoiceAsrConfig(value.asr),
+    tts: validateVoiceTtsConfig(value.tts),
+  });
+}
+
+function validateVoiceAsrConfig(value: unknown): ProductBootstrapVoiceAsrConfig {
+  if (!isRecord(value)) throw new TypeError("Voice configuration is invalid");
+  assertExactKeys(value, ["transport", "endpoint", "credentialRef", "model"], "Voice configuration is invalid");
+  const transport = voiceTransport(value.transport);
+  const credentialRef = value.credentialRef === undefined ? undefined : voiceCredentialRef("asr", value.credentialRef);
+  const endpoint = voiceEndpoint(transport, value.endpoint, credentialRef !== undefined);
+  if (transport === "wyoming" && credentialRef !== undefined) throw new TypeError("Voice configuration is invalid");
+  const model = value.model === undefined ? undefined : voiceLabel(value.model);
+  return Object.freeze({ transport, endpoint, ...(credentialRef === undefined ? {} : { credentialRef }), ...(model === undefined ? {} : { model }) });
+}
+
+function validateVoiceTtsConfig(value: unknown): ProductBootstrapVoiceTtsConfig {
+  if (!isRecord(value)) throw new TypeError("Voice configuration is invalid");
+  assertExactKeys(value, ["transport", "endpoint", "credentialRef", "model", "locale", "voice"], "Voice configuration is invalid");
+  const transport = voiceTransport(value.transport);
+  const credentialRef = value.credentialRef === undefined ? undefined : voiceCredentialRef("tts", value.credentialRef);
+  const endpoint = voiceEndpoint(transport, value.endpoint, credentialRef !== undefined);
+  if (transport === "wyoming" && credentialRef !== undefined) throw new TypeError("Voice configuration is invalid");
+  const model = value.model === undefined ? undefined : voiceLabel(value.model);
+  if (transport === "wyoming" && model !== undefined) throw new TypeError("Voice configuration is invalid");
+  const locale = voiceLocale(value.locale);
+  const voice = value.voice === undefined ? undefined : voiceLabel(value.voice);
+  return Object.freeze({ transport, endpoint, ...(credentialRef === undefined ? {} : { credentialRef }), locale, ...(voice === undefined ? {} : { voice }), ...(model === undefined ? {} : { model }) });
+}
+
+function voiceTransport(value: unknown): "wyoming" | "openai_http" {
+  if (value !== "wyoming" && value !== "openai_http") throw new TypeError("Voice configuration is invalid");
+  return value;
+}
+
+function voiceEndpoint(transport: "wyoming" | "openai_http", value: unknown, hasCredential: boolean): string {
+  try {
+    return normalizePrivateVoiceEndpoint(transport, value, { hasCredential });
+  } catch {
+    throw new TypeError("Voice configuration is invalid");
+  }
+}
+
+function voiceCredentialRef(kind: "asr" | "tts", value: unknown): string {
+  const reference = boundedString(value, 512, "Voice credential reference");
+  if (!new RegExp(`^keychain:hob-agent/voice:${kind}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, "u").test(reference)) {
+    throw new TypeError("Voice configuration is invalid");
+  }
+  return reference;
+}
+
+function voiceLocale(value: unknown): string {
+  if (typeof value !== "string") throw new TypeError("Voice configuration is invalid");
+  try {
+    const [locale] = Intl.getCanonicalLocales(value.trim());
+    if (locale === undefined || locale.length > 35) throw new TypeError("Voice configuration is invalid");
+    return locale;
+  } catch {
+    throw new TypeError("Voice configuration is invalid");
+  }
+}
+
+function voiceLabel(value: unknown): string {
+  const label = boundedString(value, 128, "Voice label");
+  if (/[\u0000-\u001f\u007f]/u.test(label)) throw new TypeError("Voice configuration is invalid");
+  return label;
+}
+
+function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[], message: string): void {
+  if (Object.keys(value).some((key) => !allowed.includes(key))) throw new TypeError(message);
 }
 
 function validateModelProfile(value: unknown, provider: string): AuthProfile {

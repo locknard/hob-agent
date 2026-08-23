@@ -1,6 +1,6 @@
 # 私有语音运行时
 
-状态：Phase 0 架构与产品决策。本文定义一条可本地部署的语音输入、理解和播报路径；它不引入新的自动化运行时、设备执行入口或家庭成员等级体系。
+状态：Phase 0 架构与产品决策。首次设置、两类 transport、激活、按键说话、既有 DSH 对话与发起端播报的最小纵切已经实现；常驻唤醒、跨房间播报和完整的语音动作确认仍是后续里程碑。本文定义的路径不引入新的自动化运行时、设备执行入口或家庭成员等级体系。
 
 ## 产品能力：让家庭自己拥有的 Jarvis
 
@@ -8,7 +8,7 @@
 
 这项能力的承诺是：
 
-- 家庭能在不上传持续麦克风音频、转写或家庭上下文的前提下完成日常语音请求；本地部署是可选能力，云端或浏览器转写仍是独立的产品选择。
+- 家庭能在不上传持续麦克风音频、转写或家庭上下文的前提下完成日常语音请求；本地部署是可选能力，文字输入始终是独立的恢复路径。
 - 家庭能独立替换 LLM、ASR 或 TTS 的实现，不会因此改变 Hub 的设备权限、确认规则或证据记录。
 - 家庭能看到当前在“听取、理解、等待确认、执行、核验、播报”的哪一步，并能随时停止聆听、停止播报或改用文字。
 - 语音识别错误、模型不确定或设备状态未知时，系统会说清楚未知之处并提供恢复出口；它不会把猜测说成已完成，也不会用听到的声音伪造身份。
@@ -22,7 +22,7 @@
 | 轨道 | 职责与最小输出 | 参考实现 | 不拥有的职责 |
 | --- | --- | --- | --- |
 | LLM | 将已接受的文字 turn 交给 DSH Agent loop；流式返回文字、工具进度与最终答复。 | 本地 OpenAI-compatible deployment，作为 `custom/<model-id>`，沿用 DSH `openai-completions` route。 | 音频采集、说话人身份、HA native service、设备执行。 |
-| ASR | 在本地把有限时长的语音流转成 partial 和 final transcript，附带置信度/端点状态。 | Wyoming ASR server；OpenAI-compatible HTTP ASR；也可用浏览器 Web Speech 作为显式降级输入。 | 解释意图、确认动作、持久保存原始音频。 |
+| ASR | 在本地把有限时长的语音流转成最终 transcript；支持流式实现时可以额外给出只用于展示的 partial。 | Wyoming ASR server；OpenAI-compatible HTTP ASR。 | 解释意图、确认动作、持久保存原始音频。 |
 | TTS | 将由产品选择的、已脱敏且有长度上限的播报文本流式/分段合成为音频。 | Wyoming TTS server；OpenAI-compatible HTTP TTS 可直接接入或由 Wyoming bridge 适配。 | 选择设备、修改队列、绕过媒体确认或直接调用 HA。 |
 
 ### LLM：沿用现有 DSH provider seam
@@ -69,13 +69,13 @@ HTTP ASR/TTS 使用各自的窄适配器。ASR 只接收受限音频流和 local
 | Hub | 保留媒体 prepare/confirmation、一次性动作策略、批准绑定、执行、后置核验与审计的唯一权威。 | 信任语音内容、TTS 文本或 HA native 数据来扩大权限。 |
 | HA bridge | 作为一个 bridge adapter 映射其平台事件/动作，接受 Hub 已治理的边缘请求。 | 主持 wake word、ASR、TTS、Agent session 或最终动作政策。 |
 
-现有 `HomeMediaConversationService` 已使用 opaque `mediaRef`、中立 player capability、显式 queue mode、准备和确认。语音只可以把 DSH 已得到的 structured clarification/confirmation 说出来；它不能构造 `mediaRef`，也不能绕过 `HomeMediaPlaybackPreparationService` 或 `HouseholdReviewCenterService`。
+现有 `HomeMediaConversationService` 已使用 opaque `mediaRef`、中立 player capability、显式 queue mode、准备和确认。语音只可以把 DSH 已得到的 structured clarification/confirmation 说出来；它不能构造 `mediaRef`，也不能绕过 `HomeMediaPlaybackPreparationService` 或 `HouseholdReviewCenterService`。当前产品纵切先把最终 transcript 送入既有 `startAdvice → HomeAdvice → DSH` 链，并只播报该轮已完成的 `ProductTurn.answer`；它没有建立第二条 Agent loop。
 
 同样，`one-shot-action-plane` 的 `pending_confirmation`、`verified`、`failed`、`unknown` 仍是结果权威。对语音说出的“确认”只在该 ticket 正在等待、同一个具体 turn、现有 actor/私有设备要求满足且票据未过期时才是一个确认输入。没有这些条件时，系统转为文字/屏幕确认或重新澄清。普通同屋说话、录音回放、媒体歌词和外部设备名称均是非可信输入，不能创建 actor 或提升权限。
 
 ## 状态机与恢复
 
-`packages/inbox-web/src/voice-surface.ts` 已存在受控 Web Speech 的展示状态。私有运行时将其扩展为一个 runtime turn machine，而不要求浏览器或 HA 成为协议中心。状态以 `voiceTurnId` 隔离；同一时刻每个采集端只能有一个活跃 turn。
+`packages/inbox-web/src/voice-surface.ts` 使用浏览器麦克风采集有限的一次音频，但识别与合成都只调用家庭已验证的私有 ASR/TTS。产品不会静默切到 Web Speech 或浏览器云端识别。状态以 turn generation 隔离；同一时刻每个采集端只能有一个活跃 turn。
 
 | 状态 | 进入事件与产品呈现 | 合法离开 / guard |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ HTTP ASR/TTS 使用各自的窄适配器。ASR 只接收受限音频流和 local
 
 状态不允许 `listening + speaking`、`partial + execution` 或“已验证但没有 Hub result”等组合。UI 对应现有 voice surface 的可访问实时状态，屏幕只是加强说明：每段播报在无屏幕时也应可理解，确认信息一次不超过三个核心事实。
 
-当前实现以 `packages/hub/src/voice/private-voice-turn-machine.ts` 提供确定性的纯 reducer。它按 `voiceTurnId` 隔离状态，并把采集、DSH、TTS 与 Hub 的工作表达成受调用方执行的 effect。该 reducer 已覆盖 partial 仅用于展示、final 端点后只提交一次、三阶无输入恢复、绑定确认、Hub 结果裁决、超时、取消与 barge-in。它不启动音频、不执行工具，也不代替 Hub 保存或核验动作结果。
+当前实现由 `packages/inbox-web/src/voice-surface.ts` 为每个浏览器页面维护一次可中断的 voice turn。它负责有限音频采集、partial 展示、最终 transcript 的单次提交、流式答复呈现、播报、停止和文字接管。`PrivateVoiceProviderRuntime` 只提供已验证 ASR/TTS 的有限调用；既有 Inbox/DSH 对话与 Hub 继续拥有文本、家庭治理和可核验动作状态。这个边界让一个 voice turn 只有一个产品状态 owner。
 
 ### 屏幕级流与恢复出口
 
@@ -155,49 +155,46 @@ ASR partial 以节流的文本增量送到当前 UI，final 只在端点后提�
 
 ## Setup、配置、Vault 与 Probe
 
-语音运行时应延续 `ProductRuntimeSupervisor`、`ProductSetupController` 和 `ProductBootstrapConfigStore` 的单一、短时 setup transaction。模型和 bridge 的现有 setup 不改变；语音新增一个独立阶段，只有各轨道 probe 通过才可激活。配置是本地非 secret 元数据，secret 只在 Vault 中保存为引用。
+语音运行时延续 `ProductRuntimeSupervisor`、`ProductSetupController` 和 `ProductBootstrapConfigStore` 的单一 setup transaction。模型和 bridge 的现有 setup 不改变；bridge 验证后进入独立语音阶段，ASR 与 TTS 都通过真实 probe 后才可随产品激活，家庭也可以明确跳过而不阻塞文字产品。配置是本地非 secret 元数据，secret 只在 Vault 中保存为引用。
 
-建议的持久化 shape（示意，待实现时以 strict Zod schema 冻结）如下：
+当前持久化的非秘密 shape 如下；按键说话、15 秒上限与“不保留音频”是产品运行时不变量，不作为 provider 可扩权配置：
 
 ```ts
-interface PrivateVoiceRuntimeConfig {
-  readonly version: "hob.private-voice/v1";
-  readonly enabled: boolean;
-  readonly input: {
-    readonly mode: "push_to_talk" | "wake_word";
-    readonly locale: string;
-    readonly maxTurnDurationMs: number;
-    readonly endpoint: { readonly minSpeechMs: number; readonly trailingSilenceMs: number };
-  };
+interface ProductVoiceRuntimeConfig {
   readonly asr: {
-    readonly transport: "wyoming" | "openai_http" | "browser";
-    readonly endpoint?: string;
+    readonly transport: "wyoming" | "openai_http";
+    readonly endpoint: string;
     readonly credentialRef?: string;
+    readonly model?: string;
   };
   readonly tts: {
-    readonly transport: "wyoming" | "openai_http" | "disabled";
-    readonly endpoint?: string;
+    readonly transport: "wyoming" | "openai_http";
+    readonly endpoint: string;
     readonly credentialRef?: string;
     readonly locale: string;
     readonly voice?: string;
+    readonly model?: string;
   };
-  readonly diagnostics: { readonly retainAudio: false; readonly retainTranscript: false };
 }
 ```
 
 实现 schema 时遵守以下规则：
 
-- 配置允许标识、transport、局域服务 endpoint、语言、超时、非敏感 voice label 与 `SecretRef`；不允许 token/password/key 字段、用户可选 URL path/query/userinfo、任意 headers、HA entity/service、播放器、模型工具策略或家庭成员角色。
-- 每个 endpoint 有严格 scheme、host、端口、长度和私网/本机部署策略校验；DNS 重绑定和重定向不得把 probe 变成任意网络访问。部署策略由宿主产品决定，并保持与现有 `custom` LLM HTTPS 规则分开。
+- 配置允许标识、transport、服务根 endpoint、语言、非敏感 voice label 与 `SecretRef`；不允许 token/password/key 字段、用户可选 URL path/query/userinfo、任意 headers、HA entity/service、播放器、模型工具策略或家庭成员角色。
+- OpenAI-compatible endpoint 接受服务根或精确 `/v1`，持久化时统一写为服务根；运行时只添加固定的转写和播报路径。Wyoming endpoint 使用 `wyoming:`、显式端口和本机、私网字面地址或家庭局域名称。
+- OpenAI-compatible provider 以 HTTPS 使用家庭选择的主机名或地址。携带 bearer credential 的明文 HTTP endpoint 使用私网或回环字面地址，因此 DNS 不参与明文凭据的目标选择。运行时禁止重定向，不执行 DNS pinning。
+- Wyoming TTS 使用 locale 和可选 voice；它没有 model 字段。ASR 与 HTTP TTS 可使用 provider 明确支持的 model id。
 - ASR/TTS credential 如有需要，使用 `keychain:hob-agent/voice:<track>:<setup-id>:<nonce>` 形式的 request-local stage ref；probe 失败、草稿过期或设置冲突时删除。激活配置仅保存最终 `SecretRef`，其目录/文件延续 `0700`/`0600` 与原子 generation commit 纪律。
 - 不把 LLM secret 复制为语音 secret。LLM 继续引用已选 model profile；ASR 与 TTS 可各自没有 credential、各自持有一个不同 ref，或者被禁用。
 - 关闭语音即停止 gateway 与音频采集，不删除模型/HA/媒体设置；它也不改变现有 `/conversation` 文字通道。
 
-`ProductVoiceSetup` 以这条契约实现了独立 ASR/TTS 的 staged probe：它接收 `wyoming` 或 `openai_http` transport、规范化本机或私网的无路径 endpoint，并返回 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible` 或 `unavailable` 的闭合结果。`ProductRuntimeSupervisor` 将它与 `PrivateVoiceRuntimeService` 挂载在同一 Cordis 根下；挂载本身不会打开麦克风或音频流。它把请求中的 credential 仅交给当前 probe，成功时只留下 track-scoped locator；它不选择 primary profile，也不激活家庭运行时。
+`ProductVoiceSetup` 以这条契约实现了独立 ASR/TTS 的 staged probe：它接收 `wyoming` 或 `openai_http` transport、将 OpenAI-compatible 服务根或精确 `/v1` 规范化为同一持久化服务根，并返回 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible` 或 `unavailable` 的闭合结果。最终请求仍固定为 `/v1/audio/transcriptions` 与 `/v1/audio/speech`。`ProductRuntimeSupervisor` 将 setup owner 与 provider runtime 挂载在同一 Cordis 根下；浏览器 voice surface 在产品 HTTP 边界管理每次 turn，挂载本身不会打开麦克风或音频流。它把请求中的 credential 仅交给当前 probe，成功时只留下 track-scoped locator；它不选择 primary LLM profile。
+
+首次激活遵守 mount-before-commit：两条语音轨道都从同一份已验证的 staged revision 构造，Provider Runtime 与家庭产品一起挂载，之后才提交产品 generation。端点暂时离线时，家庭产品以文字入口正常启用，语音呈现 degraded 与明确的重试入口；恢复使用同一个 provider runtime 的有界 retry，而不是重建 Agent。重启沿用相同规则，家庭状态和治理入口始终可用。
 
 当前 built-in transport 已能进行真实的有限探测与数据交换：`OpenAiHttpVoiceTransport` 固定使用 `/v1/audio/transcriptions` 与 `/v1/audio/speech`，允许家庭显式选择私有部署暴露的 ASR/TTS model id，并限制音频、文本、响应类型、响应大小、重定向、超时和取消；`WyomingVoiceTransport` 实现 `describe/info`、ASR audio stream 与 TTS audio stream，限制 frame、event、text 和累计音频。Wyoming 协议本身没有 bearer credential 字段，因此产品不会接收一个实际无法发送的 Wyoming token。两种 transport 都只返回闭合错误分类，不把内网 endpoint、provider body 或 secret 变成产品文案。
 
-`PrivateVoiceRuntimeService` 按 capture surface 隔离 turn machine，允许手机、墙面屏或自建语音卫星各自保留一个可打断的会话。它只保存状态并返回 effect；ASR/TTS/DSH/Hub 的实际调用仍由后续 gateway 组合执行。Hub 已认领的动作在卫星断开时保留可核验状态，语音服务无权把“停止播报”解释为“动作已取消”。
+当前 Product HTTP voice surface 负责有限音频、provider 调用、既有 DSH advice turn 与发起端播报；每个浏览器页面的状态独立，产品不再挂载另一套 server-side turn store。Hub 已认领的动作在语音采集或播报停止后保留可核验状态，浏览器的“停止播报”只结束本地体验，不改变家庭动作结果。
 
 Probe 是一次性、低权限且不改变家庭状态的操作：LLM 复用现有最小 DSH 流式 probe；ASR 对有限合成/fixture 音频验证 `ready -> final`；TTS 对固定非家庭文本验证 health、可解码的有限音频；Wyoming probe 验证 capability/locale 而非依赖某个实现的内部字段。probe 只返回稳定分类（如 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible`）和耗时。它不得记录 prompt、音频、transcript、response、endpoint private detail 或 secret。
 
@@ -206,7 +203,7 @@ Probe 是一次性、低权限且不改变家庭状态的操作：LLM 复用现�
 Phase 0 只交付一个可验证、默认安全的纵切，不增加自定义 automation runtime：
 
 1. 在设置中创建一个 `push_to_talk` 私有语音 profile：选择 locale，分别配置并 probe 一个 Wyoming ASR 与一个 Wyoming 或 HTTP TTS；LLM 复用已完成的 `custom` model profile。
-2. Voice Gateway 接受有限 PCM/浏览器音频，执行 VAD 与 ASR，向现有 voice surface 发送 partial/final；浏览器 Web Speech 仍是显式 `text_mode`/兼容降级，不能与私有 ASR 混淆。
+2. Voice Gateway 接受有限的浏览器编码音频或 PCM16 LE，执行 ASR 并把 final transcript 送入现有 voice surface；私有 ASR 不可用时直接进入文字模式，不使用 Web Speech 代替。
 3. 仅将严格校验的 final 文本作为既有 `/conversation`/DSH 会话的 user turn。先覆盖只读家庭问答和现有媒体搜索/准备；媒体确认、动作执行与验证完全复用 Hub。
 4. 将最终、已验证的短回答 TTS 播放到发起端，支持停止和 barge-in。第一版不做跨房间播报、连续常开录音、声纹身份、动态工具授权或 HA Assist pipeline 接管。
 5. 只有在真实确认卡/绑定 ticket 已存在时才接受 spoken confirmation；无法证明 actor/private-device 条件时，第一版改走屏幕确认。
@@ -223,4 +220,4 @@ Phase 0 只交付一个可验证、默认安全的纵切，不增加自定义 au
 - media/bridge：验证语音无法伪造 opaque `mediaRef` 或 player capability，仍经历 media prepare/clarification/confirmation；HA adapter 不接收 audio/ASR/TTS provider payload，契约包不新增生态原生类型。
 - 体验：真实浏览器测试 permission、listening、partial、空输入、澄清、等待、确认、执行、核验、播报、打断、失败、断线、完成和文字接管；检查键盘、屏幕阅读器与 reduced-motion/reduced-transparency/increased-contrast 的等价反馈。
 
-在 gateway 将 capture、final transcript、现有 DSH 会话、Hub 结果与 TTS 串成同一条受测链路前，私有语音保持为真实 transport、setup probe 与 turn owner，不能宣称已经成为家庭控制通道。
+当前受测链路已经覆盖 capture、final transcript、现有 DSH advice turn 与对完成答复的 TTS；Wyoming 原始 PCM 会在产品边界封装成浏览器可播放的 WAV。只有进入 Hub 的结构化动作、确认、执行和读回链后，语音请求才可以被称为完成了家庭控制。跨房间媒体播放、spoken confirmation、常驻唤醒与卫星设备仍按本节边界逐项实现，不能因为 ASR/TTS 已连通而提前宣称完成。

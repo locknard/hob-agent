@@ -107,6 +107,37 @@ test("posts bounded plain speech text and returns only an allowed bounded audio 
   }
 });
 
+test("uses each fixed audio route exactly once when configured with an OpenAI-compatible /v1 base URL", async () => {
+  const { OpenAiHttpVoiceTransport } = await loadTransport();
+  const requests: string[] = [];
+  const server = await startFakeVoiceServer(async (request, response) => {
+    requests.push(request.url ?? "");
+    await requestBody(request);
+    if (request.url === "/v1/audio/transcriptions") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ text: "灯已打开" }));
+      return;
+    }
+    response.setHeader("content-type", "audio/wav");
+    response.end(Buffer.from([82, 73, 70, 70]));
+  });
+  try {
+    const transport = new OpenAiHttpVoiceTransport({ baseUrl: `${server.baseUrl}/v1/` });
+    assert.deepEqual(await transport.transcribe({ audio: new Uint8Array([1]), mimeType: "audio/wav" }), {
+      status: "transcribed",
+      text: "灯已打开",
+    });
+    assert.deepEqual(await transport.synthesize({ text: "灯已打开。", voice: "alloy", locale: "zh-CN" }), {
+      status: "synthesized",
+      mimeType: "audio/wav",
+      audio: new Uint8Array([82, 73, 70, 70]),
+    });
+    assert.deepEqual(requests, ["/v1/audio/transcriptions", "/v1/audio/speech"]);
+  } finally {
+    await server.close();
+  }
+});
+
 test("classifies credential rejection and a missing OpenAI audio route without retaining provider details", async () => {
   const { OpenAiHttpVoiceTransport } = await loadTransport();
   const server = await startFakeVoiceServer((request, response) => {

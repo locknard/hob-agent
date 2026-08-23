@@ -1,11 +1,25 @@
 export const VOICE_SURFACE_STATES = Object.freeze([
-  "idle", "requesting_permission", "permission_denied", "listening", "no_input", "partial_transcript",
-  "transcribing", "thinking", "presenting_choice", "awaiting_confirmation", "acting", "verifying",
-  "speaking", "cancelled", "failed", "indeterminate", "text_mode",
+  "idle",
+  "requesting_permission",
+  "permission_denied",
+  "listening",
+  "no_input",
+  "partial_transcript",
+  "transcribing",
+  "thinking",
+  "presenting_choice",
+  "awaiting_confirmation",
+  "acting",
+  "verifying",
+  "speaking",
+  "playback_failed",
+  "cancelled",
+  "failed",
+  "indeterminate",
+  "text_mode",
 ] as const);
 
-export type VoiceSurfaceState = typeof VOICE_SURFACE_STATES[number];
-
+export type VoiceSurfaceState = (typeof VOICE_SURFACE_STATES)[number];
 export interface VoiceSurfaceIntent {
   readonly room?: string;
   readonly player?: string;
@@ -13,11 +27,18 @@ export interface VoiceSurfaceIntent {
   readonly queue?: string;
   readonly volume?: string;
 }
-
+export type PrivateVoiceAvailability =
+  | {
+      readonly status: "active";
+      readonly captureMode: "encoded_audio" | "pcm_s16le";
+    }
+  | { readonly status: "retryable" | "unavailable" };
 export interface VoiceSurfaceRenderOptions {
   readonly transcript?: string;
   readonly transcriptKind?: "partial" | "final";
   readonly intent?: VoiceSurfaceIntent;
+  readonly privateVoice?: PrivateVoiceAvailability;
+  readonly notice?: "recovered" | "unavailable";
 }
 
 interface StateCopy {
@@ -27,275 +48,782 @@ interface StateCopy {
   readonly detail: string;
   readonly recovery: { readonly href: string; readonly label: string };
 }
+const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
+  Object.freeze({
+    idle: {
+      eyebrow: "语音助手",
+      heading: "想说的时候，我在这里",
+      status: "等待开始",
+      detail: "开始后只会采集这一次要说的话。",
+      recovery: { href: "/settings", label: "查看语音设置" },
+    },
+    requesting_permission: {
+      eyebrow: "麦克风权限",
+      heading: "允许这台设备听取本次请求",
+      status: "等待浏览器授权",
+      detail: "麦克风只服务当前对话，结束后立即停止采集。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    permission_denied: {
+      eyebrow: "麦克风权限",
+      heading: "在浏览器设置中打开麦克风权限",
+      status: "语音等待授权",
+      detail: "权限开启后可以回到这里继续；文字对话现在就能使用。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    listening: {
+      eyebrow: "正在听",
+      heading: "说出你想让家里做的事",
+      status: "麦克风正在聆听",
+      detail: "一句话说明房间、内容和动作即可；最多 15 秒。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    no_input: {
+      eyebrow: "这次很安静",
+      heading: "刚才没有听到清楚的内容",
+      status: "等待下一步",
+      detail: "你可以再试一次，也可以直接输入文字。",
+      recovery: { href: "/voice", label: "再试一次" },
+    },
+    partial_transcript: {
+      eyebrow: "正在听",
+      heading: "继续说就好",
+      status: "继续说就好",
+      detail: "正在等待完整请求。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    transcribing: {
+      eyebrow: "整理语音",
+      heading: "正在确认刚才听到的内容",
+      status: "转成文字",
+      detail: "原始录音只用于这次转写，请求结束后从内存丢弃。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    thinking: {
+      eyebrow: "理解请求",
+      heading: "正在查看家里的情况",
+      status: "整理下一步",
+      detail: "处理进度会显示在这里；你可以随时取消等待。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    presenting_choice: {
+      eyebrow: "需要你选择",
+      heading: "请选择一个结果",
+      status: "等待选择",
+      detail: "对话会展示真实候选项，并保留你的选择。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    awaiting_confirmation: {
+      eyebrow: "等待确认",
+      heading: "等待你确认这项动作",
+      status: "等待确认",
+      detail: "确认卡会展示真实目标、效果和时限。",
+      recovery: { href: "/review-center", label: "查看并确认" },
+    },
+    acting: {
+      eyebrow: "正在执行",
+      heading: "正在执行已确认的动作",
+      status: "动作进行中",
+      detail: "Hub 正在处理这项已确认请求。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    verifying: {
+      eyebrow: "确认结果",
+      heading: "正在确认动作结果",
+      status: "验证结果",
+      detail: "只有读回真实状态后，界面才会报告完成。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    speaking: {
+      eyebrow: "已完成",
+      heading: "已收到真实结果",
+      status: "正在播报",
+      detail: "结果也会保留在活动记录中。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    playback_failed: {
+      eyebrow: "回答已完成",
+      heading: "文字回答已经准备好",
+      status: "播报暂时不可用",
+      detail: "文字回答已经保留。可以重新播报，或直接查看文字回答。",
+      recovery: { href: "/conversation", label: "查看文字回答" },
+    },
+    cancelled: {
+      eyebrow: "已停止",
+      heading: "这次请求已经取消",
+      status: "对话已经停止",
+      detail: "Hub 已接管的动作仍会在活动记录中显示真实结果。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    failed: {
+      eyebrow: "语音暂时没有完成",
+      heading: "这次没有得到可用结果",
+      status: "等待重试",
+      detail: "可以再试一次，或直接用文字继续。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    indeterminate: {
+      eyebrow: "结果待确认",
+      heading: "正在重新确认播放器状态",
+      status: "保持诚实等待",
+      detail: "确认结果前，界面会持续显示真实的不确定状态。",
+      recovery: { href: "/conversation", label: "改用文字" },
+    },
+    text_mode: {
+      eyebrow: "文字对话",
+      heading: "用文字继续和家沟通",
+      status: "文字对话可用",
+      detail: "私人语音暂时不可用。文字对话现在就能继续。",
+      recovery: { href: "/conversation", label: "打开文字对话" },
+    },
+  });
 
-const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> = Object.freeze({
-  idle: { eyebrow: "语音助手", heading: "想说的时候，我在这里", status: "等待开始", detail: "点击开始后，浏览器会请求本次麦克风权限；语音只服务当前请求。", recovery: { href: "/settings", label: "查看语音设置" } },
-  requesting_permission: { eyebrow: "麦克风权限", heading: "允许这台设备听取本次请求", status: "等待浏览器授权", detail: "麦克风只服务当前对话，结束后立即停止采集。", recovery: { href: "/conversation", label: "改用文字" } },
-  permission_denied: { eyebrow: "麦克风权限", heading: "在浏览器设置中打开麦克风权限", status: "语音等待授权", detail: "权限开启后可以回到这里继续；文字对话现在就能使用。", recovery: { href: "/conversation", label: "改用文字" } },
-  listening: { eyebrow: "正在听", heading: "说出你想让家里做的事", status: "麦克风正在聆听", detail: "一句话说明房间、内容和动作即可。", recovery: { href: "/conversation", label: "改用文字" } },
-  no_input: { eyebrow: "这次很安静", heading: "刚才没有听到清楚的内容", status: "等待下一步", detail: "你可以再试一次，也可以直接输入文字。", recovery: { href: "/voice", label: "再试一次" } },
-  partial_transcript: { eyebrow: "正在听", heading: "继续说就好", status: "继续说就好", detail: "已经听到一部分内容，正在等待完整请求。", recovery: { href: "/conversation", label: "改用文字" } },
-  transcribing: { eyebrow: "整理语音", heading: "正在确认刚才听到的内容", status: "转成文字", detail: "完成后会先展示理解结果。", recovery: { href: "/conversation", label: "改用文字" } },
-  thinking: { eyebrow: "理解请求", heading: "正在查看房间、音乐和现有安排", status: "整理下一步", detail: "结果会区分已确认事实、未知信息和建议。", recovery: { href: "/conversation", label: "改用文字" } },
-  presenting_choice: { eyebrow: "需要你选择", heading: "请选择一个结果", status: "等待选择", detail: "对话会展示真实候选项，并保留你的选择。", recovery: { href: "/conversation", label: "改用文字" } },
-  awaiting_confirmation: { eyebrow: "等待确认", heading: "等待你确认这项动作", status: "等待确认", detail: "确认卡会展示真实目标、效果和时限。", recovery: { href: "/review-center", label: "查看并确认" } },
-  acting: { eyebrow: "正在执行", heading: "正在执行已确认的动作", status: "动作进行中", detail: "Hub 正在处理这项已确认请求。", recovery: { href: "/conversation", label: "改用文字" } },
-  verifying: { eyebrow: "确认结果", heading: "正在确认动作结果", status: "验证结果", detail: "只有读回真实状态后，界面才会报告完成。", recovery: { href: "/conversation", label: "改用文字" } },
-  speaking: { eyebrow: "已完成", heading: "已收到真实结果", status: "正在播报", detail: "结果也会保留在活动记录中。", recovery: { href: "/conversation", label: "改用文字" } },
-  cancelled: { eyebrow: "已停止", heading: "这次请求已经取消", status: "家庭状态保持原样", detail: "可以随时发起新的请求。", recovery: { href: "/conversation", label: "改用文字" } },
-  failed: { eyebrow: "动作未完成", heading: "家庭连接已经返回失败", status: "等待重试", detail: "当前状态已经保留，可以在连接恢复后再次尝试。", recovery: { href: "/conversation", label: "改用文字" } },
-  indeterminate: { eyebrow: "结果待确认", heading: "正在重新确认播放器状态", status: "保持诚实等待", detail: "确认结果前，界面会持续显示真实的不确定状态。", recovery: { href: "/conversation", label: "改用文字" } },
-  text_mode: { eyebrow: "文字对话", heading: "输入文字，继续这次请求", status: "已改用文字", detail: "当前浏览器无法使用 Web Speech API；这次请求可以安全地继续用文字。", recovery: { href: "/conversation", label: "打开文字对话" } },
-});
-
-/**
- * Same-origin, dependency-free browser adapter for the bounded push-to-talk
- * seam. It deliberately uses the browser Web Speech API only. A final,
- * bounded transcript is posted to the canonical conversation form; there is
- * no direct media/device call and no alternate authority path in this code.
- */
-export const VOICE_INTERACTION_JS = String.raw`const voiceSpeechConstructor = () => window.SpeechRecognition || window.webkitSpeechRecognition;
-for (const voiceRoot of document.querySelectorAll("[data-voice-surface]")) {
+/** Same-origin bounded private-voice adapter. It never invokes device or media control. */
+export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.querySelectorAll("[data-voice-surface]")) {
   if (!(voiceRoot instanceof HTMLElement)) continue;
   const eyebrowNode = voiceRoot.querySelector("[data-voice-eyebrow]");
   const headingNode = voiceRoot.querySelector("[data-voice-heading]");
   const statusNode = voiceRoot.querySelector("[data-voice-status]");
   const detailNode = voiceRoot.querySelector("[data-voice-detail]");
   const transcriptNode = voiceRoot.querySelector("[data-voice-transcript]");
-  const intentTranscriptNode = voiceRoot.querySelector("[data-voice-intent-transcript]");
   const startButton = voiceRoot.querySelector("[data-voice-start]");
   const stopButton = voiceRoot.querySelector("[data-voice-stop]");
-  const submitButton = voiceRoot.querySelector("[data-voice-submit]");
+  const cancelButton = voiceRoot.querySelector("[data-voice-cancel]");
   const restartButton = voiceRoot.querySelector("[data-voice-restart]");
+  const speechStopButton = voiceRoot.querySelector("[data-voice-speech-stop]");
   const recoveryNode = voiceRoot.querySelector("[data-voice-recovery]");
-  const fallbackNode = voiceRoot.querySelector("[data-voice-fallback]");
-  const transcriptInput = voiceRoot.querySelector("[data-voice-transcript-input]");
-  const submitForm = voiceRoot.querySelector("[data-voice-submit-form]");
-  const canonicalConversationAction = "/conversation";
-  const configuredSubmitAction = voiceRoot.getAttribute("data-voice-submit-action");
-  const failureLimit = Math.max(1, Number(voiceRoot.getAttribute("data-voice-failure-limit") || "3"));
-  const maxTranscriptLength = 2000;
+  const textExitNode = voiceRoot.querySelector("[data-voice-text-exit]");
+  const answerNode = voiceRoot.querySelector("[data-voice-answer]");
+  const conversationNode = voiceRoot.querySelector("[data-voice-conversation]");
+  const availability = voiceRoot.getAttribute("data-private-voice-status");
+  const captureMode = voiceRoot.getAttribute("data-private-voice-capture-mode");
+  const maxTurnMs = 15000;
+  const maxPcmBytes = 5 * 1024 * 1024;
   let state = voiceRoot.getAttribute("data-voice-state") || "idle";
-  let failureCount = 0;
-  let finalTranscript = "";
-  let recognition;
-  let stoppedByHousehold = false;
-
+  let stream;
+  let recorder;
+  let audioContext;
+  let processor;
+  let source;
+  let chunks = [];
+  let pcmChunks = [];
+  let pcmBytes = 0;
+  let pcmRate = 0;
+  let timer;
+  let requestController;
+  let eventStream;
+  let audio;
+  let audioUrl;
+  let generation = 0;
+  let activeAdviceId;
+  let answerText = "";
   const copy = {
-    idle: ["等待开始", "点击开始后，浏览器会请求本次麦克风权限；语音只服务当前请求。"],
-    requesting_permission: ["等待浏览器授权", "允许后才会开始聆听；你可以随时停止。"],
-    permission_denied: ["语音等待授权", "麦克风权限没有打开。请在浏览器设置中允许，或直接改用文字。"],
-    listening: ["麦克风正在聆听", "说出房间、内容和动作；说完后会先展示完整转写。"],
-    partial_transcript: ["继续说就好", "已经听到一部分内容，完整请求只会在说完后进入对话。"],
-    no_input: ["等待下一步", "可以再试一次，也可以直接输入文字。"],
-    transcribing: ["转写已完成", "请确认这句话，再把它交给文字对话。"],
-    thinking: ["已交给对话", "家里的处理会沿用现有对话、Hub 策略和确认流程。"],
-    cancelled: ["已停止", "这次请求没有提交，家庭状态保持原样。"],
-    failed: ["识别失败", "已经连续三次没有得到可用转写。先用文字继续，语音会暂时停下来。"],
-    text_mode: ["已改用文字", "当前浏览器无法使用 Web Speech API；这次请求可以安全地继续用文字。"]
+    idle: ["等待开始", "开始后只会采集这一次要说的话。"],
+    requesting_permission: [
+      "等待浏览器授权",
+      "允许后才会开始聆听；你可以随时停止。",
+    ],
+    permission_denied: [
+      "语音等待授权",
+      "麦克风权限没有打开。请在浏览器设置中允许，或直接改用文字。",
+    ],
+    listening: ["麦克风正在聆听", "说完按停止；最长 15 秒。"],
+    no_input: [
+      "等待下一步",
+      "刚才没有听到清楚的内容。可以再试一次，或改用文字。",
+    ],
+    transcribing: ["转成文字", "正在使用私人的语音服务确认这一次请求。"],
+    thinking: ["正在处理", "正在查看家里的信息；你可以取消等待。"],
+    speaking: ["正在播报", "可以停止播报，或直接再次说话。"],
+    playback_failed: [
+      "播报暂时不可用",
+      "文字回答已经保留。可以重新播报，或直接查看文字回答。",
+    ],
+    cancelled: [
+      "已停止",
+      "对话已经停止；Hub 已接管的动作仍会在活动记录中显示真实结果。",
+    ],
+    failed: ["语音暂时没有完成", "可以再试一次，或直接改用文字。"],
+    text_mode: ["文字对话可用", "私人语音暂时不可用。文字对话现在就能继续。"],
   };
-  const eyebrow = {
-    idle: "语音助手",
-    requesting_permission: "麦克风权限",
-    permission_denied: "麦克风权限",
-    listening: "正在听",
-    partial_transcript: "正在听",
-    no_input: "这次很安静",
-    transcribing: "整理语音",
-    thinking: "理解请求",
-    cancelled: "已停止",
-    failed: "识别失败",
-    text_mode: "文字对话"
+  const labels = {
+    idle: ["语音助手", "想说的时候，我在这里"],
+    requesting_permission: ["麦克风权限", "允许这台设备听取本次请求"],
+    permission_denied: ["麦克风权限", "在浏览器设置中打开麦克风权限"],
+    listening: ["正在听", "说出你想让家里做的事"],
+    no_input: ["这次很安静", "刚才没有听到清楚的内容"],
+    transcribing: ["整理语音", "正在确认刚才听到的内容"],
+    thinking: ["理解请求", "正在查看家里的情况"],
+    speaking: ["已完成", "已收到真实结果"],
+    playback_failed: ["回答已完成", "文字回答已经准备好"],
+    cancelled: ["已停止", "这次请求已经取消"],
+    failed: ["语音暂时没有完成", "这次没有得到可用结果"],
+    text_mode: ["文字对话", "用文字继续和家沟通"],
   };
-  const heading = {
-    idle: "想说的时候，我在这里",
-    requesting_permission: "允许这台设备听取本次请求",
-    permission_denied: "在浏览器设置中打开麦克风权限",
-    listening: "说出你想让家里做的事",
-    partial_transcript: "继续说就好",
-    no_input: "刚才没有听到清楚的内容",
-    transcribing: "确认刚才听到的内容",
-    thinking: "已交给文字对话",
-    cancelled: "这次请求已经取消",
-    failed: "连续三次没有识别成功",
-    text_mode: "输入文字，继续这次请求"
-  };
-  const recovery = {
-    idle: ["/settings", "查看语音设置"],
-    requesting_permission: ["/conversation", "改用文字"],
-    permission_denied: ["/conversation", "改用文字"],
-    listening: ["/conversation", "改用文字"],
-    partial_transcript: ["/conversation", "改用文字"],
-    no_input: ["/voice", "再试一次"],
-    transcribing: ["/conversation", "改用文字"],
-    thinking: ["/conversation", "查看对话"],
-    cancelled: ["/conversation", "改用文字"],
-    failed: ["/conversation", "改用文字"],
-    text_mode: ["/conversation", "打开文字对话"]
-  };
-
   const setText = (node, value) => {
-    if (node instanceof HTMLElement && typeof value === "string") node.textContent = value;
+    if (node instanceof HTMLElement && typeof value === "string")
+      node.textContent = value;
   };
-  const setState = (next, detail) => {
+  const setState = (next, detail, recovery) => {
     state = next;
     voiceRoot.dataset.voiceState = next;
-    const stateCopy = copy[next] || copy.idle;
-    if (eyebrowNode instanceof HTMLElement && eyebrow[next]) eyebrowNode.textContent = eyebrow[next];
-    if (headingNode instanceof HTMLElement && heading[next]) headingNode.textContent = heading[next];
-    setText(statusNode, stateCopy[0]);
-    setText(detailNode, detail || stateCopy[1]);
-    const recoveryCopy = recovery[next] || recovery.idle;
+    const item = copy[next] || copy.idle;
+    const title = labels[next] || labels.idle;
+    setText(eyebrowNode, title[0]);
+    setText(headingNode, title[1]);
+    setText(statusNode, item[0]);
+    setText(detailNode, detail || item[1]);
     if (recoveryNode instanceof HTMLAnchorElement) {
-      recoveryNode.href = recoveryCopy[0];
-      recoveryNode.textContent = recoveryCopy[1];
+      recoveryNode.href = recovery?.href || "/conversation";
+      recoveryNode.textContent = recovery?.label || "改用文字";
+      recoveryNode.className =
+        next === "text_mode"
+          ? "product-primary-action"
+          : "product-secondary-action";
     }
-    voiceRoot.setAttribute("data-voice-failure-count", String(failureCount));
-    if (fallbackNode instanceof HTMLElement) fallbackNode.hidden = next !== "text_mode" && next !== "permission_denied" && next !== "failed";
-    if (startButton instanceof HTMLButtonElement) startButton.hidden = !(next === "idle" || next === "permission_denied");
-    if (stopButton instanceof HTMLButtonElement) stopButton.hidden = !(next === "requesting_permission" || next === "listening" || next === "partial_transcript");
-    if (restartButton instanceof HTMLButtonElement) restartButton.hidden = next !== "no_input";
-    if (submitButton instanceof HTMLButtonElement) submitButton.hidden = !(next === "transcribing" && finalTranscript.length > 0);
+    if (textExitNode instanceof HTMLElement)
+      textExitNode.hidden = next === "text_mode";
+    if (transcriptNode instanceof HTMLElement)
+      transcriptNode.hidden =
+        next === "text_mode" &&
+        transcriptNode.dataset.voiceTranscriptKind === "empty";
+    if (startButton instanceof HTMLButtonElement)
+      startButton.hidden =
+        availability !== "active" ||
+        !(
+          next === "idle" ||
+          next === "permission_denied" ||
+          next === "no_input" ||
+          next === "failed" ||
+          next === "speaking"
+        );
+    if (stopButton instanceof HTMLButtonElement)
+      stopButton.hidden =
+        next !== "listening" && next !== "requesting_permission";
+    if (stopButton instanceof HTMLButtonElement)
+      stopButton.textContent =
+        next === "requesting_permission" ? "取消" : "停止并转写";
+    if (cancelButton instanceof HTMLButtonElement)
+      cancelButton.hidden = next !== "transcribing" && next !== "thinking";
+    if (restartButton instanceof HTMLButtonElement)
+      restartButton.hidden = next !== "no_input" && next !== "failed" && next !== "playback_failed";
+    if (restartButton instanceof HTMLButtonElement)
+      restartButton.textContent = next === "playback_failed" ? "重新播报" : "再试一次";
+    if (speechStopButton instanceof HTMLButtonElement)
+      speechStopButton.hidden = next !== "speaking";
   };
-  const normalize = (value) => typeof value === "string" ? value.trim().slice(0, maxTranscriptLength) : "";
-  const showTranscript = (value, partial) => {
-    const text = normalize(value);
-    const display = text || (partial ? "正在等待完整请求……" : "还没有转写");
-    setText(transcriptNode, display);
-    setText(intentTranscriptNode, text ? display : "还没有转写");
-    if (transcriptNode instanceof HTMLElement) transcriptNode.dataset.voiceTranscriptKind = partial ? "partial" : "final";
-    if (intentTranscriptNode instanceof HTMLElement) intentTranscriptNode.dataset.voiceTranscriptKind = partial ? "partial" : "final";
+  const showTranscript = (text) => {
+    const value = typeof text === "string" ? text.trim().slice(0, 2000) : "";
+    setText(transcriptNode, value || "还没有转写");
+    if (transcriptNode instanceof HTMLElement)
+      transcriptNode.dataset.voiceTranscriptKind = value ? "final" : "empty";
   };
-  const failAttempt = (message) => {
-    failureCount = Math.min(failureLimit, failureCount + 1);
-    finalTranscript = "";
-    showTranscript("", false);
-    if (failureCount >= failureLimit) {
-      let resting = false;
+  const showAnswer = (text, append = false) => {
+    const next = typeof text === "string" ? text.trim().slice(0, 4000) : "";
+    answerText = append ? (answerText + next).slice(0, 4000) : next;
+    setText(answerNode, answerText);
+    if (answerNode instanceof HTMLElement) answerNode.hidden = answerText.length === 0;
+  };
+  const showConversation = (adviceId) => {
+    if (!(conversationNode instanceof HTMLAnchorElement)) return;
+    conversationNode.href = "/conversation/" + encodeURIComponent(adviceId);
+    conversationNode.hidden = false;
+  };
+  const stopTracks = () => {
+    for (const track of stream?.getTracks?.() || []) track.stop();
+    stream = undefined;
+  };
+  const discardAudio = () => {
+    chunks = [];
+    pcmChunks = [];
+    pcmBytes = 0;
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+  const stopPlayback = () => {
+    try {
+      audio?.pause();
+    } catch {}
+    if (audioUrl) {
       try {
-        const lastTriple = Number(window.sessionStorage.getItem("hob-voice-last-triple") || "0");
-        resting = Date.now() - lastTriple < 600000;
-        window.sessionStorage.setItem("hob-voice-last-triple", String(Date.now()));
+        URL.revokeObjectURL(audioUrl);
       } catch {}
-      if (resting) setState("failed", "10 分钟内又连续三次没识别成功，语音先休息一会儿 —— 先用文字继续，重新开始不会清零。");
-      else setState("failed", "连续三次没有识别成功，先用文字继续。");
     }
-    else setState("no_input", message || (failureCount === 1 ? "第 1 次没有听清，可以说得更短一些。" : "第 2 次还是没有听清，试试和当前空间相关的说法。"));
+    audio = undefined;
+    audioUrl = undefined;
   };
-  const stopRecognition = () => {
-    stoppedByHousehold = true;
-    try { recognition?.abort(); } catch { /* browser cleanup is best effort */ }
-    recognition = undefined;
+  const closeEvents = (target = eventStream) => {
+    try {
+      target?.close();
+    } catch {}
+    if (eventStream === target) eventStream = undefined;
   };
-  const startRecognition = () => {
-    const Constructor = voiceSpeechConstructor();
-    if (typeof Constructor !== "function") {
-      setState("text_mode", "当前浏览器没有 Web Speech API，请改用文字对话。");
+  const stopCapture = () => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    try {
+      recorder?.stop();
+    } catch {}
+    try {
+      processor?.disconnect();
+      source?.disconnect();
+      audioContext?.close?.();
+    } catch {}
+    recorder = undefined;
+    processor = undefined;
+    source = undefined;
+    audioContext = undefined;
+    stopTracks();
+  };
+  const resetTurn = () => {
+    generation += 1;
+    activeAdviceId = undefined;
+    showAnswer("");
+    if (conversationNode instanceof HTMLAnchorElement) conversationNode.hidden = true;
+    stopCapture();
+    discardAudio();
+    requestController?.abort();
+    requestController = undefined;
+    closeEvents();
+    stopPlayback();
+    return generation;
+  };
+  const cancelTurn = async () => {
+    const adviceId = activeAdviceId;
+    const cancelledGeneration = resetTurn();
+    if (typeof adviceId !== "string") {
+      setState("cancelled");
       return;
     }
-    try { recognition?.abort(); } catch { /* a previous session may already be closed */ }
-    recognition = undefined;
-    stoppedByHousehold = false;
-    finalTranscript = "";
-    showTranscript("", false);
-    setState("requesting_permission");
+    setState("thinking", "正在向家庭服务确认这次请求已经停止。", {
+      href: "/conversation/" + encodeURIComponent(adviceId),
+      label: "打开文字对话",
+    });
     try {
-      const nextRecognition = new Constructor();
-      recognition = nextRecognition;
-      nextRecognition.lang = voiceRoot.getAttribute("data-voice-language") || "zh-CN";
-      nextRecognition.interimResults = true;
-      nextRecognition.continuous = false;
-      nextRecognition.maxAlternatives = 1;
-      nextRecognition.onstart = () => setState("listening");
-      nextRecognition.onresult = (event) => {
-        if (recognition !== nextRecognition) return;
-        let partial = "";
-        let final = "";
-        const resultIndex = Number.isInteger(event?.resultIndex) ? event.resultIndex : 0;
-        for (let index = resultIndex; index < event.results.length; index += 1) {
-          const result = event.results[index];
-          const value = normalize(result?.[0]?.transcript);
-          if (!value) continue;
-          if (result.isFinal) final += value; else partial += value;
-        }
-        if (partial && !final) {
-          showTranscript(partial, true);
-          setState("partial_transcript");
-        }
-        const completed = normalize(final);
-        if (completed) {
-          finalTranscript = completed;
-          showTranscript(completed, false);
-          setState("transcribing");
-        }
-      };
-      nextRecognition.onerror = (event) => {
-        if (recognition !== nextRecognition) return;
-        const code = typeof event?.error === "string" ? event.error : "";
-        if (code === "not-allowed" || code === "permission-denied") {
-          finalTranscript = "";
-          setState("permission_denied");
-        } else if (code === "service-not-allowed" || code === "speech-unavailable") {
-          setState("text_mode", "浏览器的语音服务不可用，请改用文字对话。");
-        } else if (code !== "aborted" && !stoppedByHousehold) {
-          failAttempt(code === "no-speech" ? undefined : "这次语音没有完成，可以再试一次。");
-        }
-      };
-      nextRecognition.onend = () => {
-        if (recognition !== nextRecognition) return;
-        recognition = undefined;
-        if (!stoppedByHousehold && !finalTranscript && (state === "listening" || state === "partial_transcript")) failAttempt();
-      };
-      nextRecognition.start();
-    } catch (error) {
-      if (error && typeof error === "object" && "name" in error && error.name === "NotAllowedError") setState("permission_denied");
-      else setState("text_mode", "浏览器没有开始语音服务，请改用文字对话。");
+      const response = await fetch(
+        "/conversation/" + encodeURIComponent(adviceId) + "/stop",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: "",
+          redirect: "manual",
+        },
+      );
+      if (generation !== cancelledGeneration) return;
+      if (response.status === 303) {
+        setState("cancelled");
+        return;
+      }
+    } catch {}
+    if (generation === cancelledGeneration)
+      setState("thinking", "处理仍在后台继续。请在文字对话中查看进度。", {
+        href: "/conversation/" + encodeURIComponent(adviceId),
+        label: "打开文字对话",
+      });
+  };
+  const responseJson = async (response) => {
+    try {
+      const value = await response.json();
+      return value && typeof value === "object" ? value : undefined;
+    } catch {
+      return undefined;
     }
   };
-
-  startButton?.addEventListener("click", startRecognition);
-  restartButton?.addEventListener("click", startRecognition);
-  stopButton?.addEventListener("click", () => {
-    stopRecognition();
-    finalTranscript = "";
-    showTranscript("", false);
-    setState("cancelled");
-  });
-  submitButton?.addEventListener("click", () => {
-    const text = normalize(finalTranscript);
-    if (!text || !(transcriptInput instanceof HTMLInputElement) || !(submitForm instanceof HTMLFormElement)) return;
-    transcriptInput.value = text;
+  const speak = async (adviceId, turnGeneration) => {
+    if (generation !== turnGeneration) return;
+    setState("speaking", "正在准备播报；你可以停止或直接再次说话。");
+    const controller = new AbortController();
+    requestController = controller;
+    try {
+      const response = await fetch(
+        "/voice/speech/" + encodeURIComponent(adviceId),
+        { signal: controller.signal },
+      );
+      if (generation !== turnGeneration) return;
+      if (!response.ok) throw new Error("speech_unavailable");
+      const blob = await response.blob();
+      if (generation !== turnGeneration) return;
+      if (!blob.size) throw new Error("speech_empty");
+      const nextAudioUrl = URL.createObjectURL(blob);
+      const nextAudio = new Audio(nextAudioUrl);
+      audioUrl = nextAudioUrl;
+      audio = nextAudio;
+      nextAudio.onended = () => {
+        if (generation !== turnGeneration || audio !== nextAudio) return;
+        stopPlayback();
+        setState("idle", "播报结束。想继续时可以再说一句。");
+      };
+      nextAudio.onerror = () => {
+        if (generation !== turnGeneration || audio !== nextAudio) return;
+        stopPlayback();
+        setState("playback_failed", "文字回答已经保留。可以重新播报，或直接查看文字回答。", {
+          href: "/conversation/" + encodeURIComponent(adviceId),
+          label: "查看文字回答",
+        });
+      };
+      await nextAudio.play();
+    } catch (error) {
+      if (generation === turnGeneration && error?.name !== "AbortError")
+        setState("playback_failed", "文字回答已经保留。可以重新播报，或直接查看文字回答。", {
+          href: "/conversation/" + encodeURIComponent(adviceId),
+          label: "查看文字回答",
+        });
+    } finally {
+      if (generation === turnGeneration && requestController === controller)
+        requestController = undefined;
+    }
+  };
+  const beginEvents = (adviceId, turnGeneration) => {
+    if (generation !== turnGeneration) return;
+    closeEvents();
+    if (
+      typeof adviceId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,160}$/.test(adviceId)
+    ) {
+      setState(
+        "failed",
+        "这次语音没有得到可继续的请求。请再试一次或改用文字。",
+      );
+      return;
+    }
+    activeAdviceId = adviceId;
+    showConversation(adviceId);
     setState("thinking");
-    if (typeof submitForm.requestSubmit === "function") submitForm.requestSubmit();
+    const nextEventStream = new EventSource(
+      "/conversation/" + encodeURIComponent(adviceId) + "/events",
+    );
+    eventStream = nextEventStream;
+    const stages = {
+      inspecting_home: "正在查看家里的当前状态。",
+      reading_inventory: "正在查看房间和设备。",
+      checking_rules: "正在确认家里已有的安排。",
+      evaluating_evidence: "正在核对相关记录。",
+      composing_answer: "正在整理回答。",
+    };
+    for (const name of Object.keys(stages))
+      nextEventStream.addEventListener(name, () => {
+        if (generation === turnGeneration && eventStream === nextEventStream)
+          setState("thinking", stages[name]);
+      });
+    nextEventStream.addEventListener("progress", () => {
+      if (generation === turnGeneration && eventStream === nextEventStream)
+        setState("thinking", "正在处理。");
+    });
+    const eventText = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        return typeof data?.text === "string" ? data.text : "";
+      } catch {
+        return "";
+      }
+    };
+    for (const name of ["delta", "answer_delta"])
+      nextEventStream.addEventListener(name, (event) => {
+        if (generation === turnGeneration && eventStream === nextEventStream)
+          showAnswer(eventText(event), true);
+      });
+    nextEventStream.addEventListener("answer", (event) => {
+      if (generation === turnGeneration && eventStream === nextEventStream)
+        showAnswer(eventText(event));
+    });
+    nextEventStream.addEventListener("completed", () => {
+      if (generation !== turnGeneration || eventStream !== nextEventStream) return;
+      closeEvents(nextEventStream);
+      void speak(adviceId, turnGeneration);
+    });
+    nextEventStream.addEventListener("failed", () => {
+      if (generation !== turnGeneration || eventStream !== nextEventStream) return;
+      closeEvents(nextEventStream);
+      setState("failed", "这次处理没有完成。可以再试一次或改用文字。");
+    });
+    nextEventStream.addEventListener("cancelled", () => {
+      if (generation !== turnGeneration || eventStream !== nextEventStream) return;
+      closeEvents(nextEventStream);
+      setState("cancelled");
+    });
+    nextEventStream.addEventListener("error", () => {
+      if (
+        generation === turnGeneration &&
+        eventStream === nextEventStream &&
+        nextEventStream.readyState === EventSource.CONNECTING
+      )
+        setState("thinking", "连接正在恢复，处理会继续更新。");
+    });
+  };
+  const upload = async (body, mimeType, format, turnGeneration) => {
+    if (generation !== turnGeneration) return;
+    if (!body || body.size === 0) {
+      discardAudio();
+      setState("no_input");
+      return;
+    }
+    setState("transcribing");
+    const controller = new AbortController();
+    requestController = controller;
+    const headers = {
+      "Content-Type": mimeType,
+      ...(format
+        ? {
+            "X-Audio-Rate": String(format.rate),
+            "X-Audio-Width": "2",
+            "X-Audio-Channels": "1",
+          }
+        : {}),
+    };
+    try {
+      const response = await fetch("/voice/transcribe", {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      if (generation !== turnGeneration) return;
+      const result = await responseJson(response);
+      if (generation !== turnGeneration) return;
+      discardAudio();
+      if (response.status === 429) {
+        const retryAfter = Number(response.headers?.get?.("retry-after"));
+        const seconds = Number.isInteger(retryAfter) && retryAfter >= 1 && retryAfter <= 60
+          ? retryAfter
+          : 1;
+        setState("failed", "语音服务正在处理上一句，请在 " + seconds + " 秒后再试一次，或改用文字。");
+        return;
+      }
+      if (!response.ok || result === undefined)
+        throw new Error("asr_unavailable");
+      if (
+        result.status === "accepted" &&
+        typeof result.adviceId === "string" &&
+        typeof result.transcript === "string"
+      ) {
+        showTranscript(result.transcript);
+        beginEvents(result.adviceId, turnGeneration);
+      } else if (
+        result.status === "active" &&
+        typeof result.adviceId === "string"
+      )
+        beginEvents(result.adviceId, turnGeneration);
+      else if (result.status === "no_input") setState("no_input");
+      else if (result.status === "unavailable")
+        setState("text_mode", "私人语音暂时不可用；可以直接改用文字。");
+      else if (result.status === "failed") setState("failed");
+      else throw new Error("invalid_asr_response");
+    } catch (error) {
+      if (generation !== turnGeneration) return;
+      discardAudio();
+      if (error?.name !== "AbortError")
+        setState("failed", "语音服务暂时没有完成。请再试一次或改用文字。");
+    } finally {
+      if (generation === turnGeneration && requestController === controller)
+        requestController = undefined;
+    }
+  };
+  const finishCapture = (turnGeneration = generation) => {
+    if (generation !== turnGeneration) return;
+    if (captureMode === "encoded_audio") {
+      try {
+        recorder?.stop();
+      } catch {
+        setState("failed");
+      }
+      return;
+    }
+    const pcm = new Uint8Array(pcmBytes);
+    let offset = 0;
+    for (const part of pcmChunks) {
+      pcm.set(part, offset);
+      offset += part.length;
+    }
+    stopCapture();
+    void upload(new Blob([pcm], { type: "audio/l16" }), "audio/l16", {
+      rate: pcmRate,
+      width: 2,
+      channels: 1,
+    }, turnGeneration);
+  };
+  const startCapture = async () => {
+    const turnGeneration = resetTurn();
+    showTranscript("");
+    if (
+      availability !== "active" ||
+      (captureMode !== "encoded_audio" && captureMode !== "pcm_s16le")
+    ) {
+      setState("text_mode");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setState("text_mode", "这台设备不能提供麦克风；请改用文字。");
+      return;
+    }
+    setState("requesting_permission");
+    try {
+      const capturedStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (generation !== turnGeneration) {
+        for (const track of capturedStream.getTracks?.() || []) track.stop();
+        return;
+      }
+      stream = capturedStream;
+      if (captureMode === "encoded_audio") {
+        chunks = [];
+        const capturedRecorder = new MediaRecorder(capturedStream);
+        recorder = capturedRecorder;
+        capturedRecorder.ondataavailable = (event) => {
+          if (
+            generation === turnGeneration &&
+            recorder === capturedRecorder &&
+            event.data?.size > 0
+          )
+            chunks.push(event.data);
+        };
+        capturedRecorder.onstop = () => {
+          if (generation !== turnGeneration || recorder !== capturedRecorder) return;
+          const type = capturedRecorder.mimeType || chunks[0]?.type || "audio/webm";
+          const body = new Blob(chunks, { type });
+          recorder = undefined;
+          stopTracks();
+          void upload(body, type, undefined, turnGeneration);
+        };
+        capturedRecorder.start();
+      } else {
+        const capturedAudioContext = new AudioContext();
+        audioContext = capturedAudioContext;
+        pcmRate = capturedAudioContext.sampleRate;
+        const pcmLimit = Math.min(15 * pcmRate * 2, maxPcmBytes);
+        source = capturedAudioContext.createMediaStreamSource(capturedStream);
+        processor = capturedAudioContext.createScriptProcessor(4096, 1, 1);
+        const capturedProcessor = processor;
+        capturedProcessor.onaudioprocess = (event) => {
+          if (
+            generation !== turnGeneration ||
+            processor !== capturedProcessor ||
+            pcmBytes >= pcmLimit
+          )
+            return;
+          const input = event.inputBuffer.getChannelData(0);
+          const bytes = new Uint8Array(
+            Math.min(input.length * 2, pcmLimit - pcmBytes),
+          );
+          const view = new DataView(bytes.buffer);
+          for (let i = 0; i < bytes.length / 2; i += 1) {
+            const sample = Math.max(-1, Math.min(1, input[i] || 0));
+            view.setInt16(
+              i * 2,
+              sample < 0 ? sample * 32768 : sample * 32767,
+              true,
+            );
+          }
+          pcmChunks.push(bytes);
+          pcmBytes += bytes.length;
+        };
+        source.connect(processor);
+        processor.connect(capturedAudioContext.destination);
+      }
+      setState("listening");
+      timer = setTimeout(() => finishCapture(turnGeneration), maxTurnMs);
+    } catch (error) {
+      if (generation !== turnGeneration) return;
+      stopCapture();
+      if (error?.name === "NotAllowedError" || error?.name === "SecurityError")
+        setState("permission_denied");
+      else setState("failed", "麦克风暂时无法使用。请再试一次或改用文字。");
+    }
+  };
+  startButton?.addEventListener("click", () => {
+    void startCapture();
   });
-
-  if (configuredSubmitAction !== canonicalConversationAction) setState("text_mode", "这次语音无法安全交给对话，请改用文字对话。");
-  else if (typeof voiceSpeechConstructor() !== "function") setState("text_mode", "当前浏览器没有 Web Speech API，请改用文字对话。");
-  else if (copy[state]) setState(state);
+  restartButton?.addEventListener("click", () => {
+    if (state === "playback_failed" && typeof activeAdviceId === "string")
+      void speak(activeAdviceId, generation);
+    else void startCapture();
+  });
+  stopButton?.addEventListener("click", () => {
+    if (state === "requesting_permission") {
+      resetTurn();
+      setState("cancelled", "麦克风没有开始采集。想继续时可以再试一次。");
+      return;
+    }
+    finishCapture();
+  });
+  cancelButton?.addEventListener("click", () => {
+    void cancelTurn();
+  });
+  speechStopButton?.addEventListener("click", () => {
+    generation += 1;
+    activeAdviceId = undefined;
+    requestController?.abort();
+    requestController = undefined;
+    stopPlayback();
+    setState("idle", "播报已停止。想继续时可以再说一句。");
+  });
+  if (availability !== "active") setState("text_mode");
+  else setState(state);
 }`;
 
-export function renderVoiceSurface(requestedState = "idle", options: VoiceSurfaceRenderOptions = {}): string | undefined {
+export function renderVoiceSurface(
+  requestedState = "idle",
+  options: VoiceSurfaceRenderOptions = {},
+): string | undefined {
   if (!isVoiceSurfaceState(requestedState)) return undefined;
-  const copy = STATE_COPY[requestedState];
+  const privateVoice = options.privateVoice ?? {
+    status: "unavailable" as const,
+  };
+  const renderedState =
+    privateVoice.status !== "active" && requestedState === "idle"
+      ? "text_mode"
+      : requestedState;
+  const copy = STATE_COPY[renderedState];
   const safeTranscript = normalizeSurfaceText(options.transcript);
-  const transcriptKind = options.transcriptKind === "partial" ? "partial" : "final";
-  const initialTranscript = safeTranscript ? escapeHtml(safeTranscript) : "还没有转写";
+  const transcriptKind =
+    options.transcriptKind === "partial" ? "partial" : "final";
+  const initialTranscript = safeTranscript
+    ? escapeHtml(safeTranscript)
+    : "还没有转写";
   const initialTranscriptKind = safeTranscript ? transcriptKind : "empty";
-  const intentMarkup = renderVoiceIntent(safeTranscript, transcriptKind, options.intent);
-  const guideMarkup = requestedState === "idle" && !intentMarkup
-    ? `<section class="product-card product-voice-guide" aria-label="语音使用方法"><p class="product-kicker">怎么开始</p><p>点击“开始聆听”，允许本次麦克风权限，然后说出房间、内容和动作。</p></section>`
+  const transcriptMarkup =
+    renderedState === "text_mode" && !safeTranscript
+      ? ""
+      : `<p class="product-voice-transcript" data-voice-transcript data-voice-transcript-kind="${initialTranscriptKind}" aria-live="polite" aria-atomic="true">${initialTranscript}</p>`;
+  const textExitHidden = renderedState === "text_mode" ? " hidden" : "";
+  const recoveryClass =
+    renderedState === "text_mode"
+      ? "product-primary-action"
+      : "product-secondary-action";
+  const fallbackMarkup =
+    renderedState === "text_mode"
+      ? ""
+      : '<p class="product-voice-fallback" data-voice-fallback hidden>麦克风权限开启后，可以在这里继续说话；文字对话始终可用。</p>';
+  const intentMarkup = renderVoiceIntent(
+    safeTranscript,
+    transcriptKind,
+    options.intent,
+  );
+  const captureMode =
+    privateVoice.status === "active"
+      ? ` data-private-voice-capture-mode="${privateVoice.captureMode}"`
+      : "";
+  const voiceStartHidden =
+    privateVoice.status !== "active" || renderedState === "text_mode"
+      ? " hidden"
+      : "";
+  const retry = privateVoice.status === "retryable"
+    ? '<form class="product-action-form" method="post" action="/voice/retry"><button class="product-primary-action" type="submit">重新连接私人语音</button></form>'
     : "";
-  return `<section class="product-voice" data-voice-surface data-voice-state="${requestedState}" data-voice-failure-limit="3" data-voice-submit-action="/conversation" data-voice-language="zh-CN" aria-labelledby="voice-heading">
-    <header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation">改用文字</a></header>
-    <section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p><p class="product-voice-transcript" data-voice-transcript data-voice-transcript-kind="${initialTranscriptKind}" aria-live="polite" aria-atomic="true">${initialTranscript}</p><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止</button><button class="product-primary-action" type="button" data-voice-submit hidden>继续对话</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button><a class="product-secondary-action" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div><p class="product-voice-fallback" data-voice-fallback hidden>语音服务不可用或权限未打开。文字对话仍然可用。</p><p class="product-voice-privacy">不保存音频；说出的动作照常写入活动记录。动画只表示“正在听”，不表示“正在执行”。</p></section>
-    ${guideMarkup}
-    ${intentMarkup}
-    <form class="product-voice-submit-form" data-voice-submit-form method="post" action="/conversation" hidden><input type="hidden" name="question" data-voice-transcript-input></form>
-    <noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字对话。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript>
-  </section>`;
+  const notice = options.notice === "recovered"
+    ? '<p class="product-notice" data-one-shot-notice role="status">私人语音已重新连接。现在可以开始说话。</p>'
+    : options.notice === "unavailable"
+      ? '<p class="product-notice" data-one-shot-notice role="status">私人语音仍在恢复中。文字对话现在就能继续。</p>'
+      : "";
+  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}"${captureMode} aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。任何动作仍由 Hub 的确认和审计流程决定。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
 }
-
-function renderVoiceIntent(transcript: string, transcriptKind: "partial" | "final", intent?: VoiceSurfaceIntent): string {
+function renderVoiceIntent(
+  transcript: string,
+  transcriptKind: "partial" | "final",
+  intent?: VoiceSurfaceIntent,
+): string {
   const fields = [
     ["房间", normalizeSurfaceText(intent?.room)],
     ["播放器", normalizeSurfaceText(intent?.player)],
@@ -303,22 +831,20 @@ function renderVoiceIntent(transcript: string, transcriptKind: "partial" | "fina
     ["队列", normalizeSurfaceText(intent?.queue)],
     ["音量", normalizeSurfaceText(intent?.volume)],
   ] as Array<[string, string]>;
-  const visibleFields = fields.filter((entry) => entry[1].length > 0);
-  if (!transcript && visibleFields.length === 0) return "";
-
-  const transcriptMarkup = transcript
+  const visible = fields.filter((entry) => entry[1].length > 0);
+  if (!transcript && visible.length === 0) return "";
+  const quote = transcript
     ? `<blockquote lang="zh-CN" data-voice-intent-transcript data-voice-transcript-kind="${transcriptKind}">${escapeHtml(transcript)}</blockquote>`
     : "";
-  const fieldsMarkup = visibleFields.length > 0
-    ? `<dl class="product-side-list">${visibleFields.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`
-    : "";
-  return `<section class="product-card product-voice-intent" data-voice-intent-source="real" aria-label="当前理解"><p class="product-kicker">当前理解</p>${transcriptMarkup}${fieldsMarkup}<p class="product-muted">语音转写只会进入现有对话；媒体或高影响动作仍由 Hub 负责确认和执行。</p></section>`;
+  const values =
+    visible.length > 0
+      ? `<dl class="product-side-list">${visible.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`
+      : "";
+  return `<section class="product-card product-voice-intent" data-voice-intent-source="real" aria-label="当前理解"><p class="product-kicker">当前理解</p>${quote}${values}<p class="product-muted">语音转写只会进入受管控的对话；任何动作仍由 Hub 负责确认和执行。</p></section>`;
 }
-
 function normalizeSurfaceText(value: unknown): string {
   return typeof value === "string" ? value.trim().slice(0, 2_000) : "";
 }
-
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -327,7 +853,6 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
-
 function isVoiceSurfaceState(value: string): value is VoiceSurfaceState {
   return (VOICE_SURFACE_STATES as readonly string[]).includes(value);
 }

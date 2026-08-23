@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { Context } from "@deepseek-ai/cordis";
+import { ProductHttpHost } from "@hob-agent/inbox-web/product-http-host";
 
 import {
   createHomeHubProcessOptions,
@@ -14,6 +17,10 @@ import {
 } from "./main.js";
 import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
 import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
+import {
+  type ProductRuntimeSupervisorOptions,
+} from "./product-runtime-supervisor.js";
+import { PrivateVoiceProviderRuntime } from "./voice/private-voice-provider-runtime.js";
 
 const ENV = {
   HOB_DATA_DIR: "/tmp/hob-agent-main-test",
@@ -356,6 +363,41 @@ test("main starts the unified first-run product runtime without parsing operatio
   }
 });
 
+test("routes setup and recovery pairing codes through the dedicated local terminal channel", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-pairing-terminal-"));
+  const terminal: string[] = [];
+  let productOptions: ProductRuntimeSupervisorOptions | undefined;
+  try {
+    const running = await main({
+      env: { HOB_DATA_DIR: dataDirectory },
+      writeProductTerminal: (message) => { terminal.push(message); },
+      createProductRuntime: async (input) => {
+        productOptions = input;
+        return { context: new Context(), stop: async () => undefined };
+      },
+    });
+
+    productOptions?.announce?.({
+      origin: "http://127.0.0.1:8787",
+      pairingCode: "SETU-P123",
+      expiresAt: new Date("2026-08-24T01:00:00.000Z"),
+    });
+    productOptions?.announceRecovery?.({
+      origin: "http://127.0.0.1:8787",
+      pairingCode: "RECO-4567",
+      expiresAt: new Date("2026-08-24T01:10:00.000Z"),
+    });
+
+    assert.deepEqual(terminal, [
+      "\nHob 本机设置配对\n打开：http://127.0.0.1:8787/setup\n配对码：SETU-P123\n有效至：2026-08-24T01:00:00.000Z\n",
+      "\nHob 本机会话恢复\n打开：http://127.0.0.1:8787/pair\n配对码：RECO-4567\n有效至：2026-08-24T01:10:00.000Z\n",
+    ]);
+    await running.shutdown.shutdown(0);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
 test("main restores an activated product through the same supervisor instead of the legacy runtime", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-activated-product-"));
   await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
@@ -391,5 +433,92 @@ test("main restores an activated product through the same supervisor instead of 
     await running.shutdown.shutdown(0);
   } finally {
     await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test("mounts the supervisor's exact active private voice provider into the operational HTTP surface", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-private-voice-"));
+  const server = createServer((request, response) => {
+    if (request.url === "/v1/audio/transcriptions") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ text: "语音服务已连接" }));
+      return;
+    }
+    if (request.url === "/v1/audio/speech") {
+      response.setHeader("content-type", "audio/wav");
+      response.end(Buffer.from([82, 73, 70, 70]));
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve, reject) => server.listen(0, "127.0.0.1", (error?: Error) => error === undefined ? resolve() : reject(error)));
+  const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const vault = {
+    read: async () => undefined,
+    write: async () => undefined,
+    delete: async () => undefined,
+  };
+  const privateVoice = new PrivateVoiceProviderRuntime({
+    config: {
+      asr: { transport: "openai_http", endpoint },
+      tts: { transport: "openai_http", endpoint, locale: "zh-CN" },
+    },
+    vault,
+  });
+  let productOptions: ProductRuntimeSupervisorOptions | undefined;
+  let mountedVoice: unknown;
+  let mountedRecovery: unknown;
+  let running: Awaited<ReturnType<typeof main>> | undefined;
+  const host = new ProductHttpHost({ port: 0 });
+  try {
+    assert.deepEqual(await privateVoice.start(), { status: "active" });
+    running = await main({
+      env: { HOB_DATA_DIR: dataDirectory },
+      modelCredentialVault: vault,
+      mountProductBundle: async (_context, options) => {
+        mountedVoice = options.inboxHttp?.privateVoice;
+        mountedRecovery = options.inboxHttp?.sessionRecovery;
+        return {
+          context: { homeInboxHttp: { attach: () => undefined } },
+          dispose: async () => undefined,
+        } as never;
+      },
+      createProductRuntime: async (input) => {
+        productOptions = input;
+        return { context: new Context(), stop: async () => undefined };
+      },
+    });
+    assert.notEqual(productOptions, undefined);
+    const bundle = await productOptions!.mountOperational({
+      candidate: {
+        householdName: "梧桐家",
+        agentName: "小满",
+        modelReference: "custom/home-model",
+        modelBaseURL: "https://model.example.test/v1",
+        modelProfile: {
+          id: "custom:setup:main-private-voice",
+          provider: "custom",
+          kind: "api_key",
+          secretRef: "keychain:hob-agent/setup-model:main-private-voice:stage-a",
+        },
+        bridges: [],
+      },
+      context: new Context(),
+      host,
+      authenticateProductSession: async () => true,
+      recoverProductSession: { recover: async () => ({ status: "invalid" as const }) },
+      privateVoice,
+    });
+    assert.notEqual(bundle, undefined);
+    assert.equal(mountedVoice, privateVoice);
+    assert.notEqual(mountedRecovery, undefined);
+    await bundle?.dispose();
+  } finally {
+    await running?.shutdown.shutdown(0);
+    await host.dispose();
+    await privateVoice.dispose();
+    await rm(dataDirectory, { recursive: true, force: true });
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
   }
 });

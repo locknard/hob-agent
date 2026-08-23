@@ -5,7 +5,12 @@ import test from "node:test";
 
 import { Context } from "@deepseek-ai/cordis";
 
-import { ProductVoiceSetup, ProductVoiceSetupService } from "./product-voice-setup.js";
+import {
+  ProductVoiceSetup,
+  ProductVoiceSetupService,
+  type ProductVoiceProbeOutcome,
+  type ProductVoiceTrackInput,
+} from "./product-voice-setup.js";
 
 class MemoryVault {
   readonly values = new Map<string, string>();
@@ -38,7 +43,7 @@ test("stages independent Wyoming ASR and HTTP TTS settings without selecting a p
     setupId: "family-a",
     track: { kind: "asr", transport: "wyoming", endpoint: "wyoming://127.0.0.1:10300", model: "whisper-large-v3" },
   });
-  const tts = await setup.probe({
+  const tts = await probeCredentialed(setup, {
     setupId: "family-a",
     track: { kind: "tts", transport: "openai_http", endpoint: "http://127.0.0.1:9880", credential: "tts-secret", locale: "zh-CN", voice: "warm" },
   });
@@ -74,10 +79,110 @@ test("stages independent Wyoming ASR and HTTP TTS settings without selecting a p
   assert.equal([...vault.values.keys()].some((reference) => reference.includes(":primary")), false);
 });
 
+test("accepts an OpenAI-compatible /v1 base URL and stages the canonical service root", async () => {
+  const endpoints: string[] = [];
+  const setup = new ProductVoiceSetup({
+    vault: new MemoryVault(),
+    probe: async ({ track }) => {
+      endpoints.push(track.endpoint);
+      return { status: "ready", latencyMs: 1 };
+    },
+  });
+
+  const result = await setup.probe({
+    setupId: "family-openai-v1",
+    track: {
+      kind: "asr",
+      transport: "openai_http",
+      endpoint: "http://127.0.0.1:9880/v1/",
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: "ready",
+    latencyMs: 1,
+    staged: {
+      kind: "asr",
+      transport: "openai_http",
+      endpoint: "http://127.0.0.1:9880",
+    },
+  });
+  assert.deepEqual(endpoints, ["http://127.0.0.1:9880"]);
+});
+
+test("rejects a Wyoming TTS model before it can produce a non-runnable ready stage", async () => {
+  const vault = new MemoryVault();
+  let probed = false;
+  const setup = new ProductVoiceSetup({
+    vault,
+    probe: async () => { probed = true; return { status: "ready", latencyMs: 1 }; },
+  });
+
+  assert.deepEqual(await setup.probe({
+    setupId: "family-wyoming-tts-model",
+    track: {
+      kind: "tts",
+      transport: "wyoming",
+      endpoint: "wyoming://127.0.0.1:10301",
+      locale: "zh-CN",
+      model: "unsupported-model-field",
+    },
+  }), { status: "incompatible" });
+  assert.equal(probed, false);
+  assert.equal(vault.values.size, 0);
+});
+
+test("accepts credentialed HTTPS hostnames and requires literal private addresses for plaintext credentials", async () => {
+  const endpoints: string[] = [];
+  const setup = new ProductVoiceSetup({
+    vault: new MemoryVault(),
+    probe: async ({ track }) => {
+      endpoints.push(track.endpoint);
+      return { status: "ready", latencyMs: 1 };
+    },
+  });
+
+  const secure = await probeCredentialed(setup, {
+    setupId: "family-secure-host",
+    track: {
+      kind: "asr",
+      transport: "openai_http",
+      endpoint: "https://voice.example.test/v1/",
+      credential: "private-token",
+    },
+  });
+  assert.equal(secure.status, "ready");
+  assert.deepEqual(endpoints, ["https://voice.example.test"]);
+
+  assert.deepEqual(await probeCredentialed(setup, {
+    setupId: "family-plaintext-host",
+    track: {
+      kind: "asr",
+      transport: "openai_http",
+      endpoint: "http://voice.local",
+      credential: "private-token",
+    },
+  }), { status: "incompatible" });
+});
+
+test("requires a durable lease before the direct setup API writes a credential", async () => {
+  const vault = new MemoryVault();
+  const setup = new ProductVoiceSetup({ vault, probe: async () => ({ status: "ready", latencyMs: 1 }) });
+
+  await assert.rejects(
+    setup.probe({
+      setupId: "family-direct-credential",
+      track: { kind: "asr", transport: "openai_http", endpoint: "http://127.0.0.1:9880", credential: "private" },
+    }),
+    /durable staging lease/,
+  );
+  assert.equal(vault.values.size, 0);
+});
+
 test("rejects a Wyoming credential because the protocol transport cannot send one", async () => {
   const vault = new MemoryVault();
   const setup = new ProductVoiceSetup({ vault, probe: async () => ({ status: "ready", latencyMs: 1 }) });
-  assert.deepEqual(await setup.probe({
+  assert.deepEqual(await probeCredentialed(setup, {
     setupId: "family-wyoming-secret",
     track: {
       kind: "asr",
@@ -135,7 +240,7 @@ test("uses the built-in Wyoming capability probe for the selected track", async 
   }
 });
 
-test("cleans a staged ASR credential when the neutral probe rejects it", async () => {
+test("returns a rejected credential probe while its durable lease remains available for its owner", async () => {
   const vault = new MemoryVault();
   const setup = new ProductVoiceSetup({
     vault,
@@ -143,15 +248,15 @@ test("cleans a staged ASR credential when the neutral probe rejects it", async (
     probe: async () => ({ status: "credential_rejected" }),
   });
 
-  assert.deepEqual(await setup.probe({
+  assert.deepEqual(await probeCredentialed(setup, {
     setupId: "family-b",
     track: { kind: "asr", transport: "openai_http", endpoint: "https://192.168.1.20", credential: "wrong" },
   }), { status: "credential_rejected" });
-  assert.deepEqual(vault.deleted, ["keychain:hob-agent/voice:asr:family-b:rejected"]);
-  assert.equal(vault.values.size, 0);
+  assert.deepEqual(vault.deleted, []);
+  assert.equal(vault.values.get("keychain:hob-agent/voice:asr:family-b:rejected"), "wrong");
 });
 
-test("fails closed and cleans the staged credential when a transport reports an invalid latency", async () => {
+test("returns an invalid transport result while its durable lease remains available for its owner", async () => {
   const vault = new MemoryVault();
   const setup = new ProductVoiceSetup({
     vault,
@@ -159,12 +264,12 @@ test("fails closed and cleans the staged credential when a transport reports an 
     probe: async () => ({ status: "ready", latencyMs: Number.NaN }),
   });
 
-  assert.deepEqual(await setup.probe({
+  assert.deepEqual(await probeCredentialed(setup, {
     setupId: "family-invalid-result",
     track: { kind: "asr", transport: "openai_http", endpoint: "http://127.0.0.1:10300", credential: "private" },
   }), { status: "incompatible" });
-  assert.deepEqual(vault.deleted, ["keychain:hob-agent/voice:asr:family-invalid-result:invalid-result"]);
-  assert.equal(vault.values.size, 0);
+  assert.deepEqual(vault.deleted, []);
+  assert.equal(vault.values.get("keychain:hob-agent/voice:asr:family-invalid-result:invalid-result"), "private");
 });
 
 test("rejects secret-shaped endpoints before any credential reaches the vault", async () => {
@@ -245,3 +350,15 @@ test("mounts the private voice setup owner as a Cordis capability without starti
     await context.fiber.dispose();
   }
 });
+
+async function probeCredentialed(
+  setup: ProductVoiceSetup,
+  input: { readonly setupId: string; readonly track: ProductVoiceTrackInput },
+): Promise<ProductVoiceProbeOutcome> {
+  const preparation = setup.prepare(input);
+  if (preparation.status !== "prepared") return preparation;
+  return setup.execute({
+    prepared: preparation.prepared,
+    credentialLease: { stage: preparation.prepared.stage },
+  });
+}

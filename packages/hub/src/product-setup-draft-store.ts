@@ -5,16 +5,26 @@ import { join } from "node:path";
 import type {
   ProductSetupDraftProjection,
 } from "@hob-agent/inbox-web/setup";
-import type { ProductBootstrapConfigDraft } from "./product-bootstrap-config-store.js";
+import type {
+  ProductBootstrapConfigDraft,
+  ProductBootstrapVoiceAsrConfig,
+  ProductBootstrapVoiceTtsConfig,
+  ProductVoiceRuntimeConfig,
+} from "./product-bootstrap-config-store.js";
 import type { ProductModelSetupStage } from "./product-model-setup.js";
 import type { ProductBridgeSetupStage } from "./product-bridge-setup.js";
+import type { ProductVoiceSetupStage } from "./product-voice-setup.js";
+import { normalizePrivateVoiceEndpoint } from "./voice/private-voice-endpoint.js";
 
-const DRAFT_VERSION = "hob.setup-draft/v1" as const;
+const DRAFT_VERSION = "hob.setup-draft/v2" as const;
+const LEGACY_DRAFT_VERSION = "hob.setup-draft/v1" as const;
 const MAX_DRAFT_BYTES = 16_384;
+const MAX_PENDING_VOICE_CLEANUPS = 8;
+const MAX_VOICE_STAGING_LEASES = 8;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const SECRET_KEY = /token|secret|password|passphrase|(?:api|access|private|signing|encryption).?key|credential/i;
 
-interface StoredSetupDraft extends ProductSetupDraftProjection {
+interface StoredSetupDraft extends Omit<ProductSetupDraftProjection, "voice"> {
   readonly version: typeof DRAFT_VERSION;
   readonly sessionDigest: string;
   readonly sessionExpiresAt: string;
@@ -25,6 +35,16 @@ interface StoredSetupDraft extends ProductSetupDraftProjection {
   readonly bridgeConfig?: Readonly<Record<string, unknown>>;
   readonly bridgeCredentialRefs?: Readonly<Record<string, string>>;
   readonly bridgeProbeLatencyMs?: number;
+  readonly voice?: {
+    readonly asr?: ProductBootstrapVoiceAsrConfig;
+    readonly tts?: ProductBootstrapVoiceTtsConfig;
+  };
+  readonly voiceProbeLatencyMs?: { readonly asr?: number; readonly tts?: number };
+  readonly voiceSkipped?: true;
+  /** Credential-backed stages that were removed from setup progress and still need vault cleanup. */
+  readonly voiceCleanup?: readonly ProductVoiceSetupStage[];
+  /** Exact credential locators durably reserved before a voice probe can write them. */
+  readonly voiceStaging?: readonly ProductVoiceSetupStage[];
 }
 
 /** Durable owner of the paired-device session and non-secret setup progress. */
@@ -66,6 +86,11 @@ export class ProductSetupDraftStore {
         ...(current?.bridgeConfig === undefined ? {} : { bridgeConfig: current.bridgeConfig }),
         ...(current?.bridgeCredentialRefs === undefined ? {} : { bridgeCredentialRefs: current.bridgeCredentialRefs }),
         ...(current?.bridgeProbeLatencyMs === undefined ? {} : { bridgeProbeLatencyMs: current.bridgeProbeLatencyMs }),
+        ...(current?.voice === undefined ? {} : { voice: current.voice }),
+        ...(current?.voiceProbeLatencyMs === undefined ? {} : { voiceProbeLatencyMs: current.voiceProbeLatencyMs }),
+        ...(current?.voiceSkipped === undefined ? {} : { voiceSkipped: current.voiceSkipped }),
+        ...(current?.voiceCleanup === undefined ? {} : { voiceCleanup: current.voiceCleanup }),
+        ...(current?.voiceStaging === undefined ? {} : { voiceStaging: current.voiceStaging }),
         sessionDigest: digest(sessionToken).toString("hex"),
         sessionExpiresAt: input.sessionExpiresAt.toISOString(),
       });
@@ -81,6 +106,90 @@ export class ProductSetupDraftStore {
     const actual = digest(token);
     const expected = Buffer.from(stored.sessionDigest, "hex");
     return expected.length === actual.length && timingSafeEqual(expected, actual) ? project(stored) : undefined;
+  }
+
+  /** Lists the credential-backed voice stages whose durable cleanup has not yet succeeded. */
+  async pendingVoiceCleanupForSession(sessionToken: string): Promise<readonly ProductVoiceSetupStage[]> {
+    const token = boundedSessionToken(sessionToken);
+    const stored = await this.loadStored();
+    requireActiveSession(stored, token, this.now());
+    return stored!.voiceCleanup ?? Object.freeze([]);
+  }
+
+  /** Lists retired credential locators for bounded Hub maintenance, including expired setup drafts. */
+  async pendingVoiceCleanupForMaintenance(): Promise<readonly ProductVoiceSetupStage[]> {
+    const stored = await this.loadStored();
+    return stored?.voiceCleanup ?? Object.freeze([]);
+  }
+
+  /** Lists credential leases that a new process recovers before it accepts setup requests. */
+  async pendingVoiceStagingForRecovery(): Promise<readonly ProductVoiceSetupStage[]> {
+    const stored = await this.loadStored();
+    return stored?.voiceStaging ?? Object.freeze([]);
+  }
+
+  /** Atomically retires every cold-start staging lease before normal cleanup resumes. */
+  retireVoiceStagingForRecovery(): Promise<number> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      const staging = stored?.voiceStaging;
+      if (stored === undefined || staging === undefined) return 0;
+      const voiceCleanup = appendVoiceCleanup(stored.voiceCleanup, staging);
+      const { voiceStaging: _voiceStaging, voiceCleanup: _voiceCleanup, ...withoutPending } = stored;
+      await this.writeStored(Object.freeze({
+        ...withoutPending,
+        ...(voiceCleanup.length === 0 ? {} : { voiceCleanup }),
+      }));
+      return staging.length;
+    });
+  }
+
+  /** Persists an exact credential cleanup lease before the provider setup owner writes the locator. */
+  reserveVoiceCredential(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+    readonly stage: ProductVoiceSetupStage;
+  }): Promise<void> {
+    return this.exclusive(async () => {
+      const sessionToken = boundedSessionToken(input.sessionToken);
+      if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+        throw new TypeError("Setup draft revision is invalid");
+      }
+      const stored = await this.loadStored();
+      requireActiveSession(stored, sessionToken, this.now());
+      if (stored!.revision !== input.expectedRevision) throw new Error("Setup draft revision conflict");
+      if (stored!.stage !== "voice") throw new Error("Setup draft stage conflict");
+      const stage = validateVoiceStage(stored!.draftId, input.stage);
+      if (stage.credentialRef === undefined) throw new TypeError("Voice credential staging lease is invalid");
+      if (activeVoiceCredentialRefs(stored!.voice).has(stage.credentialRef)
+        || stored!.voiceCleanup?.some((candidate) => candidate.credentialRef === stage.credentialRef)) {
+        throw new Error("Voice credential staging lease is invalid");
+      }
+      if ((stored!.voiceCleanup?.length ?? 0) + (stored!.voiceStaging?.length ?? 0) >= MAX_PENDING_VOICE_CLEANUPS) {
+        throw new Error("Setup voice cleanup backlog is full");
+      }
+      const voiceStaging = appendVoiceStage(stored!.voiceStaging, stage);
+      if (voiceStaging.length === (stored!.voiceStaging?.length ?? 0)) return;
+      await this.writeStored(Object.freeze({ ...stored!, voiceStaging }));
+    });
+  }
+
+  /** Acknowledges an exact retired locator after a Hub-owned vault delete succeeds. */
+  ackVoiceCleanupForMaintenance(stage: ProductVoiceSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      await this.ackVoiceStageInStored(stored, validateVoiceStage(stored.draftId, stage), "cleanup");
+    });
+  }
+
+  /** Acknowledges an exact staging lease after its provider attempt or cold-start recovery deletes it. */
+  ackVoiceStaging(stage: ProductVoiceSetupStage): Promise<void> {
+    return this.exclusive(async () => {
+      const stored = await this.loadStored();
+      if (stored === undefined) return;
+      await this.ackVoiceStageInStored(stored, validateVoiceStage(stored.draftId, stage), "staging");
+    });
   }
 
   /** Returns the exact, non-secret configuration that the verified map stage staged. */
@@ -181,7 +290,7 @@ export class ProductSetupDraftStore {
       const updated: StoredSetupDraft = Object.freeze({
         ...stored,
         revision: stored.revision + 1,
-        stage: "map",
+        stage: "voice",
         bridge: bridge.projection,
         bridgeId: bridge.bridgeId,
         bridgeConfig: bridge.config,
@@ -190,6 +299,79 @@ export class ProductSetupDraftStore {
       });
       await this.writeStored(updated);
       return project(updated);
+    });
+  }
+
+  /** Persists one successfully probed ASR or TTS track and reports a replaced stage for vault cleanup. */
+  recordVoiceProbe(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+    readonly stage: ProductVoiceSetupStage;
+    readonly latencyMs: number;
+  }): Promise<{ readonly draft: ProductSetupDraftProjection; readonly replaced: readonly ProductVoiceSetupStage[] }> {
+    return this.exclusive(async () => {
+      const sessionToken = boundedSessionToken(input.sessionToken);
+      if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) throw new TypeError("Setup draft revision is invalid");
+      if (!Number.isSafeInteger(input.latencyMs) || input.latencyMs < 0 || input.latencyMs > 120_000) throw new TypeError("Setup voice probe latency is invalid");
+      const stored = await this.loadStored();
+      requireActiveSession(stored, sessionToken, this.now());
+      if (stored.revision !== input.expectedRevision) throw new Error("Setup draft revision conflict");
+      if (stored.stage !== "voice") throw new Error("Setup draft stage conflict");
+      const stage = validateVoiceStage(stored.draftId, input.stage);
+      if (stage.credentialRef !== undefined && !stored.voiceStaging?.some((candidate) => sameVoiceCleanupStage(candidate, stage))) {
+        throw new Error("Voice credential staging lease is missing");
+      }
+      const replaced = stored.voice?.[stage.kind] === undefined ? [] : [voiceStage(stored.voice[stage.kind]!, stage.kind)];
+      const voiceCleanup = appendVoiceCleanup(stored.voiceCleanup, replaced, stage.credentialRef);
+      const voiceStaging = (stored.voiceStaging ?? []).filter((candidate) => !sameVoiceCleanupStage(candidate, stage));
+      const voice = stage.kind === "asr"
+        ? Object.freeze({ ...stored.voice, asr: voiceConfig(stage) as ProductBootstrapVoiceAsrConfig })
+        : Object.freeze({ ...stored.voice, tts: voiceConfig(stage) as ProductBootstrapVoiceTtsConfig });
+      const probeLatencyMs = Object.freeze({ ...stored.voiceProbeLatencyMs, [stage.kind]: input.latencyMs });
+      const complete = voice.asr !== undefined && voice.tts !== undefined;
+      const { voiceStaging: _voiceStaging, ...withoutVoiceStaging } = stored;
+      const updated: StoredSetupDraft = Object.freeze({
+        ...withoutVoiceStaging,
+        revision: stored.revision + 1,
+        stage: complete ? "map" : "voice",
+        voice,
+        voiceProbeLatencyMs: probeLatencyMs,
+        ...(voiceCleanup.length === 0 ? {} : { voiceCleanup }),
+        ...(voiceStaging.length === 0 ? {} : { voiceStaging: Object.freeze(voiceStaging) }),
+      });
+      await this.writeStored(updated);
+      return Object.freeze({ draft: project(updated), replaced: Object.freeze(replaced) });
+    });
+  }
+
+  /** Explicitly finishes optional voice setup and reports every staged track that the caller owns to discard. */
+  skipVoice(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+  }): Promise<{ readonly draft: ProductSetupDraftProjection; readonly replaced: readonly ProductVoiceSetupStage[] }> {
+    return this.exclusive(async () => {
+      const sessionToken = boundedSessionToken(input.sessionToken);
+      if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) throw new TypeError("Setup draft revision is invalid");
+      const stored = await this.loadStored();
+      requireActiveSession(stored, sessionToken, this.now());
+      if (stored.revision !== input.expectedRevision) throw new Error("Setup draft revision conflict");
+      if (stored.stage !== "voice") throw new Error("Setup draft stage conflict");
+      if ((stored.voiceStaging?.length ?? 0) > 0) throw new Error("Setup voice credential staging is active");
+      const replaced = stored.voice === undefined ? [] : [
+        ...(stored.voice.asr === undefined ? [] : [voiceStage(stored.voice.asr, "asr")]),
+        ...(stored.voice.tts === undefined ? [] : [voiceStage(stored.voice.tts, "tts")]),
+      ];
+      const voiceCleanup = appendVoiceCleanup(stored.voiceCleanup, replaced);
+      const { voice: _voice, voiceProbeLatencyMs: _latencies, voiceSkipped: _skipped, voiceCleanup: _voiceCleanup, ...withoutVoice } = stored;
+      const updated: StoredSetupDraft = Object.freeze({
+        ...withoutVoice,
+        revision: stored.revision + 1,
+        stage: "map",
+        voiceSkipped: true,
+        ...(voiceCleanup.length === 0 ? {} : { voiceCleanup }),
+      });
+      await this.writeStored(updated);
+      return Object.freeze({ draft: project(updated), replaced: Object.freeze(replaced) });
     });
   }
 
@@ -233,9 +415,28 @@ export class ProductSetupDraftStore {
       await unlink(temporaryPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
     }
   }
+
+  private async ackVoiceStageInStored(
+    stored: StoredSetupDraft,
+    stage: ProductVoiceSetupStage,
+    kind: "cleanup" | "staging",
+  ): Promise<void> {
+    if (stage.credentialRef === undefined) throw new TypeError("Voice cleanup stage is invalid");
+    const pending = kind === "cleanup" ? stored.voiceCleanup ?? [] : stored.voiceStaging ?? [];
+    if (!pending.some((candidate) => sameVoiceCleanupStage(candidate, stage))) return;
+    const remaining = pending.filter((candidate) => !sameVoiceCleanupStage(candidate, stage));
+    const field = kind === "cleanup" ? "voiceCleanup" : "voiceStaging";
+    const { [field]: _removed, ...withoutPending } = stored;
+    const updated: StoredSetupDraft = Object.freeze({
+      ...withoutPending,
+      ...(remaining.length === 0 ? {} : { [field]: Object.freeze(remaining) }),
+    });
+    await this.writeStored(updated);
+  }
 }
 
 function project(stored: StoredSetupDraft): ProductSetupDraftProjection {
+  const voice = projectVoice(stored.voice, stored.voiceProbeLatencyMs);
   return Object.freeze({
     draftId: stored.draftId,
     revision: stored.revision,
@@ -244,14 +445,43 @@ function project(stored: StoredSetupDraft): ProductSetupDraftProjection {
     ...(stored.agentName === undefined ? {} : { agentName: stored.agentName }),
     ...(stored.model === undefined ? {} : { model: stored.model }),
     ...(stored.bridge === undefined ? {} : { bridge: stored.bridge }),
+    ...(voice === undefined ? {} : { voice }),
+    ...(stored.voiceSkipped === undefined ? {} : { voiceSkipped: true }),
   });
 }
 
+function projectVoice(
+  voice: StoredSetupDraft["voice"],
+  latencies: StoredSetupDraft["voiceProbeLatencyMs"],
+): ProductSetupDraftProjection["voice"] | undefined {
+  if (voice === undefined) return undefined;
+  const asr = voice.asr === undefined ? undefined : Object.freeze({
+    transport: voice.asr.transport,
+    endpoint: voice.asr.endpoint,
+    ...(voice.asr.model === undefined ? {} : { model: voice.asr.model }),
+    probeLatencyMs: latencies?.asr,
+  });
+  const tts = voice.tts === undefined ? undefined : Object.freeze({
+    transport: voice.tts.transport,
+    endpoint: voice.tts.endpoint,
+    locale: voice.tts.locale,
+    ...(voice.tts.voice === undefined ? {} : { voice: voice.tts.voice }),
+    ...(voice.tts.model === undefined ? {} : { model: voice.tts.model }),
+    probeLatencyMs: latencies?.tts,
+  });
+  return Object.freeze({ ...(asr === undefined ? {} : { asr }), ...(tts === undefined ? {} : { tts }) }) as ProductSetupDraftProjection["voice"];
+}
+
 function validateStored(value: unknown): StoredSetupDraft {
-  if (!isRecord(value) || value.version !== DRAFT_VERSION) throw new Error("Setup draft header is invalid");
+  if (!isRecord(value) || (value.version !== DRAFT_VERSION && value.version !== LEGACY_DRAFT_VERSION)) throw new Error("Setup draft header is invalid");
+  const legacy = value.version === LEGACY_DRAFT_VERSION;
+  if (legacy && (value.stage === "voice" || hasOwn(value, "voice") || hasOwn(value, "voiceProbeLatencyMs")
+    || hasOwn(value, "voiceSkipped") || hasOwn(value, "voiceCleanup") || hasOwn(value, "voiceStaging"))) {
+    throw new Error("Setup voice evidence is invalid");
+  }
   const draftId = validDraftId(value.draftId);
   if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 1) throw new Error("Setup draft revision is invalid");
-  if (value.stage !== "identity" && value.stage !== "model" && value.stage !== "bridge" && value.stage !== "map") throw new Error("Setup draft stage is invalid");
+  if (value.stage !== "identity" && value.stage !== "model" && value.stage !== "bridge" && value.stage !== "voice" && value.stage !== "map") throw new Error("Setup draft stage is invalid");
   if (typeof value.sessionDigest !== "string" || !/^[a-f0-9]{64}$/u.test(value.sessionDigest)) {
     throw new Error("Setup session digest is invalid");
   }
@@ -260,7 +490,7 @@ function validateStored(value: unknown): StoredSetupDraft {
   }
   const householdName = value.householdName === undefined ? undefined : boundedName(value.householdName, "Household name");
   const agentName = value.agentName === undefined ? undefined : boundedName(value.agentName, "Agent name");
-  if ((value.stage === "model" || value.stage === "bridge" || value.stage === "map") && (householdName === undefined || agentName === undefined)) {
+  if ((value.stage === "model" || value.stage === "bridge" || value.stage === "voice" || value.stage === "map") && (householdName === undefined || agentName === undefined)) {
     throw new Error("Setup identity is incomplete");
   }
   const model = value.model === undefined ? undefined : validateStoredModel(value.model);
@@ -272,7 +502,7 @@ function validateStored(value: unknown): StoredSetupDraft {
   const bridgeConfig = value.bridgeConfig === undefined ? undefined : validateBridgeConfig(value.bridgeConfig);
   const bridgeCredentialRefs = value.bridgeCredentialRefs === undefined ? undefined : validateBridgeCredentialRefs(bridgeId, value.bridgeCredentialRefs);
   const bridgeProbeLatencyMs = value.bridgeProbeLatencyMs === undefined ? undefined : Number(value.bridgeProbeLatencyMs);
-  if ((value.stage === "bridge" || value.stage === "map") && (model === undefined || modelCredentialRef === undefined || modelProfileId === undefined
+  if ((value.stage === "bridge" || value.stage === "voice" || value.stage === "map") && (model === undefined || modelCredentialRef === undefined || modelProfileId === undefined
     || typeof modelProbeLatencyMs !== "number" || !Number.isSafeInteger(modelProbeLatencyMs)
     || modelProbeLatencyMs < 0 || modelProbeLatencyMs > 120_000)) {
     throw new Error("Setup model evidence is incomplete");
@@ -280,10 +510,36 @@ function validateStored(value: unknown): StoredSetupDraft {
   if (model !== undefined && modelCredentialRef !== undefined && modelProfileId !== undefined) {
     validateModelProfileEvidence(draftId, model, modelCredentialRef, modelProfileId);
   }
-  if (value.stage === "map" && (bridge === undefined || bridgeId === undefined || bridgeConfig === undefined || bridgeCredentialRefs === undefined
+  if ((value.stage === "voice" || value.stage === "map") && (bridge === undefined || bridgeId === undefined || bridgeConfig === undefined || bridgeCredentialRefs === undefined
     || typeof bridgeProbeLatencyMs !== "number" || !Number.isSafeInteger(bridgeProbeLatencyMs)
     || bridgeProbeLatencyMs < 0 || bridgeProbeLatencyMs > 120_000)) {
     throw new Error("Setup bridge evidence is incomplete");
+  }
+  const voice = value.voice === undefined ? undefined : validateStoredVoice(draftId, value.voice);
+  const voiceProbeLatencyMs = value.voiceProbeLatencyMs === undefined ? undefined : validateVoiceProbeLatencies(value.voiceProbeLatencyMs, voice);
+  const voiceCleanup = value.voiceCleanup === undefined ? undefined : validateVoiceCleanup(draftId, value.voiceCleanup, MAX_PENDING_VOICE_CLEANUPS);
+  const voiceStaging = value.voiceStaging === undefined ? undefined : validateVoiceCleanup(draftId, value.voiceStaging, MAX_VOICE_STAGING_LEASES);
+  if ((voiceCleanup?.length ?? 0) + (voiceStaging?.length ?? 0) > MAX_PENDING_VOICE_CLEANUPS) {
+    throw new Error("Setup voice cleanup is invalid");
+  }
+  const activeVoiceRefs = activeVoiceCredentialRefs(voice);
+  if (voiceCleanup?.some((stage) => stage.credentialRef !== undefined && activeVoiceRefs.has(stage.credentialRef))
+    || voiceStaging?.some((stage) => stage.credentialRef !== undefined && activeVoiceRefs.has(stage.credentialRef))
+    || voiceCleanup?.some((stage) => voiceStaging?.some((candidate) => sameVoiceCleanupStage(candidate, stage)) ?? false)) {
+    throw new Error("Setup voice cleanup is invalid");
+  }
+  const voiceSkipped = value.voiceSkipped === undefined
+    ? legacy && value.stage === "map" && voice === undefined ? true : undefined
+    : value.voiceSkipped === true ? true : invalidVoiceState();
+  if (voiceSkipped !== undefined && voice !== undefined) throw new Error("Setup voice evidence is invalid");
+  if (voiceStaging !== undefined && value.stage !== "voice") throw new Error("Setup voice credential staging is invalid");
+  if (value.stage === "voice" && voiceSkipped !== undefined) throw new Error("Setup voice evidence is invalid");
+  if (value.stage === "map" && !legacy && voiceSkipped === undefined && !completeVoice(voice)) {
+    throw new Error("Setup voice evidence is incomplete");
+  }
+  if ((value.stage === "identity" || value.stage === "model" || value.stage === "bridge")
+    && (voiceSkipped !== undefined || voice !== undefined || voiceProbeLatencyMs !== undefined)) {
+    throw new Error("Setup voice evidence is invalid");
   }
   return Object.freeze({
     version: DRAFT_VERSION,
@@ -303,13 +559,19 @@ function validateStored(value: unknown): StoredSetupDraft {
     ...(bridgeConfig === undefined ? {} : { bridgeConfig }),
     ...(bridgeCredentialRefs === undefined ? {} : { bridgeCredentialRefs }),
     ...(bridgeProbeLatencyMs === undefined ? {} : { bridgeProbeLatencyMs }),
+    ...(voice === undefined ? {} : { voice }),
+    ...(voiceProbeLatencyMs === undefined ? {} : { voiceProbeLatencyMs }),
+    ...(voiceSkipped === undefined ? {} : { voiceSkipped }),
+    ...(voiceCleanup === undefined ? {} : { voiceCleanup }),
+    ...(voiceStaging === undefined ? {} : { voiceStaging }),
   });
 }
 
 function activationCandidate(stored: StoredSetupDraft): ProductBootstrapConfigDraft {
   if (stored.stage !== "map" || stored.householdName === undefined || stored.agentName === undefined
     || stored.model === undefined || stored.modelCredentialRef === undefined || stored.modelProfileId === undefined
-    || stored.bridge === undefined || stored.bridgeId === undefined || stored.bridgeConfig === undefined || stored.bridgeCredentialRefs === undefined) {
+    || stored.bridge === undefined || stored.bridgeId === undefined || stored.bridgeConfig === undefined || stored.bridgeCredentialRefs === undefined
+    || stored.voiceStaging !== undefined) {
     throw new Error("Setup activation candidate is incomplete");
   }
   const modelProfile = validateModelProfileEvidence(
@@ -318,6 +580,7 @@ function activationCandidate(stored: StoredSetupDraft): ProductBootstrapConfigDr
     stored.modelCredentialRef,
     stored.modelProfileId,
   );
+  const voice = completeVoice(stored.voice) ? Object.freeze({ asr: stored.voice.asr, tts: stored.voice.tts }) : undefined;
   return Object.freeze({
     householdName: stored.householdName,
     agentName: stored.agentName,
@@ -330,7 +593,170 @@ function activationCandidate(stored: StoredSetupDraft): ProductBootstrapConfigDr
       config: stored.bridgeConfig,
       credentialRefs: stored.bridgeCredentialRefs,
     })]),
+    ...(voice === undefined ? {} : { voice }),
   });
+}
+
+function validateStoredVoice(draftId: string, value: unknown): NonNullable<StoredSetupDraft["voice"]> {
+  if (!isRecord(value) || Object.keys(value).length === 0 || Object.keys(value).some((key) => key !== "asr" && key !== "tts")) throw new Error("Setup voice evidence is invalid");
+  const asr = value.asr === undefined ? undefined : voiceConfig(validateVoiceStage(draftId, { ...(value.asr as Record<string, unknown>), kind: "asr" })) as ProductBootstrapVoiceAsrConfig;
+  const tts = value.tts === undefined ? undefined : voiceConfig(validateVoiceStage(draftId, { ...(value.tts as Record<string, unknown>), kind: "tts" })) as ProductBootstrapVoiceTtsConfig;
+  return Object.freeze({ ...(asr === undefined ? {} : { asr }), ...(tts === undefined ? {} : { tts }) });
+}
+
+function validateVoiceProbeLatencies(value: unknown, voice: StoredSetupDraft["voice"]): { readonly asr?: number; readonly tts?: number } {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "asr" && key !== "tts")) throw new Error("Setup voice evidence is invalid");
+  const asr = value.asr === undefined ? undefined : boundedProbeLatency(value.asr);
+  const tts = value.tts === undefined ? undefined : boundedProbeLatency(value.tts);
+  if ((voice?.asr === undefined) !== (asr === undefined) || (voice?.tts === undefined) !== (tts === undefined)) {
+    throw new Error("Setup voice evidence is incomplete");
+  }
+  return Object.freeze({ ...(asr === undefined ? {} : { asr }), ...(tts === undefined ? {} : { tts }) });
+}
+
+function validateVoiceCleanup(draftId: string, value: unknown, maximum: number): readonly ProductVoiceSetupStage[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) {
+    throw new Error("Setup voice cleanup is invalid");
+  }
+  const seen = new Set<string>();
+  const stages = value.map((candidate) => {
+    const stage = validateVoiceStage(draftId, candidate);
+    if (stage.credentialRef === undefined || seen.has(stage.credentialRef)) {
+      throw new Error("Setup voice cleanup is invalid");
+    }
+    seen.add(stage.credentialRef);
+    return stage;
+  });
+  return Object.freeze(stages);
+}
+
+function appendVoiceCleanup(
+  pending: readonly ProductVoiceSetupStage[] | undefined,
+  removed: readonly ProductVoiceSetupStage[],
+  activeCredentialRef?: string,
+): readonly ProductVoiceSetupStage[] {
+  const cleanup = [...(pending ?? [])];
+  const locators = new Set(cleanup.map((stage) => stage.credentialRef));
+  for (const stage of removed) {
+    if (stage.credentialRef === undefined || stage.credentialRef === activeCredentialRef || locators.has(stage.credentialRef)) continue;
+    if (cleanup.length >= MAX_PENDING_VOICE_CLEANUPS) throw new Error("Setup voice cleanup backlog is full");
+    cleanup.push(stage);
+    locators.add(stage.credentialRef);
+  }
+  return Object.freeze(cleanup);
+}
+
+function appendVoiceStage(
+  pending: readonly ProductVoiceSetupStage[] | undefined,
+  stage: ProductVoiceSetupStage,
+): readonly ProductVoiceSetupStage[] {
+  if (stage.credentialRef === undefined) throw new TypeError("Voice credential staging lease is invalid");
+  if (pending?.some((candidate) => sameVoiceCleanupStage(candidate, stage))) return pending;
+  if ((pending?.length ?? 0) >= MAX_VOICE_STAGING_LEASES) throw new Error("Setup voice cleanup backlog is full");
+  return Object.freeze([...(pending ?? []), stage]);
+}
+
+function activeVoiceCredentialRefs(voice: StoredSetupDraft["voice"] | undefined): ReadonlySet<string> {
+  return new Set([
+    voice?.asr?.credentialRef,
+    voice?.tts?.credentialRef,
+  ].filter((reference): reference is string => reference !== undefined));
+}
+
+function sameVoiceCleanupStage(left: ProductVoiceSetupStage, right: ProductVoiceSetupStage): boolean {
+  if (left.kind !== right.kind || left.transport !== right.transport || left.endpoint !== right.endpoint
+    || left.credentialRef !== right.credentialRef || left.model !== right.model) return false;
+  return left.kind === "asr" || (right.kind === "tts" && left.locale === right.locale && left.voice === right.voice);
+}
+
+function boundedProbeLatency(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > 120_000) throw new Error("Setup voice probe latency is invalid");
+  return Number(value);
+}
+
+function invalidVoiceState(): never {
+  throw new Error("Setup voice evidence is invalid");
+}
+
+function completeVoice(voice: StoredSetupDraft["voice"] | undefined): voice is ProductVoiceRuntimeConfig {
+  return voice?.asr !== undefined && voice.tts !== undefined;
+}
+
+function validateVoiceStage(draftId: string, value: unknown): ProductVoiceSetupStage {
+  if (!isRecord(value) || (value.kind !== "asr" && value.kind !== "tts")) throw new TypeError("Voice setup stage is invalid");
+  const allowed = value.kind === "asr"
+    ? ["kind", "transport", "endpoint", "credentialRef", "model"]
+    : ["kind", "transport", "endpoint", "credentialRef", "locale", "voice", "model"];
+  if (Object.keys(value).some((key) => !allowed.includes(key))) throw new TypeError("Voice setup stage is invalid");
+  const transport = voiceTransport(value.transport);
+  const credentialRef = value.credentialRef === undefined ? undefined : voiceCredentialRef(draftId, value.kind, value.credentialRef);
+  const endpoint = voiceEndpoint(transport, value.endpoint, credentialRef !== undefined);
+  if (transport === "wyoming" && credentialRef !== undefined) throw new TypeError("Voice setup stage is invalid");
+  const model = value.model === undefined ? undefined : voiceLabel(value.model);
+  if (value.kind === "asr") {
+    return Object.freeze({ kind: "asr", transport, endpoint, ...(credentialRef === undefined ? {} : { credentialRef }), ...(model === undefined ? {} : { model }) });
+  }
+  const locale = voiceLocale(value.locale);
+  const voice = value.voice === undefined ? undefined : voiceLabel(value.voice);
+  if (transport === "wyoming" && model !== undefined) throw new TypeError("Voice setup stage is invalid");
+  return Object.freeze({ kind: "tts", transport, endpoint, ...(credentialRef === undefined ? {} : { credentialRef }), locale, ...(voice === undefined ? {} : { voice }), ...(model === undefined ? {} : { model }) });
+}
+
+function voiceConfig(stage: ProductVoiceSetupStage): ProductBootstrapVoiceAsrConfig | ProductBootstrapVoiceTtsConfig {
+  if (stage.kind === "asr") {
+    return Object.freeze({ transport: stage.transport, endpoint: stage.endpoint, ...(stage.credentialRef === undefined ? {} : { credentialRef: stage.credentialRef }), ...(stage.model === undefined ? {} : { model: stage.model }) });
+  }
+  return Object.freeze({ transport: stage.transport, endpoint: stage.endpoint, ...(stage.credentialRef === undefined ? {} : { credentialRef: stage.credentialRef }), locale: stage.locale, ...(stage.voice === undefined ? {} : { voice: stage.voice }), ...(stage.model === undefined ? {} : { model: stage.model }) });
+}
+
+function voiceStage(value: ProductBootstrapVoiceAsrConfig | ProductBootstrapVoiceTtsConfig, kind: "asr" | "tts"): ProductVoiceSetupStage {
+  if (kind === "asr") {
+    return Object.freeze({ kind, transport: value.transport, endpoint: value.endpoint, ...(value.credentialRef === undefined ? {} : { credentialRef: value.credentialRef }), ...(value.model === undefined ? {} : { model: value.model }) });
+  }
+  if (!("locale" in value)) throw new Error("Setup voice evidence is invalid");
+  return Object.freeze({ kind, transport: value.transport, endpoint: value.endpoint, ...(value.credentialRef === undefined ? {} : { credentialRef: value.credentialRef }), locale: value.locale, ...(value.voice === undefined ? {} : { voice: value.voice }), ...(value.model === undefined ? {} : { model: value.model }) });
+}
+
+function voiceTransport(value: unknown): "wyoming" | "openai_http" {
+  if (value !== "wyoming" && value !== "openai_http") throw new TypeError("Voice setup stage is invalid");
+  return value;
+}
+
+function voiceEndpoint(transport: "wyoming" | "openai_http", value: unknown, hasCredential: boolean): string {
+  try {
+    return normalizePrivateVoiceEndpoint(transport, value, { hasCredential });
+  } catch {
+    throw new TypeError("Voice setup stage is invalid");
+  }
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function voiceCredentialRef(draftId: string, kind: "asr" | "tts", value: unknown): string {
+  const reference = boundedString(value, 512, "Voice credential reference");
+  if (!new RegExp(`^keychain:hob-agent/voice:${kind}:${draftId}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, "u").test(reference)) {
+    throw new TypeError("Voice setup stage is invalid");
+  }
+  return reference;
+}
+
+function voiceLocale(value: unknown): string {
+  if (typeof value !== "string") throw new TypeError("Voice setup stage is invalid");
+  try {
+    const [locale] = Intl.getCanonicalLocales(value.trim());
+    if (locale === undefined || locale.length > 35) throw new TypeError("Voice setup stage is invalid");
+    return locale;
+  } catch {
+    throw new TypeError("Voice setup stage is invalid");
+  }
+}
+
+function voiceLabel(value: unknown): string {
+  const label = boundedString(value, 128, "Voice label");
+  if (/[\u0000-\u001f\u007f]/u.test(label)) throw new TypeError("Voice setup stage is invalid");
+  return label;
 }
 
 function validateBridgeStage(stage: ProductBridgeSetupStage, summary: {

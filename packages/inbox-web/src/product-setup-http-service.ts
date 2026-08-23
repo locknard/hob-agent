@@ -20,26 +20,33 @@ export interface ProductSetupHttpOptions {
   readonly pairingExpiresAt: Date;
   readonly now?: () => Date;
   readonly createSessionToken: () => string;
+  /** Creates the opaque token that becomes the operational HttpOnly cookie after activation. */
+  readonly createOperationalSessionToken?: () => string;
   readonly setupDrafts: ProductSetupDraftPort;
   readonly activation?: ProductSetupActivationPort;
   readonly sessionTtlMs?: number;
 }
 
 export type ProductSetupActivationResult =
-  | { readonly status: "activated" }
+  | {
+    readonly status: "activated";
+    /** Non-secret cookie lifetime receipt returned by the durable session owner. */
+    readonly sessionExpiresAt?: Date;
+  }
   | { readonly status: "busy" | "conflict" | "unavailable" };
 
 export interface ProductSetupActivationPort {
   activate(input: {
     readonly sessionToken: string;
     readonly expectedRevision: number;
+    readonly operationalSessionToken?: string;
   }): Promise<ProductSetupActivationResult>;
 }
 
 export interface ProductSetupDraftProjection {
   readonly draftId: string;
   readonly revision: number;
-  readonly stage: "identity" | "model" | "bridge" | "map";
+  readonly stage: "identity" | "model" | "bridge" | "voice" | "map";
   readonly householdName?: string;
   readonly agentName?: string;
   readonly model?: {
@@ -54,6 +61,24 @@ export interface ProductSetupDraftProjection {
     readonly endpoint?: string;
     readonly summary: { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number };
   };
+  /** Verified voice settings deliberately omit credential references. */
+  readonly voice?: {
+    readonly asr?: {
+      readonly transport: "wyoming" | "openai_http";
+      readonly endpoint: string;
+      readonly model?: string;
+      readonly probeLatencyMs: number;
+    };
+    readonly tts?: {
+      readonly transport: "wyoming" | "openai_http";
+      readonly endpoint: string;
+      readonly locale: string;
+      readonly voice?: string;
+      readonly model?: string;
+      readonly probeLatencyMs: number;
+    };
+  };
+  readonly voiceSkipped?: true;
 }
 
 export type ProductSetupModelProbeResult =
@@ -65,6 +90,11 @@ export type ProductSetupBridgeProbeResult =
   | { readonly status: "ready"; readonly draft: ProductSetupDraftProjection }
   | { readonly status: "missing"; readonly field: "credential" }
   | { readonly status: "credential_rejected" | "endpoint_unreachable" | "incompatible" | "timed_out" | "conflict" };
+
+export type ProductSetupVoiceVerifyResult =
+  | { readonly status: "ready"; readonly draft: ProductSetupDraftProjection }
+  | { readonly status: "missing"; readonly field: "endpoint" | "locale" }
+  | { readonly status: "credential_rejected" | "endpoint_unreachable" | "timed_out" | "incompatible" | "unavailable" | "conflict" };
 
 export interface ProductSetupDraftPort {
   establishSession(input: {
@@ -93,6 +123,31 @@ export interface ProductSetupDraftPort {
     readonly config: Readonly<Record<string, unknown>>;
     readonly credential: string;
   }): Promise<ProductSetupBridgeProbeResult>;
+  probeVoice(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+    readonly track:
+      | {
+        readonly kind: "asr";
+        readonly transport: "wyoming" | "openai_http";
+        readonly endpoint: string;
+        readonly credential?: string;
+        readonly model?: string;
+      }
+      | {
+        readonly kind: "tts";
+        readonly transport: "wyoming" | "openai_http";
+        readonly endpoint: string;
+        readonly credential?: string;
+        readonly locale: string;
+        readonly voice?: string;
+        readonly model?: string;
+      };
+  }): Promise<ProductSetupVoiceVerifyResult>;
+  skipVoice(input: {
+    readonly sessionToken: string;
+    readonly expectedRevision: number;
+  }): Promise<ProductSetupDraftProjection>;
 }
 
 declare module "@deepseek-ai/cordis" {
@@ -210,6 +265,15 @@ export class ProductSetupHttpService extends Service {
       }
       if (method === "POST" && url.pathname === "/setup/bridge/probe") {
         return await this.probeBridge(request, response);
+      }
+      if (method === "POST" && url.pathname === "/setup/voice/asr/verify") {
+        return await this.verifyVoice(request, response, "asr");
+      }
+      if (method === "POST" && url.pathname === "/setup/voice/tts/verify") {
+        return await this.verifyVoice(request, response, "tts");
+      }
+      if (method === "POST" && url.pathname === "/setup/voice/skip") {
+        return await this.skipVoice(request, response);
       }
       if (method === "POST" && url.pathname === "/setup/activate") {
         return await this.activate(request, response);
@@ -410,6 +474,61 @@ export class ProductSetupHttpService extends Service {
     return sendHtml(response, result.status === "credential_rejected" || result.status === "missing" || result.status === "incompatible" ? 400 : 503, renderSetupWorkspace(current, notice));
   }
 
+  private async verifyVoice(request: IncomingMessage, response: ServerResponse, kind: "asr" | "tts"): Promise<void> {
+    if (request.headers.origin !== this.origin) return sendText(response, 403, "请从这台设备上的设置页面继续。");
+    const sessionToken = cookieValue(request.headers.cookie, SESSION_COOKIE);
+    const current = sessionToken === undefined ? undefined : await this.options.setupDrafts.loadForSession(sessionToken);
+    if (sessionToken === undefined || current === undefined) return sendHtml(response, 401, renderPairingPage(this.pairingState()));
+    if (current.stage !== "voice") return sendHtml(response, 409, renderSetupWorkspace(current, "语音设置已经更新，请核对当前步骤。"));
+    if (!isFormContentType(request.headers["content-type"])) return sendHtml(response, 415, renderVoiceStep(current, "请从语音设置页面开始验证。"));
+    let revision: number;
+    let track: Parameters<ProductSetupDraftPort["probeVoice"]>[0]["track"];
+    try {
+      const form = new URLSearchParams(await readBoundedBody(request));
+      revision = boundedRevision(singleFormValue(form, "revision"));
+      track = voiceTrackFromForm(form, kind);
+    } catch {
+      return sendHtml(response, 400, renderVoiceStep(current, "请检查语音服务信息后再验证。"));
+    }
+    const result = await this.options.setupDrafts.probeVoice({ sessionToken, expectedRevision: revision, track });
+    if (result.status === "ready") {
+      response.statusCode = 303;
+      response.setHeader("location", "/setup");
+      response.end();
+      return;
+    }
+    const notice = voiceVerificationNotice(result);
+    return sendHtml(response, result.status === "conflict" ? 409 : 422, renderVoiceStep(current, notice));
+  }
+
+  private async skipVoice(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (request.headers.origin !== this.origin) return sendText(response, 403, "请从这台设备上的设置页面继续。");
+    const sessionToken = cookieValue(request.headers.cookie, SESSION_COOKIE);
+    const current = sessionToken === undefined ? undefined : await this.options.setupDrafts.loadForSession(sessionToken);
+    if (sessionToken === undefined || current === undefined) return sendHtml(response, 401, renderPairingPage(this.pairingState()));
+    if (current.stage !== "voice") return sendHtml(response, 409, renderSetupWorkspace(current, "语音设置已经更新，请核对当前步骤。"));
+    if (!isFormContentType(request.headers["content-type"])) return sendHtml(response, 415, renderVoiceStep(current, "请从语音设置页面继续。"));
+    let revision: number;
+    try {
+      const form = new URLSearchParams(await readBoundedBody(request));
+      assertAllowedFormFields(form, ["revision"]);
+      revision = boundedRevision(singleFormValue(form, "revision"));
+    } catch {
+      return sendHtml(response, 400, renderVoiceStep(current, "请重新确认后继续。"));
+    }
+    try {
+      await this.options.setupDrafts.skipVoice({ sessionToken, expectedRevision: revision });
+    } catch {
+      const latest = await this.options.setupDrafts.loadForSession(sessionToken);
+      return sendHtml(response, 409, latest === undefined
+        ? renderPairingPage(this.pairingState())
+        : renderSetupWorkspace(latest, "语音设置已经更新，请核对当前步骤。"));
+    }
+    response.statusCode = 303;
+    response.setHeader("location", "/setup");
+    response.end();
+  }
+
   private async activate(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (request.headers.origin !== this.origin) {
       return sendText(response, 403, "请从这台设备上的设置页面继续。");
@@ -428,13 +547,32 @@ export class ProductSetupHttpService extends Service {
       return sendHtml(response, 415, renderSetupWorkspace(current, "请从家庭地图页面继续。", true));
     }
     const form = new URLSearchParams(await readBoundedBody(request));
+    const operationalSessionToken = this.options.createOperationalSessionToken?.();
+    if (operationalSessionToken !== undefined && (typeof operationalSessionToken !== "string"
+      || operationalSessionToken.length < 32 || operationalSessionToken.length > 512)) {
+      throw new Error("Activated product session is invalid");
+    }
     const result = await activation.activate({
       sessionToken,
       expectedRevision: boundedRevision(form.get("revision")),
+      ...(operationalSessionToken === undefined ? {} : { operationalSessionToken }),
     });
     if (result.status === "activated") {
+      if ((operationalSessionToken === undefined) !== (result.sessionExpiresAt === undefined)) {
+        throw new Error("Activated product session is incomplete");
+      }
       response.statusCode = 303;
       response.setHeader("location", "/onboarding");
+      if (operationalSessionToken !== undefined && result.sessionExpiresAt !== undefined) {
+        const remainingMs = result.sessionExpiresAt.getTime() - this.now().getTime();
+        if (!Number.isFinite(result.sessionExpiresAt.getTime()) || remainingMs <= 0) {
+          throw new Error("Activated product session is invalid");
+        }
+        response.setHeader(
+          "set-cookie",
+          `${SESSION_COOKIE}=${encodeURIComponent(operationalSessionToken)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(remainingMs / 1_000)}`,
+        );
+      }
       response.end();
       return;
     }
@@ -518,6 +656,89 @@ function boundedModelValue(value: string | null, max: number, label: string): st
     throw new TypeError(`${label}无效`);
   }
   return value.trim();
+}
+
+function singleFormValue(form: URLSearchParams, name: string): string {
+  const values = form.getAll(name);
+  if (values.length !== 1) throw new TypeError("Setup form field must have one value");
+  return values[0]!;
+}
+
+function optionalSingleFormValue(form: URLSearchParams, name: string): string | undefined {
+  const values = form.getAll(name);
+  if (values.length > 1) throw new TypeError("Setup form field must have one value");
+  const value = values[0];
+  return value === undefined || value === "" ? undefined : value;
+}
+
+function voiceTrackFromForm(
+  form: URLSearchParams,
+  kind: "asr" | "tts",
+): Parameters<ProductSetupDraftPort["probeVoice"]>[0]["track"] {
+  assertAllowedFormFields(form, kind === "asr"
+    ? ["revision", "service", "endpoint", "credential", "model"]
+    : ["revision", "service", "endpoint", "credential", "locale", "voice", "model"]);
+  const transport = boundedVoiceService(singleFormValue(form, "service"));
+  const endpoint = boundedVoiceValue(singleFormValue(form, "endpoint"), 2_048);
+  const credential = optionalSingleFormValue(form, "credential");
+  const model = optionalSingleFormValue(form, "model");
+  const boundedCredential = credential === undefined ? undefined : boundedVoiceValue(credential, 4_096);
+  const boundedModel = model === undefined ? undefined : boundedVoiceValue(model, 128);
+  if (kind === "asr") {
+    return {
+      kind,
+      transport,
+      endpoint,
+      ...(boundedCredential === undefined ? {} : { credential: boundedCredential }),
+      ...(boundedModel === undefined ? {} : { model: boundedModel }),
+    };
+  }
+  const locale = boundedVoiceValue(singleFormValue(form, "locale"), 35);
+  const voice = optionalSingleFormValue(form, "voice");
+  const boundedVoice = voice === undefined ? undefined : boundedVoiceValue(voice, 128);
+  return {
+    kind,
+    transport,
+    endpoint,
+    locale,
+    ...(boundedCredential === undefined ? {} : { credential: boundedCredential }),
+    ...(boundedVoice === undefined ? {} : { voice: boundedVoice }),
+    ...(boundedModel === undefined ? {} : { model: boundedModel }),
+  };
+}
+
+function assertAllowedFormFields(form: URLSearchParams, allowed: readonly string[]): void {
+  const names = new Set(allowed);
+  for (const [name] of form) {
+    if (!names.has(name)) throw new TypeError("Setup form field is invalid");
+  }
+}
+
+function boundedVoiceService(value: string): "wyoming" | "openai_http" {
+  if (value === "wyoming" || value === "openai_http") return value;
+  throw new TypeError("Voice service is invalid");
+}
+
+function boundedVoiceValue(value: string, max: number): string {
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > max || /[\u0000-\u001f\u007f]/u.test(normalized)) {
+    throw new TypeError("Voice form value is invalid");
+  }
+  return normalized;
+}
+
+function voiceVerificationNotice(result: Exclude<ProductSetupVoiceVerifyResult, { readonly status: "ready" }>): string {
+  if (result.status === "missing") return result.field === "locale"
+    ? "请填写语音语言后再验证。"
+    : "请填写语音服务地址后再验证。";
+  switch (result.status) {
+    case "credential_rejected": return "这项密钥没有通过验证，请检查后重试。";
+    case "endpoint_unreachable": return "暂时无法连接这项语音服务，请检查地址和家庭网络后重试。";
+    case "timed_out": return "验证等待时间已到，请确认服务正在运行后重试。";
+    case "incompatible": return "这项服务不能用于语音输入或输出，请调整设置后重试。";
+    case "unavailable": return "语音服务暂时不可用，稍后可以再次验证。";
+    case "conflict": return "语音设置已经更新，请核对当前步骤。";
+  }
 }
 
 async function readBoundedBody(request: IncomingMessage): Promise<string> {
@@ -610,6 +831,7 @@ function renderSetupProblem(message: string): string {
 
 function renderSetupWorkspace(draft: ProductSetupDraftProjection, notice?: string, canActivate = false): string {
   if (draft.stage === "map") return renderMapStep(draft, notice, canActivate);
+  if (draft.stage === "voice") return renderVoiceStep(draft, notice);
   if (draft.stage === "bridge") return renderBridgeStep(draft, notice);
   if (draft.stage === "model") return renderModelStep(draft, notice);
   return documentShell("给家起名字", `
@@ -688,8 +910,78 @@ function renderBridgeStep(draft: ProductSetupDraftProjection, notice?: string): 
     </section>`);
 }
 
+function renderVoiceStep(draft: ProductSetupDraftProjection, notice?: string): string {
+  const asr = draft.voice?.asr;
+  const tts = draft.voice?.tts;
+  return documentShell("设置私人语音", `
+    <section class="workspace" aria-labelledby="workspace-title">
+      <header>
+        <div class="hob-mark" aria-hidden="true">h</div>
+        <div><p class="eyebrow success">家庭连接已验证</p><h1 id="workspace-title">设置私人语音</h1></div>
+      </header>
+      <p class="lead">分别确认语音输入和语音输出。它们只会在你启用产品后开始使用。</p>
+      ${notice === undefined ? "" : `<p class="notice" role="alert">${escapeHtml(notice)}</p>`}
+      ${renderVoiceTrack("asr", draft.revision, asr)}
+      ${renderVoiceTrack("tts", draft.revision, tts)}
+      <form method="post" action="/setup/voice/skip" class="quiet-action">
+        <input type="hidden" name="revision" value="${draft.revision}">
+        <button type="submit" class="secondary-action">本次跳过</button>
+      </form>
+      <p class="privacy-note">密钥写入本机凭据保险箱，页面不会回显；运行语音服务时由 Hob 读取。</p>
+    </section>`);
+}
+
+type VoiceAsrProjection = NonNullable<ProductSetupDraftProjection["voice"]>["asr"];
+type VoiceTtsProjection = NonNullable<ProductSetupDraftProjection["voice"]>["tts"];
+
+function renderVoiceTrack(
+  kind: "asr" | "tts",
+  revision: number,
+  saved: VoiceAsrProjection | VoiceTtsProjection | undefined,
+): string {
+  const isTts = kind === "tts";
+  const track = saved;
+  const status = track === undefined
+    ? `<p class="voice-status" role="status">${isTts ? "语音输出尚未验证" : "语音输入尚未验证"}</p>`
+    : `<p class="voice-status verified" role="status">${isTts ? "语音输出" : "语音输入"}已验证，启用产品时生效</p>`;
+  const endpoint = track?.endpoint ?? "";
+  const model = track?.model ?? "";
+  const service = track?.transport ?? "openai_http";
+  const ttsTrack = isTts ? track as VoiceTtsProjection | undefined : undefined;
+  const locale = ttsTrack?.locale ?? "zh-CN";
+  const voice = ttsTrack?.voice ?? "";
+  return `<section class="voice-track" aria-labelledby="voice-${kind}-title">
+      <div class="voice-track-heading"><h2 id="voice-${kind}-title">${isTts ? "语音输出" : "语音输入"}</h2>${status}</div>
+      <form method="post" action="/setup/voice/${kind}/verify" class="pairing-form" data-voice-check>
+        <input type="hidden" name="revision" value="${revision}">
+        <label for="voice-${kind}-service">语音服务</label>
+        <select id="voice-${kind}-service" name="service" required>
+          <option value="openai_http"${service === "openai_http" ? " selected" : ""}>兼容语音服务</option>
+          <option value="wyoming"${service === "wyoming" ? " selected" : ""}>本地语音服务（Wyoming）</option>
+        </select>
+        <label for="voice-${kind}-endpoint">服务地址</label>
+        <input id="voice-${kind}-endpoint" name="endpoint" inputmode="url" autocomplete="url" maxlength="2048" value="${escapeHtml(endpoint)}" required>
+        <label for="voice-${kind}-credential">密钥 <small>本地语音服务通常不需要</small></label>
+        <input id="voice-${kind}-credential" name="credential" type="password" autocomplete="new-password" maxlength="4096">
+        ${isTts ? `<label for="voice-${kind}-locale">语音语言</label>
+        <input id="voice-${kind}-locale" name="locale" autocomplete="language" maxlength="35" value="${escapeHtml(locale)}" required>
+        <label for="voice-${kind}-voice">声音名称 <small>可选</small></label>
+        <input id="voice-${kind}-voice" name="voice" autocomplete="off" maxlength="128" value="${escapeHtml(voice)}">` : ""}
+        <label for="voice-${kind}-model">服务中的模型 <small>可选</small></label>
+        <input id="voice-${kind}-model" name="model" autocomplete="off" maxlength="128" value="${escapeHtml(model)}">
+        <p class="voice-check-status" data-voice-status aria-live="polite"></p>
+        <button type="submit">${track === undefined ? `验证${isTts ? "语音输出" : "语音输入"}` : `重新验证${isTts ? "语音输出" : "语音输入"}`}</button>
+      </form>
+    </section>`;
+}
+
 function renderMapStep(draft: ProductSetupDraftProjection, notice?: string, canActivate = false): string {
   const summary = draft.bridge?.summary;
+  const voiceSummary = draft.voice !== undefined
+    ? "私人语音已验证，将和家庭助手一起启用。"
+    : draft.voiceSkipped === true
+      ? "本次不连接私人语音；文字对话仍可使用。"
+      : "";
   return documentShell("确认家庭地图", `
     <section class="workspace" aria-labelledby="workspace-title">
       <header>
@@ -704,6 +996,7 @@ function renderMapStep(draft: ProductSetupDraftProjection, notice?: string, canA
         <div><strong>${summary?.states ?? 0}</strong><span>条当前状态</span></div>
       </div>
       <p class="privacy-note">这只是连接摘要。接下来会用真实设备与空间生成可核对的家庭地图，再由你选择动作确认方式。</p>
+      ${voiceSummary === "" ? "" : `<p class="privacy-note" role="status">${voiceSummary}</p>`}
       ${canActivate ? `<form method="post" action="/setup/activate" class="pairing-form" data-activation>
         <input type="hidden" name="revision" value="${draft.revision}">
         <p class="probe-status" data-activation-status aria-live="polite"></p>
@@ -731,12 +1024,14 @@ a{color:#0066cc;text-underline-offset:.18em}
 button{min-height:3.5rem;border:0;border-radius:999px;background:#0071e3;color:#fff;padding:.8rem 1.25rem;font:inherit;font-weight:650;cursor:pointer}button:hover{background:#0077ed}button:active{transform:scale(.985)}button:focus-visible{outline:.2rem solid #0066cc;outline-offset:.2rem}
 .notice{border-radius:1rem;background:#fff3cd;color:#654d03;padding:1rem;line-height:1.45}.privacy-note,.handoff-note{margin:1.5rem 0 0;color:#6e6e73;font-size:.88rem;line-height:1.5}
 .model-intro{padding:1.15rem;border-radius:1.15rem;background:#f5faff;border:1px solid rgba(0,113,227,.25);line-height:1.5}.model-intro p{margin:.4rem 0 0;color:#515154}.quiet-action{margin-top:1rem}
+.voice-track{margin-top:2rem;padding-top:1.5rem;border-top:1px solid rgba(0,0,0,.12)}.voice-track-heading{display:flex;gap:.75rem;align-items:baseline;justify-content:space-between;flex-wrap:wrap}.voice-track h2{margin:0;font-size:1.25rem;letter-spacing:-.02em}.voice-status{margin:0;color:#6e6e73;font-size:.9rem}.voice-status.verified{color:#237a45;font-weight:600}.secondary-action{background:transparent;border:1px solid #a1a1a6;color:#1d1d1f}.secondary-action:hover{background:#f5f5f7}.voice-check-status:empty{display:none}
 .map-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem}.map-summary div{display:grid;gap:.25rem;padding:1rem;border-radius:1rem;background:#f5f5f7}.map-summary strong{font-size:1.8rem;letter-spacing:-.04em}.map-summary span{color:#6e6e73;font-size:.85rem}
 .setup-steps{display:grid;gap:.75rem;list-style:none;padding:0;margin:0}.setup-steps li{display:grid;grid-template-columns:2.25rem 1fr auto;gap:1rem;align-items:start;padding:1rem;border:1px solid rgba(0,0,0,.08);border-radius:1.15rem;color:#6e6e73}.setup-steps li>span{display:grid;place-items:center;width:2.25rem;height:2.25rem;border-radius:50%;background:#e8e8ed;color:#515154;font-weight:650}.setup-steps strong{color:#1d1d1f}.setup-steps p{margin:.25rem 0 0;font-size:.9rem;line-height:1.4}.setup-steps b{font-size:.78rem;color:#0066cc}.setup-steps .current{border-color:rgba(0,113,227,.35);background:#f5faff}.setup-steps .current>span{background:#0071e3;color:#fff}
 @media(max-width:35rem){.setup-shell{place-items:start center;padding:0}.welcome-card,.workspace{min-height:100vh;border:0;border-radius:0;padding:2rem 1.25rem;box-shadow:none}.setup-steps li{grid-template-columns:2.25rem 1fr}.setup-steps b{grid-column:2}.map-summary{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:no-preference){button{transition:background-color .2s ease,transform .12s ease}}
 @media(prefers-contrast:more){.welcome-card,.workspace,.setup-steps li,input{border-width:2px;border-color:currentColor}}
-@media(prefers-color-scheme:dark){:root,body{background:#000;color:#f5f5f7}.welcome-card,.workspace{background:#1c1c1e;border-color:#3a3a3c}.hob-mark{background:#f5f5f7;color:#1d1d1f}.lead,.privacy-note,.handoff-note,.setup-steps li{color:#aeaeb2}.setup-steps strong,h1{color:#f5f5f7}.setup-steps li{border-color:#3a3a3c}.setup-steps .current{background:#101c29;border-color:#0a84ff}.setup-steps li>span{background:#3a3a3c;color:#f5f5f7}input,select{background:#2c2c2e;color:#f5f5f7;border-color:#636366}.notice{background:#493b14;color:#ffdf7e}.model-intro{background:#101c29}.model-intro p{color:#aeaeb2}.map-summary div{background:#2c2c2e}.map-summary span{color:#aeaeb2}}
+@media(prefers-reduced-transparency:reduce){.welcome-card,.workspace{box-shadow:none}}
+@media(prefers-color-scheme:dark){:root,body{background:#000;color:#f5f5f7}.welcome-card,.workspace{background:#1c1c1e;border-color:#3a3a3c}.hob-mark{background:#f5f5f7;color:#1d1d1f}.lead,.privacy-note,.handoff-note,.setup-steps li,.voice-status{color:#aeaeb2}.setup-steps strong,h1,.voice-track h2{color:#f5f5f7}.setup-steps li,.voice-track{border-color:#3a3a3c}.setup-steps .current{background:#101c29;border-color:#0a84ff}.setup-steps li>span{background:#3a3a3c;color:#f5f5f7}input,select{background:#2c2c2e;color:#f5f5f7;border-color:#636366}.notice{background:#493b14;color:#ffdf7e}.model-intro{background:#101c29}.model-intro p{color:#aeaeb2}.map-summary div{background:#2c2c2e}.map-summary span{color:#aeaeb2}.voice-status.verified{color:#63d38a}.secondary-action{border-color:#636366;color:#f5f5f7}.secondary-action:hover{background:#2c2c2e}}
 `;
 
 const SETUP_SCRIPT = `
@@ -754,6 +1049,14 @@ for (const form of document.querySelectorAll('[data-activation]')) {
     const status = form.querySelector('[data-activation-status]');
     if (button) { button.disabled = true; button.textContent = '正在准备家庭…'; }
     if (status) status.textContent = '正在连接真实家庭状态并准备对话。';
+  });
+}
+for (const form of document.querySelectorAll('[data-voice-check]')) {
+  form.addEventListener('submit', () => {
+    const button = form.querySelector('button[type="submit"]');
+    const status = form.querySelector('[data-voice-status]');
+    if (button) { button.disabled = true; button.textContent = '正在验证…'; }
+    if (status) status.textContent = '正在进行一次真实验证，通常只需要几秒。';
   });
 }
 `;

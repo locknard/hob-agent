@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 
 import { Context, Service } from "@deepseek-ai/cordis";
@@ -332,7 +334,8 @@ class StructuredAdviceInbox extends StubInbox {
     { id: 1, type: "accepted", data: {} },
     { id: 2, type: "inspecting_home", data: {} },
     { id: 3, type: "answer_delta", data: { text: "窗帘建议" } },
-    { id: 4, type: "completed", data: {} },
+    { id: 4, type: "answer", data: { text: "先按日光和最早、最晚边界试用一周。" } },
+    { id: 5, type: "completed", data: {} },
   ];
   adviceId = "advice-stream";
   listener: ((event: unknown) => void) | undefined;
@@ -425,6 +428,60 @@ class StructuredAdviceInbox extends StubInbox {
     } : undefined;
   }
 
+}
+
+class MultiSpeechAdviceInbox extends StructuredAdviceInbox {
+  getProductAdviceTurn(id: string) {
+    if (/^speech-\d+$/.test(id)) {
+      return {
+        id,
+        question: "语音回答",
+        status: "completed" as const,
+        answer: `回答 ${id}`,
+        canStop: false,
+        canBackground: false,
+      };
+    }
+    return super.getProductAdviceTurn(id);
+  }
+}
+
+class TestVoiceSpeechResponse extends EventEmitter {
+  destroyed = false;
+  writableEnded = false;
+  statusCode = 0;
+  readonly headers = new Map<string, string>();
+  body: Uint8Array | string | undefined;
+
+  setHeader(name: string, value: string): void {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  end(body?: Uint8Array | string): void {
+    this.writableEnded = true;
+    this.body = body;
+  }
+
+  disconnect(): void {
+    this.destroyed = true;
+    this.emit("close");
+  }
+}
+
+function testVoiceSpeechRequest(): EventEmitter & { readonly headers: Record<string, string> } {
+  const request = new EventEmitter() as EventEmitter & { readonly headers: Record<string, string> };
+  Object.defineProperty(request, "headers", { value: {} });
+  return request;
+}
+
+function testVoiceSpeechHandler(ctx: Context): (
+  request: unknown,
+  response: unknown,
+  adviceId: string,
+) => Promise<void> {
+  return (ctx.homeInboxHttp as unknown as {
+    handleVoiceSpeech(request: unknown, response: unknown, adviceId: string): Promise<void>;
+  }).handleVoiceSpeech.bind(ctx.homeInboxHttp);
 }
 
 class PresentationPreferenceInbox extends StubInbox {
@@ -614,19 +671,21 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
   });
   assert.equal(canonicalVoice.status, 200);
   const voiceHtml = await canonicalVoice.text();
-  assert.match(voiceHtml, /data-voice-state="idle"/);
+  assert.match(voiceHtml, /data-voice-state="text_mode"/);
   assert.match(voiceHtml, /data-voice-surface/);
-  assert.match(voiceHtml, /action="\/conversation"/);
+  assert.match(voiceHtml, /data-private-voice-status="unavailable"/);
+  assert.doesNotMatch(voiceHtml, /data-private-voice-capture-mode/);
 
   const voiceScript = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, {
     headers: { authorization },
   });
   assert.equal(voiceScript.status, 200);
   const voiceScriptText = await voiceScript.text();
-  assert.match(voiceScriptText, /SpeechRecognition/);
-  assert.match(voiceScriptText, /webkitSpeechRecognition/);
-  assert.match(voiceScriptText, /requestSubmit/);
-  assert.doesNotMatch(voiceScriptText, /getUserMedia|MediaRecorder|fetch\(|WebSocket|play_media|mediaRef/);
+  assert.match(voiceScriptText, /getUserMedia/);
+  assert.match(voiceScriptText, /MediaRecorder/);
+  assert.match(voiceScriptText, /voice\/transcribe/);
+  assert.match(voiceScriptText, /voice\/speech/);
+  assert.doesNotMatch(voiceScriptText, /SpeechRecognition|webkitSpeechRecognition|play_media|mediaRef/);
 
   const invalidVoiceState = await fetch(`${ctx.homeInboxHttp.origin}/voice?state=%3Cscript%3E`, {
     headers: { authorization },
@@ -687,6 +746,150 @@ test("uses an async product-session authenticator without Basic challenges and p
       origin: ctx.homeInboxHttp.origin,
     });
   } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("recovers a missing product cookie only through the local pairing page", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const recoveryCode = "FRESH-HOME";
+  const recoveredToken = "recovered-product-session-token-with-at-least-32";
+  const recoveryAttempts: string[] = [];
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    principal: adminPrincipal,
+    requestAuthenticator: async (request) => request.cookie === `hob_product_session=${recoveredToken}`,
+    sessionRecovery: {
+      recover: async (code: string) => {
+        recoveryAttempts.push(code);
+        return code === recoveryCode
+          ? { status: "recovered" as const, sessionToken: recoveredToken, expiresAt: new Date("2026-11-22T00:00:00.000Z") }
+          : { status: "invalid" as const };
+      },
+    },
+  });
+
+  try {
+    const denied = await fetch(`${ctx.homeInboxHttp.origin}/home`, { redirect: "manual" });
+    assert.equal(denied.status, 303);
+    assert.equal(denied.headers.get("location"), "/pair");
+
+    const pairingPage = await fetch(`${ctx.homeInboxHttp.origin}/pair`);
+    const pairingHtml = await pairingPage.text();
+    assert.equal(pairingPage.status, 200);
+    assert.match(pairingHtml, /恢复家庭控制台/u);
+    assert.match(pairingHtml, /href="\/assets\/product\.css"/u);
+    assert.match(pairingHtml, /name="code"/u);
+    assert.equal(pairingHtml.includes(recoveryCode), false);
+    assert.equal(pairingHtml.includes(recoveredToken), false);
+    assert.equal((await fetch(`${ctx.homeInboxHttp.origin}/assets/product.css`)).status, 200);
+
+    const wrongOrigin = await fetch(`${ctx.homeInboxHttp.origin}/pair`, {
+      method: "POST",
+      headers: { origin: "http://not-the-household", "content-type": "application/x-www-form-urlencoded" },
+      body: "code=FRESH-HOME",
+      redirect: "manual",
+    });
+    assert.equal(wrongOrigin.status, 403);
+
+    const paired = await fetch(`${ctx.homeInboxHttp.origin}/pair`, {
+      method: "POST",
+      headers: { origin: ctx.homeInboxHttp.origin, "content-type": "application/x-www-form-urlencoded" },
+      body: "code=FRESH-HOME",
+      redirect: "manual",
+    });
+    assert.equal(paired.status, 303);
+    assert.equal(paired.headers.get("location"), "/home");
+    assert.match(paired.headers.get("set-cookie") ?? "", /hob_product_session=recovered-product-session-token/u);
+    assert.match(paired.headers.get("set-cookie") ?? "", /HttpOnly/u);
+    assert.match(paired.headers.get("set-cookie") ?? "", /SameSite=Strict/u);
+    assert.equal((await fetch(`${ctx.homeInboxHttp.origin}/home`, {
+      headers: { cookie: `hob_product_session=${recoveredToken}` },
+    })).status, 200);
+    assert.deepEqual(recoveryAttempts, [recoveryCode]);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("limits failed local recovery pairing attempts without revealing a session secret", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  const recoveryCode = "LIMIT-HOME";
+  const sessionToken = "session-token-that-must-never-appear-in-a-recovery-error";
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    principal: adminPrincipal,
+    requestAuthenticator: async () => false,
+    sessionRecovery: {
+      recover: async (code: string) => code === recoveryCode
+        ? { status: "recovered" as const, sessionToken, expiresAt: new Date("2026-11-22T00:00:00.000Z") }
+        : { status: "invalid" as const },
+    },
+  });
+  const attempt = () => fetch(`${ctx.homeInboxHttp.origin}/pair`, {
+    method: "POST",
+    headers: { origin: ctx.homeInboxHttp.origin, "content-type": "application/x-www-form-urlencoded" },
+    body: "code=WRONG-HOME",
+    redirect: "manual",
+  });
+
+  try {
+    for (let index = 0; index < 5; index += 1) assert.equal((await attempt()).status, 401);
+    const limited = await attempt();
+    assert.equal(limited.status, 429);
+    assert.match(limited.headers.get("retry-after") ?? "", /^\d+$/u);
+    assert.equal((await limited.text()).includes(sessionToken), false);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("admits only one recovery attempt while a code check is in flight", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StubInbox);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let invocations = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    principal: adminPrincipal,
+    requestAuthenticator: async () => false,
+    sessionRecovery: {
+      recover: async () => {
+        invocations += 1;
+        await gate;
+        return { status: "invalid" as const };
+      },
+    },
+  });
+  const attempt = () => fetch(`${ctx.homeInboxHttp.origin}/pair`, {
+    method: "POST",
+    headers: { origin: ctx.homeInboxHttp.origin, "content-type": "application/x-www-form-urlencoded" },
+    body: "code=WRONG-HOME",
+    redirect: "manual",
+  });
+
+  try {
+    const attempts = Array.from({ length: 6 }, () => attempt());
+    for (let index = 0; index < 20 && invocations === 0; index += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const admitted = invocations;
+    release();
+    const statuses = (await Promise.all(attempts)).map((response) => response.status).sort();
+    assert.equal(admitted, 1);
+    assert.equal(statuses.filter((status) => status === 401).length <= 5, true);
+    assert.equal(statuses.includes(429), true);
+  } finally {
+    release();
     await fiber.dispose();
     await inboxFiber.dispose();
     await ctx.fiber.dispose();
@@ -1596,7 +1799,8 @@ test("accepts an advice start immediately and streams only bounded replayable ho
   const body = await events.text();
   assert.match(body, /id: 2\nevent: inspecting_home\ndata: \{\}\n\n/);
   assert.match(body, /id: 3\nevent: answer_delta\ndata: \{"text":"窗帘建议"\}\n\n/);
-  assert.match(body, /id: 4\nevent: completed\ndata: \{\}\n\n/);
+  assert.match(body, /id: 4\nevent: answer\ndata: \{"text":"先按日光和最早、最晚边界试用一周。"\}\n\n/);
+  assert.match(body, /id: 5\nevent: completed\ndata: \{\}\n\n/);
   assert.equal(body.includes("raw DSH"), false);
   assert.equal(body.includes("tool_call"), false);
 
@@ -3166,6 +3370,905 @@ test("controls a deployed automation including an enable retry", async () => {
       redirect: "manual",
     });
     assert.equal(foreign.status, 403);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("accepts bounded private encoded audio only from the product session and starts the canonical advice turn", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const transcriptionCalls: Array<Record<string, unknown>> = [];
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe(input: Record<string, unknown>) {
+        transcriptionCalls.push(input);
+        return { status: "transcribed" as const, text: "客厅现在怎么样？" };
+      },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization, origin, "content-type": "audio/wav" };
+
+  try {
+    const foreign = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers: { ...headers, origin: "https://attacker.invalid" },
+      body: new Uint8Array([1, 2]),
+    });
+    assert.equal(foreign.status, 403);
+
+    const unsupported = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/octet-stream" },
+      body: new Uint8Array([1, 2]),
+    });
+    assert.equal(unsupported.status, 415);
+
+    const forgedFormat = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers: { ...headers, "x-audio-rate": "16000" },
+      body: new Uint8Array([1, 2]),
+    });
+    assert.equal(forgedFormat.status, 400);
+
+    const accepted = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers,
+      body: new Uint8Array([1, 2, 3]),
+    });
+    assert.equal(accepted.status, 202);
+    assert.equal(accepted.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await accepted.json(), {
+      status: "accepted",
+      adviceId: "advice-stream",
+      transcript: "客厅现在怎么样？",
+    });
+    assert.deepEqual((ctx.homeInbox as unknown as StructuredAdviceInbox).started, ["客厅现在怎么样？"]);
+    assert.equal(transcriptionCalls.length, 1);
+    assert.equal((transcriptionCalls[0]?.audio as Uint8Array).byteLength, 3);
+    assert.equal(transcriptionCalls[0]?.mimeType, "audio/wav");
+    assert.equal(transcriptionCalls[0]?.format, undefined);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps a second voice upload out of ASR while the household turn is still active", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const inbox = ctx.homeInbox as unknown as StructuredAdviceInbox;
+  inbox.availability = "active_request";
+  let transcriptionCalls = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() {
+        transcriptionCalls += 1;
+        return { status: "transcribed" as const, text: "这句不应进入识别" };
+      },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+
+  try {
+    const response = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers: { authorization, origin, "content-type": "audio/wav" },
+      body: new Uint8Array([1, 2, 3]),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { status: "active", adviceId: "advice-active" });
+    assert.equal(transcriptionCalls, 0);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("accepts only bounded PCM headers and maps private voice failures to closed results", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const calls: Array<Record<string, unknown>> = [];
+  let transcription: { readonly status: "transcribed"; readonly text: string } | { readonly status: "failed"; readonly reason: string } = {
+    status: "transcribed", text: "",
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "pcm_s16le",
+      async transcribe(input: Record<string, unknown>) { calls.push(input); return transcription; },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = {
+    authorization,
+    origin,
+    "content-type": "audio/l16",
+    "x-audio-rate": "16000",
+    "x-audio-width": "2",
+    "x-audio-channels": "1",
+  };
+
+  try {
+    const incomplete = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers: { authorization, origin, "content-type": "audio/l16" }, body: new Uint8Array([1]) });
+    assert.equal(incomplete.status, 400);
+
+    const accepted = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers, body: new Uint8Array([1, 2]) });
+    assert.equal(accepted.status, 422);
+    assert.deepEqual(await accepted.json(), { status: "no_input" });
+    assert.deepEqual(calls[0]?.format, { rate: 16000, width: 2, channels: 1 });
+
+    transcription = { status: "failed", reason: "endpoint=http://private.invalid token=secret" };
+    const failed = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers, body: new Uint8Array([1, 2]) });
+    assert.equal(failed.status, 502);
+    const failedBody = await failed.text();
+    assert.deepEqual(JSON.parse(failedBody), { status: "failed" });
+    assert.equal(failedBody.includes("private.invalid"), false);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("synthesizes only the completed canonical advice answer and never a requested text", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const synthesisCalls: Array<Record<string, unknown>> = [];
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize(input: Record<string, unknown>) {
+        synthesisCalls.push(input);
+        return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+
+  try {
+    const missing = await fetch(`${origin}/voice/speech/no-such-advice`, { headers: { authorization } });
+    assert.equal(missing.status, 404);
+
+    const active = await fetch(`${origin}/voice/speech/advice-active`, { headers: { authorization } });
+    assert.equal(active.status, 409);
+
+    const injected = await fetch(`${origin}/voice/speech/advice-stream?text=turn+off+the+alarm`, { headers: { authorization } });
+    assert.equal(injected.status, 400);
+
+    const head = await fetch(`${origin}/voice/speech/advice-stream`, { method: "HEAD", headers: { authorization } });
+    assert.equal(head.status, 405);
+    assert.equal(head.headers.get("allow"), "GET");
+    assert.equal(synthesisCalls.length, 0, "a metadata probe cannot spend a synthesis turn");
+
+    const speech = await fetch(`${origin}/voice/speech/advice-stream`, { headers: { authorization } });
+    assert.equal(speech.status, 200);
+    assert.equal(speech.headers.get("content-type"), "audio/wav");
+    assert.equal(speech.headers.get("cache-control"), "no-store");
+    assert.deepEqual(new Uint8Array(await speech.arrayBuffer()), new Uint8Array([82, 73, 70, 70]));
+    assert.deepEqual(synthesisCalls.map((call) => call.text), ["先按日光和最早、最晚边界试用一周。"]);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("wraps Wyoming PCM speech in a browser-playable WAV container", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "pcm_s16le",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize() {
+        return {
+          status: "synthesized" as const,
+          mimeType: "audio/l16",
+          audio: new Uint8Array([0, 0, 255, 127]),
+          format: { rate: 16_000, width: 2, channels: 1 },
+        };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+
+  try {
+    const speech = await fetch(`${ctx.homeInboxHttp.origin}/voice/speech/advice-stream`, {
+      headers: { authorization },
+    });
+    const audio = new Uint8Array(await speech.arrayBuffer());
+
+    assert.equal(speech.status, 200);
+    assert.equal(speech.headers.get("content-type"), "audio/wav");
+    assert.equal(new TextDecoder().decode(audio.subarray(0, 4)), "RIFF");
+    assert.equal(new TextDecoder().decode(audio.subarray(8, 12)), "WAVE");
+    assert.equal(audio.byteLength, 48);
+    assert.deepEqual(audio.subarray(44), new Uint8Array([0, 0, 255, 127]));
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("serves only browser-reliable synthesized audio containers", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize() {
+        return {
+          status: "synthesized" as const,
+          mimeType: "audio/webm",
+          audio: new Uint8Array([1, 2]),
+        };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+
+  try {
+    const speech = await fetch(`${ctx.homeInboxHttp.origin}/voice/speech/advice-stream`, {
+      headers: { authorization },
+    });
+    assert.equal(speech.status, 502);
+    assert.deepEqual(await speech.json(), { status: "failed" });
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("reports an unavailable private speech transport without exposing provider details", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize() {
+        return { status: "failed" as const, reason: "unavailable" };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+
+  try {
+    const speech = await fetch(`${ctx.homeInboxHttp.origin}/voice/speech/advice-stream`, {
+      headers: { authorization },
+    });
+    assert.equal(speech.status, 503);
+    assert.deepEqual(await speech.json(), { status: "unavailable" });
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("shares one synthesis for the same answer, caches it briefly, and bounds new speech turns", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MultiSpeechAdviceInbox);
+  let synthesisCalls = 0;
+  let releaseFirst: (() => void) | undefined;
+  let startedFirst: (() => void) | undefined;
+  const firstStarted = new Promise<void>((resolve) => { startedFirst = resolve; });
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize() {
+        synthesisCalls += 1;
+        if (synthesisCalls === 1) {
+          startedFirst?.();
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        }
+        return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const request = (id: string) => fetch(`${origin}/voice/speech/${id}`, { headers: { authorization } });
+
+  try {
+    const first = request("speech-1");
+    await firstStarted;
+    const sameAnswer = request("speech-1");
+    releaseFirst?.();
+    assert.equal((await first).status, 200);
+    assert.equal((await sameAnswer).status, 200);
+    assert.equal(synthesisCalls, 1, "one advice answer has one in-flight synthesis");
+    assert.equal((await request("speech-1")).status, 200);
+    assert.equal(synthesisCalls, 1, "a recent canonical answer is served from the short cache");
+
+    for (let index = 2; index <= 6; index += 1) {
+      assert.equal((await request(`speech-${index}`)).status, 200);
+    }
+    const limited = await request("speech-7");
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get("retry-after"), "30");
+    assert.deepEqual(await limited.json(), { status: "unavailable" });
+  } finally {
+    releaseFirst?.();
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("keeps shared speech synthesis running while one of two listeners remains", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let upstreamSignal: AbortSignal | undefined;
+  let release: (() => void) | undefined;
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize(input) {
+        upstreamSignal = input.signal;
+        markStarted?.();
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+  const handle = testVoiceSpeechHandler(ctx);
+  const firstResponse = new TestVoiceSpeechResponse();
+  const secondResponse = new TestVoiceSpeechResponse();
+
+  try {
+    const first = handle(testVoiceSpeechRequest(), firstResponse, "advice-stream");
+    await started;
+    const second = handle(testVoiceSpeechRequest(), secondResponse, "advice-stream");
+    await new Promise((resolve) => setImmediate(resolve));
+    firstResponse.disconnect();
+    assert.equal(upstreamSignal?.aborted, false, "the remaining listener retains the shared synthesis");
+    release?.();
+    await Promise.all([first, second]);
+    assert.equal(firstResponse.writableEnded, false);
+    assert.equal(secondResponse.statusCode, 200);
+  } finally {
+    release?.();
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("aborts shared speech synthesis when its last listener disconnects", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let upstreamSignal: AbortSignal | undefined;
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize(input) {
+        upstreamSignal = input.signal;
+        markStarted?.();
+        if (input.signal === undefined) return { status: "failed" as const, reason: "unavailable" as const };
+        await new Promise<void>((resolve) => input.signal!.addEventListener("abort", () => resolve(), { once: true }));
+        return { status: "failed" as const, reason: "unavailable" as const };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+  const response = new TestVoiceSpeechResponse();
+
+  try {
+    const handled = testVoiceSpeechHandler(ctx)(testVoiceSpeechRequest(), response, "advice-stream");
+    await started;
+    response.disconnect();
+    await handled;
+    assert.equal(upstreamSignal?.aborted, true);
+    assert.equal(response.writableEnded, false);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("never caches speech output returned after every listener cancelled", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let calls = 0;
+  let releaseCancelled: (() => void) | undefined;
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize() {
+        calls += 1;
+        if (calls === 1) {
+          markStarted?.();
+          await new Promise<void>((resolve) => { releaseCancelled = resolve; });
+        }
+        return { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([82, 73, 70, 70]) };
+      },
+    },
+  } as ProposalInboxHttpOptions);
+  const handle = testVoiceSpeechHandler(ctx);
+  const cancelledResponse = new TestVoiceSpeechResponse();
+
+  try {
+    const cancelled = handle(testVoiceSpeechRequest(), cancelledResponse, "advice-stream");
+    await started;
+    cancelledResponse.disconnect();
+    releaseCancelled?.();
+    await cancelled;
+
+    const retryResponse = new TestVoiceSpeechResponse();
+    await handle(testVoiceSpeechRequest(), retryResponse, "advice-stream");
+    assert.equal(calls, 2, "a cancelled synthesis cannot satisfy a later replay from cache");
+    assert.equal(retryResponse.statusCode, 200);
+  } finally {
+    releaseCancelled?.();
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("governs private transcription with one in-flight turn and a recoverable short-window budget", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let releaseFirst: (() => void) | undefined;
+  let startedFirst: (() => void) | undefined;
+  const firstStarted = new Promise<void>((resolve) => { startedFirst = resolve; });
+  let transcriptions = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() {
+        transcriptions += 1;
+        if (transcriptions === 1) {
+          startedFirst?.();
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        }
+        return { status: "transcribed" as const, text: "客厅现在怎么样？" };
+      },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization, origin, "content-type": "audio/wav" };
+  const request = () => fetch(`${origin}/voice/transcribe`, {
+    method: "POST",
+    headers,
+    body: new Uint8Array([1, 2]),
+  });
+  let first: Promise<Response> | undefined;
+
+  try {
+    first = request();
+    await Promise.race([
+      firstStarted,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("first transcription did not start")), 1_000)),
+    ]);
+    const busy = await request();
+    assert.equal(busy.status, 429);
+    assert.equal(busy.headers.get("retry-after"), "1");
+    assert.deepEqual(await busy.json(), { status: "unavailable" });
+    assert.equal(transcriptions, 1, "the occupied turn does not read or invoke another ASR request");
+
+    releaseFirst?.();
+    assert.equal((await first).status, 202);
+    first = undefined;
+    assert.equal((await request()).status, 202, "a normal retry proceeds after the first turn releases its slot");
+
+    for (let attempt = 0; attempt < 4; attempt += 1) assert.equal((await request()).status, 202);
+    const limited = await request();
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get("retry-after"), "30");
+    assert.deepEqual(await limited.json(), { status: "unavailable" });
+  } finally {
+    releaseFirst?.();
+    await first?.catch(() => undefined);
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("ends a slow private audio upload with a recoverable response and releases the ASR turn", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let transcriptions = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoiceReadDeadlineMs: 20,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() {
+        transcriptions += 1;
+        return { status: "transcribed" as const, text: "客厅现在怎么样？" };
+      },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = {
+    authorization,
+    origin,
+    "content-type": "audio/wav",
+  };
+
+  try {
+    const timedOut = await new Promise<{ readonly status: number; readonly body: string }>((resolve, reject) => {
+      const request = httpRequest(`${origin}/voice/transcribe`, {
+        method: "POST",
+        headers: { ...headers, "content-length": "2" },
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.once("end", () => {
+          request.destroy();
+          resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
+        });
+      });
+      request.once("error", reject);
+      request.write(Buffer.from([1]));
+    });
+    assert.equal(timedOut.status, 429);
+    assert.deepEqual(JSON.parse(timedOut.body), { status: "unavailable" });
+    assert.equal(transcriptions, 0, "a timed-out upload never enters ASR");
+
+    const retry = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers,
+      body: new Uint8Array([1, 2]),
+    });
+    assert.equal(retry.status, 202, "the timed-out upload frees the one-turn ASR slot");
+    assert.equal(transcriptions, 1);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("bounds advice events while replay is pending and resumes from the supplied event cursor", async () => {
+  class BurstingAdviceInbox extends StructuredAdviceInbox {
+    emitted = false;
+    readAdviceEvents(_id: string, after?: string) {
+      const cursor = Number(after ?? "0");
+      return cursor >= 64
+        ? [{ id: 65, type: "completed" as const, data: {} }]
+        : [];
+    }
+    subscribeAdvice(_id: string, listener: (event: unknown) => void) {
+      if (!this.emitted) {
+        this.emitted = true;
+        for (let id = 1; id <= 65; id += 1) listener({ id, type: "answer_delta", data: { text: "家庭回答" } });
+      }
+      return () => undefined;
+    }
+  }
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(BurstingAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+
+  try {
+    const overflow = await fetch(`${ctx.homeInboxHttp.origin}/conversation/advice-stream/events`, {
+      headers: { authorization },
+    });
+    assert.equal(overflow.status, 200);
+    assert.equal(await overflow.text(), "", "a bounded stream closes before retaining an unbounded live backlog");
+
+    const resumed = await fetch(`${ctx.homeInboxHttp.origin}/conversation/advice-stream/events`, {
+      headers: { authorization, "last-event-id": "64" },
+    });
+    assert.equal(resumed.status, 200);
+    assert.match(await resumed.text(), /id: 65\nevent: completed\ndata: \{\}\n\n/);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("bounds queued advice replay by serialized bytes before event count is reached", async () => {
+  class LargeBurstAdviceInbox extends StructuredAdviceInbox {
+    emitted = false;
+    readAdviceEvents() { return []; }
+    subscribeAdvice(_id: string, listener: (event: unknown) => void) {
+      if (!this.emitted) {
+        this.emitted = true;
+        const text = "家".repeat(4_096);
+        for (let id = 1; id <= 33; id += 1) listener({ id, type: "answer_delta", data: { text } });
+      }
+      return () => undefined;
+    }
+  }
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(LargeBurstAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+
+  try {
+    const overflow = await fetch(`${ctx.homeInboxHttp.origin}/conversation/advice-stream/events`, {
+      headers: { authorization },
+    });
+    assert.equal(overflow.status, 200);
+    assert.equal(await overflow.text(), "", "a byte-limited stream closes before retaining a large answer backlog");
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("waits for SSE drain before writing the next replay event", async () => {
+  class BackpressuredResponse extends EventEmitter {
+    destroyed = false;
+    writableEnded = false;
+    statusCode = 0;
+    readonly chunks: string[] = [];
+    writeCount = 0;
+    setHeader(): void {}
+    flushHeaders(): void {}
+    write(chunk: string): boolean {
+      this.chunks.push(chunk);
+      this.writeCount += 1;
+      return this.writeCount !== 1;
+    }
+    end(): void {
+      this.writableEnded = true;
+      this.emit("close");
+    }
+  }
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const request = new EventEmitter() as EventEmitter & { headers: Record<string, string> };
+  request.headers = {};
+  const response = new BackpressuredResponse();
+
+  try {
+    const handled = (ctx.homeInboxHttp as unknown as {
+      handleAdviceEvents(request: unknown, response: unknown, adviceId: string): Promise<void>;
+    }).handleAdviceEvents(request, response, "advice-stream");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(response.writeCount, 1, "one buffered write pauses replay at the transport boundary");
+    response.emit("drain");
+    await handled;
+    assert.equal(response.chunks.filter((chunk) => chunk.startsWith("id:")).length, 5);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("accepts common high-rate PCM while retaining the bounded PCM contract", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  const formats: unknown[] = [];
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "pcm_s16le",
+      async transcribe(input) {
+        formats.push(input.format);
+        return { status: "transcribed" as const, text: "客厅现在怎么样？" };
+      },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = (rate: string) => ({
+    authorization,
+    origin,
+    "content-type": "audio/l16",
+    "x-audio-rate": rate,
+    "x-audio-width": "2",
+    "x-audio-channels": "1",
+  });
+
+  try {
+    for (const rate of ["88200", "96000"]) {
+      const accepted = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers: headers(rate), body: new Uint8Array([1, 2]) });
+      assert.equal(accepted.status, 202);
+    }
+    assert.deepEqual(formats, [
+      { rate: 88_200, width: 2, channels: 1 },
+      { rate: 96_000, width: 2, channels: 1 },
+    ]);
+    const wrongWidth = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers: { ...headers("16000"), "x-audio-width": "1" },
+      body: new Uint8Array([1, 2]),
+    });
+    assert.equal(wrongWidth.status, 400);
+    const partialFrame = await fetch(`${origin}/voice/transcribe`, {
+      method: "POST",
+      headers: headers("16000"),
+      body: new Uint8Array([1, 2, 3]),
+    });
+    assert.equal(partialFrame.status, 400);
+    const outOfRange = await fetch(`${origin}/voice/transcribe`, { method: "POST", headers: headers("192000"), body: new Uint8Array([1, 2]) });
+    assert.equal(outOfRange.status, 400);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("releases the private transcription slot after a provider failure", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let attempts = 0;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      status: { status: "active" },
+      captureMode: "encoded_audio",
+      async transcribe() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("provider private endpoint failed");
+        return { status: "transcribed" as const, text: "客厅现在怎么样？" };
+      },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const request = () => fetch(`${origin}/voice/transcribe`, {
+    method: "POST",
+    headers: { authorization, origin, "content-type": "audio/wav" },
+    body: new Uint8Array([1, 2]),
+  });
+
+  try {
+    assert.equal((await request()).status, 502);
+    assert.equal((await request()).status, 202);
+    assert.equal(attempts, 2);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("retries a degraded private voice provider through the authenticated same-origin product route", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
+  let status: "active" | "degraded" = "degraded";
+  let retries = 0;
+  let retrySucceeds = true;
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    privateVoice: {
+      get status() { return status === "active" ? { status } : { status, reason: "private transport unavailable" }; },
+      captureMode: "encoded_audio",
+      async retry() { retries += 1; if (retrySucceeds) status = "active"; },
+      async transcribe() { return { status: "failed" as const, reason: "unavailable" as const }; },
+      async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+    },
+  } as ProposalInboxHttpOptions);
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization, origin, "content-type": "application/x-www-form-urlencoded" };
+
+  try {
+    const degradedPage = await fetch(`${origin}/voice`, { headers: { authorization } });
+    const degradedHtml = await degradedPage.text();
+    assert.match(degradedHtml, /data-private-voice-status="retryable"/u);
+    assert.match(degradedHtml, /action="\/voice\/retry"/u);
+    const foreign = await fetch(`${origin}/voice/retry`, { method: "POST", headers: { ...headers, origin: "https://attacker.invalid" }, body: "", redirect: "manual" });
+    assert.equal(foreign.status, 403);
+    const retry = await fetch(`${origin}/voice/retry`, { method: "POST", headers, body: "", redirect: "manual" });
+    assert.equal(retry.status, 303);
+    assert.equal(retry.headers.get("location"), "/voice?notice=voice_retry_result");
+    assert.equal(retries, 1);
+    const recovered = await fetch(`${origin}${retry.headers.get("location")}`, { headers: { authorization } });
+    const recoveredHtml = await recovered.text();
+    assert.match(recoveredHtml, /私人语音已重新连接。现在可以开始说话。/u);
+    assert.match(recoveredHtml, /data-private-voice-status="active"/u);
+    assert.match(recoveredHtml, /data-one-shot-notice/u);
+    assert.match(recoveredHtml, /href="\/conversation"[^>]*>改用文字</u);
+
+    status = "degraded";
+    retrySucceeds = false;
+    const unavailable = await fetch(`${origin}/voice/retry`, { method: "POST", headers, body: "", redirect: "manual" });
+    assert.equal(unavailable.status, 303);
+    assert.equal(unavailable.headers.get("location"), "/voice?notice=voice_retry_result");
+    const stillUnavailable = await fetch(`${origin}${unavailable.headers.get("location")}`, { headers: { authorization } });
+    const unavailableHtml = await stillUnavailable.text();
+    assert.match(unavailableHtml, /私人语音仍在恢复中。文字对话现在就能继续。/u);
+    assert.match(unavailableHtml, /data-private-voice-status="retryable"/u);
+    assert.match(unavailableHtml, /data-one-shot-notice/u);
+    assert.match(unavailableHtml, />打开文字对话</u);
+
+    const forged = await fetch(`${origin}/voice?notice=voice_recovered`, { headers: { authorization }, redirect: "manual" });
+    assert.equal(forged.status, 303);
+    assert.equal(forged.headers.get("location"), "/voice");
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();

@@ -46,7 +46,7 @@ test("mounts the exact candidate before committing its activated configuration",
     },
   });
 
-  const result = await controller.activate({ draft, expectedGeneration: 0 });
+  const result = await controller.activate({ draft, expectedGeneration: 0, context: undefined });
 
   assert.deepEqual(calls, ["mount", "commit"]);
   assert.equal(mountedDraft, draft);
@@ -67,7 +67,7 @@ test("keeps the configuration uncommitted when the candidate does not become rea
     },
   });
 
-  const result = await controller.activate({ draft, expectedGeneration: 0 });
+  const result = await controller.activate({ draft, expectedGeneration: 0, context: undefined });
 
   assert.deepEqual(result, { status: "unavailable" });
   assert.equal(commits, 0);
@@ -82,7 +82,7 @@ test("disposes a mounted candidate when committing conflicts", async () => {
     },
   });
 
-  const result = await controller.activate({ draft, expectedGeneration: 0 });
+  const result = await controller.activate({ draft, expectedGeneration: 0, context: undefined });
 
   assert.deepEqual(result, { status: "conflict" });
   assert.equal(mounted.disposeCalls(), 1);
@@ -97,10 +97,59 @@ test("disposes a mounted candidate when committing fails without calling it a re
     },
   });
 
-  const result = await controller.activate({ draft, expectedGeneration: 0 });
+  const result = await controller.activate({ draft, expectedGeneration: 0, context: undefined });
 
   assert.deepEqual(result, { status: "unavailable" });
   assert.equal(mounted.disposeCalls(), 1);
+});
+
+test("commits a mounted candidate only while its activation lease is held and rolls the lease back on conflict", async () => {
+  const calls: string[] = [];
+  const mounted = mountedBundle();
+  const controller = new ProductActivationController<{ readonly expiresAt: string }>({
+    mountCandidate: async () => {
+      calls.push("mount");
+      return mounted.bundle;
+    },
+    commitParticipant: {
+      acquire: async () => {
+        calls.push("acquire");
+        return {
+          receipt: { expiresAt: "2026-11-22T00:00:00.000Z" },
+          rollback: async () => { calls.push("rollback"); },
+        };
+      },
+    },
+    configurationStore: {
+      commit: async () => {
+        calls.push("commit");
+        throw new ProductBootstrapConfigurationConflictError();
+      },
+    },
+  });
+
+  const result = await controller.activate({ draft, expectedGeneration: 0, context: undefined });
+
+  assert.deepEqual(result, { status: "conflict" });
+  assert.deepEqual(calls, ["mount", "acquire", "commit", "rollback"]);
+  assert.equal(mounted.disposeCalls(), 1);
+});
+
+test("returns a non-secret participant receipt after its lease commits", async () => {
+  const mounted = mountedBundle();
+  const receipt = Object.freeze({ expiresAt: "2026-11-22T00:00:00.000Z" });
+  const controller = new ProductActivationController<typeof receipt>({
+    mountCandidate: async () => mounted.bundle,
+    commitParticipant: {
+      acquire: async () => ({ receipt, rollback: async () => undefined }),
+    },
+    configurationStore: { commit: async () => activatedConfiguration(1) },
+  });
+
+  const result = await controller.activate({ draft, expectedGeneration: 0, context: undefined });
+
+  assert.deepEqual(result, { status: "activated", configuration: activatedConfiguration(1), mounted: mounted.bundle, receipt });
+  assert.equal(JSON.stringify(result).includes("token"), false);
 });
 
 test("returns busy without mounting a second candidate while activation is in progress", async () => {
@@ -116,9 +165,9 @@ test("returns busy without mounting a second candidate while activation is in pr
     configurationStore: { commit: async () => activatedConfiguration(1) },
   });
 
-  const first = controller.activate({ draft, expectedGeneration: 0 });
+  const first = controller.activate({ draft, expectedGeneration: 0, context: undefined });
   await Promise.resolve();
-  const second = await controller.activate({ draft, expectedGeneration: 0 });
+  const second = await controller.activate({ draft, expectedGeneration: 0, context: undefined });
   releaseMount?.();
 
   assert.deepEqual(second, { status: "busy" });

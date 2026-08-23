@@ -153,3 +153,99 @@ test("recovers an abandoned configuration lock while preserving a fresh owner", 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("persists a complete, non-secret private voice runtime configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-voice-"));
+  try {
+    const store = new ProductBootstrapConfigStore(directory);
+    const committed = await store.commit(0, {
+      householdName: "梧桐家", agentName: "小满", modelReference: "custom/model",
+      modelProfile: { id: "custom:setup:draft-voice", provider: "custom", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:draft-voice:stage" },
+      bridges: [],
+      voice: {
+        asr: { transport: "wyoming", endpoint: "wyoming://voice.local:10700", model: "tiny" },
+        tts: { transport: "openai_http", endpoint: "http://127.0.0.1:9880", credentialRef: "keychain:hob-agent/voice:tts:draft-voice:tts-one", locale: "zh-CN", voice: "warm", model: "kokoro" },
+      },
+    });
+    assert.deepEqual(await store.load(), committed);
+    const source = await readFile(join(directory, "product-config.json"), "utf8");
+    assert.equal(source.includes("raw-voice-credential"), false);
+    await assert.rejects(store.commit(1, {
+      ...committed,
+      voice: {
+        asr: { transport: "wyoming", endpoint: "wyoming://voice.local:10700", credential: "raw-voice-credential" },
+        tts: { transport: "openai_http", endpoint: "http://voice.local:9880", locale: "zh-CN" },
+      },
+    } as never), /Voice configuration is invalid/);
+    for (const voice of [
+      {
+        asr: { transport: "wyoming", endpoint: "wyoming://voice.local:10700", credentialRef: "keychain:hob-agent/voice:asr:draft-voice:asr-one" },
+        tts: { transport: "openai_http", endpoint: "http://voice.local:9880", locale: "zh-CN" },
+      },
+      {
+        asr: { transport: "openai_http", endpoint: "http://voice.local:9880" },
+        tts: { transport: "wyoming", endpoint: "wyoming://voice.local:10700", credentialRef: "keychain:hob-agent/voice:tts:draft-voice:tts-one", locale: "zh-CN" },
+      },
+    ]) {
+      await assert.rejects(store.commit(1, { ...committed, voice } as never), /Voice configuration is invalid/);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("canonicalizes OpenAI voice service roots and rejects Wyoming TTS model settings", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-voice-contract-"));
+  try {
+    const store = new ProductBootstrapConfigStore(directory);
+    const base = {
+      householdName: "梧桐家", agentName: "小满", modelReference: "custom/model",
+      modelProfile: { id: "custom:setup:draft-voice-contract", provider: "custom", kind: "api_key" as const, secretRef: "keychain:hob-agent/setup-model:draft-voice-contract:stage" },
+      bridges: [],
+    };
+    const committed = await store.commit(0, {
+      ...base,
+      voice: {
+        asr: { transport: "openai_http", endpoint: "https://voice.example.test/v1/", credentialRef: "keychain:hob-agent/voice:asr:draft-voice-contract:asr-one" },
+        tts: { transport: "openai_http", endpoint: "http://127.0.0.1:9880/v1", locale: "zh-CN" },
+      },
+    });
+    assert.deepEqual(committed.voice, {
+      asr: { transport: "openai_http", endpoint: "https://voice.example.test", credentialRef: "keychain:hob-agent/voice:asr:draft-voice-contract:asr-one" },
+      tts: { transport: "openai_http", endpoint: "http://127.0.0.1:9880", locale: "zh-CN" },
+    });
+    await assert.rejects(store.commit(1, {
+      ...base,
+      voice: {
+        asr: { transport: "wyoming", endpoint: "wyoming://127.0.0.1:10700" },
+        tts: { transport: "wyoming", endpoint: "wyoming://127.0.0.1:10700", locale: "zh-CN", model: "unsupported-model-field" },
+      },
+    }), /Voice configuration is invalid/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("loads v2 configuration without voice and rejects an unknown configuration version", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-v2-"));
+  try {
+    const store = new ProductBootstrapConfigStore(directory);
+    await store.commit(0, {
+      householdName: "梧桐家", agentName: "小满", modelReference: "custom/model",
+      modelProfile: { id: "custom:setup:draft-v2", provider: "custom", kind: "api_key", secretRef: "keychain:hob-agent/setup-model:draft-v2:stage" }, bridges: [],
+    });
+    const path = join(directory, "product-config.json");
+    const v2 = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    v2.version = "hob.product-config/v2";
+    await writeFile(path, `${JSON.stringify(v2)}\n`, { mode: 0o600 });
+    const loaded = await store.load();
+    assert.equal(loaded?.version, "hob.product-config/v3");
+    assert.equal(loaded?.voice, undefined);
+
+    v2.version = "hob.product-config/v99";
+    await writeFile(path, `${JSON.stringify(v2)}\n`, { mode: 0o600 });
+    await assert.rejects(store.load(), /header is invalid/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

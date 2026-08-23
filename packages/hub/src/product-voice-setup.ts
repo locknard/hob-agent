@@ -5,6 +5,10 @@ import {
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import { OpenAiHttpVoiceTransport } from "./voice/openai-http-voice-transport.js";
+import {
+  normalizePrivateVoiceEndpoint,
+  type PrivateVoiceTransport,
+} from "./voice/private-voice-endpoint.js";
 import { WyomingVoiceTransport } from "./voice/wyoming-voice-transport.js";
 
 const SETUP_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -12,7 +16,7 @@ const STAGE_NONCE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const VOICE_LABEL = /^[^\u0000-\u001f\u007f]{1,128}$/u;
 
 export type ProductVoiceTrackKind = "asr" | "tts";
-export type ProductVoiceTransport = "wyoming" | "openai_http";
+export type ProductVoiceTransport = PrivateVoiceTransport;
 
 export type ProductVoiceTrackInput =
   | {
@@ -63,6 +67,21 @@ export type ProductVoiceProbeOutcome =
   | { readonly status: "missing"; readonly field: "endpoint" | "locale" }
   | ProductVoiceProbeFailure;
 
+/** Request-local probe material. A credential stays here until the transport consumes it. */
+export interface ProductVoicePreparedProbe {
+  readonly stage: ProductVoiceSetupStage;
+  readonly credential?: string;
+}
+
+export type ProductVoicePrepareOutcome =
+  | { readonly status: "prepared"; readonly prepared: ProductVoicePreparedProbe }
+  | Exclude<ProductVoiceProbeOutcome, { readonly status: "ready" }>;
+
+/** A durable setup-draft owner issues this exact locator lease before a credential write. */
+export interface ProductVoiceCredentialLease {
+  readonly stage: ProductVoiceSetupStage;
+}
+
 /**
  * The transport adapter receives metadata plus a short-lived credential only
  * while probing. It exposes a deliberately small, provider-neutral result.
@@ -103,17 +122,32 @@ export class ProductVoiceSetup {
     this.createStageNonce = options.createStageNonce ?? (() => globalThis.crypto.randomUUID().replace(/-/gu, ""));
   }
 
-  async probe(input: { readonly setupId: string; readonly track: ProductVoiceTrackInput }): Promise<ProductVoiceProbeOutcome> {
+  prepare(input: { readonly setupId: string; readonly track: ProductVoiceTrackInput }): ProductVoicePrepareOutcome {
     const prepared = prepareInput(input);
     if ("status" in prepared) return prepared;
 
     const staged = createStage(prepared, this.createStageNonce());
     const credential = credentialValue(prepared.track.credential);
+    return Object.freeze({
+      status: "prepared",
+      prepared: Object.freeze({ stage: staged, ...(credential === undefined ? {} : { credential }) }),
+    });
+  }
+
+  /** Executes a prepared probe. Credential-backed probes require their persisted exact locator lease. */
+  async execute(input: {
+    readonly prepared: ProductVoicePreparedProbe;
+    readonly credentialLease?: ProductVoiceCredentialLease;
+  }): Promise<ProductVoiceProbeOutcome> {
+    const staged = input.prepared.stage;
+    const credential = input.prepared.credential;
     if (credential !== undefined && staged.credentialRef !== undefined) {
+      if (input.credentialLease === undefined || input.credentialLease.stage !== staged) {
+        throw new TypeError("Voice credential execution requires a durable staging lease");
+      }
       try {
         await this.vault.write(staged.credentialRef, credential);
       } catch {
-        await this.discard(staged).catch(() => undefined);
         return { status: "unavailable" };
       }
     }
@@ -123,12 +157,20 @@ export class ProductVoiceSetup {
       if (result.status === "ready" && Number.isSafeInteger(result.latencyMs) && result.latencyMs >= 0 && result.latencyMs <= 120_000) {
         return { status: "ready", latencyMs: result.latencyMs, staged };
       }
-      await this.discard(staged);
       return result.status === "ready" ? { status: "incompatible" } : result;
     } catch {
-      await this.discard(staged).catch(() => undefined);
       return { status: "endpoint_unreachable" };
     }
+  }
+
+  /** Credential-free setup callers can probe in one step; credential probes use prepare + durable lease + execute. */
+  async probe(input: { readonly setupId: string; readonly track: ProductVoiceTrackInput }): Promise<ProductVoiceProbeOutcome> {
+    const preparation = this.prepare(input);
+    if (preparation.status !== "prepared") return preparation;
+    if (preparation.prepared.credential !== undefined) {
+      throw new TypeError("Voice credential probes require a durable staging lease");
+    }
+    return this.execute({ prepared: preparation.prepared });
   }
 
   /** Removes only the exact locator created for this staged voice track. */
@@ -156,6 +198,14 @@ export class ProductVoiceSetupService extends Service {
     return this.setup.probe(input);
   }
 
+  prepare(input: Parameters<ProductVoiceSetup["prepare"]>[0]): ReturnType<ProductVoiceSetup["prepare"]> {
+    return this.setup.prepare(input);
+  }
+
+  execute(input: Parameters<ProductVoiceSetup["execute"]>[0]): ReturnType<ProductVoiceSetup["execute"]> {
+    return this.setup.execute(input);
+  }
+
   discard(stage: ProductVoiceSetupStage): Promise<void> {
     return this.setup.discard(stage);
   }
@@ -171,10 +221,11 @@ function prepareInput(input: { readonly setupId: string; readonly track: Product
     return { status: "missing", field: "locale" };
   }
   try {
-    const endpoint = normalizeEndpoint(track.transport, track.endpoint);
     const credential = credentialValue(track.credential);
+    const endpoint = normalizeEndpoint(track.transport, track.endpoint, credential !== undefined);
     if (track.transport === "wyoming" && credential !== undefined) return { status: "incompatible" };
     const model = normalizeOptionalLabel(track.model);
+    if (track.kind === "tts" && track.transport === "wyoming" && model !== undefined) return { status: "incompatible" };
     if (track.kind === "asr") return {
       setupId: input.setupId,
       track: { ...track, endpoint, ...(credential === undefined ? {} : { credential }), ...(model === undefined ? {} : { model }) },
@@ -223,32 +274,8 @@ function createStage(input: { readonly setupId: string; readonly track: ProductV
   });
 }
 
-function normalizeEndpoint(transport: ProductVoiceTransport, value: string): string {
-  if (transport !== "wyoming" && transport !== "openai_http") throw new TypeError("Voice endpoint transport is invalid");
-  const endpoint = new URL(value.trim());
-  const requiredProtocol = transport === "wyoming" ? "wyoming:" : undefined;
-  if (requiredProtocol !== undefined && endpoint.protocol !== requiredProtocol) throw new TypeError("Voice endpoint transport is invalid");
-  if (transport === "openai_http" && endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
-    throw new TypeError("Voice endpoint transport is invalid");
-  }
-  if (endpoint.username !== "" || endpoint.password !== "" || endpoint.search !== "" || endpoint.hash !== "") {
-    throw new TypeError("Voice endpoint credentials are invalid");
-  }
-  if (endpoint.pathname !== "" && endpoint.pathname !== "/") throw new TypeError("Voice endpoint path is invalid");
-  if (transport === "wyoming" && endpoint.port === "") throw new TypeError("Wyoming endpoint port is required");
-  if (!isLocalVoiceHost(endpoint.hostname)) throw new TypeError("Voice endpoint host is invalid");
-  return endpoint.toString().replace(/\/$/u, "");
-}
-
-function isLocalVoiceHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  if (host === "localhost" || host === "[::1]" || host.endsWith(".local") || host.endsWith(".lan")) return true;
-  const octets = host.split(".").map((segment) => Number(segment));
-  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
-  return octets[0] === 10
-    || octets[0] === 127
-    || (octets[0] === 192 && octets[1] === 168)
-    || (octets[0] === 172 && octets[1] !== undefined && octets[1] >= 16 && octets[1] <= 31);
+function normalizeEndpoint(transport: ProductVoiceTransport, value: string, hasCredential = false): string {
+  return normalizePrivateVoiceEndpoint(transport, value, { hasCredential });
 }
 
 function normalizeLocale(value: string): string {

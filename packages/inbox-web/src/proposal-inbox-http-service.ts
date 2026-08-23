@@ -57,13 +57,28 @@ import type {
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_FORM_BYTES = 4 * 1024;
+const MAX_SESSION_RECOVERY_FORM_BYTES = 256;
+const MAX_SESSION_RECOVERY_FAILURES = 5;
+const SESSION_RECOVERY_FAILURE_WINDOW_MS = 60_000;
 const MAX_BATCH_CONTROL_FORM_BYTES = 8 * 1024;
 // application/x-www-form-urlencoded expands a 1,000-character CJK question to roughly 9 KiB.
 const MAX_ADVICE_FORM_BYTES = 12 * 1024;
 const MAX_CORRECTION_FORM_BYTES = 24 * 1024;
 const MAX_LAYOUT_DRAFT_FORM_BYTES = 196 * 1024;
+const MAX_PRIVATE_VOICE_AUDIO_BYTES = 5 * 1024 * 1024;
+const PRIVATE_VOICE_READ_DEADLINE_MS = 30_000;
+const MAX_PRIVATE_VOICE_TRANSCRIPT_CHARS = 1_000;
+const MAX_PRIVATE_VOICE_SPEECH_CHARS = 4_096;
+const PRIVATE_VOICE_TRANSCRIPTION_WINDOW_MS = 30_000;
+const MAX_PRIVATE_VOICE_TRANSCRIPTIONS_PER_WINDOW = 6;
+const PRIVATE_VOICE_SPEECH_WINDOW_MS = 30_000;
+const MAX_PRIVATE_VOICE_SYNTHESIS_PER_WINDOW = 6;
+const PRIVATE_VOICE_SPEECH_CACHE_MS = 30_000;
+const MAX_PRIVATE_VOICE_SPEECH_CACHE_ENTRIES = 8;
 const MAX_ADVICE_EVENT_TEXT = 4 * 1024;
 const MAX_ADVICE_EVENT_ID = 64;
+const MAX_ADVICE_SSE_QUEUED_EVENTS = 64;
+const MAX_ADVICE_SSE_QUEUED_BYTES = 128 * 1024;
 const ADVICE_SSE_HEARTBEAT_MS = 15_000;
 const SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store",
@@ -84,6 +99,14 @@ export interface InboxAuthenticationRequest {
 
 /** Optional asynchronous authentication seam for a supervisor-owned product session. */
 export type InboxRequestAuthenticator = (request: InboxAuthenticationRequest) => boolean | Promise<boolean>;
+
+/** Supervisor-owned one-time local code redemption. The Inbox never receives a code or token at construction. */
+export interface ProductSessionRecoveryPort {
+  recover(code: string): Promise<
+    | { readonly status: "recovered"; readonly sessionToken: string; readonly expiresAt: Date }
+    | { readonly status: "invalid" | "unavailable" }
+  >;
+}
 
 /** Stable V4 destinations owned by the product shell. */
 export type ProductRoute =
@@ -120,6 +143,59 @@ export interface ProductRouteRenderContext {
   readonly household?: ProductShellModel["household"];
   readonly view?: ProductShellModel["view"];
 }
+
+export type PrivateVoiceCaptureMode = "encoded_audio" | "pcm_s16le";
+
+export interface PrivateVoiceAudioFormat {
+  readonly rate: number;
+  readonly width: number;
+  readonly channels: number;
+}
+
+export type PrivateVoiceProductPortStatus =
+  | { readonly status: "active" }
+  | { readonly status: "degraded" | "disabled"; readonly reason?: string };
+
+/**
+ * Product-facing voice seam. It accepts one bounded audio turn and returns
+ * provider-detail-free results; HTTP owns browser input validation and output.
+ */
+export interface PrivateVoiceProductPort {
+  readonly status: PrivateVoiceProductPortStatus;
+  readonly captureMode: PrivateVoiceCaptureMode;
+  /** Reconnects a degraded local provider. The provider owns concurrent retry reuse. */
+  retry?(): unknown | Promise<unknown>;
+  transcribe(input: {
+    readonly audio: Uint8Array;
+    readonly mimeType: string;
+    readonly format?: PrivateVoiceAudioFormat;
+    readonly signal?: AbortSignal;
+  }): Promise<
+    | { readonly status: "transcribed"; readonly text: string; readonly locale?: string }
+    | { readonly status: "failed"; readonly reason: string }
+  >;
+  synthesize(input: {
+    readonly text: string;
+    readonly signal?: AbortSignal;
+  }): Promise<
+    | { readonly status: "synthesized"; readonly mimeType: string; readonly audio: Uint8Array; readonly format?: PrivateVoiceAudioFormat }
+    | { readonly status: "failed"; readonly reason: string }
+  >;
+}
+
+type BrowserVoiceAudio = {
+  readonly mimeType: string;
+  readonly audio: Uint8Array;
+};
+
+type VoiceSpeechResult = BrowserVoiceAudio | "unavailable" | undefined;
+
+type VoiceSpeechInFlight = {
+  readonly adviceId: string;
+  readonly promise: Promise<VoiceSpeechResult>;
+  readonly controller: AbortController;
+  activeWaiters: number;
+};
 
 /**
  * Product view provider seam. The HTTP service owns transport and policy
@@ -435,11 +511,17 @@ export interface ProposalInboxHttpOptions {
   readonly authenticate?: InboxAuthenticator;
   /** Supervisor-owned product session authenticator, evaluated instead of HTTP Basic when configured. */
   readonly requestAuthenticator?: InboxRequestAuthenticator;
+  /** Supervisor-owned one-time recovery code owner for an activated local household. */
+  readonly sessionRecovery?: ProductSessionRecoveryPort;
   /** Explicit household identity for every review mutation. */
   readonly principal?: InboxReviewActor;
   readonly reviewer?: string;
   /** Hub-owned typed onboarding coordinator. */
   readonly onboarding?: OnboardingPort;
+  /** Active private voice bridge. Its provider details remain outside product HTTP. */
+  readonly privateVoice?: PrivateVoiceProductPort;
+  /** Total time allowed to receive one private voice turn. The product uses the fixed 30-second default. */
+  readonly privateVoiceReadDeadlineMs?: number;
   /** Trusted in-process presentation providers registered beside the built-in views. */
   readonly viewProviders?: readonly ProductViewProvider[];
   /** Explicit data-only layout contributions checked before the listener opens. */
@@ -488,6 +570,7 @@ export type AdviceProgressEventType =
   | "composing_answer"
   | "delta"
   | "answer_delta"
+  | "answer"
   | "completed"
   | "failed"
   | "cancelled";
@@ -595,6 +678,18 @@ export class ProposalInboxHttpService extends Service {
   private readonly defaultViewId: string;
   private readonly onboarding: OnboardingPort;
   private readonly viewRecipeDrafts: ProductViewRecipeDraftPort | undefined;
+  private readonly privateVoiceReadDeadlineMs: number;
+  private voiceTranscriptionInFlight = false;
+  private readonly voiceTranscriptionAttempts: number[] = [];
+  private voiceSpeechInFlight: VoiceSpeechInFlight | undefined;
+  private readonly voiceSpeechAttempts: number[] = [];
+  private readonly voiceSpeechCache = new Map<string, {
+    readonly answer: string;
+    readonly at: number;
+    readonly audio: BrowserVoiceAudio;
+  }>();
+  private sessionRecoveryFailures: number[] = [];
+  private sessionRecoveryInFlight = false;
 
   constructor(ctx: Context, private readonly options: ProposalInboxHttpOptions) {
     super(ctx, "homeInboxHttp");
@@ -609,6 +704,9 @@ export class ProposalInboxHttpService extends Service {
     }
     if (options.requestAuthenticator !== undefined && typeof options.requestAuthenticator !== "function") {
       throw new TypeError("Inbox HTTP request authenticator is invalid");
+    }
+    if (options.sessionRecovery !== undefined && typeof options.sessionRecovery.recover !== "function") {
+      throw new TypeError("Inbox HTTP session recovery owner is invalid");
     }
     if (options.authenticate === undefined && options.requestAuthenticator === undefined) {
       throw new TypeError("Inbox HTTP authenticator is required");
@@ -632,6 +730,7 @@ export class ProposalInboxHttpService extends Service {
       throw new TypeError("Default product view provider is not registered");
     }
     this.viewRecipeDrafts = options.viewRecipeDrafts;
+    this.privateVoiceReadDeadlineMs = boundedPrivateVoiceReadDeadline(options.privateVoiceReadDeadlineMs);
     this.hydratePublishedProductViews();
     this.onboarding = options.onboarding ?? new UnavailableOnboardingService();
     this.host = options.host;
@@ -691,15 +790,26 @@ export class ProposalInboxHttpService extends Service {
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
+      const method = request.method ?? "GET";
+      const url = new URL(request.url ?? "/", this.origin);
+      if (this.options.sessionRecovery !== undefined && url.pathname === "/pair") {
+        return this.handleSessionRecovery(request, response, method, url);
+      }
+      if (this.options.sessionRecovery !== undefined
+        && (method === "GET" || method === "HEAD")
+        && url.pathname === "/assets/product.css") {
+        return this.sendProductAsset(response, "css", method === "HEAD");
+      }
       if (!(await this.authenticateRequest(request))) {
         if (this.options.requestAuthenticator === undefined) {
           response.setHeader("www-authenticate", 'Basic realm="hob-agent Inbox", charset="UTF-8"');
           return send(response, 401, "Authentication required");
         }
+        if (this.options.sessionRecovery !== undefined && (method === "GET" || method === "HEAD")) {
+          return redirect(response, "/pair");
+        }
         return send(response, 401, "请重新打开家庭控制台以恢复本地会话");
       }
-      const method = request.method ?? "GET";
-      const url = new URL(request.url ?? "/", this.origin);
       const viewPreference = productViewPreference(
         url.searchParams.get("view"),
         request.headers.cookie,
@@ -1082,9 +1192,38 @@ export class ProposalInboxHttpService extends Service {
         }
         return redirect(response, "/home");
       }
+      if (method === "POST" && url.pathname === "/voice/transcribe") {
+        if (url.search.length > 0) return send(response, 400, "Invalid private voice request");
+        return this.handleVoiceTranscription(request, response);
+      }
+      if (method === "POST" && url.pathname === "/voice/retry") {
+        if (url.search.length > 0) return send(response, 400, "Invalid private voice request");
+        return this.handlePrivateVoiceRetry(request, response);
+      }
+      const voiceSpeech = /^\/voice\/speech\/([^/]+)$/.exec(url.pathname);
+      if ((method === "GET" || method === "HEAD") && voiceSpeech) {
+        if (url.search.length > 0) return send(response, 400, "Invalid private voice request");
+        if (method === "HEAD") {
+          response.setHeader("allow", "GET");
+          return send(response, 405, "Private voice speech requires GET");
+        }
+        const adviceId = safeDecode(voiceSpeech[1]!);
+        return adviceId === undefined
+          ? send(response, 404, "Household advice not found")
+          : this.handleVoiceSpeech(request, response, adviceId);
+      }
       if ((method === "GET" || method === "HEAD") && url.pathname === "/voice") {
-        if (url.search.length > 0) return redirect(response, "/voice");
-        const content = renderVoiceSurface("idle");
+        const retryNotice = url.search.length === 0
+          ? false
+          : url.search === "?notice=voice_retry_result";
+        if (retryNotice === false && url.search.length > 0) return redirect(response, "/voice");
+        const privateVoice = this.privateVoiceRenderState();
+        const content = renderVoiceSurface("idle", {
+          privateVoice,
+          ...(retryNotice
+            ? { notice: privateVoice.status === "active" ? "recovered" as const : "unavailable" as const }
+            : {}),
+        } as Parameters<typeof renderVoiceSurface>[1]);
         if (content === undefined) return send(response, 500, "Voice surface unavailable");
         return this.sendVoiceRoute(response, content, method === "HEAD", requestedViewId, storedDefaultViewId, request.headers.cookie);
       }
@@ -1638,6 +1777,67 @@ export class ProposalInboxHttpService extends Service {
     }
   }
 
+  private async handleSessionRecovery(
+    request: IncomingMessage,
+    response: ServerResponse,
+    method: string,
+    url: URL,
+  ): Promise<void> {
+    if (url.search !== "") return send(response, 404, "Not found");
+    if (method === "GET" || method === "HEAD") {
+      return sendHtml(response, 200, renderSessionRecoveryPage(), method === "HEAD");
+    }
+    if (method !== "POST") return send(response, 405, "Method not allowed");
+    if (request.headers.origin !== this.origin) return send(response, 403, "This action requires the local household origin");
+    if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+      return send(response, 415, "Unsupported recovery content type");
+    }
+    const retryAfter = this.sessionRecoveryRetryAfterSeconds();
+    if (retryAfter > 0) {
+      response.setHeader("retry-after", String(retryAfter));
+      return sendHtml(response, 429, renderSessionRecoveryPage("limited"), false);
+    }
+    if (this.sessionRecoveryInFlight) {
+      response.setHeader("retry-after", "1");
+      request.resume();
+      return sendHtml(response, 429, renderSessionRecoveryPage("busy"), false);
+    }
+    this.sessionRecoveryInFlight = true;
+    try {
+      let body: string;
+      try {
+        body = await readBoundedBody(request, MAX_SESSION_RECOVERY_FORM_BYTES);
+      } catch (error) {
+        if (isPayloadTooLarge(error)) return send(response, 413, "Invalid recovery request");
+        body = "";
+      }
+      const code = sessionRecoveryCode(body);
+      const recovered: Awaited<ReturnType<ProductSessionRecoveryPort["recover"]>> = code === undefined
+        ? { status: "invalid" as const }
+        : await this.options.sessionRecovery!.recover(code).catch(() => ({ status: "unavailable" as const }));
+      if (recovered.status !== "recovered") {
+        if (recovered.status === "invalid") {
+          this.sessionRecoveryFailures.push(Date.now());
+          return sendHtml(response, 401, renderSessionRecoveryPage("invalid"), false);
+        }
+        return sendHtml(response, 503, renderSessionRecoveryPage("unavailable"), false);
+      }
+      setOperationalSessionCookie(response, recovered.sessionToken, recovered.expiresAt);
+      return redirect(response, "/home");
+    } finally {
+      this.sessionRecoveryInFlight = false;
+    }
+  }
+
+  private sessionRecoveryRetryAfterSeconds(): number {
+    const now = Date.now();
+    this.sessionRecoveryFailures = this.sessionRecoveryFailures.filter(
+      (attemptedAt) => now - attemptedAt < SESSION_RECOVERY_FAILURE_WINDOW_MS,
+    );
+    if (this.sessionRecoveryFailures.length < MAX_SESSION_RECOVERY_FAILURES) return 0;
+    return Math.max(1, Math.ceil((this.sessionRecoveryFailures[0]! + SESSION_RECOVERY_FAILURE_WINDOW_MS - now) / 1_000));
+  }
+
   private async sendProductAsset(
     response: ServerResponse,
     asset: "css" | "js",
@@ -1953,6 +2153,283 @@ export class ProposalInboxHttpService extends Service {
     throw new Error("advice_unavailable");
   }
 
+  private privateVoiceRenderState():
+    | { readonly status: "active"; readonly captureMode: PrivateVoiceCaptureMode }
+    | { readonly status: "retryable" | "unavailable" } {
+    const voice = this.activePrivateVoice();
+    if (voice !== undefined) return { status: "active", captureMode: voice.captureMode };
+    return this.options.privateVoice?.status.status === "degraded"
+      && typeof this.options.privateVoice.retry === "function"
+      ? { status: "retryable" }
+      : { status: "unavailable" };
+  }
+
+  private activePrivateVoice(): PrivateVoiceProductPort | undefined {
+    const voice = this.options.privateVoice;
+    return voice?.status.status === "active"
+      && (voice.captureMode === "encoded_audio" || voice.captureMode === "pcm_s16le")
+      && typeof voice.transcribe === "function"
+      && typeof voice.synthesize === "function"
+      ? voice
+      : undefined;
+  }
+
+  private async handleVoiceTranscription(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const voice = this.activePrivateVoice();
+    if (voice === undefined) return sendVoiceJson(response, 503, { status: "unavailable" });
+    const mimeType = mediaType(request.headers["content-type"]);
+    const format = privateVoiceInputFormat(voice.captureMode, mimeType, request.headers);
+    if (mimeType === undefined || format === undefined) {
+      return send(response, mimeType === undefined || !isPrivateVoiceMimeType(mimeType) ? 415 : 400, "Invalid private voice audio");
+    }
+    const initialAvailability = await this.adviceAvailability();
+    if (initialAvailability.status === "active_request" && initialAvailability.activeAdviceId !== undefined) {
+      request.resume();
+      return sendVoiceJson(response, 409, { status: "active", adviceId: initialAvailability.activeAdviceId });
+    }
+    if (initialAvailability.status !== "ready") {
+      request.resume();
+      return sendVoiceJson(response, 503, { status: "unavailable" });
+    }
+    const retryAfter = this.reservePrivateVoiceTranscription();
+    if (retryAfter !== undefined) {
+      request.resume();
+      return sendVoiceBackoff(response, retryAfter);
+    }
+    try {
+      let audio: Uint8Array;
+      try {
+        audio = await readBoundedBytes(request, MAX_PRIVATE_VOICE_AUDIO_BYTES, this.privateVoiceReadDeadlineMs);
+      } catch (error) {
+        if (isPrivateVoiceReadTimedOut(error)) {
+          request.resume();
+          return sendVoiceBackoff(response, 1);
+        }
+        return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid private voice audio");
+      }
+      if (audio.byteLength === 0) return sendVoiceJson(response, 422, { status: "no_input" });
+      if (format !== NO_PRIVATE_VOICE_FORMAT
+        && audio.byteLength % (format.width * format.channels) !== 0) {
+        return send(response, 400, "Invalid private voice audio");
+      }
+
+      const cancellation = abortOnDisconnect(request, response);
+      let transcription: Awaited<ReturnType<PrivateVoiceProductPort["transcribe"]>>;
+      try {
+        transcription = await voice.transcribe({
+          audio,
+          mimeType,
+          ...(format === NO_PRIVATE_VOICE_FORMAT ? {} : { format }),
+          signal: cancellation.signal,
+        });
+      } catch {
+        return sendVoiceJson(response, 502, { status: "failed" });
+      } finally {
+        cancellation.cleanup();
+      }
+      if (transcription.status !== "transcribed") {
+        return sendVoiceJson(response, privateVoiceUnavailable(transcription.reason) ? 503 : 502, {
+          status: privateVoiceUnavailable(transcription.reason) ? "unavailable" : "failed",
+        });
+      }
+      const transcript = boundedVoiceText(transcription.text, MAX_PRIVATE_VOICE_TRANSCRIPT_CHARS);
+      if (transcript === undefined || transcript.length === 0) return sendVoiceJson(response, 422, { status: "no_input" });
+
+      const availability = await this.adviceAvailability();
+      if (availability.status === "active_request" && availability.activeAdviceId !== undefined) {
+        return sendVoiceJson(response, 409, { status: "active", adviceId: availability.activeAdviceId });
+      }
+      if (availability.status !== "ready") return sendVoiceJson(response, 503, { status: "unavailable" });
+      let advice: AdviceStartResult;
+      try {
+        advice = await this.startAdvice(transcript);
+      } catch (error) {
+        const activeAdviceId = adviceActiveId(error);
+        if ((errorCode(error) === "active_request" || errorCode(error) === "already_active") && activeAdviceId !== undefined) {
+          return sendVoiceJson(response, 409, { status: "active", adviceId: activeAdviceId });
+        }
+        return sendVoiceJson(response, 503, { status: "unavailable" });
+      }
+      if ((advice.status === "active_request" || advice.status === "already_active") && advice.activeAdviceId !== undefined) {
+        return sendVoiceJson(response, 409, { status: "active", adviceId: advice.activeAdviceId });
+      }
+      if (advice.id === undefined || safeDecode(advice.id) === undefined) return sendVoiceJson(response, 502, { status: "failed" });
+      return sendVoiceJson(response, 202, { status: "accepted", adviceId: advice.id, transcript });
+    } finally {
+      this.releasePrivateVoiceTranscription();
+    }
+  }
+
+  private reservePrivateVoiceTranscription(now = Date.now()): number | undefined {
+    if (this.voiceTranscriptionInFlight) return 1;
+    while (this.voiceTranscriptionAttempts[0] !== undefined
+      && this.voiceTranscriptionAttempts[0] <= now - PRIVATE_VOICE_TRANSCRIPTION_WINDOW_MS) {
+      this.voiceTranscriptionAttempts.shift();
+    }
+    if (this.voiceTranscriptionAttempts.length >= MAX_PRIVATE_VOICE_TRANSCRIPTIONS_PER_WINDOW) {
+      const oldest = this.voiceTranscriptionAttempts[0] ?? now;
+      return Math.max(1, Math.ceil((oldest + PRIVATE_VOICE_TRANSCRIPTION_WINDOW_MS - now) / 1_000));
+    }
+    this.voiceTranscriptionAttempts.push(now);
+    this.voiceTranscriptionInFlight = true;
+    return undefined;
+  }
+
+  private releasePrivateVoiceTranscription(): void {
+    this.voiceTranscriptionInFlight = false;
+  }
+
+  private async handlePrivateVoiceRetry(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const voice = this.options.privateVoice;
+    if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+      return send(response, 415, "Unsupported private voice retry content type");
+    }
+    let body: string;
+    try {
+      body = await readBoundedBody(request);
+    } catch (error) {
+      return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid private voice retry");
+    }
+    if (body.length !== 0) return send(response, 400, "Invalid private voice retry");
+    if (voice?.status.status === "degraded" && typeof voice.retry === "function") {
+      try {
+        await voice.retry();
+      } catch {}
+    }
+    return redirect(response, "/voice?notice=voice_retry_result");
+  }
+
+  private async handleVoiceSpeech(
+    request: IncomingMessage,
+    response: ServerResponse,
+    adviceId: string,
+  ): Promise<void> {
+    const voice = this.activePrivateVoice();
+    if (voice === undefined) return sendVoiceJson(response, 503, { status: "unavailable" });
+    const turn = await this.productAdviceTurn(adviceId);
+    if (turn === undefined) return send(response, 404, "Household advice not found");
+    if (turn.status !== "completed") return send(response, 409, "Household advice is not complete");
+    const answer = boundedVoiceText(turn.answer, MAX_PRIVATE_VOICE_SPEECH_CHARS);
+    if (answer === undefined || answer.length === 0) return sendVoiceJson(response, 502, { status: "failed" });
+    const cached = this.cachedVoiceSpeech(adviceId, answer);
+    if (cached !== undefined) return sendVoiceAudio(response, cached.mimeType, cached.audio);
+
+    let inFlight = this.voiceSpeechInFlight;
+    if (inFlight !== undefined && inFlight.adviceId !== adviceId) {
+      return sendVoiceBackoff(response, 1);
+    }
+    const retryAfter = inFlight === undefined ? this.reservePrivateVoiceSpeech() : undefined;
+    if (retryAfter !== undefined) return sendVoiceBackoff(response, retryAfter);
+    inFlight ??= this.startVoiceSpeech(voice, adviceId, answer);
+    const waiter = this.trackVoiceSpeechWaiter(request, response, inFlight);
+    let browserAudio: VoiceSpeechResult;
+    try {
+      browserAudio = await inFlight.promise;
+    } finally {
+      waiter.release();
+    }
+    if (waiter.disconnected() || response.destroyed || response.writableEnded) return;
+    if (browserAudio === "unavailable") return sendVoiceJson(response, 503, { status: "unavailable" });
+    if (browserAudio === undefined) return sendVoiceJson(response, 502, { status: "failed" });
+    sendVoiceAudio(response, browserAudio.mimeType, browserAudio.audio);
+  }
+
+  private cachedVoiceSpeech(adviceId: string, answer: string, now = Date.now()): BrowserVoiceAudio | undefined {
+    const cached = this.voiceSpeechCache.get(adviceId);
+    if (cached === undefined) return undefined;
+    if (cached.answer !== answer || cached.at + PRIVATE_VOICE_SPEECH_CACHE_MS <= now) {
+      this.voiceSpeechCache.delete(adviceId);
+      return undefined;
+    }
+    return cached.audio;
+  }
+
+  private reservePrivateVoiceSpeech(now = Date.now()): number | undefined {
+    while (this.voiceSpeechAttempts[0] !== undefined
+      && this.voiceSpeechAttempts[0] <= now - PRIVATE_VOICE_SPEECH_WINDOW_MS) {
+      this.voiceSpeechAttempts.shift();
+    }
+    if (this.voiceSpeechAttempts.length >= MAX_PRIVATE_VOICE_SYNTHESIS_PER_WINDOW) {
+      const oldest = this.voiceSpeechAttempts[0] ?? now;
+      return Math.max(1, Math.ceil((oldest + PRIVATE_VOICE_SPEECH_WINDOW_MS - now) / 1_000));
+    }
+    this.voiceSpeechAttempts.push(now);
+    return undefined;
+  }
+
+  private startVoiceSpeech(voice: PrivateVoiceProductPort, adviceId: string, answer: string): VoiceSpeechInFlight {
+    const controller = new AbortController();
+    let inFlight!: VoiceSpeechInFlight;
+    const promise = this.synthesizeBrowserVoiceAudio(voice, answer, controller.signal).then((audio) => {
+      if (controller.signal.aborted || audio === undefined || audio === "unavailable") return audio;
+      this.voiceSpeechCache.set(adviceId, { answer, at: Date.now(), audio });
+      while (this.voiceSpeechCache.size > MAX_PRIVATE_VOICE_SPEECH_CACHE_ENTRIES) {
+        const oldest = this.voiceSpeechCache.keys().next().value;
+        if (typeof oldest !== "string") break;
+        this.voiceSpeechCache.delete(oldest);
+      }
+      return audio;
+    }).finally(() => {
+      if (this.voiceSpeechInFlight === inFlight) this.voiceSpeechInFlight = undefined;
+    });
+    inFlight = { adviceId, promise, controller, activeWaiters: 0 };
+    this.voiceSpeechInFlight = inFlight;
+    return inFlight;
+  }
+
+  private trackVoiceSpeechWaiter(
+    request: IncomingMessage,
+    response: ServerResponse,
+    inFlight: VoiceSpeechInFlight,
+  ): { readonly disconnected: () => boolean; readonly release: () => void } {
+    let active = true;
+    let disconnected = false;
+    inFlight.activeWaiters += 1;
+    const release = (connectionClosed: boolean) => {
+      if (!active) return;
+      active = false;
+      disconnected ||= connectionClosed;
+      request.off("aborted", onDisconnect);
+      response.off("close", onDisconnect);
+      inFlight.activeWaiters -= 1;
+      if (inFlight.activeWaiters === 0 && this.voiceSpeechInFlight === inFlight) {
+        this.voiceSpeechInFlight = undefined;
+        inFlight.controller.abort();
+      }
+    };
+    const onDisconnect = () => release(true);
+    request.once("aborted", onDisconnect);
+    response.once("close", onDisconnect);
+    if (response.destroyed) onDisconnect();
+    return {
+      disconnected: () => disconnected,
+      release: () => release(false),
+    };
+  }
+
+  private async synthesizeBrowserVoiceAudio(
+    voice: PrivateVoiceProductPort,
+    answer: string,
+    signal: AbortSignal,
+  ): Promise<VoiceSpeechResult> {
+    let synthesis: Awaited<ReturnType<PrivateVoiceProductPort["synthesize"]>>;
+    try {
+      synthesis = await voice.synthesize({ text: answer, signal });
+    } catch {
+      return undefined;
+    }
+    if (synthesis.status !== "synthesized") {
+      return privateVoiceUnavailable(synthesis.reason) ? "unavailable" : undefined;
+    }
+    if (!isPrivateVoiceOutputMimeType(synthesis.mimeType)
+      || !(synthesis.audio instanceof Uint8Array)
+      || synthesis.audio.byteLength === 0
+      || synthesis.audio.byteLength > MAX_PRIVATE_VOICE_AUDIO_BYTES) {
+      return undefined;
+    }
+    return browserPlayableVoiceAudio(synthesis);
+  }
+
   private async handleAdviceEvents(
     request: IncomingMessage,
     response: ServerResponse,
@@ -1971,10 +2448,15 @@ export class ProposalInboxHttpService extends Service {
     let terminal = false;
     let lastSent: string | undefined;
     let highestSentSequence: number | undefined = adviceEventSequence(lastEventId(request.headers["last-event-id"]));
-    const queued: AdviceProgressEvent[] = [];
+    const queued: Array<{ readonly event: SafeAdviceEvent; readonly bytes: number }> = [];
+    const queuedIds = new Set<string>();
+    let queuedBytes = 0;
+    let flushing = false;
+    let transportDrain: Promise<boolean> | undefined;
     let unsubscribe: (() => void) | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
-    let finish: (() => void) | undefined;
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => { finish = resolve; });
 
     const cleanup = () => {
       if (closed) return;
@@ -1988,66 +2470,125 @@ export class ProposalInboxHttpService extends Service {
           try { remove.call(this.inbox, adviceId, onAdviceEvent); } catch { /* best effort */ }
         }
       }
-      finish?.();
+      finish();
     };
 
-    const writeEvent = (raw: AdviceProgressEvent) => {
-      const event = safeAdviceEvent(raw);
-      if (event === undefined || closed) return;
-      const eventId = String(event.id);
-      if (lastSent !== undefined && eventId === lastSent) return;
-      const sequence = adviceEventSequence(eventId);
-      if (sequence !== undefined && highestSentSequence !== undefined && sequence <= highestSentSequence) return;
-      if (response.destroyed) {
+    const closeStream = () => {
+      cleanup();
+      if (!response.writableEnded) response.end();
+    };
+
+    const waitForDrain = (): Promise<boolean> => {
+      if (transportDrain !== undefined) return transportDrain;
+      transportDrain = new Promise<boolean>((resolve) => {
+        const settle = (writable: boolean) => {
+          response.removeListener("drain", onDrain);
+          response.removeListener("close", onClose);
+          response.removeListener("error", onClose);
+          resolve(writable);
+        };
+        const onDrain = () => settle(true);
+        const onClose = () => settle(false);
+        response.once("drain", onDrain);
+        response.once("close", onClose);
+        response.once("error", onClose);
+      });
+      void transportDrain.finally(() => {
+        transportDrain = undefined;
+        if (!closed && queued.length > 0) void flushQueued();
+      });
+      return transportDrain;
+    };
+
+    const writeEvent = async (entry: { readonly event: SafeAdviceEvent; readonly bytes: number }): Promise<boolean> => {
+      if (closed || response.destroyed || response.writableEnded) {
         cleanup();
-        return;
+        return false;
       }
-      response.write(formatSseEvent(event));
+      if (transportDrain !== undefined && !await transportDrain) return false;
+      const eventId = String(entry.event.id);
+      if (lastSent !== undefined && eventId === lastSent) return true;
+      const sequence = adviceEventSequence(eventId);
+      if (sequence !== undefined && highestSentSequence !== undefined && sequence <= highestSentSequence) return true;
+      let writable: boolean;
+      try {
+        writable = response.write(formatSseEvent(entry.event));
+      } catch {
+        closeStream();
+        return false;
+      }
       lastSent = eventId;
       if (sequence !== undefined) highestSentSequence = sequence;
-      if (event.type === "completed" || event.type === "failed" || event.type === "cancelled") terminal = true;
+      return writable || await waitForDrain();
     };
 
-    function onAdviceEvent(event: AdviceProgressEvent): void {
-      if (replaying) queued.push(event);
-      else writeEvent(event);
-      if (!replaying && terminal) {
-        cleanup();
-        response.end();
+    const flushQueued = async (): Promise<void> => {
+      if (flushing || closed) return;
+      flushing = true;
+      try {
+        while (!closed && queued.length > 0) {
+          const entry = queued.shift()!;
+          queuedBytes -= entry.bytes;
+          queuedIds.delete(String(entry.event.id));
+          if (!await writeEvent(entry)) return;
+        }
+      } finally {
+        flushing = false;
+        if (!closed && terminal && queued.length === 0) closeStream();
       }
-    }
+    };
+
+    const enqueue = (raw: AdviceProgressEvent): void => {
+      if (closed || terminal) return;
+      const event = safeAdviceEvent(raw);
+      if (event === undefined) return;
+      const eventId = String(event.id);
+      const sequence = adviceEventSequence(eventId);
+      if (eventId === lastSent || queuedIds.has(eventId)
+        || (sequence !== undefined && highestSentSequence !== undefined && sequence <= highestSentSequence)) return;
+      const bytes = Buffer.byteLength(formatSseEvent(event), "utf8");
+      if (queued.length >= MAX_ADVICE_SSE_QUEUED_EVENTS || queuedBytes + bytes > MAX_ADVICE_SSE_QUEUED_BYTES) {
+        closeStream();
+        return;
+      }
+      queued.push({ event, bytes });
+      queuedIds.add(eventId);
+      queuedBytes += bytes;
+      if (event.type === "completed" || event.type === "failed" || event.type === "cancelled") terminal = true;
+      if (!replaying) void flushQueued();
+    };
+
+    function onAdviceEvent(event: AdviceProgressEvent): void { enqueue(event); }
 
     try {
+      response.once("close", cleanup);
+      response.once("error", cleanup);
+      request.once("aborted", cleanup);
       const after = lastEventId(request.headers["last-event-id"]);
       if (subscribeAdvice !== undefined) {
         unsubscribe = subscribeAdvice.call(this.inbox, adviceId, onAdviceEvent) ?? undefined;
       }
       const replay = readEvents === undefined ? [] : await readEvents.call(this.inbox, adviceId, after);
-      for (const event of replay) writeEvent(event);
+      for (const event of replay) enqueue(event);
       replaying = false;
-      for (const event of queued) writeEvent(event);
-      queued.length = 0;
-      if (terminal) {
-        cleanup();
-        response.end();
-        return;
-      }
+      await flushQueued();
+      if (closed) return;
       heartbeat = setInterval(() => {
         if (closed || response.destroyed) {
           cleanup();
           return;
         }
-        response.write(": heartbeat\n\n");
+        if (flushing || queued.length > 0 || transportDrain !== undefined) return;
+        try {
+          if (!response.write(": heartbeat\n\n")) void waitForDrain();
+        } catch {
+          closeStream();
+        }
       }, ADVICE_SSE_HEARTBEAT_MS);
-      await new Promise<void>((resolve) => {
-        finish = resolve;
-        response.once("close", cleanup);
-        request.once("aborted", cleanup);
-        if (response.destroyed) cleanup();
-      });
+      if (response.destroyed) cleanup();
+      await finished;
     } catch {
-      cleanup();
-      if (!response.writableEnded) response.end();
+      closeStream();
     }
   }
 }
@@ -2077,6 +2618,35 @@ function redirect(response: ServerResponse, location: string): void {
   applySecurityHeaders(response);
   response.setHeader("location", location);
   response.end();
+}
+
+function setOperationalSessionCookie(response: ServerResponse, token: string, expiresAt: Date): void {
+  const expiresAtMs = expiresAt.getTime();
+  if (!Number.isFinite(expiresAtMs)) throw new TypeError("Recovered product session expiry is invalid");
+  const maxAge = Math.max(1, Math.floor((expiresAtMs - Date.now()) / 1_000));
+  response.setHeader("set-cookie", `hob_product_session=${encodeURIComponent(token)}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Strict`);
+}
+
+function sessionRecoveryCode(body: string): string | undefined {
+  const form = new URLSearchParams(body);
+  if ([...form.keys()].length !== 1 || form.getAll("code").length !== 1) return undefined;
+  const code = form.get("code")?.normalize("NFKC").toUpperCase();
+  return code !== undefined && /^[A-Z2-9]{4,16}(?:-[A-Z2-9]{4,16})?$/u.test(code) ? code : undefined;
+}
+
+function renderSessionRecoveryPage(
+  state: "ready" | "invalid" | "unavailable" | "limited" | "busy" = "ready",
+): string {
+  const notice = state === "invalid"
+    ? '<p class="product-notice" role="alert">配对码没有对上。请查看这台电脑上的家庭服务提示后再试。</p>'
+    : state === "unavailable"
+      ? '<p class="product-notice" role="alert">家庭服务暂时没有完成恢复。原来的连接保持不变，请稍后再试。</p>'
+      : state === "limited"
+        ? '<p class="product-notice" role="alert">尝试次数较多，请稍等片刻再试。</p>'
+        : state === "busy"
+          ? '<p class="product-notice" role="status">正在检查另一条恢复请求，请稍后再试。</p>'
+          : "";
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>恢复家庭控制台</title><link rel="stylesheet" href="/assets/product.css"></head><body><div class="product-shell"><div class="product-content"><main class="product-main" id="product-main"><section class="product-onboarding" aria-labelledby="recovery-heading"><header class="product-page-header"><div><p class="product-kicker">家庭控制台</p><h1 id="recovery-heading">恢复家庭控制台</h1></div></header><section class="product-card"><p class="product-muted">这台设备的连接已失效。请输入这台电脑上显示的一次性配对码。</p>${notice}<form method="post" action="/pair" class="product-onboarding-form"><label class="product-onboarding-field" for="pairing-code"><span>配对码</span><input id="pairing-code" name="code" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="33" required autofocus></label><button class="product-primary-action product-onboarding-submit" type="submit">恢复连接</button></form></section></section></main></div></div></body></html>`;
 }
 
 function productRouteForPath(path: string): ProductRoute | undefined {
@@ -2819,7 +3389,7 @@ function safeAdviceEvent(value: AdviceProgressEvent): SafeAdviceEvent | undefine
     || rawType === "checking_rules" || rawType === "evaluating_evidence" || rawType === "composing_answer") {
     return { id, type: rawType, data: {} };
   }
-  if (rawType === "delta" || rawType === "answer_delta") {
+  if (rawType === "delta" || rawType === "answer_delta" || rawType === "answer") {
     const rawText = typeof data.text === "string" ? data.text : value.text;
     const text = boundedEventText(rawText);
     return text === undefined ? undefined : { id, type: rawType, data: { text } };
@@ -2898,8 +3468,154 @@ function sendJavaScript(response: ServerResponse, status: number, script: string
   response.end(head ? undefined : script);
 }
 
+function sendVoiceJson(
+  response: ServerResponse,
+  status: number,
+  body: { readonly status: "accepted"; readonly adviceId: string; readonly transcript: string }
+    | { readonly status: "active"; readonly adviceId: string }
+    | { readonly status: "no_input" | "unavailable" | "failed" },
+): void {
+  applySecurityHeaders(response);
+  response.statusCode = status;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.end(JSON.stringify(body));
+}
+
+function sendVoiceBackoff(response: ServerResponse, retryAfterSeconds: number): void {
+  response.setHeader("retry-after", String(retryAfterSeconds));
+  sendVoiceJson(response, 429, { status: "unavailable" });
+}
+
+function sendVoiceAudio(response: ServerResponse, mimeType: string, audio: Uint8Array): void {
+  applySecurityHeaders(response);
+  response.statusCode = 200;
+  response.setHeader("content-type", mimeType);
+  response.setHeader("content-length", String(audio.byteLength));
+  response.end(audio);
+}
+
 function mediaType(value: string | undefined): string | undefined {
   return value?.split(";", 1)[0]?.trim().toLowerCase();
+}
+
+const NO_PRIVATE_VOICE_FORMAT = Symbol("no-private-voice-format");
+const PRIVATE_VOICE_ENCODED_MIME_TYPES = new Set(["audio/wav", "audio/mpeg", "audio/mp4", "audio/webm", "audio/ogg", "audio/flac"]);
+const PRIVATE_VOICE_PCM_MIME_TYPE = "audio/l16";
+const PRIVATE_VOICE_PCM_RATES = new Set([8_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 88_200, 96_000]);
+const PRIVATE_VOICE_PCM_CHANNELS = new Set([1, 2]);
+const PRIVATE_VOICE_BROWSER_OUTPUT_MIME_TYPES = new Set(["audio/wav", "audio/mpeg", "audio/mp4"]);
+
+function privateVoiceInputFormat(
+  captureMode: PrivateVoiceCaptureMode,
+  mimeType: string | undefined,
+  headers: Readonly<Record<string, string | string[] | undefined>>,
+): PrivateVoiceAudioFormat | typeof NO_PRIVATE_VOICE_FORMAT | undefined {
+  const rate = exactHeader(headers, "x-audio-rate");
+  const width = exactHeader(headers, "x-audio-width");
+  const channels = exactHeader(headers, "x-audio-channels");
+  if (captureMode === "encoded_audio") {
+    return mimeType !== undefined && PRIVATE_VOICE_ENCODED_MIME_TYPES.has(mimeType)
+      && rate === undefined && width === undefined && channels === undefined
+      ? NO_PRIVATE_VOICE_FORMAT
+      : undefined;
+  }
+  if (mimeType !== PRIVATE_VOICE_PCM_MIME_TYPE || rate === undefined || width !== "2" || channels === undefined) return undefined;
+  const parsedRate = boundedPcmHeader(rate, PRIVATE_VOICE_PCM_RATES);
+  const parsedChannels = boundedPcmHeader(channels, PRIVATE_VOICE_PCM_CHANNELS);
+  return parsedRate === undefined || parsedChannels === undefined
+    ? undefined
+    : { rate: parsedRate, width: 2, channels: parsedChannels };
+}
+
+function exactHeader(headers: Readonly<Record<string, string | string[] | undefined>>, name: string): string | undefined {
+  const value = headers[name];
+  return typeof value === "string" && value.length > 0 && value.length <= 16 ? value : undefined;
+}
+
+function boundedPcmHeader(value: string, allowed: ReadonlySet<number>): number | undefined {
+  if (!/^[1-9]\d{0,5}$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && allowed.has(parsed) ? parsed : undefined;
+}
+
+function isPrivateVoiceMimeType(mimeType: string): boolean {
+  return PRIVATE_VOICE_ENCODED_MIME_TYPES.has(mimeType) || mimeType === PRIVATE_VOICE_PCM_MIME_TYPE;
+}
+
+function isPrivateVoiceOutputMimeType(mimeType: unknown): mimeType is string {
+  return typeof mimeType === "string"
+    && (mimeType === PRIVATE_VOICE_PCM_MIME_TYPE || PRIVATE_VOICE_BROWSER_OUTPUT_MIME_TYPES.has(mimeType));
+}
+
+function browserPlayableVoiceAudio(
+  synthesis: Extract<Awaited<ReturnType<PrivateVoiceProductPort["synthesize"]>>, { readonly status: "synthesized" }>,
+): BrowserVoiceAudio | undefined {
+  if (synthesis.mimeType !== PRIVATE_VOICE_PCM_MIME_TYPE) {
+    return { mimeType: synthesis.mimeType, audio: synthesis.audio };
+  }
+  const format = synthesis.format;
+  if (format === undefined
+    || format.width !== 2
+    || !PRIVATE_VOICE_PCM_RATES.has(format.rate)
+    || !PRIVATE_VOICE_PCM_CHANNELS.has(format.channels)
+    || synthesis.audio.byteLength % (format.width * format.channels) !== 0) {
+    return undefined;
+  }
+  return {
+    mimeType: "audio/wav",
+    audio: pcmS16LeWav(synthesis.audio, format.rate, format.channels),
+  };
+}
+
+function pcmS16LeWav(pcm: Uint8Array, rate: number, channels: number): Uint8Array {
+  const headerBytes = 44;
+  const wav = new Uint8Array(headerBytes + pcm.byteLength);
+  const view = new DataView(wav.buffer);
+  writeAscii(wav, 0, "RIFF");
+  view.setUint32(4, 36 + pcm.byteLength, true);
+  writeAscii(wav, 8, "WAVE");
+  writeAscii(wav, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * channels * 2, true);
+  view.setUint16(32, channels * 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(wav, 36, "data");
+  view.setUint32(40, pcm.byteLength, true);
+  wav.set(pcm, headerBytes);
+  return wav;
+}
+
+function writeAscii(target: Uint8Array, offset: number, value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    target[offset + index] = value.charCodeAt(index);
+  }
+}
+
+function boundedVoiceText(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(text) ? text : undefined;
+}
+
+function privateVoiceUnavailable(reason: string): boolean {
+  return reason === "unavailable" || reason === "disabled" || reason === "degraded" || reason === "endpoint_unreachable";
+}
+
+function abortOnDisconnect(request: IncomingMessage, response: ServerResponse): { readonly signal: AbortSignal; cleanup(): void } {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  request.once("aborted", abort);
+  response.once("close", abort);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      request.off("aborted", abort);
+      response.off("close", abort);
+    },
+  };
 }
 
 function safeDecode(value: string): string | undefined {
@@ -3305,10 +4021,66 @@ async function readBoundedBody(request: IncomingMessage, maximumBytes = MAX_FORM
   return Buffer.concat(chunks).toString("utf8");
 }
 
+function boundedPrivateVoiceReadDeadline(value: number | undefined): number {
+  if (value === undefined) return PRIVATE_VOICE_READ_DEADLINE_MS;
+  if (!Number.isSafeInteger(value) || value < 10 || value > PRIVATE_VOICE_READ_DEADLINE_MS) {
+    throw new TypeError("Private voice read deadline must be an integer from 10 to 30000 milliseconds");
+  }
+  return value;
+}
+
+async function readBoundedBytes(
+  request: IncomingMessage,
+  maximumBytes: number,
+  deadlineMs: number,
+): Promise<Uint8Array> {
+  const declared = Number(request.headers["content-length"] ?? 0);
+  if (Number.isFinite(declared) && declared > maximumBytes) throw new PayloadTooLargeError();
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const finish = (result: Uint8Array | Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      request.removeListener("data", onData);
+      request.removeListener("end", onEnd);
+      request.removeListener("aborted", onAborted);
+      if (result instanceof Error) reject(result);
+      else resolve(result);
+    };
+    const onData = (chunk: Buffer | Uint8Array | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > maximumBytes) {
+        finish(new PayloadTooLargeError());
+        request.resume();
+        return;
+      }
+      chunks.push(buffer);
+    };
+    const onEnd = () => finish(new Uint8Array(Buffer.concat(chunks)));
+    const onAborted = () => finish(new Error("Private voice request was aborted"));
+    const deadline = setTimeout(() => {
+      finish(new PrivateVoiceReadTimedOutError());
+    }, deadlineMs);
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("aborted", onAborted);
+  });
+}
+
 class PayloadTooLargeError extends Error {}
+
+class PrivateVoiceReadTimedOutError extends Error {}
 
 function isPayloadTooLarge(error: unknown): boolean {
   return error instanceof PayloadTooLargeError;
+}
+
+function isPrivateVoiceReadTimedOut(error: unknown): boolean {
+  return error instanceof PrivateVoiceReadTimedOutError;
 }
 
 function reviewInput(proposalId: string, body: string, reviewer: string): InboxReviewInput | undefined {

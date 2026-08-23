@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { PRODUCT_SHELL_STYLES } from "./product-shell-styles.js";
+
 const ACTIVE_STATES = [
   "idle",
   "requesting_permission",
@@ -15,6 +17,7 @@ const ACTIVE_STATES = [
   "acting",
   "verifying",
   "speaking",
+  "playback_failed",
   "cancelled",
   "failed",
   "indeterminate",
@@ -23,13 +26,22 @@ const ACTIVE_STATES = [
 
 interface VoiceSurfaceModule {
   readonly VOICE_SURFACE_STATES: readonly string[];
-  readonly renderVoiceSurface: (state?: string, options?: VoiceSurfaceRenderOptions) => string | undefined;
+  readonly renderVoiceSurface: (
+    state?: string,
+    options?: VoiceSurfaceRenderOptions,
+  ) => string | undefined;
   readonly VOICE_INTERACTION_JS: string;
 }
 
 interface VoiceSurfaceRenderOptions {
   readonly transcript?: string;
   readonly transcriptKind?: "partial" | "final";
+  readonly privateVoice?:
+    | {
+        readonly status: "active";
+        readonly captureMode: "encoded_audio" | "pcm_s16le";
+      }
+    | { readonly status: "retryable" | "unavailable" };
   readonly intent?: {
     readonly room?: string;
     readonly player?: string;
@@ -41,9 +53,11 @@ interface VoiceSurfaceRenderOptions {
 
 async function loadVoiceSurface(): Promise<VoiceSurfaceModule> {
   try {
-    return await import("./voice-surface.js") as VoiceSurfaceModule;
+    return (await import("./voice-surface.js")) as VoiceSurfaceModule;
   } catch (error) {
-    assert.fail(`voice surface implementation is missing: ${error instanceof Error ? error.message : String(error)}`);
+    assert.fail(
+      `voice surface implementation is missing: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -52,16 +66,79 @@ test("renders every governed voice state with an honest availability boundary", 
 
   assert.deepEqual(VOICE_SURFACE_STATES, ACTIVE_STATES);
   for (const state of ACTIVE_STATES) {
-    const html = renderVoiceSurface(state);
+    const html = renderVoiceSurface(state, {
+      privateVoice: { status: "active", captureMode: "encoded_audio" },
+    });
     assert.ok(html);
     assert.match(html, new RegExp(`data-voice-state="${state}"`));
     assert.match(html, /aria-live="polite"/);
-    assert.match(html, /改用文字/);
-    assert.doesNotMatch(html, /Visual prototype|Preview only|no live services/i);
-    for (const forbidden of ["getUserMedia", "MediaRecorder", "WebSocket", "fetch(", "play_media", "mediaRef"]) {
-      assert.equal(html.includes(forbidden), false, `${state} leaked active capability ${forbidden}`);
+    assert.match(
+      html,
+      state === "text_mode" ? /打开文字对话/ : /改用文字/,
+    );
+    assert.doesNotMatch(
+      html,
+      /Visual prototype|Preview only|no live services/i,
+    );
+    for (const forbidden of [
+      "getUserMedia",
+      "MediaRecorder",
+      "WebSocket",
+      "fetch(",
+      "play_media",
+      "mediaRef",
+    ]) {
+      assert.equal(
+        html.includes(forbidden),
+        false,
+        `${state} leaked active capability ${forbidden}`,
+      );
     }
   }
+});
+
+test("gives unavailable private voice one clear text continuation", async () => {
+  const { renderVoiceSurface } = await loadVoiceSurface();
+  const html =
+    renderVoiceSurface("idle", { privateVoice: { status: "unavailable" } }) ??
+    "";
+
+  assert.match(html, /data-voice-state="text_mode"/);
+  assert.match(html, /私人语音暂时不可用。文字对话现在就能继续。/);
+  assert.match(html, /data-voice-text-exit[^>]* hidden/);
+  assert.match(html, /data-voice-recovery[^>]*>打开文字对话</);
+  assert.equal(html.match(/>打开文字对话</g)?.length, 1);
+  assert.doesNotMatch(html, /data-voice-transcript/);
+  assert.doesNotMatch(html, /data-voice-fallback/);
+  assert.match(html, /原始录音不写入磁盘/);
+  assert.match(html, /请求结束后从内存丢弃/);
+  assert.match(html, /回答播报音频只在本机内存中保留最多 30 秒/);
+  assert.match(html, /当前对话重播/);
+  assert.match(html, /确认和审计流程决定/);
+});
+
+test("describes the input recording and short answer replay cache as separate private audio lifecycles", async () => {
+  const { renderVoiceSurface } = await loadVoiceSurface();
+  const html = renderVoiceSurface("transcribing", {
+    privateVoice: { status: "active", captureMode: "encoded_audio" },
+  }) ?? "";
+
+  assert.match(html, /原始录音只用于这次转写，请求结束后从内存丢弃。/);
+  assert.match(html, /回答播报音频只在本机内存中保留最多 30 秒/);
+  assert.doesNotMatch(html, /音频只用于这次转写，不会留存。/);
+});
+
+test("keeps reconnect alongside the single text exit while private voice recovers", async () => {
+  const { renderVoiceSurface } = await loadVoiceSurface();
+  const html =
+    renderVoiceSurface("idle", { privateVoice: { status: "retryable" } }) ??
+    "";
+
+  assert.match(html, /data-voice-state="text_mode"/);
+  assert.match(html, /data-voice-text-exit[^>]* hidden/);
+  assert.match(html, />重新连接私人语音</);
+  assert.equal(html.match(/>打开文字对话</g)?.length, 1);
+  assert.doesNotMatch(html, /data-voice-transcript/);
 });
 
 test("shows the representative media request with neutral, confirmable intent", async () => {
@@ -78,7 +155,10 @@ test("shows the representative media request with neutral, confirmable intent", 
 
   assert.ok(html);
   assert.match(html, /帮我在多媒体室放一部爵士音乐/);
-  assert.match(html, /<blockquote lang="zh-CN"[^>]*>帮我在多媒体室放一部爵士音乐。<\/blockquote>/);
+  assert.match(
+    html,
+    /<blockquote lang="zh-CN"[^>]*>帮我在多媒体室放一部爵士音乐。<\/blockquote>/,
+  );
   assert.match(html, /多媒体室/);
   assert.match(html, /晚间爵士/);
   assert.match(html, /替换当前队列并播放/);
@@ -88,26 +168,40 @@ test("shows the representative media request with neutral, confirmable intent", 
 
 test("does not invent a current intent before a real transcript or intent arrives", async () => {
   const { renderVoiceSurface } = await loadVoiceSurface();
-  const statesWithoutIntent = ["idle", "requesting_permission", "permission_denied", "no_input", "partial_transcript"];
+  const statesWithoutIntent = [
+    "idle",
+    "requesting_permission",
+    "permission_denied",
+    "no_input",
+    "partial_transcript",
+  ];
 
   for (const state of statesWithoutIntent) {
-    const html = renderVoiceSurface(state) ?? "";
-    assert.doesNotMatch(html, /帮我在多媒体室放一部爵士音乐|多媒体室|晚间爵士|替换当前队列并播放/);
+    const html =
+      renderVoiceSurface(state, {
+        privateVoice: { status: "active", captureMode: "encoded_audio" },
+      }) ?? "";
+    assert.doesNotMatch(
+      html,
+      /帮我在多媒体室放一部爵士音乐|多媒体室|晚间爵士|替换当前队列并播放/,
+    );
   }
 
-  assert.match(renderVoiceSurface("idle") ?? "", /点击“开始聆听”|说出房间、内容和动作/);
+  assert.match(renderVoiceSurface("idle") ?? "", /开始聆听|一次要说的话/);
 });
 
 test("renders current understanding only from explicit transcript or structured intent", async () => {
   const { renderVoiceSurface } = await loadVoiceSurface();
   const empty = renderVoiceSurface("awaiting_confirmation") ?? "";
-  const withTranscript = renderVoiceSurface("partial_transcript", {
-    transcript: "帮我在书房",
-    transcriptKind: "partial",
-  }) ?? "";
-  const withIntent = renderVoiceSurface("awaiting_confirmation", {
-    intent: { room: "书房", selection: "当前播放列表" },
-  }) ?? "";
+  const withTranscript =
+    renderVoiceSurface("partial_transcript", {
+      transcript: "帮我在书房",
+      transcriptKind: "partial",
+    }) ?? "";
+  const withIntent =
+    renderVoiceSurface("awaiting_confirmation", {
+      intent: { room: "书房", selection: "当前播放列表" },
+    }) ?? "";
 
   assert.doesNotMatch(empty, /product-voice-intent/);
   assert.match(withTranscript, /data-voice-transcript-kind="partial"/);
@@ -119,10 +213,13 @@ test("renders current understanding only from explicit transcript or structured 
 test("provides permission, no-input, and text recovery exits", async () => {
   const { renderVoiceSurface } = await loadVoiceSurface();
 
-  assert.match(renderVoiceSurface("permission_denied") ?? "", /打开麦克风权限|浏览器设置/);
+  assert.match(
+    renderVoiceSurface("permission_denied") ?? "",
+    /打开麦克风权限|浏览器设置/,
+  );
   assert.match(renderVoiceSurface("no_input") ?? "", /没有听到|再试一次/);
   assert.match(renderVoiceSurface("partial_transcript") ?? "", /正在听|继续说/);
-  assert.match(renderVoiceSurface("text_mode") ?? "", /输入文字/);
+  assert.match(renderVoiceSurface("text_mode") ?? "", /用文字继续/);
 });
 
 test("rejects unknown preview state instead of reflecting it into markup", async () => {
@@ -132,9 +229,11 @@ test("rejects unknown preview state instead of reflecting it into markup", async
   assert.equal(renderVoiceSurface("playing"), undefined);
 });
 
-test("renders a real push-to-talk seam with a canonical conversation form", async () => {
+test("renders a private push-to-talk seam only when the configured voice pair is active", async () => {
   const { renderVoiceSurface } = await loadVoiceSurface();
-  const html = renderVoiceSurface("idle");
+  const html = renderVoiceSurface("idle", {
+    privateVoice: { status: "active", captureMode: "encoded_audio" },
+  });
 
   assert.ok(html);
   assert.equal(html.match(/data-voice-text-exit/g)?.length, 1);
@@ -142,18 +241,51 @@ test("renders a real push-to-talk seam with a canonical conversation form", asyn
   assert.match(html, /data-voice-start/);
   assert.match(html, /data-voice-stop/);
   assert.match(html, /data-voice-transcript/);
-  assert.match(html, /data-voice-submit/);
-  assert.match(html, /<form[^>]+method="post"[^>]+action="\/conversation"/);
+  assert.match(html, /data-private-voice-status="active"/);
+  assert.match(html, /data-private-voice-capture-mode="encoded_audio"/);
+  assert.match(html, /data-voice-cancel/);
+  assert.match(html, /data-voice-speech-stop/);
   assert.match(html, /浏览器不支持语音|改用文字/);
   assert.doesNotMatch(html, /Visual prototype|Preview only|状态选择/);
 });
 
-test("ships only a local Web Speech adapter and leaves action authority in conversation", async () => {
-  const { VOICE_INTERACTION_JS } = await loadVoiceSurface();
+test("uses only bounded private ASR and TTS routes, never browser speech recognition", async () => {
+  const { VOICE_INTERACTION_JS, renderVoiceSurface } = await loadVoiceSurface();
 
-  assert.match(VOICE_INTERACTION_JS, /SpeechRecognition/);
-  assert.match(VOICE_INTERACTION_JS, /webkitSpeechRecognition/);
-  assert.match(VOICE_INTERACTION_JS, /\/conversation/);
-  assert.match(VOICE_INTERACTION_JS, /requestSubmit/);
-  assert.doesNotMatch(VOICE_INTERACTION_JS, /getUserMedia|MediaRecorder|fetch\(|WebSocket|play_media|mediaRef/);
+  assert.doesNotMatch(
+    VOICE_INTERACTION_JS,
+    /SpeechRecognition|webkitSpeechRecognition|speechSynthesis/,
+  );
+  assert.match(VOICE_INTERACTION_JS, /getUserMedia/);
+  assert.match(VOICE_INTERACTION_JS, /MediaRecorder/);
+  assert.match(VOICE_INTERACTION_JS, /AudioContext/);
+  assert.match(VOICE_INTERACTION_JS, /\/voice\/transcribe/);
+  assert.match(VOICE_INTERACTION_JS, /\/voice\/speech\//);
+  assert.match(VOICE_INTERACTION_JS, /EventSource/);
+  assert.match(VOICE_INTERACTION_JS, /X-Audio-Rate/);
+  assert.match(VOICE_INTERACTION_JS, /X-Audio-Width/);
+  assert.match(VOICE_INTERACTION_JS, /X-Audio-Channels/);
+  assert.doesNotMatch(VOICE_INTERACTION_JS, /play_media|mediaRef/);
+
+  const unavailable =
+    renderVoiceSurface("idle", { privateVoice: { status: "unavailable" } }) ??
+    "";
+  assert.match(unavailable, /data-private-voice-status="unavailable"/);
+  assert.match(unavailable, /data-voice-state="text_mode"/);
+  assert.match(unavailable, /私人语音暂时不可用|改用文字/);
+  assert.match(unavailable, /data-voice-start hidden/);
+
+  const retryable =
+    renderVoiceSurface("idle", { privateVoice: { status: "retryable" } }) ??
+    "";
+  assert.match(retryable, /data-private-voice-status="retryable"/);
+  assert.match(retryable, /action="\/voice\/retry"/);
+  assert.match(retryable, />重新连接私人语音</);
+  assert.match(retryable, /data-voice-start hidden/);
+});
+
+test("animates the voice indicator only while a household member is speaking", () => {
+  assert.match(PRODUCT_SHELL_STYLES, /\.product-voice-indicator[^}]*animation-play-state:\s*paused/u);
+  assert.match(PRODUCT_SHELL_STYLES, /data-voice-state="listening"[^}]*animation-play-state:\s*running/u);
+  assert.match(PRODUCT_SHELL_STYLES, /data-voice-state="partial_transcript"[^}]*animation-play-state:\s*running/u);
 });

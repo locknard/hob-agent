@@ -433,6 +433,10 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.match(PRODUCT_SHELL_CSS, /max-width: 56rem/);
   assert.match(PRODUCT_SHELL_CSS, /-apple-system/);
   assert.match(PRODUCT_SHELL_CSS, /touch-action:\s*manipulation/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-skip-link\s*\{[^}]*min-height:\s*2\.75rem/);
+  assert.match(PRODUCT_SHELL_CSS, /nav\[data-host-view-shortcuts\]\s+a\s*\{[^}]*min-height:\s*2\.75rem/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-host-view-menu summary\s*\{[^}]*min-height:\s*2\.75rem/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-primary-action, \.product-secondary-action, \.product-danger-action\s*\{[^}]*min-height:\s*2\.75rem/);
   assert.doesNotMatch(PRODUCT_SHELL_CSS, /-webkit-tap-highlight-color:\s*transparent/);
   assert.equal(PRODUCT_SHELL_CSS.includes("gradient"), false);
   assert.equal(PRODUCT_SHELL_CSS.includes("<svg"), false);

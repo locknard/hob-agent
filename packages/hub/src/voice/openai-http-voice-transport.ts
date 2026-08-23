@@ -1,3 +1,5 @@
+import { normalizePrivateVoiceEndpoint } from "./private-voice-endpoint.js";
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_TRANSCRIPT_CHARS = 4_096;
@@ -39,7 +41,7 @@ export type OpenAiHttpVoiceProbe =
   | OpenAiHttpVoiceFailure;
 
 export interface OpenAiHttpVoiceTransportOptions {
-  /** A verified local/private deployment root. This transport adds the only two allowed paths. */
+  /** A verified private deployment root. This transport adds the only two allowed paths. */
   readonly baseUrl: string;
   /** Held only by this transport instance and sent only as a bearer credential. */
   readonly credential?: string;
@@ -84,8 +86,8 @@ export class OpenAiHttpVoiceTransport {
   private readonly clock: () => number;
 
   constructor(options: OpenAiHttpVoiceTransportOptions) {
-    this.root = normalizeRootUrl(options.baseUrl);
     this.credential = normalizeCredential(options.credential);
+    this.root = normalizeRootUrl(options.baseUrl, this.credential !== undefined);
     this.timeoutMs = boundedInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 10, 120_000, "Voice timeout");
     this.maxAudioBytes = boundedInteger(options.maxAudioBytes ?? DEFAULT_MAX_AUDIO_BYTES, 1, 32 * 1024 * 1024, "Voice audio limit");
     this.maxTranscriptChars = boundedInteger(options.maxTranscriptChars ?? DEFAULT_MAX_TRANSCRIPT_CHARS, 1, 16_384, "Voice transcript limit");
@@ -225,18 +227,8 @@ function failure(reason: OpenAiHttpVoiceFailureReason): OpenAiHttpVoiceFailure {
   return { status: "failed", reason };
 }
 
-function normalizeRootUrl(value: unknown): URL {
-  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) throw new TypeError("Voice endpoint is invalid");
-  const root = new URL(value);
-  if ((root.protocol !== "http:" && root.protocol !== "https:")
-    || root.username !== ""
-    || root.password !== ""
-    || root.search !== ""
-    || root.hash !== ""
-    || (root.pathname !== "" && root.pathname !== "/")) {
-    throw new TypeError("Voice endpoint is invalid");
-  }
-  return root;
+function normalizeRootUrl(value: unknown, hasCredential: boolean): URL {
+  return new URL(normalizePrivateVoiceEndpoint("openai_http", value, { hasCredential }));
 }
 
 function normalizeCredential(value: unknown): string | undefined {
