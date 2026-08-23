@@ -22,8 +22,8 @@
 | 轨道 | 职责与最小输出 | 参考实现 | 不拥有的职责 |
 | --- | --- | --- | --- |
 | LLM | 将已接受的文字 turn 交给 DSH Agent loop；流式返回文字、工具进度与最终答复。 | 本地 OpenAI-compatible deployment，作为 `custom/<model-id>`，沿用 DSH `openai-completions` route。 | 音频采集、说话人身份、HA native service、设备执行。 |
-| ASR | 在本地把有限时长的语音流转成 partial 和 final transcript，附带置信度/端点状态。 | Wyoming ASR server；也可用浏览器 Web Speech 作为显式降级输入。 | 解释意图、确认动作、持久保存原始音频。 |
-| TTS | 将由产品选择的、已脱敏且有长度上限的播报文本流式/分段合成为音频。 | Wyoming TTS server；HTTP TTS endpoint 由 Wyoming bridge 适配。 | 选择设备、修改队列、绕过媒体确认或直接调用 HA。 |
+| ASR | 在本地把有限时长的语音流转成 partial 和 final transcript，附带置信度/端点状态。 | Wyoming ASR server；OpenAI-compatible HTTP ASR；也可用浏览器 Web Speech 作为显式降级输入。 | 解释意图、确认动作、持久保存原始音频。 |
+| TTS | 将由产品选择的、已脱敏且有长度上限的播报文本流式/分段合成为音频。 | Wyoming TTS server；OpenAI-compatible HTTP TTS 可直接接入或由 Wyoming bridge 适配。 | 选择设备、修改队列、绕过媒体确认或直接调用 HA。 |
 
 ### LLM：沿用现有 DSH provider seam
 
@@ -46,7 +46,7 @@ type AsrEvent =
 
 这是 gateway 内部类型，不进入 `contracts`，也不把 Wyoming frame、模型名称或端口泄漏给 Agent。最终 transcript 的长度、控制字符、语言/采样参数和 session ownership 都在 gateway 校验；partial 只用于当前 UI，不自动作为 DSH 输入或工具参数。
 
-HTTP TTS 参考实现使用一个窄适配器：`health()`、`synthesize({ text, voice, locale, signal })`，返回有 MIME type、有限时长及可取消字节流的音频结果。若已有 HTTP-only TTS 服务，Wyoming TTS bridge 是它的接入适配器；若使用 Wyoming TTS，直接适配相同的 `synthesize` 端口。两者都不能接受 URL、SSML 指令、设备标识或任意 provider payload 作为“文本”。
+HTTP ASR/TTS 使用各自的窄适配器。ASR 只接收受限音频流和 locale，产出受限 partial/final 事件；TTS 提供 `health()`、`synthesize({ text, voice, locale, signal })`，返回有 MIME type、有限时长及可取消字节流的音频结果。若已有 HTTP-only TTS 服务，Wyoming TTS bridge 可以作为接入适配器；若使用 Wyoming TTS，直接适配相同的 `synthesize` 端口。两种 transport 都不能接受 URL、SSML 指令、设备标识或任意 provider payload 作为“文本”。
 
 本地音频可在语音 gateway/客户端播放，也可作为被明确准备的媒体内容交给媒体层；第二种情况必须通过 Hub 的中立媒体与动作规则。TTS 不自行挑选播放器。
 
@@ -153,7 +153,7 @@ ASR partial 以节流的文本增量送到当前 UI，final 只在端点后提�
 
 ## Setup、配置、Vault 与 Probe
 
-语音运行时应延续 `ProductSetupRuntime`、`ProductSetupController` 和 `ProductBootstrapConfigStore` 的单一、短时 setup transaction。模型和 bridge 的现有 setup 不改变；语音新增一个独立阶段，只有各轨道 probe 通过才可激活。配置是本地非 secret 元数据，secret 只在 Vault 中保存为引用。
+语音运行时应延续 `ProductRuntimeSupervisor`、`ProductSetupController` 和 `ProductBootstrapConfigStore` 的单一、短时 setup transaction。模型和 bridge 的现有 setup 不改变；语音新增一个独立阶段，只有各轨道 probe 通过才可激活。配置是本地非 secret 元数据，secret 只在 Vault 中保存为引用。
 
 建议的持久化 shape（示意，待实现时以 strict Zod schema 冻结）如下：
 
@@ -168,12 +168,12 @@ interface PrivateVoiceRuntimeConfig {
     readonly endpoint: { readonly minSpeechMs: number; readonly trailingSilenceMs: number };
   };
   readonly asr: {
-    readonly transport: "wyoming" | "browser";
+    readonly transport: "wyoming" | "openai_http" | "browser";
     readonly endpoint?: string;
     readonly credentialRef?: string;
   };
   readonly tts: {
-    readonly transport: "wyoming" | "http" | "disabled";
+    readonly transport: "wyoming" | "openai_http" | "disabled";
     readonly endpoint?: string;
     readonly credentialRef?: string;
     readonly locale: string;
@@ -187,9 +187,11 @@ interface PrivateVoiceRuntimeConfig {
 
 - 配置允许标识、transport、局域服务 endpoint、语言、超时、非敏感 voice label 与 `SecretRef`；不允许 token/password/key 字段、用户可选 URL path/query/userinfo、任意 headers、HA entity/service、播放器、模型工具策略或家庭成员角色。
 - 每个 endpoint 有严格 scheme、host、端口、长度和私网/本机部署策略校验；DNS 重绑定和重定向不得把 probe 变成任意网络访问。部署策略由宿主产品决定，并保持与现有 `custom` LLM HTTPS 规则分开。
-- ASR/TTS credential 如有需要，使用 `keychain:hob-agent/voice:<stage>:<alias>` 形式的 request-local stage ref；probe 失败、草稿过期或设置冲突时删除。激活配置仅保存最终 `SecretRef`，其目录/文件延续 `0700`/`0600` 与原子 generation commit 纪律。
+- ASR/TTS credential 如有需要，使用 `keychain:hob-agent/voice:<track>:<setup-id>:<nonce>` 形式的 request-local stage ref；probe 失败、草稿过期或设置冲突时删除。激活配置仅保存最终 `SecretRef`，其目录/文件延续 `0700`/`0600` 与原子 generation commit 纪律。
 - 不把 LLM secret 复制为语音 secret。LLM 继续引用已选 model profile；ASR 与 TTS 可各自没有 credential、各自持有一个不同 ref，或者被禁用。
 - 关闭语音即停止 gateway 与音频采集，不删除模型/HA/媒体设置；它也不改变现有 `/conversation` 文字通道。
+
+`ProductVoiceSetup` 以这条契约实现了独立 ASR/TTS 的 staged probe：它接收 `wyoming` 或 `openai_http` transport、规范化本机或私网的无路径 endpoint，并返回 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible` 或 `unavailable` 的闭合结果。`ProductRuntimeSupervisor` 将它作为空闲的 Cordis capability 挂载，授权 transport 插件可以提供真实 probe；挂载本身不会打开麦克风或音频流。它把请求中的 credential 仅交给当前 probe，成功时只留下 track-scoped locator；它不选择 primary profile，也不激活家庭运行时。
 
 Probe 是一次性、低权限且不改变家庭状态的操作：LLM 复用现有最小 DSH 流式 probe；ASR 对有限合成/fixture 音频验证 `ready -> final`；TTS 对固定非家庭文本验证 health、可解码的有限音频；Wyoming probe 验证 capability/locale 而非依赖某个实现的内部字段。probe 只返回稳定分类（如 `ready`、`credential_rejected`、`endpoint_unreachable`、`timed_out`、`incompatible`）和耗时。它不得记录 prompt、音频、transcript、response、endpoint private detail 或 secret。
 

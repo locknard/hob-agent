@@ -23,6 +23,10 @@ import {
 } from "./product-bootstrap-config-store.js";
 import { ProductSetupController } from "./product-setup-controller.js";
 import { ProductSetupDraftStore } from "./product-setup-draft-store.js";
+import {
+  ProductVoiceSetupService,
+  type ProductVoiceSetupOptions,
+} from "./product-voice-setup.js";
 
 const PRODUCT_SESSION_COOKIE = "hob_product_session";
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -69,6 +73,8 @@ export interface ProductRuntimeSupervisorOptions {
   readonly pairingCode?: string;
   readonly createSessionToken?: () => string;
   readonly announce?: (announcement: ProductSetupAnnouncement) => void;
+  /** Provider-neutral ASR/TTS setup capability. It remains idle until a caller probes a track. */
+  readonly voiceSetup?: ProductVoiceSetupOptions;
   /** Test seam and one durable owner for paired setup progress. */
   readonly setupDrafts?: ProductRuntimeSetupDrafts;
   /** Test seam and the single durable active-generation owner. */
@@ -125,6 +131,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     this.statusValue = "starting";
     try {
       await this.host.listen();
+      await this.context.plugin(ProductVoiceSetupService, this.options.voiceSetup ?? {});
       const active = await this.configurationStore.load();
       if (active === undefined) {
         await this.mountSetupSurface();

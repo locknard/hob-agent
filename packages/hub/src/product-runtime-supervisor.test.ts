@@ -156,6 +156,37 @@ test("restores an active generation directly into the product bundle after resta
   }
 });
 
+test("mounts the private voice provider setup capability without opening a second runtime", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-voice-"));
+  const calls: string[] = [];
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    setupDrafts: new MapSetupDrafts(draft),
+    voiceSetup: {
+      probe: async ({ track }) => {
+        calls.push(track.kind);
+        return { status: "ready", latencyMs: 4 };
+      },
+    },
+    mountOperational: async () => undefined,
+    announce: () => undefined,
+  });
+  try {
+    await runtime.start();
+    const result = await runtime.context.productVoiceSetup.probe({
+      setupId: "runtime-supervisor",
+      track: { kind: "tts", transport: "wyoming", endpoint: "wyoming://127.0.0.1:10301", locale: "zh-CN" },
+    });
+    assert.equal(result.status, "ready");
+    assert.deepEqual(calls, ["tts"]);
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 class MapSetupDrafts implements ProductSetupDraftPort {
   private readonly projection: ProductSetupDraftProjection = {
     draftId: "runtime-supervisor",
