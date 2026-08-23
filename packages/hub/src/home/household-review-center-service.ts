@@ -273,6 +273,16 @@ export class HouseholdReviewCenterService extends Service {
 
   actionActivities() { return this.plane.activities(); }
   listActionTickets() { return this.plane.listTickets(); }
+
+  /** Reads one durable action ticket without creating or deciding it. */
+  getActionTicket(ticketId: string): OneShotActionTicket | undefined {
+    return this.plane.listTickets().find((ticket) => ticket.id === ticketId);
+  }
+
+  /** Reads the one durable action ticket bound to a Hub-owned request id. */
+  getActionTicketForRequest(requestId: string): OneShotActionTicket | undefined {
+    return this.plane.listTickets().find((ticket) => ticket.requestId === requestId);
+  }
 }
 
 function unavailableGateway(): OneShotActionGateway {

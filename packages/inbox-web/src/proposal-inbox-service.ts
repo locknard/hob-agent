@@ -36,6 +36,8 @@ import type {
   ProductControlFeedback,
   ProductActivityRecord,
   ProductTurn,
+  ProductMediaActionTurn,
+  ProductMediaActionTicketStatus,
   ProductTurnStage,
   ProductSafetyAlert,
   ProductAdviceCompletionNotification,
@@ -350,6 +352,30 @@ export interface ProposalInboxServiceOptions {
   readonly timezone?: string;
 }
 
+/** Narrow, presentation-safe port for the Hub-owned explicit media action owner. */
+interface HomeMediaActionTurnsPort {
+  availability():
+    | { readonly status: "active_turn"; readonly activeTurnId: string }
+    | { readonly status: "ready" | "model_unavailable" | "agent_busy" | "stopped" | "unavailable" };
+  start(input: { readonly question: string; readonly actor: InboxReviewActor; readonly idempotencyKey: string }): Promise<unknown>;
+  get(id: string): unknown;
+  events(id: string, afterSeq?: number): readonly { readonly seq: number; readonly type: string; readonly at: string }[];
+  subscribe(id: string, listener: (event: { readonly seq: number; readonly type: string; readonly at: string }) => void, afterSeq?: number): () => void;
+  cancel(id: string): boolean;
+}
+
+export type InboxMediaActionAvailability =
+  | ReturnType<HomeMediaActionTurnsPort["availability"]>
+  | { readonly status: "setup_required" };
+export interface InboxMediaActionEvent {
+  readonly id: number;
+  readonly type: "accepted" | "clarification" | "ticket" | "failed" | "cancelled";
+}
+
+export type InboxMediaActionCancelResult =
+  | { readonly status: "cancelled" }
+  | { readonly status: "not_found" | "terminal_status" };
+
 /** Local review composition over hub proposal state and metadata-safe DSH traces. */
 export class ProposalInboxService extends Service {
   static inject = ["homeProposals"];
@@ -397,6 +423,7 @@ export class ProposalInboxService extends Service {
     list(query?: { limit?: number }): readonly InboxHomeAdviceRecord[];
     get(id: string): InboxHomeAdviceRecord | undefined;
   };
+  private readonly mediaActionTurns?: HomeMediaActionTurnsPort;
 
   constructor(ctx: Context, options: ProposalInboxServiceOptions = {}) {
     super(ctx, "homeInbox");
@@ -433,6 +460,8 @@ export class ProposalInboxService extends Service {
       summary(): InboxObservationQualitySummary;
     } | undefined;
     this.advice = ctx.get("homeAdvice") as unknown as typeof this.advice;
+    const mediaActionTurns = ctx.get("homeMediaActionTurns");
+    this.mediaActionTurns = isHomeMediaActionTurnsPort(mediaActionTurns) ? mediaActionTurns : undefined;
   }
 
   list(query?: { status?: InboxProposalStatus; limit?: number }): readonly InboxProposalSummary[] {
@@ -872,6 +901,50 @@ export class ProposalInboxService extends Service {
     return this.advice.ask(question, actor);
   }
 
+  getMediaActionAvailability(): InboxMediaActionAvailability {
+    return this.mediaActionTurns?.availability() ?? { status: "setup_required" };
+  }
+
+  async startMediaAction(input: {
+    readonly question: string;
+    readonly actor: InboxReviewActor;
+    readonly idempotencyKey: string;
+  }): Promise<ProductMediaActionTurn> {
+    if (this.mediaActionTurns === undefined) throw new Error("media_action_unavailable");
+    return projectMediaActionTurn(await this.mediaActionTurns.start(input), this.now);
+  }
+
+  getProductMediaActionTurn(id: string): ProductMediaActionTurn | undefined {
+    if (this.mediaActionTurns === undefined) return undefined;
+    const value = this.mediaActionTurns.get(id);
+    return value === undefined ? undefined : projectMediaActionTurn(value, this.now);
+  }
+
+  readMediaActionEvents(id: string, after?: string): readonly InboxMediaActionEvent[] {
+    if (this.mediaActionTurns === undefined) return [];
+    const cursor = adviceCursor(after);
+    return this.mediaActionTurns.events(id, cursor).flatMap((event) => {
+      const projected = projectMediaActionEvent(event);
+      return projected === undefined ? [] : [projected];
+    });
+  }
+
+  subscribeMediaAction(id: string, listener: (event: InboxMediaActionEvent) => void): () => void {
+    if (this.mediaActionTurns === undefined) return () => undefined;
+    // HTTP owns cursor-aware replay and installs this future-only listener first.
+    return this.mediaActionTurns.subscribe(id, (event) => {
+      const projected = projectMediaActionEvent(event);
+      if (projected !== undefined) listener(projected);
+    }, Number.MAX_SAFE_INTEGER);
+  }
+
+  async cancelMediaAction(id: string): Promise<InboxMediaActionCancelResult> {
+    const turn = this.getProductMediaActionTurn(id);
+    if (turn === undefined) return { status: "not_found" };
+    if (turn.status !== "running" || this.mediaActionTurns === undefined) return { status: "terminal_status" };
+    return this.mediaActionTurns.cancel(id) ? { status: "cancelled" } : { status: "terminal_status" };
+  }
+
   async submitConversationCorrection(input: {
     readonly adviceId: string;
     readonly actor: InboxReviewActor;
@@ -931,6 +1004,7 @@ export class ProposalInboxService extends Service {
         ...advice.report.validationSteps,
       ];
       const turn: ProductTurn = {
+        kind: "advice",
         id: advice.id,
         question: advice.question,
         status: "completed",
@@ -959,6 +1033,7 @@ export class ProposalInboxService extends Service {
     const lastEvent = events.at(-1);
     if (advice.status === "failed") {
       return {
+        kind: "advice",
         id: advice.id,
         question: advice.question,
         status: lastEvent?.type === "cancelled" ? "cancelled" : "failed",
@@ -968,6 +1043,7 @@ export class ProposalInboxService extends Service {
     }
     const elapsedSeconds = Math.max(0, Math.floor((this.now().getTime() - Date.parse(advice.createdAt)) / 1_000));
     return {
+      kind: "advice",
       id: advice.id,
       question: advice.question,
       status: advice.status === "background" ? "background" : "inspecting",
@@ -1041,6 +1117,148 @@ type InboxAdviceRetryResult = InboxHomeAdviceRecord
   | { readonly status: "not_found" }
   | { readonly status: "terminal_status" }
   | { readonly status: "unavailable" };
+
+function isHomeMediaActionTurnsPort(value: unknown): value is HomeMediaActionTurnsPort {
+  return isRecord(value)
+    && typeof value.availability === "function"
+    && typeof value.start === "function"
+    && typeof value.get === "function"
+    && typeof value.events === "function"
+    && typeof value.subscribe === "function"
+    && typeof value.cancel === "function";
+}
+
+function projectMediaActionTurn(value: unknown, now: () => Date): ProductMediaActionTurn {
+  if (!isRecord(value)) throw new TypeError("media_action_projection_invalid");
+  const id = productMediaActionId(value.id);
+  const question = productMediaActionQuestion(value.question);
+  const status = value.status;
+  if (status === "running") {
+    const createdAt = typeof value.createdAt === "string" ? Date.parse(value.createdAt) : NaN;
+    const elapsedSeconds = Number.isNaN(createdAt) ? undefined : Math.max(0, Math.floor((now().getTime() - createdAt) / 1_000));
+    return {
+      kind: "media_action",
+      id,
+      question,
+      status,
+      statusMessage: "正在准备播放方式。",
+      ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }),
+      canStop: true,
+    };
+  }
+  if (status === "clarification") {
+    return {
+      kind: "media_action",
+      id,
+      question,
+      status,
+      clarification: projectMediaClarification(value.clarification),
+    };
+  }
+  if (status === "ticket") {
+    const ticket = projectMediaActionTicket(value.ticket);
+    return { kind: "media_action", id, question, status, ticket };
+  }
+  if (status === "unavailable" || status === "corrupted") {
+    return {
+      kind: "media_action",
+      id,
+      question,
+      status,
+      error: status === "unavailable" ? "确认状态暂时不可用。请稍后在处理中心查看。" : "确认状态需要重新检查。请在处理中心查看。",
+    };
+  }
+  if (status === "failed" || status === "cancelled") {
+    return {
+      kind: "media_action",
+      id,
+      question,
+      status,
+      error: status === "cancelled" ? "播放命令已取消。" : "播放命令没有完成。请稍后重试。",
+    };
+  }
+  throw new TypeError("media_action_projection_invalid");
+}
+
+function projectMediaClarification(value: unknown): Extract<ProductMediaActionTurn, { readonly status: "clarification" }>['clarification'] {
+  if (!isRecord(value)
+    || !isMediaClarificationSlot(value.slot)
+    || !isMediaClarificationReason(value.reason)
+    || !Array.isArray(value.options)
+    || value.options.length > 16) throw new TypeError("media_action_clarification_invalid");
+  return {
+    slot: value.slot,
+    reason: value.reason,
+    options: value.options.flatMap((option) => {
+      if (!isRecord(option)) throw new TypeError("media_action_clarification_invalid");
+      const title = productMediaOptionText(option.title);
+      const sourceLabel = productMediaOptionText(option.sourceLabel);
+      const playable = typeof option.playable === "boolean" ? option.playable : undefined;
+      if (title === undefined && sourceLabel === undefined && playable === undefined) return [];
+      return [{ ...(title === undefined ? {} : { title }), ...(sourceLabel === undefined ? {} : { sourceLabel }), ...(playable === undefined ? {} : { playable }) }];
+    }),
+  };
+}
+
+function projectMediaActionTicket(value: unknown): Extract<ProductMediaActionTurn, { readonly status: "ticket" }>['ticket'] {
+  if (!isRecord(value)) throw new TypeError("media_action_ticket_invalid");
+  const id = productMediaActionId(value.id);
+  const status = productMediaTicketStatus(value.status);
+  const detail = productMediaOptionText(value.summary);
+  return {
+    id,
+    status,
+    ...(detail === undefined ? {} : { detail }),
+    ...(status === "pending_confirmation" ? { reviewHref: "/review-center" } : {}),
+  };
+}
+
+function projectMediaActionEvent(value: { readonly seq: number; readonly type: string }): InboxMediaActionEvent | undefined {
+  if (!Number.isSafeInteger(value.seq) || value.seq < 0) return undefined;
+  return value.type === "accepted" || value.type === "clarification" || value.type === "ticket"
+    || value.type === "failed" || value.type === "cancelled"
+    ? { id: value.seq, type: value.type }
+    : undefined;
+}
+
+function productMediaActionId(value: unknown): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 200 || /[\u0000-\u001F\u007F]/u.test(value)) {
+    throw new TypeError("media_action_projection_invalid");
+  }
+  return value;
+}
+
+function productMediaActionQuestion(value: unknown): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 512 || /[\u0000-\u001F\u007F]/u.test(value)) {
+    throw new TypeError("media_action_projection_invalid");
+  }
+  return value;
+}
+
+function productMediaOptionText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= 200 && !/[\u0000-\u001F\u007F]/u.test(value)
+    ? value
+    : undefined;
+}
+
+function isMediaClarificationSlot(value: unknown): value is "query" | "mediaRef" | "playerCapabilityId" | "queueMode" {
+  return value === "query" || value === "mediaRef" || value === "playerCapabilityId" || value === "queueMode";
+}
+
+function isMediaClarificationReason(value: unknown): value is "missing" | "ambiguous" | "no_match" | "not_playable" {
+  return value === "missing" || value === "ambiguous" || value === "no_match" || value === "not_playable";
+}
+
+function productMediaTicketStatus(value: unknown): ProductMediaActionTicketStatus {
+  if (value === "pending_confirmation" || value === "verified" || value === "failed" || value === "unknown"
+    || value === "rejected" || value === "expired" || value === "unavailable" || value === "corrupted") return value;
+  if (value === "approved" || value === "executing") return "acting";
+  throw new TypeError("media_action_ticket_invalid");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function adviceCursor(value: string | undefined): number {
   if (value === undefined || value.length === 0) return 0;

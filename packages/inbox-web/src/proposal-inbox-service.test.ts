@@ -569,6 +569,61 @@ class StubAdvice extends Service {
   }
 }
 
+class StubMediaActionTurns extends Service {
+  readonly started: unknown[] = [];
+  readonly cancelled: string[] = [];
+  constructor(ctx: Context) { super(ctx, "homeMediaActionTurns"); }
+  availability() { return { status: "ready" as const }; }
+  async start(input: unknown) {
+    this.started.push(input);
+    return this.get("media-turn-1")!;
+  }
+  get(id: string) {
+    if (id === "media-turn-1") return {
+      id,
+      question: "播放 Jazz Evening",
+      createdAt: "2026-08-24T00:00:00.000Z",
+      status: "ticket" as const,
+      ticket: {
+        id: "ticket-media-1",
+        status: "pending_confirmation" as const,
+        requestId: "media-action:0123456789abcdef0123456789abcdef",
+        summary: "播放 Jazz Evening",
+      },
+    };
+    if (id === "media-clarification") return {
+      id,
+      question: "播放 Jazz",
+      createdAt: "2026-08-24T00:00:00.000Z",
+      status: "clarification" as const,
+      clarification: {
+        slot: "mediaRef" as const,
+        reason: "ambiguous" as const,
+        options: [{ title: "Jazz Evening", sourceLabel: "家庭音响", playable: true, mediaRef: "opaque-ref" }],
+      },
+    };
+    if (id === "media-queue") return {
+      id,
+      question: "播放 Jazz",
+      createdAt: "2026-08-24T00:00:00.000Z",
+      status: "clarification" as const,
+      clarification: {
+        slot: "queueMode" as const,
+        reason: "missing" as const,
+        options: [{ queueMode: "play_next", mediaRef: "opaque-ref" }],
+      },
+    };
+    return undefined;
+  }
+  events(id: string, after = 0) {
+    return id === "media-turn-1" && after < 2
+      ? [{ seq: 2, type: "ticket", at: "2026-08-24T00:00:01.000Z" }]
+      : [];
+  }
+  subscribe(_id: string, _listener: (event: unknown) => void, _after = 0) { return () => undefined; }
+  cancel(id: string) { this.cancelled.push(id); return id === "media-running"; }
+}
+
 class StubCorrection extends Service {
   readonly submissions: unknown[] = [];
 
@@ -825,6 +880,7 @@ test("exposes bounded household advice without turning the Inbox into a chat run
   }).getProductAdviceTurn;
   assert.equal(typeof getProductAdviceTurn, "function");
   assert.deepEqual(getProductAdviceTurn?.call(ctx.homeInbox, "advice-1"), {
+    kind: "advice",
     id: "advice-1",
     question: "Why is the curtain timing uncomfortable?",
     status: "completed",
@@ -836,6 +892,50 @@ test("exposes bounded household advice without turning the Inbox into a chat run
     canBackground: false,
   });
   assert.equal(getProductAdviceTurn?.call(ctx.homeInbox, "missing"), undefined);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("projects an explicit media action through the Hub owner without exposing opaque choices or a second approval path", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubMediaActionTurns);
+  const fiber = await ctx.plugin(ProposalInboxService, { now: () => new Date("2026-08-24T00:00:03.000Z") });
+
+  const started = await ctx.homeInbox.startMediaAction({
+    question: "播放 Jazz Evening",
+    actor: correctionActor,
+    idempotencyKey: "0123456789abcdef0123456789abcdef",
+  });
+  assert.deepEqual(started, {
+    kind: "media_action",
+    id: "media-turn-1",
+    question: "播放 Jazz Evening",
+    status: "ticket",
+    ticket: { id: "ticket-media-1", status: "pending_confirmation", detail: "播放 Jazz Evening", reviewHref: "/review-center" },
+  });
+  assert.deepEqual((ctx.get("homeMediaActionTurns") as unknown as StubMediaActionTurns).started, [{
+    question: "播放 Jazz Evening", actor: correctionActor, idempotencyKey: "0123456789abcdef0123456789abcdef",
+  }]);
+  assert.deepEqual(ctx.homeInbox.getProductMediaActionTurn("media-clarification"), {
+    kind: "media_action",
+    id: "media-clarification",
+    question: "播放 Jazz",
+    status: "clarification",
+    clarification: {
+      slot: "mediaRef", reason: "ambiguous",
+      options: [{ title: "Jazz Evening", sourceLabel: "家庭音响", playable: true }],
+    },
+  });
+  assert.deepEqual(ctx.homeInbox.getProductMediaActionTurn("media-queue"), {
+    kind: "media_action",
+    id: "media-queue",
+    question: "播放 Jazz",
+    status: "clarification",
+    clarification: { slot: "queueMode", reason: "missing", options: [] },
+  });
+  assert.deepEqual(ctx.homeInbox.readMediaActionEvents("media-turn-1"), [{ id: 2, type: "ticket" }]);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

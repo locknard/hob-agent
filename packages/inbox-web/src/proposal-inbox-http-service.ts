@@ -43,6 +43,8 @@ import {
   type ProductOperationalModelNotice,
   type ProductShellRoute,
   type ProductTurn,
+  type ProductMediaActionTurn,
+  type ProductMediaActionAvailability,
   type ProductControlFeedback,
   type ProductViewPreferenceState,
 } from "./product-shell.js";
@@ -169,6 +171,8 @@ export interface ProductRouteRenderContext {
   readonly reviewCounts?: ProductReviewCounts;
   readonly reviewProjection?: InboxProductReviewProjection;
   readonly availability?: AdviceAvailability;
+  readonly mediaActionAvailability?: ProductMediaActionAvailability;
+  readonly mediaActionIdempotencyKey?: string;
   /** A bounded, session-bound question recovered after the model becomes ready. */
   readonly conversationDraft?: string;
   readonly activeTurn?: ProductTurn;
@@ -280,13 +284,15 @@ if (activityFilters instanceof HTMLElement) {
 
 const turn = document.querySelector("[data-advice-stream=\"sse\"]");
 if (turn instanceof HTMLElement) {
+  const turnKind = turn.getAttribute("data-conversation-turn");
   const eventsUrl = turn.getAttribute("data-advice-events");
   const status = turn.querySelector("[data-advice-status]");
   const answer = turn.querySelector("[data-advice-answer]");
   const setStatus = (message) => { if (status instanceof HTMLElement && typeof message === "string") status.textContent = message; };
   const stream = typeof eventsUrl === "string" && eventsUrl.startsWith("/") ? new EventSource(eventsUrl) : undefined;
   const payload = (event) => { try { const value = JSON.parse(event.data); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
-  const terminal = (name) => name === "completed" || name === "cancelled" || name === "failed";
+  const terminal = (name) => name === "completed" || name === "cancelled" || name === "failed"
+    || (turnKind === "media_action" && (name === "clarification" || name === "ticket"));
   const stages = {
     inspecting_home: "正在查看家里的当前状态。",
     reading_inventory: "正在查看房间和设备。",
@@ -303,10 +309,13 @@ if (turn instanceof HTMLElement) {
     if (name === "completed") setStatus("已完成。");
     if (name === "cancelled") setStatus("已停止，家里的状态保持原样。");
     if (name === "failed") setStatus("这次处理需要重新开始。");
-    if (terminal(name)) stream?.close();
+    if (terminal(name)) {
+      stream?.close();
+      if (turnKind === "media_action") window.location.reload();
+    }
   };
   if (stream) {
-    for (const name of ["accepted", "progress", "inspecting_home", "reading_inventory", "checking_rules", "evaluating_evidence", "composing_answer", "delta", "answer_delta", "completed", "cancelled", "failed"]) stream.addEventListener(name, (event) => handle(name, event));
+    for (const name of ["accepted", "progress", "inspecting_home", "reading_inventory", "checking_rules", "evaluating_evidence", "composing_answer", "delta", "answer_delta", "completed", "clarification", "ticket", "cancelled", "failed"]) stream.addEventListener(name, (event) => handle(name, event));
     stream.addEventListener("error", () => { if (stream.readyState === EventSource.CONNECTING) setStatus("连接正在恢复，答案会继续更新。"); });
     window.addEventListener("beforeunload", () => stream.close(), { once: true });
   }
@@ -366,9 +375,9 @@ function renderBundledView(
     context.route !== "conversation"
     || context.adviceId === undefined
     || context.activeTurn === undefined
-    || !streamsAdviceTurn(context.activeTurn)
+    || !streamsConversationTurn(context.activeTurn)
   ) return rendered;
-  return `<section data-advice-stream="sse" data-advice-events="/conversation/${encodeURIComponent(context.adviceId)}/events"><p data-advice-status>${escapeTransportHtml(context.activeTurn.statusMessage ?? "正在处理。")}</p><p data-advice-answer></p>${rendered}</section>`;
+  return `<section data-advice-stream="sse" data-conversation-turn="${context.activeTurn.kind}" data-advice-events="/conversation/${encodeURIComponent(context.adviceId)}/events"><p data-advice-status>${escapeTransportHtml(conversationStatusMessage(context.activeTurn))}</p><p data-advice-answer></p>${rendered}</section>`;
 }
 
 /** Creates a Host-rendered provider from a strict data-only layout recipe. */
@@ -521,6 +530,8 @@ export interface ProposalInboxHttpOptions {
   readonly privateVoiceReadDeadlineMs?: number;
   /** Test seam. Returns a base64url 256-bit browser capability. */
   readonly privateVoiceTurnToken?: () => string;
+  /** Test seam for a server-issued media command retry key. */
+  readonly mediaActionIdempotencyKey?: () => string;
   /** Trusted in-process presentation providers registered beside the built-in views. */
   readonly viewProviders?: readonly ProductViewProvider[];
   /** Explicit data-only layout contributions checked before the listener opens. */
@@ -569,6 +580,13 @@ export interface AdviceProgressEvent {
 
 type AdviceEventListener = (event: AdviceProgressEvent) => void;
 
+interface MediaActionProgressEvent {
+  readonly id: number;
+  readonly type: "accepted" | "clarification" | "ticket" | "failed" | "cancelled";
+}
+
+type MediaActionEventListener = (event: MediaActionProgressEvent) => void;
+
 interface InboxHttpPort {
   review(input: InboxReviewInput): Promise<unknown>;
   canRetryPreparation?(): boolean;
@@ -581,6 +599,19 @@ interface InboxHttpPort {
   observeNow(): Promise<unknown>;
   getAdviceAvailability?(): AdviceAvailability | Promise<AdviceAvailability>;
   startAdvice?(question: string, actor?: InboxReviewActor): Promise<AdviceStartResult>;
+  getMediaActionAvailability?(): {
+    readonly status: ProductMediaActionAvailability;
+    readonly activeTurnId?: string;
+  };
+  startMediaAction?(input: {
+    readonly question: string;
+    readonly actor: InboxReviewActor;
+    readonly idempotencyKey: string;
+  }): Promise<ProductMediaActionTurn>;
+  getProductMediaActionTurn?(id: string): ProductMediaActionTurn | Promise<ProductMediaActionTurn | undefined>;
+  readMediaActionEvents?(id: string, after?: string): readonly MediaActionProgressEvent[] | Promise<readonly MediaActionProgressEvent[]>;
+  subscribeMediaAction?(id: string, listener: MediaActionEventListener): void | (() => void);
+  cancelMediaAction?(id: string): Promise<unknown> | unknown;
   readAdviceEvents?(
     id: string,
     after?: string,
@@ -658,6 +689,7 @@ export class ProposalInboxHttpService extends Service {
   private readonly viewRecipeDrafts: ProductViewRecipeDraftPort | undefined;
   private readonly privateVoiceHttp: PrivateVoiceHttpController;
   private readonly operationalModelHttp: OperationalModelHttpController;
+  private readonly createMediaActionIdempotencyKey: () => string;
   private readonly unavailableConversationDrafts = new Map<string, {
     readonly question: string;
     readonly sessionKey: string;
@@ -683,6 +715,9 @@ export class ProposalInboxHttpService extends Service {
     if (options.sessionRecovery !== undefined && typeof options.sessionRecovery.recover !== "function") {
       throw new TypeError("Inbox HTTP session recovery owner is invalid");
     }
+    if (options.mediaActionIdempotencyKey !== undefined && typeof options.mediaActionIdempotencyKey !== "function") {
+      throw new TypeError("Inbox media action idempotency key factory is invalid");
+    }
     if (options.authenticate === undefined && options.requestAuthenticator === undefined) {
       throw new TypeError("Inbox HTTP authenticator is required");
     }
@@ -690,6 +725,7 @@ export class ProposalInboxHttpService extends Service {
     this.reviewer = this.principal?.principalId ?? (options.reviewer?.trim() || "local-household-reviewer");
     if (this.reviewer.length > 200) throw new TypeError("Inbox reviewer identity is too long");
     this.inbox = ctx.homeInbox as unknown as InboxHttpPort;
+    this.createMediaActionIdempotencyKey = options.mediaActionIdempotencyKey ?? (() => randomBytes(16).toString("hex"));
     if (this.principal === undefined) {
       throw new TypeError("Inbox runtime review requires an explicit principal role and device binding");
     }
@@ -1258,8 +1294,11 @@ export class ProposalInboxHttpService extends Service {
       const adviceEvents = /^\/conversation\/([^/]+)\/events$/.exec(url.pathname);
       if (method === "GET" && adviceEvents) {
         const adviceId = safeDecode(adviceEvents[1]!);
-        return adviceId === undefined
-          ? send(response, 404, "Household advice not found")
+        if (adviceId === undefined) return send(response, 404, "Household conversation not found");
+        const turn = await this.productConversationTurn(adviceId);
+        if (turn === undefined) return send(response, 404, "Household conversation not found");
+        return turn.kind === "media_action"
+          ? this.handleMediaActionEvents(request, response, adviceId)
           : this.handleAdviceEvents(request, response, adviceId);
       }
       const adviceCancel = /^\/conversation\/([^/]+)\/stop$/.exec(url.pathname);
@@ -1276,6 +1315,25 @@ export class ProposalInboxHttpService extends Service {
           return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid household advice cancellation");
         }
         if (body.length !== 0) return send(response, 400, "Invalid household advice cancellation");
+        const mediaTurn = await this.productConversationTurn(adviceId);
+        if (mediaTurn?.kind === "media_action") {
+          if (mediaTurn.status !== "running") {
+            return send(response, 409, mediaTurn.status === "ticket"
+              ? "Media action is now handled in Review Center"
+              : "Media action is no longer running");
+          }
+          const cancelMediaAction = this.inbox.cancelMediaAction;
+          if (cancelMediaAction === undefined) return send(response, 503, "Media action cancellation unavailable");
+          try {
+            const result = await cancelMediaAction.call(this.inbox, adviceId);
+            const status = mediaActionCancelStatus(result);
+            if (status === "not_found") return send(response, 404, "Media action not found");
+            if (status !== "cancelled") return send(response, 409, "Media action is no longer running");
+          } catch {
+            return send(response, 503, "Media action cancellation unavailable");
+          }
+          return redirectConversationTurn(response, adviceId);
+        }
         const cancelAdvice = this.inbox.cancelAdvice;
         if (cancelAdvice === undefined) return send(response, 404, "Household advice cancellation unavailable");
         try {
@@ -1402,6 +1460,33 @@ export class ProposalInboxHttpService extends Service {
         const adviceId = safeDecode(adviceDetail[1]!);
         if (adviceId === undefined) return send(response, 404, "Household advice not found");
         return this.sendProductRoute(response, "conversation", url.pathname, method === "HEAD", adviceId, undefined, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference);
+      }
+      if (method === "POST" && url.pathname === "/conversation/media") {
+        if (this.principal === undefined || !canUsePrivateCorrectionPrincipal(this.principal)) {
+          return send(response, 403, "Media action requires a present member on a private device bound to themselves");
+        }
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported media action content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request, MAX_ADVICE_FORM_BYTES);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid media action request");
+        }
+        const input = mediaActionInput(body);
+        if (input === undefined) return send(response, 400, "Invalid media action request");
+        const start = this.inbox.startMediaAction;
+        if (start === undefined) return redirect(response, "/conversation");
+        let turn: ProductMediaActionTurn;
+        try {
+          turn = await start.call(this.inbox, { ...input, actor: this.principal });
+        } catch (error) {
+          if (isMediaActionAvailability(errorCode(error))) return redirect(response, "/conversation");
+          return send(response, 503, "Media action is temporarily unavailable");
+        }
+        if (safeDecode(turn.id) === undefined) return send(response, 503, "Media action is temporarily unavailable");
+        return redirectConversationTurn(response, turn.id);
       }
       if (method === "POST" && url.pathname === "/conversation") {
         if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
@@ -1910,13 +1995,21 @@ export class ProposalInboxHttpService extends Service {
     const availability = route === "home" || route === "conversation"
       ? await this.adviceAvailability()
       : undefined;
+    const mediaActionState = route === "home" || route === "conversation"
+      ? this.mediaActionAvailability()
+      : undefined;
+    const mediaActionAvailability = mediaActionState?.status;
+    const mediaActionIdempotencyKey = mediaActionAvailability === undefined
+      ? undefined
+      : this.mediaActionIdempotencyKey(mediaActionAvailability, head);
     const conversationDraft = route === "conversation" && !head
       ? this.readUnavailableConversationDraft(conversationDraftToken, presentationCookie, conversationDraftAuthorization, availability?.status)
       : undefined;
     const effectiveAdviceId = adviceId
-      ?? (availability?.status === "active_request" ? availability.activeAdviceId : undefined);
+      ?? (availability?.status === "active_request" ? availability.activeAdviceId : undefined)
+      ?? (mediaActionState?.status === "active_turn" ? mediaActionState.activeTurnId : undefined);
     const activeTurn = (route === "home" || route === "conversation") && effectiveAdviceId !== undefined
-      ? await this.productAdviceTurn(effectiveAdviceId)
+      ? await this.productConversationTurn(effectiveAdviceId)
       : undefined;
     const hostProjection = await this.productHostProjection(reviewProjection);
     const onboarding = route === "onboarding" ? hostProjection.onboardingState : undefined;
@@ -1938,6 +2031,8 @@ export class ProposalInboxHttpService extends Service {
       reviewCounts: hostProjection.reviewCounts,
       ...(reviewProjection === undefined ? {} : { reviewProjection }),
       ...(route === "conversation" && availability !== undefined ? { availability } : {}),
+      ...(mediaActionAvailability === undefined ? {} : { mediaActionAvailability }),
+      ...(mediaActionIdempotencyKey === undefined ? {} : { mediaActionIdempotencyKey }),
       ...(conversationDraft === undefined ? {} : { conversationDraft }),
       ...(activeTurn === undefined ? {} : { activeTurn }),
       ...(shellProjection === undefined ? {} : { shellProjection }),
@@ -2174,6 +2269,18 @@ export class ProposalInboxHttpService extends Service {
     }
   }
 
+  private async productConversationTurn(id: string): Promise<ProductTurn | undefined> {
+    const advice = await this.productAdviceTurn(id);
+    if (advice !== undefined) return advice;
+    const readMediaAction = this.inbox.getProductMediaActionTurn;
+    if (readMediaAction === undefined) return undefined;
+    try {
+      return await readMediaAction.call(this.inbox, id);
+    } catch {
+      return undefined;
+    }
+  }
+
   private async productShellProjection(batchRequestId?: string): Promise<InboxProductShellProjection | undefined> {
     const readProjection = this.inbox.getProductShellProjection;
     if (readProjection === undefined) return undefined;
@@ -2235,12 +2342,95 @@ export class ProposalInboxHttpService extends Service {
     return { status: "unavailable" };
   }
 
+  private mediaActionAvailability(): {
+    readonly status: ProductMediaActionAvailability;
+    readonly activeTurnId?: string;
+  } {
+    const readAvailability = this.inbox.getMediaActionAvailability;
+    if (readAvailability === undefined) return { status: "setup_required" };
+    try {
+      const availability = readAvailability.call(this.inbox);
+      const status = availability?.status;
+      if (status === "active_turn") {
+        const activeTurnId = availability.activeTurnId;
+        return isSafeProductTurnId(activeTurnId)
+          ? { status, activeTurnId }
+          : { status };
+      }
+      return status === "ready" || status === "model_unavailable" || status === "agent_busy"
+        || status === "setup_required" || status === "stopped" || status === "unavailable"
+        ? { status }
+        : { status: "unavailable" };
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+
+  private mediaActionIdempotencyKey(availability: ProductMediaActionAvailability, head: boolean): string | undefined {
+    if (head || availability !== "ready") return undefined;
+    const key = this.createMediaActionIdempotencyKey();
+    return /^[a-f0-9]{32}$/u.test(key) ? key : undefined;
+  }
+
   private async startAdvice(question: string): Promise<AdviceStartResult> {
     const start = this.inbox.startAdvice;
     if (start !== undefined) {
       return normalizeAdviceStart(await start.call(this.inbox, question, this.principal));
     }
     throw new Error("advice_unavailable");
+  }
+
+  /** Media lifecycle events hold no question, actor, device, media, or player data. */
+  private async handleMediaActionEvents(
+    request: IncomingMessage,
+    response: ServerResponse,
+    turnId: string,
+  ): Promise<void> {
+    const readEvents = this.inbox.readMediaActionEvents;
+    const subscribe = this.inbox.subscribeMediaAction;
+    if (readEvents === undefined && subscribe === undefined) return send(response, 404, "Media action progress unavailable");
+    applySseHeaders(response);
+    response.flushHeaders();
+    let closed = false;
+    let unsubscribe: (() => void) | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let highest = adviceEventSequence(lastEventId(request.headers["last-event-id"])) ?? 0;
+    const sent = new Set<number>();
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      try { unsubscribe?.(); } catch { /* subscription cleanup is best effort */ }
+      if (!response.writableEnded) response.end();
+    };
+    const write = (raw: MediaActionProgressEvent) => {
+      if (closed || !safeMediaActionEvent(raw) || raw.id <= highest || sent.has(raw.id)) return;
+      highest = raw.id;
+      sent.add(raw.id);
+      try {
+        response.write(`id: ${raw.id}\nevent: ${raw.type}\ndata: {}\n\n`);
+      } catch {
+        cleanup();
+        return;
+      }
+      if (raw.type === "clarification" || raw.type === "ticket" || raw.type === "failed" || raw.type === "cancelled") cleanup();
+    };
+    try {
+      response.once("close", cleanup);
+      response.once("error", cleanup);
+      request.once("aborted", cleanup);
+      // Install the future-only subscription before cursor replay.
+      if (subscribe !== undefined) unsubscribe = subscribe.call(this.inbox, turnId, write) ?? undefined;
+      const replay = readEvents === undefined ? [] : await readEvents.call(this.inbox, turnId, String(highest));
+      for (const event of replay) write(event);
+      if (closed) return;
+      heartbeat = setInterval(() => {
+        if (closed || response.destroyed) return cleanup();
+        try { response.write(": heartbeat\n\n"); } catch { cleanup(); }
+      }, ADVICE_SSE_HEARTBEAT_MS);
+    } catch {
+      cleanup();
+    }
   }
 
   private async handleAdviceEvents(
@@ -2901,6 +3091,8 @@ function productShellModel(route: ProductRoute, context: ProductRouteRenderConte
       : { expiredSummary: context.reviewProjection.expiredSummary }),
     ...(context.activeTurn === undefined ? {} : { activeTurn: context.activeTurn }),
     ...(context.availability === undefined ? {} : { conversationAvailability: context.availability.status }),
+    ...(context.mediaActionAvailability === undefined ? {} : { mediaActionAvailability: context.mediaActionAvailability }),
+    ...(context.mediaActionIdempotencyKey === undefined ? {} : { mediaActionIdempotencyKey: context.mediaActionIdempotencyKey }),
     ...(context.conversationDraft === undefined ? {} : { conversationDraft: context.conversationDraft }),
     ...(context.controlFeedback === undefined ? {} : { controlFeedback: context.controlFeedback }),
     ...(context.proposalNotice === undefined ? {} : { proposalNotice: context.proposalNotice }),
@@ -2923,6 +3115,17 @@ function redirectAdvice(response: ServerResponse, adviceId: string, basePath = "
   response.statusCode = 303;
   applySecurityHeaders(response);
   response.setHeader("location", `${basePath}/${encodeURIComponent(adviceId)}`);
+  response.end();
+}
+
+function redirectConversationTurn(response: ServerResponse, turnId: string): void {
+  if (safeDecode(turnId) === undefined) {
+    send(response, 503, "Household conversation is temporarily unavailable");
+    return;
+  }
+  response.statusCode = 303;
+  applySecurityHeaders(response);
+  response.setHeader("location", `/conversation/${encodeURIComponent(turnId)}`);
   response.end();
 }
 
@@ -3116,11 +3319,17 @@ function productRouteTitle(route: ProductRoute): string {
   }
 }
 
-function streamsAdviceTurn(turn: ProductTurn): boolean {
+function streamsConversationTurn(turn: ProductTurn): boolean {
+  if (turn.kind === "media_action") return turn.status === "running";
   return turn.status === "accepted"
     || turn.status === "inspecting"
     || turn.status === "streaming"
     || turn.status === "background";
+}
+
+function conversationStatusMessage(turn: ProductTurn): string {
+  if (turn.kind === "media_action") return turn.status === "running" ? turn.statusMessage ?? "正在准备媒体命令。" : "正在更新媒体命令。";
+  return turn.statusMessage ?? "正在处理。";
 }
 
 function escapeTransportHtml(value: string): string {
@@ -3163,9 +3372,21 @@ function isAdviceAvailabilityStatus(value: unknown): value is AdviceAvailability
     || value === "stopped" || value === "unavailable";
 }
 
+function isMediaActionAvailability(value: unknown): boolean {
+  return value === "model_unavailable" || value === "agent_busy" || value === "active_turn"
+    || value === "stopped" || value === "setup_required" || value === "unavailable";
+}
+
 function adviceCancelStatus(value: unknown): "cancelled" | "not_found" | "terminal_status" | undefined {
   if (value === true) return "cancelled";
   if (value === false) return "terminal_status";
+  if (!isRecord(value) || typeof value.status !== "string") return undefined;
+  return value.status === "cancelled" || value.status === "not_found" || value.status === "terminal_status"
+    ? value.status
+    : undefined;
+}
+
+function mediaActionCancelStatus(value: unknown): "cancelled" | "not_found" | "terminal_status" | undefined {
   if (!isRecord(value) || typeof value.status !== "string") return undefined;
   return value.status === "cancelled" || value.status === "not_found" || value.status === "terminal_status"
     ? value.status
@@ -3226,6 +3447,13 @@ function safeAdviceEvent(value: AdviceProgressEvent): SafeAdviceEvent | undefine
   if (rawType === "failed") return { id, type: rawType, data: { reason: "advice_failed" } };
   if (rawType === "cancelled") return { id, type: rawType, data: {} };
   return undefined;
+}
+
+function safeMediaActionEvent(value: MediaActionProgressEvent): boolean {
+  return isRecord(value)
+    && Number.isSafeInteger(value.id) && value.id >= 0
+    && (value.type === "accepted" || value.type === "clarification" || value.type === "ticket"
+      || value.type === "failed" || value.type === "cancelled");
 }
 
 function safeProgressStage(value: unknown): string | undefined {
@@ -3309,11 +3537,33 @@ function safeDecode(value: string): string | undefined {
   }
 }
 
+function isSafeProductTurnId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 180
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value);
+}
+
 function adviceQuestion(body: string): string | undefined {
   const params = new URLSearchParams(body);
   if ([...params.keys()].some((key) => key !== "question") || params.getAll("question").length !== 1) return undefined;
   const question = params.get("question")?.trim();
   return question !== undefined && question.length >= 1 && question.length <= 1_000 ? question : undefined;
+}
+
+function mediaActionInput(body: string): { readonly question: string; readonly idempotencyKey: string } | undefined {
+  const form = new URLSearchParams(body);
+  const allowed = new Set(["question", "mediaActionIdempotencyKey"]);
+  if ([...form.keys()].some((key) => !allowed.has(key))
+    || form.getAll("question").length !== 1
+    || form.getAll("mediaActionIdempotencyKey").length !== 1) return undefined;
+  const question = form.get("question")?.trim();
+  const idempotencyKey = form.get("mediaActionIdempotencyKey")?.trim();
+  return question !== undefined && question.length >= 1 && question.length <= 512
+    && !/[\u0000-\u001F\u007F]/u.test(question)
+    && idempotencyKey !== undefined && /^[a-f0-9]{32}$/u.test(idempotencyKey)
+    ? { question, idempotencyKey }
+    : undefined;
 }
 
 function correctionInput(body: string): {

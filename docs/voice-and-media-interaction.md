@@ -1,8 +1,10 @@
 # Voice and media interaction
 
-Status: accepted product direction. Neutral media discovery, preparation, the
-governed action path, and an explicit media-only DSH turn seam are implemented;
-the durable Product action-turn owner and household-facing entry remain pending.
+Status: accepted and implemented through the explicit text media-command slice.
+Neutral media discovery, preparation, the governed action path, the media-only
+DSH turn, the durable Product action-turn owner, and the household-facing text
+entry all run through the same Hub and Agent composition. Private voice remains
+an Advice input until it gains an equally explicit action-mode affordance.
 
 ## Product decision
 
@@ -167,7 +169,7 @@ scope may reach the existing action-ticket owner. The model tool accepts no
 actor, ticket id, or request id; it can supply only bounded search text, an
 opaque media reference, a neutral player capability id, and an explicit queue
 mode. Separate household turns therefore cannot alias an old ticket by reusing
-model output, while retries owned by one future durable turn can retain one
+model output, while retries owned by one durable turn retain one server-issued
 idempotency key.
 
 `DshHomeAgentService.requestMediaActionTurn` uses the existing Agent with a
@@ -178,13 +180,36 @@ other control tools fail in code. A cancelled or timed-out scope is revocable,
 so a provider completion that arrives later cannot acquire its former actor or
 create a ticket.
 
-The backend seam is intentionally not exposed by `/conversation` or `/voice`
-yet. Product delivery requires a Hub-owned durable media-action turn that
-creates the request id, starts the scoped DSH turn with the current authenticated
-actor, stores only the closed clarification or existing ticket id, and projects
-the ticket's current result rather than copying confirmation or execution state.
-Restart may recover an already-created ticket, but it must never replay an
-unfinished command with stale presence.
+The Product exposes this boundary only through the explicit
+`POST /conversation/media` submitter. Ordinary `POST /conversation`, Enter in
+the composer, and private voice continue to start read-only Advice. The media
+submitter alone carries a server-issued 128-bit idempotency key. The HTTP owner
+requires an authenticated, present, private, self-bound product session and
+derives the actor from that session; actor, presence, device, and role fields
+are never accepted from the form.
+
+`HomeMediaActionTurnService` creates the Hub request id, starts the scoped DSH
+turn, and owns the durable Product projection. Its local SQLite record contains
+the normalized household question and digest, lifecycle metadata, bounded safe
+clarification data, or one existing ticket id. It never persists the actor,
+presence assertion, device binding, credentials, provider payload, or a copy of
+ticket approval/execution state. The Product resolves the ticket live through
+`HouseholdReviewCenterService` and links to the one existing review surface; it
+does not render a second approve/reject owner.
+
+Acceptance of a new turn and its first event is atomic. Reusing the same key
+with the same question replays the same Product turn; reusing it with different
+text is a conflict. A restart may rebind a running record only when the exact
+Hub request already has an action ticket. A pre-ticket running record becomes
+`interrupted_before_action` and must be submitted again from a currently
+authenticated private device. Stored presence is therefore never replayed as
+execution authority.
+
+Cancellation and timeout revoke the in-memory action scope before the Product
+owner settles. A model or transport that completes later cannot create a ticket
+or recover its former actor. Ticket creation wins over local cancellation: once
+the action plane owns the request, the Product binds the real ticket and lets
+its policy, confirmation, verification, and audit lifecycle finish.
 
 The neutral action describes the desired outcome rather than an HA service:
 
@@ -452,31 +477,27 @@ two players, the Agent asks which one. With several equally plausible results,
 it presents at most three choices. With a timeout after dispatch, it says that
 the result is uncertain and does not retry automatically.
 
-## Phase 0 Web voice seam
+## Phase 0 private Web voice seam
 
-The `/voice` path serves the bounded Web V1 interaction. The conversation
-composer links directly to it. Its push-to-talk control constructs the browser's
-`SpeechRecognition`/`webkitSpeechRecognition` implementation only after the
-household member's direct click. It shows the live partial transcript, keeps a
-final transcript in a reviewable state, and exposes Stop while recognition is
-active. A permission denial leaves the text route available. A no-input or
-recognition failure produces an escalating first and second recovery prompt;
-the third consecutive failure stops the voice loop and offers the text exit.
+The `/voice` path serves the bounded private-voice interaction. After a direct
+household click, the browser captures a short MediaRecorder or bounded mono
+PCM16 turn and uploads it to the authenticated same-origin Product gateway.
+The gateway pins ASR, Advice wait, and TTS to one provider generation lease.
+Raw audio is not written to disk and is released from memory when the request
+ends; synthesized answers use only a small process-local replay cache.
 
-The browser capability check is explicit. When Web Speech is unavailable, the
-surface says so and moves to text mode without opening a microphone or adding a
-product-owned cloud speech dependency. Raw audio is not persisted. Only a
-bounded final transcript can be submitted, through the existing same-origin `POST
-/conversation` form. The voice script does not call a media player, Hub
-action, bridge endpoint, or alternate conversation API. Therefore media and
-high-impact utterances enter the existing DSH turn and remain subject to the
-Hub's neutral confirmation and administrator gates.
+The configured private ASR returns one bounded final transcript. The Product
+submits that text to the canonical read-only Advice owner, streams the same
+durable conversation result, and synthesizes only its completed answer. Stop,
+page hide, provider replacement, model degradation, no input, and permission
+denial all have closed recovery paths with a text exit. Browser Web Speech is
+not an implicit cloud fallback.
 
-The server-rendered form and the browser adapter deliberately share the
-canonical conversation action. If that action is ever changed or replaced by
-an embedding, the adapter fails closed to text mode instead of posting to an
-unreviewed route. Stop aborts the active recognition session and never submits
-the partial transcript.
+Voice deliberately does not infer that an imperative transcript authorizes an
+action turn. It has no call to `/conversation/media`, a bridge endpoint, or an
+action tool. A future spoken-action slice must expose an explicit action-mode
+state, bind the current private actor, and project the same durable media turn
+and ticket; it may not classify ordinary Advice text into mutable authority.
 
 ## Hub-owned background advice lifecycle
 
@@ -542,10 +563,13 @@ ready, while the failed record and its terminal notification remain intact.
    through the ticket owner, and allows direct actions only after Hub policy
    approval and read-back verification. One explicit media-only turn uses the
    same DSH Agent, while ordinary Advice remains non-applying.
-5. **V4 — household media command product (pending):** add the durable Hub turn
-   owner, explicit text/private-voice mode, clarification/result projection,
-   and links to the one existing confirmation ticket and Activity record.
-6. **V5 — ambient household assistant:** evaluate local wake word, barge-in,
+5. **V4 — household media command product (text implemented):** the Hub-owned
+   durable action turn, explicit text submitter, bounded clarification/result
+   projection, restart rules, and links to the existing confirmation ticket are
+   in place. Ordinary Advice and private voice remain read-only.
+6. **V5 — explicit spoken actions and ambient evaluation:** first add a visible,
+   interruptible private-voice action mode that reuses the V4 durable owner;
+   only then evaluate local wake word, barge-in,
    multi-room handoff, household-member policy, and local speech providers only
    after push-to-talk privacy and reliability are proven.
 

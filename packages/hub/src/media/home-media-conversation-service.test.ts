@@ -666,6 +666,50 @@ test("revokes an explicit media action scope before a detached late request can 
   }
 });
 
+test("revokes an explicit media action scope when its owner aborts a signal-ignoring callback", async () => {
+  const { HomeMediaConversationService } = await loadModule();
+  const ctx = new Context();
+  await ctx.plugin(StubCatalog);
+  await ctx.plugin(StubPreparation);
+  await ctx.plugin(StubReviewCenter);
+  const fiber = await ctx.plugin(HomeMediaConversationService);
+  try {
+    const service = ctx.homeMediaConversation as unknown as {
+      requestAction(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+      runActionTurn(
+        actor: OneShotActionActor,
+        requestId: string,
+        callback: () => unknown | PromiseLike<unknown>,
+        signal?: AbortSignal,
+      ): Promise<Record<string, unknown>>;
+    };
+    const controller = new AbortController();
+    let releaseLate!: () => void;
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve; });
+    let lateResult!: Promise<Record<string, unknown>>;
+    const turn = service.runActionTurn(actor, "media-turn-aborted", () => {
+      lateResult = (async () => {
+        await lateGate;
+        return service.requestAction({
+          mediaRef: "opaqueMediaRef0001",
+          playerCapabilityId: "hwc-media-room",
+          queueMode: "play_next",
+        });
+      })();
+      return new Promise<never>(() => undefined);
+    }, controller.signal);
+
+    controller.abort(new Error("owner timeout"));
+    await assert.rejects(turn, /owner timeout/);
+    releaseLate();
+    assert.deepEqual(await lateResult, { status: "blocked", reason: "unavailable" });
+    assert.equal((ctx.homeReviewCenter as unknown as StubReviewCenter).requests.length, 0);
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("rejects a new media action turn inherited by a detached child of a revoked scope", async () => {
   const { HomeMediaConversationService } = await loadModule();
   const ctx = new Context();

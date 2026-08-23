@@ -165,7 +165,8 @@ export type ProductTurnStatus =
 
 export type ProductTurnStage = "received" | "checking_home" | "reading_inventory" | "checking_rules" | "composing";
 
-export interface ProductTurn {
+export interface ProductAdviceTurn {
+  readonly kind: "advice";
   readonly id: string;
   readonly question: string;
   readonly status: ProductTurnStatus;
@@ -185,6 +186,81 @@ export interface ProductTurn {
   readonly canStop?: boolean;
   readonly canBackground?: boolean;
 }
+
+export type ProductMediaActionTicketStatus =
+  | "pending_confirmation"
+  | "acting"
+  | "verified"
+  | "failed"
+  | "unknown"
+  | "rejected"
+  | "expired"
+  | "unavailable"
+  | "corrupted";
+
+/** Hub-owned availability for an explicit media action turn. */
+export type ProductMediaActionAvailability =
+  | "ready"
+  | "active_turn"
+  | "model_unavailable"
+  | "agent_busy"
+  | "setup_required"
+  | "stopped"
+  | "unavailable";
+
+/** Safe display fields only. Opaque media and player references stay in the Hub. */
+export interface ProductMediaActionClarification {
+  readonly slot: "query" | "mediaRef" | "playerCapabilityId" | "queueMode";
+  readonly reason: "missing" | "ambiguous" | "no_match" | "not_playable";
+  readonly options: readonly {
+    readonly title?: string;
+    readonly sourceLabel?: string;
+    readonly playable?: boolean;
+  }[];
+}
+
+/** Live ticket status; the Review Center remains the only approval surface. */
+export interface ProductMediaActionTicket {
+  readonly id: string;
+  readonly status: ProductMediaActionTicketStatus;
+  readonly detail?: string;
+  readonly reviewHref?: string;
+}
+
+export type ProductMediaActionTurn =
+  | {
+      readonly kind: "media_action";
+      readonly id: string;
+      readonly question: string;
+      readonly status: "running";
+      readonly statusMessage?: string;
+      readonly elapsedSeconds?: number;
+      readonly canStop?: boolean;
+    }
+  | {
+      readonly kind: "media_action";
+      readonly id: string;
+      readonly question: string;
+      readonly status: "clarification";
+      readonly clarification: ProductMediaActionClarification;
+    }
+  | {
+      readonly kind: "media_action";
+      readonly id: string;
+      readonly question: string;
+      readonly status: "ticket";
+      readonly ticket: ProductMediaActionTicket;
+    }
+  | {
+      readonly kind: "media_action";
+      readonly id: string;
+      readonly question: string;
+      readonly status: "failed" | "cancelled" | "unavailable" | "corrupted";
+      readonly error?: string;
+    };
+
+/** Every conversation surface declares whether it reads advice or governs a media action. */
+export type ProductTurn = ProductAdviceTurn | ProductMediaActionTurn;
 
 export interface ProductAdviceCompletionNotification {
   readonly adviceId: string;
@@ -458,6 +534,10 @@ export interface ProductShellModel {
   readonly concern?: ProductConcern;
   readonly agentNote?: string;
   readonly activeTurn?: ProductTurn;
+  /** A server-issued 128-bit retry key for one explicit media command. */
+  readonly mediaActionIdempotencyKey?: string;
+  /** The action owner supplies an explicit availability state; missing means setup is required. */
+  readonly mediaActionAvailability?: ProductMediaActionAvailability;
   /** The conversation entry follows the model availability visible to this household. */
   readonly conversationAvailability?: "ready" | "active_request" | "setup_required" | "home_connecting" | "agent_busy" | "model_unavailable" | "stopped" | "unavailable";
   /** A bounded server-held question that returns after the model recovers. */
@@ -836,7 +916,7 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
-  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderOverviewConcern(model.concern)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer(model.connection.state === "disconnected", model.conversationAvailability === "model_unavailable")}`;
+  return `${renderOverviewHeader(model, options)}${renderOverviewStatus(model)}${renderOverviewConcern(model.concern)}${renderActiveTurnSummary(model.activeTurn)}<div class="product-overview-grid"><div class="product-space-grid">${renderOverviewSpaces(model)}</div><aside class="product-overview-aside">${renderOverviewReviewSummary(model, options)}${renderOverviewAgentNote(model)}${renderOverviewEnergy(model)}</aside></div>${renderOverviewComposer(model.connection.state === "disconnected", model.conversationAvailability === "model_unavailable", model.mediaActionIdempotencyKey, model.mediaActionAvailability)}`;
 }
 
 function renderOverviewHeader(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
@@ -893,13 +973,58 @@ function renderOverviewEnergy(model: NormalizedProductShellModel): string {
   return energy === undefined ? "" : `<section class="product-card" aria-labelledby="energy-heading"><h2 id="energy-heading">今日能耗</h2><div class="product-energy-value"><strong>${escapeHtml(energy.value ?? "—")}</strong>${energy.change === undefined ? "" : `<span>${escapeHtml(energy.change)}</span>`}</div>${energy.note === undefined ? "" : `<p class="product-energy-note">${escapeHtml(energy.note)}</p>`}</section>`;
 }
 
-function renderOverviewComposer(disconnected = false, modelUnavailable = false): string {
-  if (modelUnavailable) return `<section class="product-composer-unavailable" role="status" aria-live="polite"><p>家庭助手模型正在恢复。恢复后可以继续提问。</p><a class="product-primary-action" href="/settings#operational-model">检查模型连接</a></section>`;
+function validMediaActionIdempotencyKey(value: string | undefined): string | undefined {
+  return value !== undefined && /^[a-f0-9]{32}$/.test(value) ? value : undefined;
+}
+
+function mediaActionAvailabilityNotice(availability: ProductMediaActionAvailability, hasKey: boolean): string {
+  switch (availability) {
+    case "ready": return hasKey
+      ? "普通问答只读取和解释家庭状态；“作为媒体命令”才会准备受治理的播放动作。"
+      : "媒体命令已就绪，请刷新此页后重试。";
+    case "active_turn": return "当前一条媒体命令完成后，可以继续发出新的命令。";
+    case "model_unavailable": return "家庭助手模型正在恢复。恢复后可以继续提问或发出媒体命令。";
+    case "agent_busy": return "助手正在处理另一件事，完成后可以继续发出媒体命令。";
+    case "setup_required": return "这台 Hub 尚未启用媒体命令。";
+    case "stopped": return "媒体命令暂不可用。";
+    case "unavailable": return "媒体命令暂不可用。";
+  }
+}
+
+function renderQuestionComposer(input: {
+  readonly className: "product-composer" | "product-conversation-composer";
+  readonly inputId: string;
+  readonly label: string;
+  readonly placeholder: string;
+  readonly draft?: string;
+  readonly modelUnavailable: boolean;
+  readonly mediaActionIdempotencyKey?: string;
+  readonly mediaActionAvailability?: ProductMediaActionAvailability;
+  readonly voice?: string;
+}): string {
+  const key = validMediaActionIdempotencyKey(input.mediaActionIdempotencyKey);
+  const disabled = input.modelUnavailable ? " disabled" : "";
+  const mediaAvailability = input.modelUnavailable ? "model_unavailable" : input.mediaActionAvailability ?? "setup_required";
+  const mediaEnabled = mediaAvailability === "ready" && key !== undefined;
+  const mediaDisabled = !mediaEnabled;
+  const mediaDisabledAttribute = mediaDisabled ? " disabled" : "";
+  const mediaNotice = mediaActionAvailabilityNotice(mediaAvailability, key !== undefined);
+  const mediaKey = mediaEnabled ? ` name="mediaActionIdempotencyKey" value="${escapeHtml(key!)}"` : "";
+  const recovery = input.modelUnavailable ? `<a class="product-secondary-action" href="/settings#operational-model">检查模型连接</a>` : "";
+  return `<form class="${input.className}" method="post" action="/conversation"><label class="product-sr-only" for="${input.inputId}">${escapeHtml(input.label)}</label><input id="${input.inputId}" name="question" autocomplete="off" placeholder="${escapeHtml(input.placeholder)}"${input.draft === undefined ? "" : ` value="${escapeHtml(input.draft)}"`}${disabled} />${input.voice ?? ""}<button type="submit"${disabled}>问问家里</button><button class="product-media-command-action" type="submit" formaction="/conversation/media"${mediaKey}${mediaDisabledAttribute}>作为媒体命令</button></form><p class="product-helper-copy"${input.modelUnavailable ? ' role="status" aria-live="polite"' : ""}>${mediaNotice}</p>${recovery}`;
+}
+
+function renderOverviewComposer(
+  disconnected = false,
+  modelUnavailable = false,
+  mediaActionIdempotencyKey?: string,
+  mediaActionAvailability?: ProductMediaActionAvailability,
+): string {
   const placeholder = disconnected ? "可以提问；涉及设备的动作会等连接恢复" : "问问家，或说出你想做的事…";
-  const helper = disconnected ? "设备动作会在连接恢复后回到这里。" : "快捷句会把这句话交给它：低风险直接做，其余走该走的闸门。";
   const phrase = (question: string) => `<form method="post" action="/conversation"><button type="submit" name="question" value="${escapeHtml(question)}">${escapeHtml(question)}</button></form>`;
-  const phrases = disconnected ? "" : `<div class="product-quick-phrases">${phrase("现在家里怎么样？")}${phrase("今晚有什么要注意的吗？")}</div>`;
-  return `${phrases}<form class="product-composer" method="post" action="/conversation"><label class="product-sr-only" for="overview-question">问问家里的情况</label><input id="overview-question" name="question" autocomplete="off" placeholder="${placeholder}" /><a class="product-voice-entry" href="/voice" aria-label="使用语音">语音</a><button type="submit">发送</button></form><p class="product-helper-copy">${helper}</p>`;
+  const phrases = disconnected || modelUnavailable ? "" : `<div class="product-quick-phrases">${phrase("现在家里怎么样？")}${phrase("今晚有什么要注意的吗？")}</div>`;
+  const voice = modelUnavailable ? "" : `<a class="product-voice-entry" href="/voice" aria-label="使用语音">语音</a>`;
+  return `${phrases}${renderQuestionComposer({ className: "product-composer", inputId: "overview-question", label: "问问家里的情况", placeholder, modelUnavailable, mediaActionIdempotencyKey, mediaActionAvailability, voice })}`;
 }
 
 function overviewConnectionStatus(connection: ProductShellConnection): {
@@ -923,8 +1048,15 @@ function overviewConnectionStatus(connection: ProductShellConnection): {
 }
 
 function renderActiveTurnSummary(turn: ProductTurn | undefined): string {
-  if (turn === undefined || !["accepted", "inspecting", "streaming", "background"].includes(turn.status)) return "";
-  return `<section class="product-card product-active-turn" aria-live="polite"><div><p class="product-kicker">正在处理</p><h2>${escapeHtml(turn.question)}</h2><p class="product-muted">${escapeHtml(turn.statusMessage ?? "正在查看家里的信息")}</p></div><a class="product-primary-action" href="/conversation/${encodedPathSegment(turn.id)}">查看进度</a></section>`;
+  if (turn === undefined) return "";
+  const active = turn.kind === "advice"
+    ? ["accepted", "inspecting", "streaming", "background"].includes(turn.status)
+    : turn.status === "running" || (turn.status === "ticket" && turn.ticket.status === "acting");
+  if (!active) return "";
+  const detail = turn.kind === "advice"
+    ? turn.statusMessage ?? "正在查看家里的信息"
+    : turn.status === "running" ? turn.statusMessage ?? "正在准备媒体命令" : "正在执行已确认的媒体命令";
+  return `<section class="product-card product-active-turn" aria-live="polite"><div><p class="product-kicker">正在处理</p><h2>${escapeHtml(turn.question)}</h2><p class="product-muted">${escapeHtml(detail)}</p></div><a class="product-primary-action" href="/conversation/${encodedPathSegment(turn.id)}">查看进度</a></section>`;
 }
 
 function renderSpaceCard(space: ProductSpace, stale = false): string {
@@ -944,13 +1076,75 @@ function renderConversation(model: NormalizedProductShellModel, options: Product
     : turn === undefined
     ? `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><p>我在这里，告诉我家里的情况或想做的事。</p></div></div>`
     : `<div class="product-message product-message--user"><div class="product-message-bubble"><p>${escapeHtml(turn.question)}</p></div></div>${renderTurn(turn, agentName)}`;
-  const draft = model.conversationDraft === undefined ? "" : ` value="${escapeHtml(model.conversationDraft)}"`;
-  const disabled = modelUnavailable ? " disabled" : "";
   const voice = modelUnavailable ? "" : `<a class="product-voice-entry" href="/voice" aria-label="使用语音">语音</a>`;
-  return `<header class="product-page-header product-conversation-header"><div><p class="product-kicker">对话</p><h1>和${escapeHtml(agentName)}对话</h1><p class="product-muted">问我家里的状态、刚刚发生的变化，或下一步怎么做。</p></div><a class="product-view-switcher" href="${routeHref("overview", options)}">回到总览</a></header><div class="product-conversation"><section class="product-card product-conversation-main" aria-label="对话内容"><div class="product-conversation-thread" aria-live="polite">${thread}</div><form class="product-conversation-composer" method="post" action="/conversation"><label class="product-sr-only" for="conversation-question">继续对话</label><input id="conversation-question" name="question" autocomplete="off" placeholder="继续吩咐，或问它为什么这样选…"${draft}${disabled} />${voice}<button type="submit"${disabled}>发送</button></form><p class="product-helper-copy">${modelUnavailable ? "恢复后会保留这条问题，继续发送。" : "处理进度和结果会显示在这里。"}</p>${renderUndo(model.undo)}</section><aside class="product-conversation-side"><section class="product-card product-conversation-side" aria-labelledby="conversation-scope-heading"><h2 id="conversation-scope-heading">本次问题</h2><ul class="product-side-list"><li><span>家庭</span><strong>${escapeHtml(model.household.name ?? "家庭名称待设置")}</strong></li><li><span>来源</span><strong>家庭状态</strong></li></ul></section><section class="product-card product-card--flat"><h2>动作说明</h2><p class="product-muted">需要确认的动作会先等你同意；每次动作的验证和撤销入口会显示在结果里。</p></section></aside></div>`;
+  return `<header class="product-page-header product-conversation-header"><div><p class="product-kicker">对话</p><h1>和${escapeHtml(agentName)}对话</h1><p class="product-muted">普通问答解释家里的情况；播放媒体时，明确选择媒体命令。</p></div><a class="product-view-switcher" href="${routeHref("overview", options)}">回到总览</a></header><div class="product-conversation"><section class="product-card product-conversation-main" aria-label="对话内容"><div class="product-conversation-thread" aria-live="polite">${thread}</div>${renderQuestionComposer({ className: "product-conversation-composer", inputId: "conversation-question", label: "继续对话", placeholder: "继续提问，或输入要播放的内容…", draft: model.conversationDraft, modelUnavailable, mediaActionIdempotencyKey: model.mediaActionIdempotencyKey, mediaActionAvailability: model.mediaActionAvailability, voice })}${renderUndo(model.undo)}</section><aside class="product-conversation-side"><section class="product-card product-conversation-side" aria-labelledby="conversation-scope-heading"><h2 id="conversation-scope-heading">本次问题</h2><ul class="product-side-list"><li><span>家庭</span><strong>${escapeHtml(model.household.name ?? "家庭名称待设置")}</strong></li><li><span>来源</span><strong>家庭状态</strong></li></ul></section><section class="product-card product-card--flat"><h2>媒体命令</h2><p class="product-muted">只有你明确选择“作为媒体命令”后，系统才会准备播放；确认仍在处理中心完成。</p></section></aside></div>`;
+}
+
+function mediaClarificationLabel(slot: ProductMediaActionClarification["slot"]): string {
+  switch (slot) {
+    case "query": return "想播放什么";
+    case "mediaRef": return "要播放的内容";
+    case "playerCapabilityId": return "播放位置";
+    case "queueMode": return "播放方式";
+  }
+}
+
+function mediaClarificationReason(reason: ProductMediaActionClarification["reason"]): string {
+  switch (reason) {
+    case "missing": return "还缺少这项信息。";
+    case "ambiguous": return "有多个合适的候选。";
+    case "no_match": return "没有找到可用的候选。";
+    case "not_playable": return "找到的内容当前不能播放。";
+  }
+}
+
+function mediaTicketPresentation(ticket: ProductMediaActionTicket): { readonly title: string; readonly detail: string; readonly tone: "pending" | "verified" | "attention" } {
+  switch (ticket.status) {
+    case "pending_confirmation": return { title: "等待你确认", detail: ticket.detail ?? "这项媒体动作会在你确认后执行。", tone: "pending" };
+    case "acting": return { title: "正在执行", detail: ticket.detail ?? "正在等待设备返回结果。", tone: "pending" };
+    case "verified": return { title: "已确认完成", detail: ticket.detail ?? "设备状态已读回确认。", tone: "verified" };
+    case "failed": return { title: "没有完成", detail: ticket.detail ?? "设备没有完成这项动作。", tone: "attention" };
+    case "unknown": return { title: "结果还待确认", detail: ticket.detail ?? "设备状态暂时无法确认。", tone: "attention" };
+    case "rejected": return { title: "没有执行", detail: ticket.detail ?? "这项媒体动作没有获得确认。", tone: "attention" };
+    case "expired": return { title: "确认已过期", detail: ticket.detail ?? "请重新发出媒体命令以取得新的确认。", tone: "attention" };
+    case "unavailable": return { title: "动作状态暂不可用", detail: ticket.detail ?? "请稍后在处理中心重新检查。", tone: "attention" };
+    case "corrupted": return { title: "动作状态需要检查", detail: ticket.detail ?? "请在处理中心重新检查这项动作。", tone: "attention" };
+  }
+}
+
+function renderMediaActionTurn(turn: ProductMediaActionTurn, agentName: string): string {
+  if (turn.status === "running") {
+    const longWait = (turn.elapsedSeconds ?? 0) > 10;
+    const stop = turn.canStop === false ? "" : `<form class="product-action-form product-action-form--stop" method="post" action="/conversation/${encodedPathSegment(turn.id)}/stop"><button class="product-quiet-action" type="submit">停止</button></form>`;
+    return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><section class="product-media-action-turn product-media-action-turn--running" aria-label="${escapeHtml(agentName)}正在准备媒体命令"><p class="product-kicker">媒体命令</p><h2>${escapeHtml(turn.statusMessage ?? "正在准备媒体命令")}</h2><p>${longWait ? "仍在处理。你可以离开这页；完成后会显示在这里。" : "正在查找内容和可用的播放位置。"}</p><div class="product-conversation-actions">${stop}</div></section></div></div>`;
+  }
+  if (turn.status === "clarification") {
+    const options = turn.clarification.options
+      .map((option) => option.title === undefined ? "" : `<li><strong>${escapeHtml(option.title)}</strong>${option.sourceLabel === undefined ? "" : `<span>${escapeHtml(option.sourceLabel)}</span>`}${option.playable === false ? "<span>当前不可播放</span>" : ""}</li>`)
+      .filter(Boolean)
+      .join("");
+    return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><section class="product-media-action-turn product-media-action-turn--clarification"><p class="product-kicker">媒体命令</p><h2>还需要确认${mediaClarificationLabel(turn.clarification.slot)}</h2><p>${mediaClarificationReason(turn.clarification.reason)} 请重新明确输入，再选择“作为媒体命令”。</p>${options === "" ? "" : `<ul class="product-media-clarification-options">${options}</ul>`}</section></div></div>`;
+  }
+  if (turn.status === "ticket") {
+    const presentation = mediaTicketPresentation(turn.ticket);
+    const href = turn.ticket.reviewHref === undefined ? "/review-center" : localHref(turn.ticket.reviewHref, "/review-center");
+    return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><section class="product-media-action-turn product-media-action-turn--${presentation.tone}"><p class="product-kicker">媒体命令</p><h2>${escapeHtml(presentation.title)}</h2><p>${escapeHtml(presentation.detail)}</p><a class="product-secondary-action" href="${escapeHtml(href)}">在处理中心查看</a></section></div></div>`;
+  }
+  const presentation = turn.status === "cancelled"
+    ? { title: "已停止", message: "已停止这次媒体命令，家里的状态保持原样。" }
+    : turn.status === "unavailable"
+      ? { title: "动作状态暂不可用", message: turn.error ?? "请稍后重新检查，或重新发出媒体命令。" }
+      : turn.status === "corrupted"
+        ? { title: "动作状态需要检查", message: turn.error ?? "请在处理中心重新检查这项动作。" }
+        : { title: "没有完成", message: turn.error ?? "媒体命令没有完成。请确认内容和播放位置后重新发出。" };
+  const review = turn.status === "unavailable" || turn.status === "corrupted"
+    ? `<a class="product-secondary-action" href="/review-center">在处理中心查看</a>`
+    : "";
+  return `<div class="product-message"><span class="product-message-mark" aria-hidden="true">h</span><div class="product-message-bubble"><section class="product-media-action-turn product-media-action-turn--attention" role="status"><p class="product-kicker">媒体命令</p><h2>${presentation.title}</h2><p>${escapeHtml(presentation.message)}</p>${review}</section></div></div>`;
 }
 
 function renderTurn(turn: ProductTurn, agentName: string): string {
+  if (turn.kind === "media_action") return renderMediaActionTurn(turn, agentName);
   const active = turn.status === "accepted" || turn.status === "inspecting" || turn.status === "streaming" || turn.status === "background";
   const stageOrder: readonly ProductTurnStage[] = ["received", "checking_home", "reading_inventory", "checking_rules", "composing"];
   const stageLabels: Readonly<Record<ProductTurnStage, string>> = { received: "已收到", checking_home: "查看家里的当前状态", reading_inventory: "查看房间和设备", checking_rules: "确认家里已有安排", composing: "整理回答" };
@@ -1729,7 +1923,7 @@ function renderProductViewRecipeSlot(
     case "overview.review-summary": return renderOverviewReviewSummary(model, options);
     case "overview.agent-note": return renderOverviewAgentNote(model);
     case "overview.energy": return renderOverviewEnergy(model);
-    case "overview.composer": return renderOverviewComposer(model.connection.state === "disconnected", model.conversationAvailability === "model_unavailable");
+    case "overview.composer": return renderOverviewComposer(model.connection.state === "disconnected", model.conversationAvailability === "model_unavailable", model.mediaActionIdempotencyKey, model.mediaActionAvailability);
     case "conversation.workspace": return renderConversation(model, options);
     case "reviews.workspace": return renderReviews(model, options);
     case "activity.workspace": return renderActivity(model);

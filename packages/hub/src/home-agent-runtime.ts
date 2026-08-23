@@ -62,6 +62,10 @@ import {
   type HomeMediaConversationServiceOptions,
 } from "./media/home-media-conversation-service.js";
 import {
+  HomeMediaActionTurnService,
+  type HomeMediaActionTurnServiceOptions,
+} from "./media/home-media-action-turn-service.js";
+import {
   HouseholdReviewCenterService,
   type HouseholdReviewCenterServiceOptions,
 } from "./home/household-review-center-service.js";
@@ -110,6 +114,8 @@ export interface HomeAgentRuntimeOptions {
   readonly mediaPlayback?: HomeMediaPlaybackExecutionServiceOptions;
   /** Governed media request orchestration. The runtime mounts it with the catalog and review owner. */
   readonly mediaConversation?: HomeMediaConversationServiceOptions;
+  /** Durable owner for explicit media action turns. Requires an explicit media catalog. */
+  readonly homeMediaActionTurns?: Pick<HomeMediaActionTurnServiceOptions, "path">;
   readonly inboxHttp?: ProposalInboxHttpOptions;
   /** Private Hub-owned persistence for layout authoring source drafts. */
   readonly homeViewRecipeDrafts?: SqliteProductViewRecipeDraftStoreOptions;
@@ -223,8 +229,13 @@ class HomeAgentProductBundleRuntime {
       });
       if (this.options.mediaCatalog !== undefined) {
         await this.mount(HomeMediaConversationService, this.options.mediaConversation ?? {});
+      } else if (this.options.homeMediaActionTurns !== undefined) {
+        throw new Error("Media action turns require an explicit media catalog");
       }
       this.mountedFibers.push(await mountDshHomeAgent(this.context, this.options.agent));
+      if (this.options.homeMediaActionTurns !== undefined) {
+        await this.mount(HomeMediaActionTurnService, this.options.homeMediaActionTurns);
+      }
       await this.mount(HomeAdviceService, this.options.homeAdvice ?? { path: ":memory:" });
       if (this.options.homeOnboarding !== undefined) {
         await this.mount(HomeOnboardingCoordinatorService, {

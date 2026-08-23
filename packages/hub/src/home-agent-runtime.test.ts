@@ -307,6 +307,8 @@ test("mounts one durable household review center and disposes it with the root",
 });
 
 test("mounts an explicit synthetic media catalog before the DSH Agent", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-media-action-turn-runtime-"));
+  const actionTurnPath = join(directory, "home-media-action-turns.sqlite");
   const runtime = createHomeAgentRuntime({
     homeWorld: homeWorldOptions(),
     launchEnvironment: launchEnvironment(),
@@ -322,6 +324,7 @@ test("mounts an explicit synthetic media catalog before the DSH Agent", async ()
         { providerItemId: "jazz-1", title: "Late Night Jazz", kind: "playlist", playable: true },
       ]),
     },
+    homeMediaActionTurns: { path: actionTurnPath },
     agent: {
       provider: "deepseek",
       model: "deepseek-v4-flash",
@@ -333,6 +336,8 @@ test("mounts an explicit synthetic media catalog before the DSH Agent", async ()
     assert.equal(runtime.context.homeMediaCatalog.name, "homeMediaCatalog");
     assert.equal(runtime.context.homeMediaPlaybackPreparation.name, "homeMediaPlaybackPreparation");
     assert.equal(runtime.context.homeMediaConversation.name, "homeMediaConversation");
+    assert.equal(runtime.context.homeMediaActionTurns.name, "homeMediaActionTurns");
+    assert.equal(existsSync(actionTurnPath), true);
     assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "search_home_media"), true);
     assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "prepare_home_media_playback"), true);
     assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "home_media_conversation"), true);
@@ -363,10 +368,12 @@ test("mounts an explicit synthetic media catalog before the DSH Agent", async ()
     assert.deepEqual(JSON.parse(preparationBlock.text), { status: "blocked", reason: "player_not_found" });
   } finally {
     await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
   }
   assert.equal(runtime.context.homeMediaCatalog, undefined);
   assert.equal(runtime.context.homeMediaPlaybackPreparation, undefined);
   assert.equal(runtime.context.homeMediaConversation, undefined);
+  assert.equal(runtime.context.homeMediaActionTurns, undefined);
 });
 
 test("mounts the explicit retention coordinator without starting a timer", async () => {

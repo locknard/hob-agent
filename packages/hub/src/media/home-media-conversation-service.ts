@@ -259,6 +259,7 @@ export class HomeMediaConversationService extends Service {
     actor: OneShotActionActor,
     requestId: string,
     callback: () => unknown | PromiseLike<unknown>,
+    signal?: AbortSignal,
   ): Promise<HomeMediaConversationState> {
     if (this.actionTurnScope.getStore() !== undefined) {
       throw new Error("A media action turn is already active");
@@ -274,7 +275,7 @@ export class HomeMediaConversationService extends Service {
       actionState: undefined,
     };
     try {
-      await this.actionTurnScope.run(scope, callback);
+      await runActionTurnCallback(this.actionTurnScope, scope, callback, signal);
       return scope.actionState ?? { status: "blocked", reason: "unavailable" };
     } finally {
       scope.active = false;
@@ -446,6 +447,22 @@ export class HomeMediaConversationService extends Service {
     if (decision.status === "denied") return blockedDecision(decision);
     return projectActionTicket(updated);
   }
+}
+
+function runActionTurnCallback(
+  storage: AsyncLocalStorage<HomeMediaActionTurnScope>,
+  scope: HomeMediaActionTurnScope,
+  callback: () => unknown | PromiseLike<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<unknown> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Home media action was cancelled"));
+  const task = Promise.resolve(storage.run(scope, callback));
+  if (signal === undefined) return task;
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("Home media action was cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    task.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 function readRequiredPort(ctx: Context, key: string): unknown {

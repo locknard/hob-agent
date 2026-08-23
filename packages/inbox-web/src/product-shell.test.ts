@@ -9,15 +9,27 @@ import {
   renderProductViewRecipeContent,
   PRODUCT_OPERATIONAL_MODEL_JS,
   PRODUCT_PRIVATE_VOICE_JS,
+  type ProductAdviceTurn,
   type ProductConnectionState,
   type ProductControlFeedback,
+  type ProductMediaActionTurn,
   type ProductShellModel,
 } from "./product-shell.js";
 import { PRODUCT_SHELL_CSS } from "./product-shell-styles.js";
 
 const PRODUCT_OPERATIONAL_MODEL_CSS = readFileSync(new URL("./product.css", import.meta.url), "utf8");
 
-function model(overrides: Partial<ProductShellModel> = {}): ProductShellModel {
+type ProductShellFixture = Omit<Partial<ProductShellModel>, "activeTurn"> & {
+  readonly activeTurn?: Omit<ProductAdviceTurn, "kind"> & { readonly kind?: "advice" } | ProductMediaActionTurn;
+};
+
+function model(overrides: ProductShellFixture = {}): ProductShellModel {
+  const { activeTurn: rawActiveTurn, ...rest } = overrides;
+  const activeTurn = rawActiveTurn === undefined
+    ? undefined
+    : rawActiveTurn.kind === "media_action"
+      ? rawActiveTurn
+      : { ...rawActiveTurn, kind: "advice" as const };
   return {
     route: "overview",
     household: { name: "小海的家", agentName: "阿灶", memberName: "小海" },
@@ -68,7 +80,8 @@ function model(overrides: Partial<ProductShellModel> = {}): ProductShellModel {
         cause: ["门磁传感器打开", "触发场景「回家」v3", "执行客厅顶灯与空调动作"],
       },
     ],
-    ...overrides,
+    ...rest,
+    ...(activeTurn === undefined ? {} : { activeTurn }),
   };
 }
 
@@ -190,7 +203,7 @@ test("projects unknown household facts and connection states without inventing a
   assert.match(conversation, />语音<\/a>/);
   assert.match(conversation, /家庭名称待设置/);
   assert.doesNotMatch(conversation, /阿灶|小海的家/);
-  assert.match(conversation, /处理进度和结果会显示在这里/);
+  assert.match(conversation, /这台 Hub 尚未启用媒体命令/);
   assert.doesNotMatch(conversation, /可撤销窗口|告诉你已完成的动作|10 秒/);
 });
 
@@ -213,8 +226,10 @@ test("keeps conversation entry honest while the household model reconnects", () 
   }));
   assert.match(overview, /家庭助手模型正在恢复/);
   assert.match(overview, /href="\/settings#operational-model"/);
-  assert.doesNotMatch(overview, /id="overview-question"/);
-  assert.doesNotMatch(overview, /问问家，或说出你想做的事/);
+  assert.match(overview, /id="overview-question"[^>]*disabled/);
+  assert.match(overview, />问问家里<\/button>/);
+  assert.match(overview, /作为媒体命令<\/button>/);
+  assert.doesNotMatch(overview, /现在家里怎么样？|今晚有什么要注意的吗？/);
 });
 
 test("renders the bounded activity projection without inert filter controls", () => {
@@ -285,6 +300,173 @@ test("renders streaming stop/background states and only offers a ten-second undo
   }));
   assert.match(failed, /家中连接正在恢复/);
   assert.equal(failed.includes("10 秒内"), false);
+});
+
+test("renders an explicit media command separately from read-only household advice", () => {
+  const entry = renderProductShell(model({ route: "conversation" }));
+  assert.match(entry, /播放媒体时，明确选择媒体命令/);
+  assert.doesNotMatch(entry, /播放或停止/);
+
+  const clarification = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      kind: "media_action",
+      id: "media-clarification-1",
+      question: "在多媒体室放 Jazz Evening",
+      status: "clarification",
+      clarification: {
+        slot: "playerCapabilityId",
+        reason: "ambiguous",
+        options: [{ title: "多媒体室音响", sourceLabel: "家庭音响" }],
+      },
+    },
+  }));
+
+  assert.match(clarification, /还需要确认播放位置/);
+  assert.match(clarification, /有多个合适的候选/);
+  assert.match(clarification, /多媒体室音响/);
+  assert.match(clarification, /请重新明确输入/);
+  assert.doesNotMatch(clarification, /已完成/);
+
+  const pending = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      kind: "media_action",
+      id: "media-ticket-1",
+      question: "在多媒体室放 Jazz Evening",
+      status: "ticket",
+      ticket: { id: "ticket-private", status: "pending_confirmation" },
+    },
+  }));
+
+  assert.match(pending, /等待你确认/);
+  assert.match(pending, /href="\/review-center"/);
+  assert.doesNotMatch(pending, /批准|拒绝|ticket-private/);
+
+  const unavailable = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      kind: "media_action",
+      id: "media-unavailable-1",
+      question: "在多媒体室放 Jazz Evening",
+      status: "unavailable",
+    },
+  }));
+  assert.match(unavailable, /动作状态暂不可用/);
+  assert.doesNotMatch(unavailable, /已完成/);
+  const unavailableCard = unavailable.match(/<section class="product-media-action-turn[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.match(unavailableCard, /href="\/review-center"/);
+
+  for (const status of ["corrupted", "failed", "cancelled"] as const) {
+    const html = renderProductShell(model({
+      route: "conversation",
+      activeTurn: {
+        kind: "media_action",
+        id: `media-${status}-1`,
+        question: "在多媒体室放 Jazz Evening",
+        status,
+      },
+    }));
+    const card = html.match(/<section class="product-media-action-turn[\s\S]*?<\/section>/)?.[0] ?? "";
+    if (status === "corrupted") assert.match(card, /href="\/review-center"/);
+    else assert.doesNotMatch(card, /href="\/review-center"/);
+  }
+
+  const running = renderProductShell(model({
+    route: "conversation",
+    activeTurn: {
+      kind: "media_action",
+      id: "media-running-1",
+      question: "在多媒体室放 Jazz Evening",
+      status: "running",
+      elapsedSeconds: 11,
+      canStop: true,
+    },
+  }));
+  assert.match(running, /你可以离开这页/);
+  assert.match(running, /action="\/conversation\/media-running-1\/stop"/);
+});
+
+test("offers a separate media command submit with a server-issued retry key", () => {
+  const html = renderProductShell(model({
+    route: "conversation",
+    mediaActionAvailability: "ready",
+    mediaActionIdempotencyKey: "a".repeat(32),
+  }));
+
+  assert.match(html, /action="\/conversation"/);
+  assert.match(html, /formaction="\/conversation\/media"/);
+  assert.doesNotMatch(html, /<input type="hidden" name="mediaActionIdempotencyKey"/);
+  assert.match(html, /<button class="product-media-command-action" type="submit" formaction="\/conversation\/media" name="mediaActionIdempotencyKey" value="a{32}">作为媒体命令<\/button>/);
+  assert.match(html, /<button type="submit">问问家里<\/button>/);
+  assert.match(html, />作为媒体命令</);
+  assert.match(html, />问问家里</);
+  assert.match(html, /普通问答只读取和解释家庭状态/);
+
+  const invalidKey = renderProductShell(model({
+    route: "conversation",
+    mediaActionAvailability: "ready",
+    mediaActionIdempotencyKey: "A".repeat(32),
+  }));
+  assert.doesNotMatch(invalidKey, /name="mediaActionIdempotencyKey"/);
+  assert.match(invalidKey, /formaction="\/conversation\/media" disabled/);
+});
+
+test("keeps the media command submit touch-safe at the 390px layout", () => {
+  const mobileStyles = PRODUCT_SHELL_CSS.slice(PRODUCT_SHELL_CSS.indexOf("@media (max-width: 28rem)"));
+
+  assert.match(
+    mobileStyles,
+    /\.product-composer \.product-media-command-action, \.product-conversation-composer \.product-media-command-action \{[^}]*min-height:\s*2\.75rem;/,
+  );
+});
+
+test("states the Hub-owned media availability before enabling a command", () => {
+  const key = "a".repeat(32);
+  const unavailable = renderProductShell(model({
+    route: "conversation",
+    mediaActionIdempotencyKey: key,
+  }));
+  assert.match(unavailable, /这台 Hub 尚未启用媒体命令/);
+  assert.match(unavailable, /formaction="\/conversation\/media" disabled/);
+
+  const busy = renderProductShell(model({
+    route: "conversation",
+    mediaActionAvailability: "agent_busy",
+    mediaActionIdempotencyKey: key,
+  }));
+  assert.match(busy, /助手正在处理另一件事/);
+  assert.match(busy, /formaction="\/conversation\/media" disabled/);
+
+  for (const [availability, notice] of [
+    ["active_turn", "当前一条媒体命令完成后"],
+    ["model_unavailable", "家庭助手模型正在恢复"],
+    ["stopped", "媒体命令暂不可用"],
+    ["unavailable", "媒体命令暂不可用"],
+  ] as const) {
+    const html = renderProductShell(model({
+      route: "conversation",
+      mediaActionAvailability: availability,
+      mediaActionIdempotencyKey: key,
+    }));
+    assert.match(html, new RegExp(notice));
+    assert.match(html, /formaction="\/conversation\/media" disabled/);
+  }
+
+  const readyWithoutKey = renderProductShell(model({
+    route: "conversation",
+    mediaActionAvailability: "ready",
+  }));
+  assert.match(readyWithoutKey, /请刷新此页后重试/);
+  assert.match(readyWithoutKey, /formaction="\/conversation\/media" disabled/);
+
+  const ready = renderProductShell(model({
+    route: "conversation",
+    mediaActionAvailability: "ready",
+    mediaActionIdempotencyKey: key,
+  }));
+  assert.match(ready, /formaction="\/conversation\/media" name="mediaActionIdempotencyKey" value="a{32}">作为媒体命令/);
+  assert.match(ready, /普通问答只读取和解释家庭状态/);
 });
 
 test("renders only completed answers as completion and keeps idle or unknown turns waiting", () => {
@@ -472,7 +654,8 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.doesNotMatch(html, /[⌄✓●→↗⚙⌂◷≋▱□]/);
   assert.equal(html.includes('class="product-mobile-header"'), false);
   assert.match(PRODUCT_SHELL_CSS, /\.product-main > \.product-composer \{ position: fixed;/);
-  assert.match(PRODUCT_SHELL_CSS, /\.product-composer \{ grid-template-columns: minmax\(0, 1fr\) auto;/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-composer, \.product-conversation-composer \{ grid-template-columns: minmax\(0, 1fr\) auto;/);
+  assert.match(PRODUCT_SHELL_CSS, /\.product-conversation-composer \.product-media-command-action \{[^}]*background: var\(--shell-surface\)/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-shell\[data-route="onboarding"\] \.product-mobile-nav \{ display: none;/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-shell\[data-route="onboarding"\] \.product-onboarding-list \{ display: none;/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-presentation-choice:has\(input:checked\)/);
@@ -480,6 +663,30 @@ test("ships responsive and preference-aware presentation tokens without decorati
   assert.match(PRODUCT_SHELL_CSS, /data-control-row-density="compact"/);
   assert.match(PRODUCT_SHELL_CSS, /\.product-host-view-menu-panel\s*\{[^}]*position:\s*absolute/);
   assert.match(PRODUCT_SHELL_CSS, /@media\s*\(max-width:\s*56rem\)[\s\S]*\.product-host-view-menu-panel\s*\{[^}]*position:\s*fixed/);
+});
+
+test("keeps muted copy AA-readable when dark mode requests more contrast", () => {
+  const override = PRODUCT_SHELL_CSS.match(
+    /@media \(prefers-color-scheme: dark\) and \(prefers-contrast: more\) \{\s*:root \{[^}]*--shell-muted:\s*(#[0-9a-f]{6});[^}]*--shell-subtle:\s*(#[0-9a-f]{6});/i,
+  );
+  assert.ok(override);
+
+  const luminance = (hex: string): number => {
+    const channels = [1, 3, 5].map((start) => Number.parseInt(hex.slice(start, start + 2), 16) / 255);
+    const [red = 0, green = 0, blue = 0] = channels.map((channel) => channel <= 0.04045
+      ? channel / 12.92
+      : ((channel + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const contrast = (foreground: string, background: string): number => {
+    const foregroundLuminance = luminance(foreground);
+    const backgroundLuminance = luminance(background);
+    return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05)
+      / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
+  };
+
+  assert.ok(contrast(override[1]!, "#202522") >= 4.5);
+  assert.ok(contrast(override[2]!, "#202522") >= 4.5);
 });
 
 test("keeps two views as direct shortcuts and presents larger catalogs in a Host menu", () => {

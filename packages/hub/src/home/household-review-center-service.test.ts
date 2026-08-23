@@ -177,6 +177,65 @@ test("uses one action ticket as the runtime confirmation card", async () => {
   }
 });
 
+test("reads one action ticket by its ticket and request identity", async () => {
+  const context = new Context();
+  const fixture = confirmationFixture();
+  await context.plugin(StubHomeWorld);
+  await context.plugin(HouseholdReviewCenterService, {
+    path: ":memory:",
+    gateway: fixture.gateway,
+    policy: fixture.policy,
+    now: () => NOW,
+    idFactory: (() => {
+      let next = 0;
+      return () => `ticket-by-request-${++next}`;
+    })(),
+  });
+
+  try {
+    const requested = await context.homeReviewCenter.requestAction({
+      requestId: "media-action:turn-by-request",
+      capabilityId: "media-capability",
+      summary: "播放晚间爵士",
+      action: { kind: "set_boolean", value: true },
+      actor,
+    });
+    assert.equal(context.homeReviewCenter.getActionTicket(requested.ticket.id)?.requestId, "media-action:turn-by-request");
+    assert.equal(context.homeReviewCenter.getActionTicketForRequest("media-action:turn-by-request")?.id, requested.ticket.id);
+    assert.equal(context.homeReviewCenter.getActionTicketForRequest("missing-request"), undefined);
+  } finally {
+    await context.fiber.dispose();
+  }
+});
+
+test("expires an action ticket before returning it through the read-only ticket port", async () => {
+  let now = NOW;
+  const context = new Context();
+  const fixture = confirmationFixture();
+  await context.plugin(StubHomeWorld);
+  await context.plugin(HouseholdReviewCenterService, {
+    path: ":memory:",
+    gateway: fixture.gateway,
+    policy: fixture.policy,
+    now: () => now,
+    idFactory: (() => { let next = 0; return () => `expiry-read-${++next}`; })(),
+  });
+
+  try {
+    const requested = await context.homeReviewCenter.requestAction({
+      requestId: "media-action:expiry-read",
+      capabilityId: "media-capability",
+      summary: "播放晚间爵士",
+      action: { kind: "set_boolean", value: true },
+      actor,
+    });
+    now = "2026-08-21T00:00:11.000Z";
+    assert.equal(context.homeReviewCenter.getActionTicket(requested.ticket.id)?.status, "expired");
+  } finally {
+    await context.fiber.dispose();
+  }
+});
+
 test("keeps an action unknown when the authoritative bridge contact is stale", async () => {
   const context = new Context();
   await context.plugin(StubHomeWorld);

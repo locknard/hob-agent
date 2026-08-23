@@ -144,6 +144,7 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   assert.equal(JSON.stringify(options.runtime.homeWorld.bridges).includes("home-assistant-secret"), false);
   assert.equal(options.runtime.inboxHttp, undefined);
   assert.equal(options.runtime.mediaCatalog, undefined);
+  assert.equal(options.runtime.homeMediaActionTurns, undefined);
   assert.deepEqual(options.runtime.homeSafety?.bindings, []);
 });
 
@@ -248,6 +249,9 @@ test("mounts explicit Music Assistant catalog and governed playback composition"
   assert.equal(mediaCatalog?.sourceLabel, "Music Assistant");
   assert.equal(mediaCatalog?.maxResults, 3);
   assert.equal(mediaCatalog?.provider.constructor.name, "MusicAssistantMediaCatalogProvider");
+  assert.deepEqual(options.runtime.homeMediaActionTurns, {
+    path: "/tmp/hob-agent-main-test/home-media-action-turns.sqlite",
+  });
   const client = (mediaCatalog?.provider as unknown as { readonly client?: unknown }).client as {
     readonly constructor: { readonly name: string };
   } | undefined;

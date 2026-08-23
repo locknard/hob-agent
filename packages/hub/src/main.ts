@@ -163,7 +163,10 @@ export function createHomeHubProcessOptions(
         homeViewRecipeDrafts: { path: join(config.dataDirectory, "layout-drafts.sqlite") },
       }),
       ...(config.observation === undefined ? {} : { observation: config.observation }),
-      ...(mediaCatalog === undefined ? {} : { mediaCatalog }),
+      ...(mediaCatalog === undefined ? {} : {
+        mediaCatalog,
+        homeMediaActionTurns: { path: join(config.dataDirectory, "home-media-action-turns.sqlite") },
+      }),
       ...(mediaPlayback === undefined ? {} : { mediaPlayback }),
       launchEnvironment: config.launchEnvironment,
     },

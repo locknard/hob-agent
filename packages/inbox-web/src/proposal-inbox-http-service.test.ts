@@ -100,6 +100,43 @@ class StubInbox extends Service {
   }
 }
 
+class MediaActionInbox extends StubInbox {
+  readonly mediaStarts: unknown[] = [];
+  readonly mediaCancels: string[] = [];
+  mediaStatus: "running" | "ticket" | "unavailable" | "corrupted" = "ticket";
+  mediaAvailability: "ready" | "active_turn" = "ready";
+  getMediaActionAvailability() {
+    return this.mediaAvailability === "active_turn"
+      ? { status: "active_turn" as const, activeTurnId: "media-turn-1" }
+      : { status: "ready" as const };
+  }
+  async startMediaAction(input: unknown) {
+    this.mediaStarts.push(input);
+    return this.getProductMediaActionTurn("media-turn-1")!;
+  }
+  getProductMediaActionTurn(id: string) {
+    if (id !== "media-turn-1") return undefined;
+    if (this.mediaStatus === "running") return {
+      kind: "media_action" as const, id, question: "播放 Jazz Evening", status: "running" as const, canStop: true,
+    };
+    if (this.mediaStatus === "ticket") return {
+      kind: "media_action" as const, id, question: "播放 Jazz Evening", status: "ticket" as const,
+      ticket: { id: "ticket-media-1", status: "pending_confirmation" as const, reviewHref: "/review-center" },
+    };
+    return {
+      kind: "media_action" as const, id, question: "播放 Jazz Evening", status: this.mediaStatus,
+    };
+  }
+  readMediaActionEvents(id: string, after?: string) {
+    return id === "media-turn-1" && after !== "2" ? [{ id: 2, type: "ticket" as const }] : [];
+  }
+  subscribeMediaAction() { return () => undefined; }
+  cancelMediaAction(id: string) {
+    this.mediaCancels.push(id);
+    return this.mediaStatus === "running" ? { status: "cancelled" as const } : { status: "terminal_status" as const };
+  }
+}
+
 class ControlInbox extends StubInbox {
   readonly controls: unknown[] = [];
   readonly undos: unknown[] = [];
@@ -467,6 +504,7 @@ class StructuredAdviceInbox extends StubInbox {
 
   getProductAdviceTurn(id: string) {
     if (id === "advice-active") return {
+      kind: "advice" as const,
       id,
       question: "正在分析窗帘时间",
       status: "inspecting" as const,
@@ -477,6 +515,7 @@ class StructuredAdviceInbox extends StubInbox {
       canBackground: true,
     };
     return id === this.adviceId ? {
+      kind: "advice" as const,
       id,
       question: "窗帘有时太早打开",
       status: "completed" as const,
@@ -495,6 +534,7 @@ class MultiSpeechAdviceInbox extends StructuredAdviceInbox {
   getProductAdviceTurn(id: string) {
     if (/^speech-\d+$/.test(id)) {
       return {
+        kind: "advice" as const,
         id,
         question: "语音回答",
         status: "completed" as const,
@@ -609,6 +649,7 @@ class CorrectionAdviceInbox extends StructuredAdviceInbox {
   getProductAdviceTurn(id: string) {
     if (id !== this.adviceId) return undefined;
     return {
+      kind: "advice" as const,
       id,
       question: "窗帘有时太早打开",
       status: "completed" as const,
@@ -641,7 +682,7 @@ class CorrectionAdviceInbox extends StructuredAdviceInbox {
 class IncompleteCorrectionInbox extends CorrectionAdviceInbox {
   getProductAdviceTurn(id: string) {
     return id === this.adviceId
-      ? { id, question: "正在分析", status: "inspecting" as const }
+      ? { kind: "advice" as const, id, question: "正在分析", status: "inspecting" as const }
       : undefined;
   }
 }
@@ -2466,6 +2507,99 @@ test("accepts one bounded same-origin household question and serves its answer",
   await ctx.fiber.dispose();
 });
 
+test("starts an explicit private media action once, keeps its question out of redirects, and leaves ordinary advice on its read-only route", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MediaActionInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    mediaActionIdempotencyKey: () => "0123456789abcdef0123456789abcdef",
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization, origin, "content-type": "application/x-www-form-urlencoded" };
+  try {
+    const conversation = await fetch(`${origin}/conversation`, { headers: { authorization } });
+    const conversationHtml = await conversation.text();
+    assert.match(conversationHtml, /name="mediaActionIdempotencyKey" value="0123456789abcdef0123456789abcdef"/);
+
+    const ordinary = await fetch(`${origin}/conversation`, {
+      method: "POST", headers, body: new URLSearchParams({ question: "客厅现在怎么样？" }), redirect: "manual",
+    });
+    assert.equal(ordinary.status, 303);
+    assert.deepEqual((ctx.homeInbox as unknown as MediaActionInbox).questions, ["客厅现在怎么样？"]);
+    assert.deepEqual((ctx.homeInbox as unknown as MediaActionInbox).mediaStarts, []);
+
+    const submitted = await fetch(`${origin}/conversation/media`, {
+      method: "POST", headers,
+      body: new URLSearchParams({ question: "播放 Jazz Evening", mediaActionIdempotencyKey: "0123456789abcdef0123456789abcdef" }),
+      redirect: "manual",
+    });
+    assert.equal(submitted.status, 303);
+    assert.equal(submitted.headers.get("location"), "/conversation/media-turn-1");
+    assert.equal(submitted.headers.get("location")?.includes("Jazz"), false);
+    assert.deepEqual((ctx.homeInbox as unknown as MediaActionInbox).mediaStarts, [{
+      question: "播放 Jazz Evening", idempotencyKey: "0123456789abcdef0123456789abcdef", actor: adminPrincipal,
+    }]);
+
+    const replay = await fetch(`${origin}/conversation/media`, {
+      method: "POST", headers,
+      body: new URLSearchParams({ question: "播放 Jazz Evening", mediaActionIdempotencyKey: "0123456789abcdef0123456789abcdef" }),
+      redirect: "manual",
+    });
+    assert.equal(replay.headers.get("location"), "/conversation/media-turn-1");
+    const detail = await fetch(`${origin}/conversation/media-turn-1`, { headers: { authorization } });
+    assert.match(await detail.text(), /href="\/review-center"/);
+
+    const mediaInbox = ctx.homeInbox as unknown as MediaActionInbox;
+    mediaInbox.mediaStatus = "running";
+    mediaInbox.mediaAvailability = "active_turn";
+    const homeWhileRunning = await fetch(`${origin}/home`, { headers: { authorization } });
+    const homeWhileRunningHtml = await homeWhileRunning.text();
+    assert.match(homeWhileRunningHtml, /播放 Jazz Evening/);
+    assert.match(homeWhileRunningHtml, /href="\/conversation\/media-turn-1"/);
+
+    const head = await fetch(`${origin}/conversation/media-turn-1`, { method: "HEAD", headers: { authorization } });
+    assert.equal(head.status, 200);
+
+    const events = await fetch(`${origin}/conversation/media-turn-1/events`, { headers: { authorization } });
+    assert.equal(events.status, 200);
+    assert.match(await events.text(), /id: 2\nevent: ticket\ndata: \{\}\n\n/);
+
+    const stopped = await fetch(`${origin}/conversation/media-turn-1/stop`, {
+      method: "POST", headers, body: "", redirect: "manual",
+    });
+    assert.equal(stopped.status, 303);
+    assert.deepEqual((ctx.homeInbox as unknown as MediaActionInbox).mediaCancels, ["media-turn-1"]);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("refuses an explicit media action from a shared household device", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MediaActionInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0, authenticate: createInboxBasicAuthenticator(token), principal: childSharedPrincipal,
+  });
+  try {
+    const response = await fetch(`${ctx.homeInboxHttp.origin}/conversation/media`, {
+      method: "POST",
+      headers: { authorization, origin: ctx.homeInboxHttp.origin, "content-type": "application/x-www-form-urlencoded" },
+      body: "question=%E6%92%AD%E6%94%BE&mediaActionIdempotencyKey=0123456789abcdef0123456789abcdef",
+      redirect: "manual",
+    });
+    assert.equal(response.status, 403);
+    assert.deepEqual((ctx.homeInbox as unknown as MediaActionInbox).mediaStarts, []);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("reports typed advice availability and redirects duplicate requests to the active advice", async () => {
   const ctx = new Context();
   const inboxFiber = await ctx.plugin(StructuredAdviceInbox);
@@ -2556,7 +2690,7 @@ test("keeps one model-unavailable household question private until its model is 
     const readyHtml = await ready.text();
     assert.match(readyHtml, /value="窗帘为什么今天开得太早？"/);
     assert.doesNotMatch(readyHtml, /id="conversation-question"[^>]*disabled/);
-    assert.match(readyHtml, /<button type="submit">发送<\/button>/);
+    assert.match(readyHtml, /<button type="submit">问问家里<\/button>/);
 
     const accepted = await fetch(`${origin}/conversation`, {
       method: "POST",
