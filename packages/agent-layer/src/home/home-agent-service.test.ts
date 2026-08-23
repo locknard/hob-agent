@@ -383,7 +383,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   await ctx.homeAgent.agent.whenIdle();
 
   assert.equal(adapter.requests.length, 1);
-  assert.match(adapter.requests[0]?.system ?? "", /media action.*home_media_conversation.*authenticated present household member/is);
+  assert.match(adapter.requests[0]?.system ?? "", /media preparation remains read-only during an advice turn/is);
   assert.match(adapter.requests[0]?.system ?? "", /Persistent behavior changes remain review-only proposals/is);
   assert.match(adapter.requests[0]?.system ?? "", /same.*media.*label.*not.*same.*endpoint/is);
   assert.match(adapter.requests[0]?.system ?? "", /mediaRef.*does not grant.*authority/is);

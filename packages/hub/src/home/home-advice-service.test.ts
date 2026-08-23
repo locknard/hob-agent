@@ -193,7 +193,7 @@ test("coordinates one ready Agent turn and persists its structured report", asyn
   await ctx.fiber.dispose();
 });
 
-test("keeps the authenticated actor in the media scope for a same-process background turn", async () => {
+test("keeps an authenticated actor out of the media scope for an advice turn", async () => {
   const ctx = new Context();
   await ctx.plugin(ReadyWorld);
   await ctx.plugin(ActorAwareAdviceAgent);
@@ -208,8 +208,8 @@ test("keeps the authenticated actor in the media scope for a same-process backgr
   assert.equal(ctx.homeAdvice.background(running.id), true);
   ctx.homeAgent.release();
   await eventually(() => ctx.homeAdvice.get(running.id)?.status === "completed");
-  assert.deepEqual(ctx.homeMediaConversation.calls, [authenticatedActor]);
-  assert.deepEqual(ctx.homeAgent.observedActors, [authenticatedActor]);
+  assert.deepEqual(ctx.homeMediaConversation.calls, []);
+  assert.deepEqual(ctx.homeAgent.observedActors, [undefined]);
   await ctx.fiber.dispose();
 });
 

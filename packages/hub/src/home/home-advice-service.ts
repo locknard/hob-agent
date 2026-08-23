@@ -36,13 +36,6 @@ interface AdviceWorldPort {
   snapshot(): Parameters<typeof isHomeWorldReady>[0];
 }
 
-interface HomeMediaActorScopePort {
-  runWithActor<T>(
-    actor: OneShotActionActor,
-    callback: () => T | PromiseLike<T>,
-  ): T | PromiseLike<T>;
-}
-
 declare module "@deepseek-ai/cordis" {
   interface Context {
     homeAdvice: HomeAdviceService;
@@ -87,8 +80,6 @@ export interface HomeAdviceServiceOptions extends SqliteHomeAdviceStoreOptions {
 interface ActiveAdvice {
   readonly id: string;
   readonly question: string;
-  /** The actor remains process-local and never enters the durable advice record. */
-  readonly actor?: OneShotActionActor;
   readonly controller: AbortController;
   readonly traceToolIds: Set<string>;
   readonly progressTypes: Set<HomeAdviceProgressType>;
@@ -224,7 +215,6 @@ export class HomeAdviceService extends Service {
     const active: ActiveAdvice = {
       id,
       question: boundedQuestion,
-      ...(authenticatedActor === undefined ? {} : { actor: authenticatedActor }),
       controller,
       traceToolIds: new Set(),
       progressTypes: new Set(["accepted"]),
@@ -366,11 +356,7 @@ export class HomeAdviceService extends Service {
       ? undefined
       : setInterval(() => this.captureTrace(active, agent), this.progressPollIntervalMs);
     try {
-      const requestAdvice = () => agent.requestAdvice(active.question, active.controller.signal);
-      const media = this.ctx.get("homeMediaConversation") as unknown as HomeMediaActorScopePort | undefined;
-      const report = active.actor === undefined || media === undefined
-        ? await requestAdvice()
-        : await media.runWithActor(active.actor, requestAdvice);
+      const report = await agent.requestAdvice(active.question, active.controller.signal);
       if (active.preserveBackgroundOnShutdown) return;
       if (active.cancelRequested || active.controller.signal.aborted) {
         this.finishFailed(active, "cancelled");
