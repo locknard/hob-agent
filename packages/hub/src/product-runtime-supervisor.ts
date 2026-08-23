@@ -19,6 +19,10 @@ import type {
 
 import type { HomeHubRuntime } from "./process-entry.js";
 import {
+  builtinBridgeProductBundle,
+  type BridgeProductBundle,
+} from "./bridge/bridge-bundle.js";
+import {
   ProductActivationController,
   type ProductActivationResult,
 } from "./product-activation-controller.js";
@@ -28,6 +32,7 @@ import {
   type ProductBootstrapConfiguration,
 } from "./product-bootstrap-config-store.js";
 import { ProductSetupController } from "./product-setup-controller.js";
+import { ProductBridgeSetup } from "./product-bridge-setup.js";
 import { ProductModelSetup } from "./product-model-setup.js";
 import { ProductModelCleanupLedger, type ProductModelCleanupEntry } from "./product-model-cleanup-ledger.js";
 import { ProductOperationalModelSettings } from "./product-operational-model-settings.js";
@@ -124,6 +129,8 @@ interface ProductRuntimeSessionStore {
 export interface ProductRuntimeSupervisorOptions {
   readonly dataDirectory: string;
   readonly port: number;
+  /** One explicit inventory supplies both setup peers and every mounted generation. */
+  readonly bridgeProductBundle?: BridgeProductBundle;
   readonly now?: () => Date;
   readonly pairingCode?: string;
   readonly createSessionToken?: () => string;
@@ -164,6 +171,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
   readonly context = new Context();
   private readonly now: () => Date;
   private readonly voiceCredentialVault: WritableSecretVault;
+  private readonly bridgeProductBundle: BridgeProductBundle;
   private readonly modelCredentialVault: WritableSecretVault;
   private readonly modelSetup: ProductModelSetup;
   private readonly modelCleanupLedger: ProductModelCleanupLedger;
@@ -190,6 +198,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
 
   constructor(private readonly options: ProductRuntimeSupervisorOptions) {
     this.now = options.now ?? (() => new Date());
+    this.bridgeProductBundle = options.bridgeProductBundle ?? builtinBridgeProductBundle;
     this.voiceCredentialVault = options.voiceSetup?.vault ?? new MacOSKeychainSecretVault();
     this.modelCredentialVault = options.modelCredentialVault ?? new MacOSKeychainSecretVault();
     this.setupDrafts = options.setupDrafts;
@@ -257,7 +266,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
         this.setupDrafts = new ProductSetupController(
           store,
           this.modelSetup,
-          undefined,
+          new ProductBridgeSetup({ bundle: this.bridgeProductBundle }),
           this.context.productVoiceSetup,
         );
       }

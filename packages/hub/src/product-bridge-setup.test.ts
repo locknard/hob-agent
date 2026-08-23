@@ -6,6 +6,8 @@ import test from "node:test";
 
 import { ProductBridgeSetup } from "./product-bridge-setup.js";
 import { ProductSetupDraftStore } from "./product-setup-draft-store.js";
+import { createBridgeProductBundle, productBridgeAdapterRegistration } from "./bridge/bridge-bundle.js";
+import { HOME_ASSISTANT_ADAPTER_REGISTRATION } from "./bridge/home-assistant-bridge.js";
 
 class MemoryVault {
   readonly values = new Map<string, string>();
@@ -28,6 +30,7 @@ const registration = {
     status: "connected" as const,
     latencyMs: 28,
     summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+    review: { areas: [{ name: "Fixture room", deviceCount: 8 }], unassignedDeviceCount: 0, complete: true as const },
   }),
 };
 
@@ -130,6 +133,7 @@ test("cancelling a bridge probe waits for the catalog probe and leaves exact cle
           status: "connected" as const,
           latencyMs: 28,
           summary: { states: 21, entities: 20, devices: 8, areas: 4 },
+          review: { areas: [{ name: "Fixture room", deviceCount: 8 }], unassignedDeviceCount: 0, complete: true as const },
         };
       },
     }],
@@ -180,4 +184,22 @@ test("rejects an invalid adapter display endpoint before staging a credential", 
     credential: "request-local-bridge-secret",
   }), { status: "incompatible" });
   assert.equal(vault.values.size, 0);
+});
+
+test("uses only the setup registrations published by its product bundle", () => {
+  const bundle = createBridgeProductBundle({
+    adapterRegistrations: [productBridgeAdapterRegistration(HOME_ASSISTANT_ADAPTER_REGISTRATION)],
+    setupRegistrations: [],
+  });
+  const setup = new ProductBridgeSetup({
+    bundle,
+    vault: new MemoryVault(),
+  });
+
+  assert.deepEqual(setup.prepare({
+    setupId: "draft-home",
+    adapterType: "home-assistant",
+    config: { baseUrl: "http://ha.local:8123" },
+    credential: "request-local-bridge-secret",
+  }), { status: "incompatible" });
 });

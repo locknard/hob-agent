@@ -6,7 +6,8 @@ import {
 } from "@hob-agent/agent-layer/model-credentials";
 
 import {
-  createBuiltinProductBridgeSetupCatalog,
+  builtinBridgeProductBundle,
+  type BridgeProductBundle,
   type ProductBridgeSetupMapReview,
   type ProductBridgeSetupProbeResult,
   type ProductBridgeSetupRegistration,
@@ -21,7 +22,7 @@ export type ProductBridgeProbeOutcome =
       readonly status: "ready";
       readonly latencyMs: number;
       readonly summary: { readonly states: number; readonly entities: number; readonly devices: number; readonly areas: number };
-      readonly review?: ProductBridgeSetupMapReview;
+      readonly review: ProductBridgeSetupMapReview;
       readonly stage: ProductBridgeSetupStage;
     }
   | { readonly status: "missing"; readonly field: "credential" }
@@ -52,6 +53,9 @@ export type ProductBridgePrepareOutcome =
 
 interface ProductBridgeSetupOptions {
   readonly vault?: WritableSecretVault;
+  /** The product-owned bundle is the source of setup peers for an executable runtime. */
+  readonly bundle?: BridgeProductBundle;
+  /** Narrow test seam for isolated setup behavior. */
   readonly registrations?: readonly ProductBridgeSetupRegistration[];
   readonly createStageNonce?: () => string;
 }
@@ -64,7 +68,12 @@ export class ProductBridgeSetup {
 
   constructor(options: ProductBridgeSetupOptions = {}) {
     this.vault = options.vault ?? new MacOSKeychainSecretVault();
-    const registrations = options.registrations ?? createBuiltinProductBridgeSetupCatalog();
+    if (options.bundle !== undefined && options.registrations !== undefined) {
+      throw new TypeError("Bridge setup accepts either a product bundle or isolated registrations");
+    }
+    const registrations = options.registrations
+      ?? options.bundle?.setupRegistrations
+      ?? builtinBridgeProductBundle.setupRegistrations;
     this.registrations = new Map(registrations.map((registration) => [registration.adapterType, registration]));
     this.createStageNonce = options.createStageNonce ?? (() => globalThis.crypto.randomUUID().replace(/-/gu, ""));
   }
@@ -156,11 +165,12 @@ export class ProductBridgeSetup {
       });
       if (isCancelled(input.signal)) return { status: "endpoint_unreachable" };
       if (result.status !== "connected") return result;
+      if (!isCompleteBoundedMapReview(result.review)) return { status: "incompatible" };
       return {
         status: "ready",
         latencyMs: result.latencyMs,
         summary: result.summary,
-        ...(result.review === undefined ? {} : { review: result.review }),
+        review: result.review,
         stage: input.stage,
       };
     } catch {
@@ -216,4 +226,25 @@ function normalizeDisplayEndpoint(value: unknown): string {
     throw new TypeError("Bridge display endpoint is invalid");
   }
   return endpoint;
+}
+
+/** Holds setup success to the same compact, complete map contract activation consumes. */
+function isCompleteBoundedMapReview(value: unknown): value is ProductBridgeSetupMapReview {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (record.complete !== true || !Array.isArray(record.areas) || record.areas.length > 64
+    || !Number.isSafeInteger(record.unassignedDeviceCount) || Number(record.unassignedDeviceCount) < 0
+    || Number(record.unassignedDeviceCount) > 100_000) return false;
+  const names = new Set<string>();
+  return record.areas.every((area) => {
+    if (area === null || typeof area !== "object") return false;
+    const candidate = area as Record<string, unknown>;
+    if (typeof candidate.name !== "string" || candidate.name.trim() === ""
+      || Array.from(candidate.name).length > 80 || /[\u0000-\u001f\u007f]/u.test(candidate.name)
+      || names.has(candidate.name)
+      || !Number.isSafeInteger(candidate.deviceCount) || Number(candidate.deviceCount) < 0
+      || Number(candidate.deviceCount) > 100_000) return false;
+    names.add(candidate.name);
+    return true;
+  });
 }

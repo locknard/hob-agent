@@ -17,6 +17,8 @@ import {
 } from "./main.js";
 import { provisionPrimaryModelApiKey } from "./model-credential-profile.js";
 import { ProductBootstrapConfigStore } from "./product-bootstrap-config-store.js";
+import { createBuiltinBridgeProductBundle } from "./bridge/bridge-bundle.js";
+import type { XiaomiHomeTransportPlugin } from "./bridge/xiaomi-home-bridge.js";
 import {
   type ProductRuntimeSupervisorOptions,
 } from "./product-runtime-supervisor.js";
@@ -143,6 +145,79 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   assert.equal(options.runtime.inboxHttp, undefined);
   assert.equal(options.runtime.mediaCatalog, undefined);
   assert.deepEqual(options.runtime.homeSafety?.bindings, []);
+});
+
+test("mounts each candidate with the runtime registrations from its product bridge bundle", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-product-bridge-bundle-"));
+  const xiaomi: XiaomiHomeTransportPlugin = {
+    credentialRequirements: [],
+    create: () => ({
+      connect: async () => ({ installationId: "fixture", devices: [] }),
+      changes: async function* () {},
+      resync: async () => ({ installationId: "fixture", devices: [] }),
+      dispose: async () => {},
+    }),
+  };
+  const bridgeProductBundle = createBuiltinBridgeProductBundle({ xiaomi });
+  let productOptions: ProductRuntimeSupervisorOptions | undefined;
+  let observedXiaomi = false;
+  const host = new ProductHttpHost({ port: 0 });
+  const privateVoice = new PrivateVoiceGateway();
+  let running: Awaited<ReturnType<typeof main>> | undefined;
+  try {
+    running = await main({
+      env: { HOB_DATA_DIR: dataDirectory },
+      bridgeProductBundle,
+      mountProductBundle: async (_context, options) => {
+        observedXiaomi = options.homeWorld.catalog.hasAdapter("xiaomi-home");
+        return {
+          context: { homeInboxHttp: { attach: () => undefined } },
+          dispose: async () => undefined,
+        } as never;
+      },
+      createProductRuntime: async (input) => {
+        productOptions = input;
+        return { context: new Context(), stop: async () => undefined };
+      },
+    });
+    assert.equal(productOptions?.bridgeProductBundle, bridgeProductBundle);
+    const mounted = await productOptions!.mountOperational({
+      candidate: {
+        householdName: "梧桐家",
+        agentName: "小满",
+        modelReference: "custom/home-model",
+        modelBaseURL: "https://model.example.test/v1",
+        modelProfile: {
+          id: "custom:setup:bundle-main",
+          provider: "custom",
+          kind: "api_key",
+          secretRef: "keychain:hob-agent/setup-model:bundle-main:stage-a",
+        },
+        bridges: [{
+          bridgeId: "xiaomi-main",
+          adapterType: "xiaomi-home",
+          config: { region: "cn", transport: "central-gateway" },
+          credentialRefs: {},
+        }],
+      },
+      context: new Context(),
+      host,
+      authenticateProductSession: async () => true,
+      recoverProductSession: { recover: async () => ({ status: "invalid" as const }) },
+      privateVoice,
+      voiceSettings: {} as never,
+      modelProviderResolver: {} as never,
+      modelSettings: {} as never,
+    });
+    assert.notEqual(mounted, undefined);
+    assert.equal(observedXiaomi, true);
+    await mounted?.dispose();
+  } finally {
+    await running?.shutdown.shutdown(0);
+    await host.dispose();
+    await privateVoice.dispose({ force: true });
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
 });
 
 test("passes explicit safety bindings only to the Hub safety owner", () => {

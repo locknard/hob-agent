@@ -25,6 +25,11 @@ import {
 import { loadActionAuthorityConfiguration } from "./authority/action-authority-config.js";
 import type { ActionAuthorityConfiguration } from "./authority/authority-coordinator.js";
 import {
+  builtinBridgeProductBundle,
+  createBuiltinBridgeCatalog,
+  type BridgeProductBundle,
+} from "./bridge/bridge-bundle.js";
+import {
   loadSelectedModelCredential,
   type SelectedModelCredential,
 } from "./model-credential-profile.js";
@@ -58,6 +63,8 @@ export interface HomeHubMainOptions {
   readonly modelCredentialVault?: WritableSecretVault;
   /** Local terminal presentation for the short-lived setup and recovery pairing codes. */
   readonly writeProductTerminal?: (message: string) => void;
+  /** The single bridge inventory shared by setup and every mounted generation. */
+  readonly bridgeProductBundle?: BridgeProductBundle;
 }
 
 export interface HomeHubProcessOptions {
@@ -90,6 +97,7 @@ export function createHomeHubProcessOptions(
   selectedCredential?: SelectedModelCredential,
   actionAuthorityConfig: ActionAuthorityConfig = Object.freeze({}),
   bridgeCredentialVault?: SecretVault,
+  bridgeProductBundle?: BridgeProductBundle,
 ): HomeHubProcessOptions {
   const config = readHomeHubLaunchConfig(environment, selectedCredential, bridgeCredentialVault);
   const musicAssistantClient = config.musicAssistant === undefined
@@ -119,7 +127,7 @@ export function createHomeHubProcessOptions(
   return {
     runtime: {
       homeWorld: {
-        catalog: config.catalog,
+        catalog: bridgeProductBundle === undefined ? config.catalog : createBuiltinBridgeCatalog(bridgeProductBundle),
         bridges: config.bridges,
         credentialSource: config.bridgeCredentialSource,
         journalDirectory: config.journalDirectory,
@@ -205,6 +213,7 @@ async function resolveCandidateHomeHubProcessOptions(
   dataDirectory: string,
   candidate: ProductBootstrapConfigDraft,
   vault?: SecretVault,
+  bridgeProductBundle?: BridgeProductBundle,
 ): Promise<HomeHubProcessOptions> {
   const effectiveEnvironment: LaunchEnvironment = {
     ...environment,
@@ -219,7 +228,13 @@ async function resolveCandidateHomeHubProcessOptions(
   };
   readHomeHubLaunchConfig(effectiveEnvironment, selectedCredential, secretVault);
   const actionAuthorityConfig = await loadActionAuthorityConfigurationIfConfigured(dataDirectory);
-  return createHomeHubProcessOptions(effectiveEnvironment, selectedCredential, actionAuthorityConfig, secretVault);
+  return createHomeHubProcessOptions(
+    effectiveEnvironment,
+    selectedCredential,
+    actionAuthorityConfig,
+    secretVault,
+    bridgeProductBundle,
+  );
 }
 
 async function prepareProductLaunch(environment: LaunchEnvironment): Promise<PreparedProductLaunch> {
@@ -268,10 +283,12 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
   const mountProductBundle = options.mountProductBundle ?? mountHomeAgentProductBundle;
   const writeProductTerminal = options.writeProductTerminal ?? ((message: string) => { process.stdout.write(message); });
   const productModelCredentialVault = options.modelCredentialVault ?? new MacOSKeychainSecretVault();
+  const bridgeProductBundle = options.bridgeProductBundle ?? builtinBridgeProductBundle;
   const productOptions: ProductRuntimeSupervisorOptions = {
     dataDirectory,
     port: productSetupPort(environment.HOB_SETUP_PORT),
     modelCredentialVault: productModelCredentialVault,
+    bridgeProductBundle,
     announce: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("setup", announcement)),
     announceRecovery: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("recovery", announcement)),
     mountOperational: async (input) => {
@@ -280,6 +297,7 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
         dataDirectory,
         input.candidate,
         productModelCredentialVault,
+        bridgeProductBundle,
       );
       const bundle = await mountProductBundle(input.context, {
         ...processOptions.runtime,
