@@ -196,6 +196,75 @@ test("stops before ASR when the household model is unavailable and returns its o
   }
 });
 
+test("does not dispatch a late transcription after its exact browser turn was released", async () => {
+  let resolveTranscription!: (value: { readonly status: "transcribed"; readonly text: string }) => void;
+  let markTranscribing!: () => void;
+  const transcribing = new Promise<void>((resolve) => { markTranscribing = resolve; });
+  const transcription = new Promise<{ readonly status: "transcribed"; readonly text: string }>(
+    (resolve) => { resolveTranscription = resolve; },
+  );
+  let adviceStarts = 0;
+  let releases = 0;
+  const token = "c".repeat(43);
+  const controller = new PrivateVoiceHttpController({
+    privateVoice: {
+      status: "active",
+      beginTurn() {
+        return {
+          captureMode: "encoded_audio" as const,
+          async transcribe() {
+            markTranscribing();
+            return transcription;
+          },
+          async synthesize() { return { status: "failed" as const, reason: "unavailable" as const }; },
+          async release() { releases += 1; },
+        };
+      },
+    },
+    adviceAvailability: async () => ({ status: "ready" }),
+    startAdvice: async () => { adviceStarts += 1; return { id: "late-advice" }; },
+    productAdviceTurn: async () => undefined,
+    privateVoiceTurnToken: () => token,
+  });
+  const server = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/voice/turns")
+      return void controller.handleVoiceTurnStart(request, response);
+    if (request.method === "POST" && request.url === `/voice/turns/${token}/transcribe`)
+      return void controller.handleVoiceTranscription(request, response, token);
+    if (request.method === "POST" && request.url === `/voice/turns/${token}/release`)
+      return void controller.handleVoiceTurnRelease(request, response, token);
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const lease = await fetch(`${origin}/voice/turns`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "",
+    });
+    assert.equal(lease.status, 201);
+    const pending = fetch(`${origin}/voice/turns/${token}/transcribe`, {
+      method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array([1, 2]),
+    });
+    await transcribing;
+    const released = await fetch(`${origin}/voice/turns/${token}/release`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "",
+    });
+    assert.equal(released.status, 204);
+    resolveTranscription({ status: "transcribed", text: "这句迟到内容不应进入模型" });
+    const response = await pending;
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { status: "unavailable" });
+    assert.equal(adviceStarts, 0);
+    assert.equal(releases, 1);
+  } finally {
+    await controller.dispose();
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
 test("runs private voice recovery in the background and publishes one completion receipt", async () => {
   let resolveRetry: ((status: "active") => void) | undefined;
   class DelayedRetrySettings extends VoiceSettings {

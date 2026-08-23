@@ -700,6 +700,8 @@ export class PrivateVoiceHttpController {
         audio.byteLength % (format.width * format.channels) !== 0
       )
         return send(response, 400, "Invalid private voice audio");
+      if (!this.isLiveTranscribingTurn(turn))
+        return sendVoiceJson(response, 409, { status: "unavailable" });
       const cancellation = abortOnDisconnect(request, response);
       let transcription: Awaited<
         ReturnType<PrivateVoiceTurnLease["transcribe"]>
@@ -716,6 +718,8 @@ export class PrivateVoiceHttpController {
       } finally {
         cancellation.cleanup();
       }
+      if (!this.isLiveTranscribingTurn(turn))
+        return sendVoiceJson(response, 409, { status: "unavailable" });
       if (transcription.status !== "transcribed")
         return sendVoiceJson(
           response,
@@ -733,6 +737,8 @@ export class PrivateVoiceHttpController {
       if (transcript === undefined || transcript.length === 0)
         return sendVoiceJson(response, 422, { status: "no_input" });
       const availability = await this.options.adviceAvailability();
+      if (!this.isLiveTranscribingTurn(turn))
+        return sendVoiceJson(response, 409, { status: "unavailable" });
       if (
         availability.status === "active_request" &&
         availability.activeAdviceId !== undefined
@@ -999,6 +1005,9 @@ export class PrivateVoiceHttpController {
       )
       ? turn
       : undefined;
+  }
+  private isLiveTranscribingTurn(turn: PrivateVoiceHttpTurn): boolean {
+    return this.turns.get(turn.token) === turn && turn.phase === "transcribing";
   }
   private expireTurns(now = Date.now()): void {
     const expired = [...this.turns.values()]

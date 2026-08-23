@@ -71,9 +71,9 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
     },
     listening: {
       eyebrow: "正在听",
-      heading: "说出你想让家里做的事",
+      heading: "说出你想问家里的事",
       status: "麦克风正在聆听",
-      detail: "一句话说明房间、内容和动作即可；最多 15 秒。",
+      detail: "一句话说明你想了解的家庭情况；最多 15 秒。",
       recovery: { href: "/conversation", label: "改用文字" },
     },
     no_input: {
@@ -171,7 +171,7 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
       eyebrow: "家庭助手模型",
       heading: "模型连接正在恢复",
       status: "等待模型恢复",
-      detail: "家庭助手模型正在恢复。私人语音已经完成转写，模型恢复后可以继续这次请求。",
+      detail: "家庭助手模型正在恢复，本次语音尚未转写。请恢复模型后重试，或直接改用文字。",
       recovery: { href: "/settings#operational-model", label: "检查模型连接" },
     },
     text_mode: {
@@ -227,6 +227,9 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   let captureMode;
   let activeAdviceId;
   let answerText = "";
+  const noInputBackoffStorageKey = "hob.private-voice.no-input.v1";
+  const noInputBackoffMs = 10 * 60 * 1000;
+  let noInputBackoffTimer;
   const copy = {
     idle: ["等待开始", "开始后只会采集这一次要说的话。"],
     requesting_permission: [
@@ -272,6 +275,84 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     model_unavailable: ["家庭助手模型", "模型连接正在恢复"],
     text_mode: ["文字对话", "用文字继续和家沟通"],
   };
+  const noInputStore = () => {
+    try {
+      return typeof sessionStorage !== "undefined" &&
+        typeof sessionStorage.getItem === "function" &&
+        typeof sessionStorage.setItem === "function" &&
+        typeof sessionStorage.removeItem === "function"
+        ? sessionStorage
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const readNoInputBackoff = () => {
+    const store = noInputStore();
+    if (!store) return undefined;
+    try {
+      const raw = store.getItem(noInputBackoffStorageKey);
+      if (!raw) return { count: 0 };
+      const value = JSON.parse(raw);
+      if (!value || !Number.isInteger(value.count) || value.count < 0 || value.count > 3 ||
+        (value.until !== undefined && (!Number.isSafeInteger(value.until) || value.until < 0))) {
+        store.removeItem(noInputBackoffStorageKey);
+        return { count: 0 };
+      }
+      if (typeof value.until === "number") {
+        if (value.until > Date.now()) return { count: value.count, until: value.until };
+        store.removeItem(noInputBackoffStorageKey);
+        return { count: 0 };
+      }
+      return { count: value.count };
+    } catch {
+      return undefined;
+    }
+  };
+  const clearNoInputBackoff = () => {
+    if (noInputBackoffTimer !== undefined) {
+      try { clearTimeout(noInputBackoffTimer); } catch {}
+      noInputBackoffTimer = undefined;
+    }
+    const store = noInputStore();
+    try { store?.removeItem(noInputBackoffStorageKey); } catch {}
+  };
+  const backoffDetail = () => "连续三次没有听到内容，语音已暂停 10 分钟。你可以改用文字。";
+  const scheduleNoInputRecovery = (until) => {
+    try {
+      const delay = until - Date.now();
+      if (!Number.isSafeInteger(delay) || delay < 1 || delay > noInputBackoffMs) return false;
+      if (noInputBackoffTimer !== undefined) clearTimeout(noInputBackoffTimer);
+      noInputBackoffTimer = setTimeout(() => {
+        noInputBackoffTimer = undefined;
+        const backoff = readNoInputBackoff();
+        if (backoff?.until !== undefined) return;
+        if (!disposed && state === "no_input") setState("idle", "语音现在可以再次开始。", { href: "/conversation", label: "改用文字" });
+      }, delay);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const recordNoInput = () => {
+    const store = noInputStore();
+    const current = readNoInputBackoff();
+    if (!store || !current) return undefined;
+    const count = Math.min(current.count + 1, 3);
+    try {
+      if (count < 3) {
+        store.setItem(noInputBackoffStorageKey, JSON.stringify({ count }));
+        return undefined;
+      }
+      const until = Date.now() + noInputBackoffMs;
+      store.setItem(noInputBackoffStorageKey, JSON.stringify({ count, until }));
+      if (scheduleNoInputRecovery(until)) return until;
+      clearNoInputBackoff();
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const setText = (node, value) => {
     if (node instanceof HTMLElement && typeof value === "string")
       node.textContent = value;
@@ -309,6 +390,9 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
           next === "failed" ||
           next === "speaking"
         );
+    const noInputBackoff = next === "no_input" ? readNoInputBackoff()?.until : undefined;
+    if (startButton instanceof HTMLButtonElement)
+      startButton.disabled = noInputBackoff !== undefined;
     if (stopButton instanceof HTMLButtonElement)
       stopButton.hidden =
         next !== "listening" && next !== "requesting_permission";
@@ -321,6 +405,8 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       restartButton.hidden = next !== "no_input" && next !== "failed" && next !== "playback_failed";
     if (restartButton instanceof HTMLButtonElement)
       restartButton.textContent = next === "playback_failed" ? "重新播报" : "再试一次";
+    if (restartButton instanceof HTMLButtonElement)
+      restartButton.disabled = noInputBackoff !== undefined;
     if (speechStopButton instanceof HTMLButtonElement)
       speechStopButton.hidden = next !== "speaking";
   };
@@ -599,7 +685,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     if (!body || body.size === 0) {
       discardAudio();
       releaseLease();
-      setState("no_input");
+      setState("no_input", recordNoInput() === undefined ? undefined : backoffDetail());
       return;
     }
     setState("transcribing");
@@ -643,6 +729,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
         typeof result.adviceId === "string" &&
         typeof result.transcript === "string"
       ) {
+        clearNoInputBackoff();
         showTranscript(result.transcript);
         beginEvents(result.adviceId, turnGeneration);
       } else if (
@@ -652,7 +739,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
         beginEvents(result.adviceId, turnGeneration);
       else if (result.status === "no_input") {
         releaseLease();
-        setState("no_input");
+        setState("no_input", recordNoInput() === undefined ? undefined : backoffDetail());
       } else if (result.status === "unavailable") {
         releaseLease();
         setState("text_mode", "私人语音暂时不可用；可以直接改用文字。");
@@ -737,6 +824,14 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   };
   const startCapture = async () => {
     if (disposed) return;
+    const persistedNoInputBackoff = readNoInputBackoff();
+    if (persistedNoInputBackoff?.until !== undefined) {
+      if (scheduleNoInputRecovery(persistedNoInputBackoff.until)) {
+        setState("no_input", backoffDetail());
+        return;
+      }
+      clearNoInputBackoff();
+    }
     const turnGeneration = resetTurn();
     showTranscript("");
     if (availability !== "active") {
@@ -866,6 +961,10 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const disposeVoiceSurface = () => {
     if (disposed) return;
     disposed = true;
+    if (noInputBackoffTimer !== undefined) {
+      try { clearTimeout(noInputBackoffTimer); } catch {}
+      noInputBackoffTimer = undefined;
+    }
     resetTurn();
   };
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
@@ -929,7 +1028,7 @@ export function renderVoiceSurface(
     : options.notice === "unavailable"
       ? '<p class="product-notice" data-one-shot-notice role="status">私人语音仍在恢复中。文字对话现在就能继续。</p>'
       : "";
-  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${recovery}${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。需要确认的动作会先等待你的确认，结果会保留在活动记录中。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
+  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${recovery}${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。当前语音只用于家庭问答，不会直接发起设备或媒体动作；如需动作，请在文字对话中明确选择相应入口。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
 }
 function renderVoiceIntent(
   transcript: string,

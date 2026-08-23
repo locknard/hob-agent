@@ -136,8 +136,20 @@ test("gives unavailable private voice one clear text continuation", async () => 
   assert.match(html, /请求结束后从内存丢弃/);
   assert.match(html, /回答播报音频只在本机内存中保留最多 30 秒/);
   assert.match(html, /当前对话重播/);
-  assert.match(html, /需要确认的动作会先等待你的确认/);
-  assert.match(html, /结果会保留在活动记录中/);
+  assert.match(html, /当前语音只用于家庭问答/);
+  assert.match(html, /不会直接发起设备或媒体动作/);
+  assert.doesNotMatch(html, /结果会保留在活动记录中/);
+});
+
+test("describes the shipped voice path as read-only advice rather than an action surface", async () => {
+  const { renderVoiceSurface } = await loadVoiceSurface();
+  const listening = renderVoiceSurface("listening", { privateVoice: { status: "active" } }) ?? "";
+  assert.match(listening, /说出你想问家里的事/);
+  assert.doesNotMatch(listening, /想让家里做的事|房间、内容和动作/);
+
+  const modelUnavailable = renderVoiceSurface("model_unavailable", { privateVoice: { status: "active" } }) ?? "";
+  assert.match(modelUnavailable, /本次语音尚未转写/);
+  assert.doesNotMatch(modelUnavailable, /已经完成转写/);
 });
 
 test("keeps a working private voice distinct from a recovering household model", async () => {

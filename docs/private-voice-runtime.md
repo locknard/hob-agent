@@ -104,7 +104,7 @@ HTTP ASR/TTS 使用各自的窄适配器。ASR 只接收受限音频流和 local
 flowchart TD
   A([唤醒或按住说话]) --> B[聆听：显示停止与文字出口]
   B --> C{有有效 final transcript？}
-  C -- 否 --> D[短重问；第三次改用文字]
+  C -- 否 --> D[短重问；第三次暂停语音 10 分钟并改用文字]
   D --> B
   C -- 是 --> E[理解：DSH 使用现有受控工具]
   E --> F{缺失、歧义或不确定？}
@@ -122,7 +122,7 @@ flowchart TD
   L --> O[流式播报；可随时打断]
 ```
 
-无输入采用递进式重问：第一次用更短提示，第二次给一个家庭语境示例，第三次停止语音并保留文字入口。权限被拒绝时只解释如何在浏览器/设备开启；不反复触发权限弹窗。任何超过十秒的模型、桥或工具等待均显示正在做什么、继续后台处理与取消等待；取消等待保留当前 turn，且不取消已经由 Hub 接管的动作。
+无输入采用递进式重问：第一次用更短提示，第二次给一个家庭语境示例；同一浏览器会话连续第三次无输入后暂停语音 10 分钟，并始终保留文字入口。一次有效转写会清零计数；暂停到期后可直接恢复。浏览器会话只保存次数与到期时间，不保存音频、转写或问题；存储或恢复计时不可用时保持 fail-open，不把人锁在语音页。权限被拒绝时只解释如何在浏览器/设备开启；不反复触发权限弹窗。任何超过十秒的模型、桥或工具等待均显示正在做什么、继续后台处理与取消等待；取消等待保留当前 turn，且不取消已经由 Hub 接管的动作。
 
 ## Barge-in、端点检测、流式与延迟
 
@@ -216,7 +216,7 @@ Phase 0 只交付一个可验证、默认安全的纵切，不增加自定义 au
 
 - schema/vault：严格拒绝 secret-shaped config、未知字段、URL userinfo/query、越界端点参数、重复 track、错误权限、非 `SecretRef` 和无效 locale；commit 中只出现 ref，失败/过期 setup stage 彻底清理。
 - probe：三轨分别覆盖 ready、认证拒绝、TLS/网络失败、超时、畸形协议、取消；断言不写音频、文本、响应或 secret 到配置/日志。
-- 状态机：覆盖表中每一个状态与 transition、权限拒绝、无输入三阶重问、partial 不提交、manual stop、text exit、10 秒后台/取消语义、连接失败和 `indeterminate`。断言不存在不可能的并发状态。
+- 状态机：覆盖表中每一个状态与 transition、权限拒绝、无输入三阶重问与 10 分钟会话退避、partial 不提交、manual stop、text exit、10 秒后台/取消语义、连接失败和 `indeterminate`。断言不存在不可能的并发状态。
 - 流与打断：验证 endpoint 前 partial 只见 UI、final 只提交一次、TTS/DSH AbortSignal 被取消、barge-in 不取消已认领 Hub 动作，且执行结果仍由 Hub 核验。
 - authority：验证 voice gateway/DSH 不获得 action ticket、bridge/HA native id 或直接执行 API；普通语音不创建 actor；确认只接受未过期、精确绑定的 ticket，并保留原有 action-plane audit。
 - media/bridge：验证语音无法伪造 opaque `mediaRef` 或 player capability，仍经历 media prepare/clarification/confirmation；HA adapter 不接收 audio/ASR/TTS provider payload，契约包不新增生态原生类型。

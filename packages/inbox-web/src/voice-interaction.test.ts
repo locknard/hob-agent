@@ -12,6 +12,7 @@ class Element {
   readonly listeners = new Map<string, Handler>();
   readonly dataset: Record<string, string> = {};
   hidden = false;
+  disabled = false;
   textContent = "";
   getAttribute(name: string): string | null {
     return this.attributes.get(name) ?? null;
@@ -140,6 +141,12 @@ class FakeWindow {
     this.listeners.get(name)?.({});
   }
 }
+class FakeSessionStorage {
+  readonly values = new Map<string, string>();
+  getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.values.set(key, value); }
+  removeItem(key: string): void { this.values.delete(key); }
+}
 
 interface Harness {
   root: Element;
@@ -156,6 +163,7 @@ interface Harness {
   calls: Array<{ url: string; init: any }>;
   streams: FakeStream[];
   timers: Array<Handler>;
+  storage: FakeSessionStorage;
   pagehide(): void;
 }
 function createHarness(
@@ -168,6 +176,9 @@ function createHarness(
     sampleRate?: number;
     permissionRequest?: Promise<FakeStream>;
     leaseRequest?: (init: any) => Promise<any> | any;
+    now?: () => number;
+    sessionStorage?: unknown;
+    setTimeout?: (handler: Handler) => unknown;
   } = {},
 ): Harness {
   FakeRecorder.instances = [];
@@ -215,6 +226,7 @@ function createHarness(
   const calls: Array<{ url: string; init: any }> = [];
   let adviceId = "";
   const timers: Handler[] = [];
+  const storage = new FakeSessionStorage();
   const window = new FakeWindow();
   const result = options.response ?? {
     status: "accepted",
@@ -296,10 +308,12 @@ function createHarness(
     AbortController,
     URL: { createObjectURL: () => "blob:test", revokeObjectURL: () => {} },
     window,
-    setTimeout: (handler: Handler) => {
+    sessionStorage: options.sessionStorage ?? storage,
+    Date: { now: options.now ?? (() => 0) },
+    setTimeout: (handler: Handler) => options.setTimeout?.(handler) ?? (() => {
       timers.push(handler);
       return timers.length;
-    },
+    })(),
     clearTimeout: () => {},
   });
   return {
@@ -317,12 +331,158 @@ function createHarness(
     calls,
     streams,
     timers,
+    storage,
     pagehide: () => window.dispatch("pagehide"),
   };
 }
 async function flush(): Promise<void> {
   for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
+
+test("pauses private voice for ten minutes after three consecutive no-input turns while keeping text available and recovering after expiry", async () => {
+  let now = 1_000;
+  const h = createHarness({ now: () => now });
+  const noInput = async () => {
+    h.start.click();
+    await flush();
+    h.stop.click();
+    await flush();
+    assert.equal(h.root.dataset.voiceState, "no_input");
+  };
+  await noInput();
+  h.restart.click();
+  await flush();
+  h.stop.click();
+  await flush();
+  h.restart.click();
+  await flush();
+  h.stop.click();
+  await flush();
+
+  assert.match(h.detail.textContent, /连续三次.*10 分钟/);
+  assert.equal(h.start.disabled, true);
+  assert.equal(h.restart.disabled, true);
+  assert.equal(h.recovery.href, "/conversation");
+  const leasesBeforeBlockedRetry = h.calls.filter((call) => call.url === "/voice/turns").length;
+  h.restart.click();
+  await flush();
+  assert.equal(h.calls.filter((call) => call.url === "/voice/turns").length, leasesBeforeBlockedRetry);
+
+  now += 10 * 60_000 + 1;
+  h.restart.click();
+  await flush();
+  assert.equal(h.start.disabled, false);
+  assert.equal(h.root.dataset.voiceState, "listening");
+  assert.equal(h.calls.filter((call) => call.url === "/voice/turns").length, leasesBeforeBlockedRetry + 1);
+});
+
+test("rebuilds one session no-input recovery timer after a page reload", async () => {
+  let now = 1_000;
+  const storage = new FakeSessionStorage();
+  const until = now + 10 * 60_000;
+  storage.setItem("hob.private-voice.no-input.v1", JSON.stringify({ count: 3, until }));
+  const timers: Handler[] = [];
+  const h = createHarness({
+    now: () => now,
+    sessionStorage: storage,
+    setTimeout(handler) { timers.push(handler); return timers.length; },
+  });
+
+  assert.equal(h.root.dataset.voiceState, "idle");
+  h.start.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "no_input");
+  assert.equal(h.start.disabled, true);
+  assert.equal(h.restart.disabled, true);
+  assert.equal(timers.length, 1);
+
+  now = until + 1;
+  timers[0]!();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "idle");
+  assert.equal(h.start.disabled, false);
+  assert.equal(h.restart.disabled, false);
+  assert.equal(storage.getItem("hob.private-voice.no-input.v1"), null);
+});
+
+test("a successful private transcription clears the session no-input count", async () => {
+  const h = createHarness();
+  const noInput = async () => {
+    h.start.click();
+    await flush();
+    h.stop.click();
+    await flush();
+    assert.equal(h.root.dataset.voiceState, "no_input");
+  };
+  await noInput();
+  h.restart.click();
+  await flush();
+  h.stop.click();
+  await flush();
+  h.restart.click();
+  await flush();
+  FakeRecorder.instances.at(-1)!.emit();
+  h.stop.click();
+  await flush();
+
+  h.start.click();
+  await flush();
+  h.stop.click();
+  await flush();
+  h.restart.click();
+  await flush();
+  h.stop.click();
+  await flush();
+  assert.equal(h.start.disabled, false, "two no-input turns after a transcription remain retryable");
+});
+
+test("fails open to text and a recoverable voice retry when session backoff persistence or its timer is unavailable", async () => {
+  const throwingStorage = {
+    getItem() { throw new Error("storage unavailable"); },
+    setItem() { throw new Error("storage unavailable"); },
+    removeItem() { throw new Error("storage unavailable"); },
+  };
+  let timers = 0;
+  const h = createHarness({
+    sessionStorage: throwingStorage,
+    setTimeout(handler) {
+      timers += 1;
+      if (timers === 4) throw new Error("timer unavailable");
+      return timers;
+    },
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    h.start.click();
+    await flush();
+    h.stop.click();
+    await flush();
+    if (attempt < 2) h.restart.click();
+  }
+  assert.equal(h.root.dataset.voiceState, "no_input");
+  assert.equal(h.start.disabled, false);
+  assert.equal(h.restart.disabled, false);
+  assert.equal(h.recovery.href, "/conversation");
+  assert.equal([...h.storage.values.values()].some((value) => /音频|转写|问题/.test(value)), false);
+
+  let timerCalls = 0;
+  const timerFailure = createHarness({
+    setTimeout() {
+      timerCalls += 1;
+      if (timerCalls === 4) throw new Error("timer unavailable");
+      return timerCalls;
+    },
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    timerFailure.start.click();
+    await flush();
+    timerFailure.stop.click();
+    await flush();
+    if (attempt < 2) timerFailure.restart.click();
+  }
+  assert.equal(timerFailure.start.disabled, false);
+  assert.equal(timerFailure.restart.disabled, false);
+  assert.equal(timerFailure.recovery.href, "/conversation");
+});
 
 function deferred<T>(): {
   promise: Promise<T>;
