@@ -118,6 +118,18 @@ export type ProductViewProvider = RegisteredProductViewProvider<ProductShellMode
 /** Static assets served alongside the fixed Host Shell and registered providers. */
 export const PRODUCT_CSS = PRODUCT_SHELL_STYLES;
 export const PRODUCT_JS = String.raw`// EventSource reconnects with Last-Event-ID for the active household turn.
+// The confirmation-method save button waits for a real change; the server
+// still answers an unchanged submission honestly for clients without script.
+for (const policyForm of document.querySelectorAll("[data-policy-form]")) {
+  if (!(policyForm instanceof HTMLFormElement)) continue;
+  const submit = policyForm.querySelector('button[type="submit"]');
+  if (!(submit instanceof HTMLButtonElement)) continue;
+  submit.disabled = true;
+  policyForm.addEventListener("change", () => {
+    submit.disabled = false;
+  }, { once: true });
+}
+
 // A one-shot notice cleans its query parameter after display, so a refresh
 // or a shared link never replays it. Runs from this asset because the page
 // CSP (script-src 'self') forbids inline scripts.
@@ -729,28 +741,35 @@ export class ProposalInboxHttpService extends Service {
         }
         const selection = actionPolicySelectionInput(body);
         if (selection === undefined) return send(response, 400, "Invalid confirmation settings");
+        let changedCount: number | undefined;
         try {
           const configured = await configure(selection, this.principal as OnboardingActor | undefined);
           if (configured.status !== "configured") return send(response, 409, "Confirmation settings were not saved");
+          changedCount = configured.changedCount;
         } catch (error) {
           return send(response, onboardingErrorStatus(error), onboardingErrorText(error));
         }
-        // The saved configuration immediately rechecks every blocked plan, so
+        // A save that changed nothing writes nothing, rechecks nothing, and
+        // says so. A real change immediately rechecks every blocked plan, so
         // the card the household came from recovers without another step. The
         // redirect carries an opaque single-use receipt — the page can never
         // be talked into a success message by a crafted URL. A recheck failure
         // never undoes the save; the receipt states it plainly.
+        const noChange = changedCount === 0;
         let recheck: { readonly rechecked: number; readonly cleared: number } | undefined;
         let recheckFailed = false;
-        try {
-          recheck = this.inbox.recheckBlockedProposals?.();
-        } catch {
-          recheckFailed = true;
+        if (!noChange) {
+          try {
+            recheck = this.inbox.recheckBlockedProposals?.();
+          } catch {
+            recheckFailed = true;
+          }
         }
         const receipt = randomBytes(16).toString("hex");
         this.pruneActionPolicyReceipts();
         this.actionPolicyReceipts.set(receipt, {
           at: Date.now(),
+          ...(noChange ? { noChange: true } : {}),
           ...(recheck === undefined ? {} : { recheck }),
           ...(recheckFailed ? { recheckFailed: true } : {}),
         });
@@ -1713,7 +1732,7 @@ export class ProposalInboxHttpService extends Service {
       ...(notice === undefined ? {} : { notice }),
     });
   }
-  private readonly actionPolicyReceipts = new Map<string, { readonly at: number; readonly recheck?: { readonly rechecked: number; readonly cleared: number }; readonly recheckFailed?: boolean }>();
+  private readonly actionPolicyReceipts = new Map<string, { readonly at: number; readonly noChange?: boolean; readonly recheck?: { readonly rechecked: number; readonly cleared: number }; readonly recheckFailed?: boolean }>();
 
   private pruneActionPolicyReceipts(): void {
     const now = Date.now();
@@ -1734,6 +1753,7 @@ export class ProposalInboxHttpService extends Service {
     if (receipt === undefined) return undefined;
     this.actionPolicyReceipts.delete(token);
     if (Date.now() - receipt.at > 300_000) return undefined;
+    if (receipt.noChange === true) return "确认方式没有变化。";
     if (receipt.recheckFailed === true) return "已保存确认方式，建议状态稍后重新检查。";
     if (receipt.recheck === undefined) return "已保存确认方式。";
     return receipt.recheck.rechecked === 0
@@ -2040,7 +2060,7 @@ function actionPolicySelectionInput(body: string): {
     total += 1;
     if (total > 200) return undefined;
   }
-  return total === 0 ? undefined : { directCapabilityIds: direct, confirmationCapabilityIds: confirmation, administratorCapabilityIds: administrator };
+  return { directCapabilityIds: direct, confirmationCapabilityIds: confirmation, administratorCapabilityIds: administrator };
 }
 
 function selectedProposalId(value: string | null): string | undefined {

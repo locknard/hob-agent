@@ -1133,11 +1133,10 @@ export class HomeWorldService extends Service {
    */
   configureActionAuthorityDelta(
     changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
-  ): HomeWorldActionAuthorityPolicyResult {
+  ): HomeWorldActionAuthorityPolicyResult & { readonly changedCount?: number } {
     if (this.actionAuthorityConfigPathValue === undefined) {
       return { status: "blocked", reason: "configuration_source_unavailable" };
     }
-    if (changes.length === 0) return { status: "blocked", reason: "unknown_capability" };
     this.refreshIdentity();
     const merged = new Map<string, ActionAuthorityBindingWriteInput>();
     for (const existing of this.authority.actionAuthorityConfigurationEntries()) {
@@ -1150,14 +1149,20 @@ export class HomeWorldService extends Service {
       });
     }
     const seen = new Set<string>();
+    let changedCount = 0;
     for (const change of changes) {
       if (seen.has(change.hwCapabilityId)) return { status: "blocked", reason: "unknown_capability" };
       seen.add(change.hwCapabilityId);
+      const existing = merged.get(change.hwCapabilityId);
+      // A row already enabled with the same class is a re-statement, not a
+      // change: the original entry survives byte-for-byte — bridge, revision
+      // and identity untouched — so a form echoing what it displayed can
+      // never rebind, re-approve, or invalidate anything.
+      if (existing !== undefined && existing.approved && existing.policyClass === change.policyClass) continue;
       const capability = this.authority.capability(change.hwCapabilityId);
       if (capability === undefined) return { status: "blocked", reason: "unknown_capability" };
       const bridgeIds = [...new Set(capability.bindings.map((binding) => binding.bridgeId))];
       if (bridgeIds.length !== 1 || bridgeIds[0] === undefined) return { status: "blocked", reason: "ambiguous_bridge" };
-      const existing = merged.get(change.hwCapabilityId);
       merged.set(change.hwCapabilityId, {
         hwCapabilityId: change.hwCapabilityId,
         bridgeId: bridgeIds[0],
@@ -1165,12 +1170,18 @@ export class HomeWorldService extends Service {
         policyClass: change.policyClass,
         revision: (existing?.revision ?? 0) + 1,
       });
+      changedCount += 1;
+    }
+    if (changedCount === 0) {
+      // Nothing changed: no write, no revision bump, no invalidation.
+      const revisions = this.authority.actionAuthorityConfigurationEntries().map((entry) => entry.revision);
+      return { status: "configured", configurationRevision: revisions.length === 0 ? 0 : Math.max(...revisions), changedCount: 0 };
     }
     try {
       const projection = writeActionAuthorityConfiguration(this.actionAuthorityConfigPathValue, [...merged.values()]);
       this.authority.replaceActionAuthorityConfig(projection);
       const revisions = Object.values(projection).map((entry) => entry.configRevision);
-      return { status: "configured", configurationRevision: revisions.length === 0 ? 0 : Math.max(...revisions) };
+      return { status: "configured", configurationRevision: revisions.length === 0 ? 0 : Math.max(...revisions), changedCount };
     } catch {
       return { status: "blocked", reason: "write_failed" };
     }

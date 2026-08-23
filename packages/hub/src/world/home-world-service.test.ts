@@ -559,6 +559,14 @@ test("a delta save preserves persisted entries that availability cannot see", as
           configIdentity: `sha256:${"b".repeat(64)}`,
           configRevision: 3,
         },
+        // Active — the form will echo it back unchanged.
+        "hwc-curtain": {
+          bridgeId: "bridge-delta",
+          approved: true,
+          policyClass: "direct",
+          configIdentity: `sha256:${"d".repeat(64)}`,
+          configRevision: 7,
+        },
         // Configured on a bridge that is not part of this runtime at all.
         "hwc-detached": {
           bridgeId: "bridge-gone",
@@ -578,10 +586,18 @@ test("a delta save preserves persisted entries that availability cannot see", as
     assert.equal(revoked.status, "configured");
     assert.equal(revoked.approved, false, "the settings projection sees the revocation, not a blank");
 
+    const curtainBefore = ctx.homeWorld.actionAuthorityConfigurationOf("hwc-curtain");
+
     const result = ctx.homeWorld.configureActionAuthorityDelta([
       { hwCapabilityId: "hwc-light", policyClass: "direct" },
+      // The form echoes the untouched active row back — a re-statement.
+      { hwCapabilityId: "hwc-curtain", policyClass: "direct" },
     ]);
     assert.equal(result.status, "configured");
+    assert.equal(result.changedCount, 1, "only the row the household actually changed counts");
+
+    const curtainAfter = ctx.homeWorld.actionAuthorityConfigurationOf("hwc-curtain");
+    assert.deepEqual(curtainAfter, curtainBefore, "the echoed row keeps bridge, revision, and identity byte-for-byte");
 
     const changed = ctx.homeWorld.actionAuthorityConfigurationOf("hwc-light");
     assert.equal(changed.status, "configured");
@@ -591,6 +607,8 @@ test("a delta save preserves persisted entries that availability cannot see", as
     const written = JSON.parse(readFileSync(configPath, "utf8")) as {
       bindings: readonly { hwCapabilityId: string; approved: boolean; policyClass: string; revision: number }[];
     };
+    const curtainWritten = written.bindings.find((binding) => binding.hwCapabilityId === "hwc-curtain");
+    assert.equal(curtainWritten?.revision, 7, "the echoed row's revision never bumps");
     const detached = written.bindings.find((binding) => binding.hwCapabilityId === "hwc-detached");
     assert.equal(detached?.approved, true, "the entry no page and no bridge can see survives the write");
     assert.equal(detached?.policyClass, "administrator");

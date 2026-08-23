@@ -978,9 +978,11 @@ test("settings saves confirmation methods and rechecks blocked proposals", async
       bridges: [],
       capabilities: [{ id: "hwc-1", label: "灯（客厅） · 灯", bridgeId: "ha", bridgeLabel: "Home Assistant", suggestedPolicyClass: "confirmation" as const }],
     }),
-    configureActionPolicy: (selection: unknown) => {
+    configureActionPolicy: (selection: { directCapabilityIds: readonly string[]; confirmationCapabilityIds: readonly string[]; administratorCapabilityIds: readonly string[] }) => {
+      const rows = selection.directCapabilityIds.length + selection.confirmationCapabilityIds.length + selection.administratorCapabilityIds.length;
+      if (rows === 0) return { status: "configured" as const, changedCount: 0 };
       configured.push(selection);
-      return { status: "configured" as const };
+      return { status: "configured" as const, changedCount: rows };
     },
   };
   const fiber = await ctx.plugin(ProposalInboxHttpService, {
@@ -999,6 +1001,9 @@ test("settings saves confirmation methods and rechecks blocked proposals", async
     const settingsHtml = await settings.text();
     assert.match(settingsHtml, /id="action-policy"/, "settings offers the confirmation-method editor");
     assert.match(settingsHtml, /name="capability:hwc-1"/);
+    assert.match(settingsHtml, /data-policy-form/, "the form is marked for the change-gated save button");
+    const asset = await fetch(`${ctx.homeInboxHttp.origin}/assets/product.js`, { headers: { authorization } });
+    assert.match(await asset.text(), /data-policy-form[\s\S]*disabled = true/, "the asset gates the save button until a real change");
 
     const saved = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
       method: "POST",
@@ -1025,6 +1030,19 @@ test("settings saves confirmation methods and rechecks blocked proposals", async
 
     const forged = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=saved`, { headers: { authorization } });
     assert.doesNotMatch(await forged.text(), /已保存确认方式/, "a crafted URL never fakes a success message");
+
+    const empty = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers,
+      body: "",
+      redirect: "manual",
+    });
+    assert.equal(empty.status, 303, "choosing nothing is a truthful no-change, not an error");
+    const emptyReceipt = /policy=([a-f0-9]{32})/.exec(empty.headers.get("location") ?? "")?.[1];
+    assert.ok(emptyReceipt !== undefined);
+    const emptyConfirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${emptyReceipt}`, { headers: { authorization } });
+    assert.match(await emptyConfirmed.text(), /确认方式没有变化。/);
+    assert.equal(rechecks, 1, "a no-change save rechecks nothing");
 
     const sharedDenied = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
       method: "POST",

@@ -107,7 +107,7 @@ export interface OnboardingActionAuthorityPort {
   /** Delta write over the persisted configuration; the owner preserves the rest. */
   configureDelta?(
     changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
-  ): { readonly status: "configured"; readonly configurationRevision: number }
+  ): { readonly status: "configured"; readonly configurationRevision: number; readonly changedCount?: number }
     | { readonly status: "blocked"; readonly reason: string };
 }
 
@@ -261,15 +261,17 @@ export class HomeOnboardingCoordinatorService extends Service {
       readonly administratorCapabilityIds: readonly string[];
     },
     actor?: OnboardingActor,
-  ): { readonly status: "configured" } | { readonly status: "blocked"; readonly reason: string } {
+  ): { readonly status: "configured"; readonly changedCount?: number } | { readonly status: "blocked"; readonly reason: string } {
     if (!actor || !actor.present || actor.device.kind !== "private" || actor.device.boundPrincipalId !== actor.principalId) {
       throw new HomeOnboardingCoordinatorError("permission_denied", "确认方式设置需要在场，并使用绑定到本人的私人设备");
     }
     const world = this.requireWorld();
     const all = [...selection.directCapabilityIds, ...selection.confirmationCapabilityIds, ...selection.administratorCapabilityIds];
-    if (all.length === 0 || new Set(all).size !== all.length) {
+    if (new Set(all).size !== all.length) {
       throw new HomeOnboardingCoordinatorError("invalid_input", "每个动作只能选择一种确认方式");
     }
+    // No rows chosen is a truthful no-change, not an error.
+    if (all.length === 0) return { status: "configured", changedCount: 0 };
     const available = capabilityIds(world.snapshot());
     if (all.some((id) => !available.has(id))) {
       return { status: "blocked", reason: "确认方式必须来自当前家庭地图中的真实能力。" };
@@ -291,7 +293,7 @@ export class HomeOnboardingCoordinatorService extends Service {
     ];
     const configured = this.actionAuthority.configureDelta(changes);
     return configured.status === "configured"
-      ? { status: "configured" }
+      ? { status: "configured", ...(configured.changedCount === undefined ? {} : { changedCount: configured.changedCount }) }
       : { status: "blocked", reason: "确认方式配置没有完成，家庭保持安全默认值。" };
   }
 

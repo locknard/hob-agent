@@ -1306,7 +1306,7 @@ function renderActionPolicyEditor(model: NormalizedProductShellModel): string {
         : "";
     return `<li class="product-policy-row"><span class="product-policy-device">${escapeHtml(capability.label)}<small>${escapeHtml(capability.bridgeLabel)}${hint}</small></span><span class="product-policy-options">${options}</span></li>`;
   }).join("");
-  return `<section class="product-settings-section product-card" id="action-policy"><div><h2>设备动作的确认方式</h2><p class="product-muted">逐项决定每个动作要不要先问你；保存后会重新检查受影响的建议。</p></div>${notice}<form class="product-policy-form" method="post" action="/settings/action-policy"><ul class="product-policy-list">${rows}</ul><button class="product-primary-action" type="submit">保存确认方式</button></form></section>`;
+  return `<section class="product-settings-section product-card" id="action-policy"><div><h2>设备动作的确认方式</h2><p class="product-muted">逐项决定每个动作要不要先问你；保存后会重新检查受影响的建议。</p></div>${notice}<form class="product-policy-form" method="post" action="/settings/action-policy" data-policy-form><ul class="product-policy-list">${rows}</ul><button class="product-primary-action" type="submit">保存确认方式</button></form></section>`;
 }
 
 function renderManagedSettings(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
