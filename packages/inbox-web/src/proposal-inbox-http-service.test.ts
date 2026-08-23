@@ -1013,8 +1013,12 @@ test("settings saves confirmation methods and rechecks blocked proposals", async
     assert.deepEqual(configured, [{ directCapabilityIds: [], confirmationCapabilityIds: ["hwc-1"], administratorCapabilityIds: [] }]);
     assert.equal(rechecks, 1, "the saved configuration immediately rechecks blocked proposals");
 
+    const probed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { method: "HEAD", headers: { authorization } });
+    assert.equal(probed.status, 200);
+
     const confirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
-    assert.match(await confirmed.text(), /已保存确认方式，已重新检查 1 条受阻建议，其中 1 条已恢复可启用。/, "the notice consumes the real recheck result");
+    assert.match(await confirmed.text(), /已保存确认方式，已重新检查 1 条受阻建议，其中 1 条已恢复可启用。/,
+      "a HEAD probe never consumes the receipt; the household's GET still reads it");
 
     const replayed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
     assert.doesNotMatch(await replayed.text(), /已保存确认方式/, "a receipt reads exactly once");
@@ -1029,6 +1033,53 @@ test("settings saves confirmation methods and rechecks blocked proposals", async
       redirect: "manual",
     });
     assert.equal(sharedDenied.status, 303, "the bound-phone principal saves normally");
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("a recheck failure never undoes the save and the receipt says so", async () => {
+  const ctx = new Context();
+  class ThrowingRecheckInbox extends StubInbox {
+    recheckBlockedProposals(): { rechecked: number; cleared: number } {
+      throw new Error("recheck port failed");
+    }
+  }
+  const inboxFiber = await ctx.plugin(ThrowingRecheckInbox);
+  const onboarding = {
+    getState: () => ({ step: 8, complete: true, status: "complete" as const, title: "完成", body: "完成", choices: { status: "available" as const, bridges: [], capabilities: [] } }),
+    submit: () => { throw new Error("not used"); },
+    actionPolicyChoices: () => ({
+      status: "available" as const,
+      bridges: [],
+      capabilities: [{ id: "hwc-1", label: "灯（客厅） · 灯", bridgeId: "ha", bridgeLabel: "Home Assistant", suggestedPolicyClass: "confirmation" as const }],
+    }),
+    configureActionPolicy: () => ({ status: "configured" as const }),
+  };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+    onboarding,
+  });
+  try {
+    const saved = await fetch(`${ctx.homeInboxHttp.origin}/settings/action-policy`, {
+      method: "POST",
+      headers: {
+        authorization,
+        origin: ctx.homeInboxHttp.origin,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "capability%3Ahwc-1=confirmation",
+      redirect: "manual",
+    });
+    assert.equal(saved.status, 303, "the save survives a recheck failure");
+    const receipt = /policy=([a-f0-9]{32})/.exec(saved.headers.get("location") ?? "")?.[1];
+    assert.ok(receipt !== undefined);
+    const confirmed = await fetch(`${ctx.homeInboxHttp.origin}/settings?policy=${receipt}`, { headers: { authorization } });
+    assert.match(await confirmed.text(), /已保存确认方式，建议状态稍后重新检查。/, "the receipt states the recheck did not run");
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();

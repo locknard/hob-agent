@@ -686,7 +686,7 @@ export class ProposalInboxHttpService extends Service {
           productRoute === "settings" && url.searchParams.get("preview") === "1",
           productRoute === "settings" ? boundedLayoutDraftNotice(url.searchParams.get("layoutNotice")) : undefined,
           undefined,
-          productRoute === "settings" ? this.consumeActionPolicyReceipt(url.searchParams.get("policy")) : undefined,
+          productRoute === "settings" && method === "GET" ? this.consumeActionPolicyReceipt(url.searchParams.get("policy")) : undefined,
         );
       }
       if (method === "POST" && url.pathname === "/onboarding/continue") {
@@ -738,11 +738,22 @@ export class ProposalInboxHttpService extends Service {
         // The saved configuration immediately rechecks every blocked plan, so
         // the card the household came from recovers without another step. The
         // redirect carries an opaque single-use receipt — the page can never
-        // be talked into a success message by a crafted URL.
-        const recheck = this.inbox.recheckBlockedProposals?.();
+        // be talked into a success message by a crafted URL. A recheck failure
+        // never undoes the save; the receipt states it plainly.
+        let recheck: { readonly rechecked: number; readonly cleared: number } | undefined;
+        let recheckFailed = false;
+        try {
+          recheck = this.inbox.recheckBlockedProposals?.();
+        } catch {
+          recheckFailed = true;
+        }
         const receipt = randomBytes(16).toString("hex");
         this.pruneActionPolicyReceipts();
-        this.actionPolicyReceipts.set(receipt, { at: Date.now(), ...(recheck === undefined ? {} : { recheck }) });
+        this.actionPolicyReceipts.set(receipt, {
+          at: Date.now(),
+          ...(recheck === undefined ? {} : { recheck }),
+          ...(recheckFailed ? { recheckFailed: true } : {}),
+        });
         return redirect(response, `/settings?policy=${receipt}#action-policy`);
       }
       if (method === "POST" && url.pathname === "/settings/view-default") {
@@ -1702,7 +1713,7 @@ export class ProposalInboxHttpService extends Service {
       ...(notice === undefined ? {} : { notice }),
     });
   }
-  private readonly actionPolicyReceipts = new Map<string, { readonly at: number; readonly recheck?: { readonly rechecked: number; readonly cleared: number } }>();
+  private readonly actionPolicyReceipts = new Map<string, { readonly at: number; readonly recheck?: { readonly rechecked: number; readonly cleared: number }; readonly recheckFailed?: boolean }>();
 
   private pruneActionPolicyReceipts(): void {
     const now = Date.now();
@@ -1723,6 +1734,7 @@ export class ProposalInboxHttpService extends Service {
     if (receipt === undefined) return undefined;
     this.actionPolicyReceipts.delete(token);
     if (Date.now() - receipt.at > 300_000) return undefined;
+    if (receipt.recheckFailed === true) return "已保存确认方式，建议状态稍后重新检查。";
     if (receipt.recheck === undefined) return "已保存确认方式。";
     return receipt.recheck.rechecked === 0
       ? "已保存确认方式，没有受影响的建议。"
@@ -1746,10 +1758,11 @@ export class ProposalInboxHttpService extends Service {
           id: capability.id,
           label: capability.label,
           bridgeLabel: capability.bridgeLabel,
-          // The saved configuration wins; the type-based suggestion only fills
-          // in for a capability the household has never configured.
+          // The saved configuration wins; the type-based suggestion is only a
+          // labeled hint on rows the household never configured.
           policyClass: capability.currentPolicyClass ?? capability.suggestedPolicyClass,
-          configured: capability.currentPolicyClass !== undefined,
+          state: capability.configurationState
+            ?? (capability.currentPolicyClass !== undefined ? "active" as const : "unconfigured" as const),
         })),
         ...(savedNotice === undefined ? {} : { savedNotice }),
       },

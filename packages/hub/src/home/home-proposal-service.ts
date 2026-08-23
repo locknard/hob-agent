@@ -51,7 +51,7 @@ export interface ProposalDeploymentPort {
   }): ProposalDeploymentIntent
     | { readonly reason: string }
     | { readonly revalidationReason: string; readonly updatedGateDisclosure?: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
-    | { readonly blockedKind?: "not_configured" | "not_approved" | "unknown_capability" | "protected"; readonly blockedReason: string };
+    | { readonly blockedKind: "not_configured" | "not_approved" | "unknown_capability" | "protected"; readonly blockedReason: string };
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
@@ -405,7 +405,7 @@ export class HomeProposalService extends Service {
             proposalId: proposal.id,
             actor: "system",
             reason: resolved.blockedReason,
-            ...(resolved.blockedKind === undefined ? {} : { kind: resolved.blockedKind }),
+            kind: resolved.blockedKind,
           });
         }
         continue;
@@ -485,7 +485,7 @@ export class HomeProposalService extends Service {
         ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
         actor: "system",
         reason: resolved.blockedReason,
-        ...(resolved.blockedKind === undefined ? {} : { kind: resolved.blockedKind }),
+        kind: resolved.blockedKind,
       });
     }
     if (resolved !== undefined && "revalidationReason" in resolved) {

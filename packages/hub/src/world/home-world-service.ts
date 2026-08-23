@@ -75,6 +75,7 @@ import {
   type AuthorityAvailability,
   type AuthorityResyncPort,
   type StateAuthorityResolution,
+  type ActionAuthorityConfigurationResolution,
 } from "../authority/authority-coordinator.js";
 import {
   actionAuthorityConfigurationPath,
@@ -1121,6 +1122,63 @@ export class HomeWorldService extends Service {
     } catch {
       return { status: "blocked", reason: "write_failed" };
     }
+  }
+
+  /**
+   * Delta write over the persisted configuration: the submitted rows change,
+   * every other persisted entry — bridge down, authorization revoked, device
+   * momentarily out of the snapshot — survives byte-for-byte semantics and
+   * the whole set writes back atomically. A selected row re-approves
+   * deliberately; nothing else touches the approved flag.
+   */
+  configureActionAuthorityDelta(
+    changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
+  ): HomeWorldActionAuthorityPolicyResult {
+    if (this.actionAuthorityConfigPathValue === undefined) {
+      return { status: "blocked", reason: "configuration_source_unavailable" };
+    }
+    if (changes.length === 0) return { status: "blocked", reason: "unknown_capability" };
+    this.refreshIdentity();
+    const merged = new Map<string, ActionAuthorityBindingWriteInput>();
+    for (const existing of this.authority.actionAuthorityConfigurationEntries()) {
+      merged.set(existing.hwCapabilityId, {
+        hwCapabilityId: existing.hwCapabilityId,
+        bridgeId: existing.bridgeId,
+        approved: existing.approved,
+        policyClass: existing.policyClass,
+        revision: existing.revision,
+      });
+    }
+    const seen = new Set<string>();
+    for (const change of changes) {
+      if (seen.has(change.hwCapabilityId)) return { status: "blocked", reason: "unknown_capability" };
+      seen.add(change.hwCapabilityId);
+      const capability = this.authority.capability(change.hwCapabilityId);
+      if (capability === undefined) return { status: "blocked", reason: "unknown_capability" };
+      const bridgeIds = [...new Set(capability.bindings.map((binding) => binding.bridgeId))];
+      if (bridgeIds.length !== 1 || bridgeIds[0] === undefined) return { status: "blocked", reason: "ambiguous_bridge" };
+      const existing = merged.get(change.hwCapabilityId);
+      merged.set(change.hwCapabilityId, {
+        hwCapabilityId: change.hwCapabilityId,
+        bridgeId: bridgeIds[0],
+        approved: true,
+        policyClass: change.policyClass,
+        revision: (existing?.revision ?? 0) + 1,
+      });
+    }
+    try {
+      const projection = writeActionAuthorityConfiguration(this.actionAuthorityConfigPathValue, [...merged.values()]);
+      this.authority.replaceActionAuthorityConfig(projection);
+      const revisions = Object.values(projection).map((entry) => entry.configRevision);
+      return { status: "configured", configurationRevision: revisions.length === 0 ? 0 : Math.max(...revisions) };
+    } catch {
+      return { status: "blocked", reason: "write_failed" };
+    }
+  }
+
+  /** Persisted configuration state for one capability — settings truth. */
+  actionAuthorityConfigurationOf(hwCapabilityId: string): ActionAuthorityConfigurationResolution {
+    return this.authority.resolveActionAuthorityConfiguration(hwCapabilityId);
   }
 
   async executeOneShotAction(input: HomeWorldOneShotActionInput): Promise<BridgeActionResult> {

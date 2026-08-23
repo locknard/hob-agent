@@ -469,7 +469,12 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   decision: proposalGovernanceDecisionSchema.optional(),
   review: proposalReviewSchema.optional(),
   audit: z.array(proposalAuditEventSchema).min(1).max(100),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  // The blocked cause and its household reason are one fact: never one alone.
+  if ((value.enableBlockedReason === undefined) !== (value.enableBlockedKind === undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "enable block reason and kind exist together or not at all" });
+  }
+});
 
 interface ReviewProposalInputBase {
   readonly proposalId: string;
@@ -1173,7 +1178,7 @@ export class SqliteProposalStore {
    * or a lost authority). The card stays visible with an honest notice; the
    * household keeps the revise and decline entries and is never sent in a loop.
    */
-  markEnableBlocked(input: ProposalLifecycleInput & { readonly reason: string; readonly kind?: "not_configured" | "not_approved" | "unknown_capability" | "protected" }): ProposalEnvelope {
+  markEnableBlocked(input: ProposalLifecycleInput & { readonly reason: string; readonly kind: "not_configured" | "not_approved" | "unknown_capability" | "protected" }): ProposalEnvelope {
     const reason = input.reason?.trim();
     if (typeof reason !== "string" || reason.length === 0 || reason.length > 1_000) {
       throw new TypeError("proposal enable block reason is invalid");
@@ -1187,7 +1192,7 @@ export class SqliteProposalStore {
         ...current,
         revision,
         enableBlockedReason: reason,
-        ...(input.kind === undefined ? {} : { enableBlockedKind: input.kind }),
+        enableBlockedKind: input.kind,
         updatedAt: at,
         audit: [...current.audit, {
           ...this.auditEvent(at, "revalidation_required", input.actor ?? "system", revision),

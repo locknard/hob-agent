@@ -43,6 +43,8 @@ export interface OnboardingCapabilityChoice {
   readonly suggestedPolicyClass: OnboardingPolicySuggestion;
   /** The saved confirmation method, present only when actually configured. */
   readonly currentPolicyClass?: OnboardingPolicySuggestion;
+  /** Persisted configuration state: the settings editor renders each honestly. */
+  readonly configurationState?: "unconfigured" | "active" | "revoked" | "invalid";
 }
 
 export interface OnboardingChoiceProjection {
@@ -63,10 +65,12 @@ export interface OnboardingActor {
 }
 
 export interface OnboardingWorldPort {
-  /** Current action authority, when the world owner provides it (HomeWorld does). */
-  resolveActionAuthority?(hwCapabilityId: string):
-    | { readonly status: "available"; readonly policyClass: "direct" | "confirmation" | "administrator" }
-    | { readonly status: "unavailable"; readonly reason?: string };
+  /** Persisted configuration state, when the world owner provides it (HomeWorld does). */
+  actionAuthorityConfigurationOf?(hwCapabilityId: string): {
+    readonly status: "configured" | "not_configured" | "invalid";
+    readonly approved: boolean;
+    readonly policyClass?: "direct" | "confirmation" | "administrator";
+  };
   snapshot(): {
     readonly generatedAt?: string;
     readonly bridges: Readonly<Record<string, {
@@ -99,6 +103,11 @@ export interface OnboardingActionAuthorityPort {
     readonly confirmationCapabilityIds: readonly string[];
     readonly administratorCapabilityIds: readonly string[];
   }): { readonly status: "configured"; readonly configurationRevision: number }
+    | { readonly status: "blocked"; readonly reason: string };
+  /** Delta write over the persisted configuration; the owner preserves the rest. */
+  configureDelta?(
+    changes: readonly { readonly hwCapabilityId: string; readonly policyClass: "direct" | "confirmation" | "administrator" }[],
+  ): { readonly status: "configured"; readonly configurationRevision: number }
     | { readonly status: "blocked"; readonly reason: string };
 }
 
@@ -268,31 +277,19 @@ export class HomeOnboardingCoordinatorService extends Service {
     if (this.actionAuthority === undefined) {
       return { status: "blocked", reason: "确认方式配置服务尚未就绪，家庭保持安全默认值。" };
     }
-    // The submission is a delta over what the household saw. The full set the
-    // authority receives is current configuration merged with that delta, so
-    // saving a page never erases a capability the page did not show.
-    if (world.resolveActionAuthority === undefined) {
+    // The submission is a delta of the rows the household actually chose.
+    // The configuration owner merges it over the persisted facts and writes
+    // the whole set back atomically — availability plays no part, so a
+    // bridge-down or revoked entry the page never showed survives untouched.
+    if (this.actionAuthority.configureDelta === undefined) {
       return { status: "blocked", reason: "当前配置暂时读取不到，为避免覆盖已有设置没有保存。" };
     }
-    const submitted = new Map<string, "direct" | "confirmation" | "administrator">();
-    for (const id of selection.directCapabilityIds) submitted.set(id, "direct");
-    for (const id of selection.confirmationCapabilityIds) submitted.set(id, "confirmation");
-    for (const id of selection.administratorCapabilityIds) submitted.set(id, "administrator");
-    const merged = { direct: [] as string[], confirmation: [] as string[], administrator: [] as string[] };
-    for (const id of available) {
-      const chosen = submitted.get(id);
-      if (chosen !== undefined) {
-        merged[chosen].push(id);
-        continue;
-      }
-      const current = world.resolveActionAuthority(id);
-      if (current.status === "available") merged[current.policyClass].push(id);
-    }
-    const configured = this.actionAuthority.configure({
-      directCapabilityIds: merged.direct,
-      confirmationCapabilityIds: merged.confirmation,
-      administratorCapabilityIds: merged.administrator,
-    });
+    const changes: { hwCapabilityId: string; policyClass: "direct" | "confirmation" | "administrator" }[] = [
+      ...selection.directCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "direct" as const })),
+      ...selection.confirmationCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "confirmation" as const })),
+      ...selection.administratorCapabilityIds.map((hwCapabilityId) => ({ hwCapabilityId, policyClass: "administrator" as const })),
+    ];
+    const configured = this.actionAuthority.configureDelta(changes);
     return configured.status === "configured"
       ? { status: "configured" }
       : { status: "blocked", reason: "确认方式配置没有完成，家庭保持安全默认值。" };
@@ -361,9 +358,19 @@ export class HomeOnboardingCoordinatorService extends Service {
         const bridge = bridgeById.get(bridgeIds[0]!);
         if (bridge === undefined || !bridge.selectable) continue;
         const semanticKind = capability.semanticKind;
-        const currentAuthority = this.world?.resolveActionAuthority?.(capability.hwCapabilityId);
+        const persisted = this.world?.actionAuthorityConfigurationOf?.(capability.hwCapabilityId);
+        const configurationState = persisted === undefined
+          ? undefined
+          : persisted.status === "invalid"
+            ? "invalid" as const
+            : persisted.status === "not_configured"
+              ? "unconfigured" as const
+              : persisted.approved ? "active" as const : "revoked" as const;
         capabilities.push({
-          ...(currentAuthority?.status === "available" ? { currentPolicyClass: currentAuthority.policyClass } : {}),
+          ...(persisted?.status === "configured" && persisted.policyClass !== undefined
+            ? { currentPolicyClass: persisted.policyClass }
+            : {}),
+          ...(configurationState === undefined ? {} : { configurationState }),
           id: capability.hwCapabilityId,
           label: `${boundedText(device.name) ? device.name : "设备"} · ${semanticLabel(semanticKind)}`,
           bridgeId: bridge.id,

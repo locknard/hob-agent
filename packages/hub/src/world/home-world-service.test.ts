@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -530,6 +531,73 @@ test("returns an explicit unavailable placeholder without configuration and fail
     });
   } finally {
     await placeholderFiber.dispose();
+  }
+});
+
+test("a delta save preserves persisted entries that availability cannot see", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-world-authority-delta-"));
+  const configPath = join(directory, "action-authority.json");
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge("bridge-delta", "remote-delta", snapshotFor("bridge-delta", "remote-delta"));
+  catalog.register(registration(() => bridge));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-delta")],
+    new Map([["bridge-delta", bridge]]),
+    {
+      identityManager: deterministicIdentityManager(),
+      actionAuthorityConfigPath: configPath,
+      actionAuthorityConfig: {
+        // Revoked by the household — persisted fact, invisible to availability.
+        "hwc-light": {
+          bridgeId: "bridge-delta",
+          approved: false,
+          policyClass: "confirmation",
+          configIdentity: `sha256:${"b".repeat(64)}`,
+          configRevision: 3,
+        },
+        // Configured on a bridge that is not part of this runtime at all.
+        "hwc-detached": {
+          bridgeId: "bridge-gone",
+          approved: true,
+          policyClass: "administrator",
+          configIdentity: `sha256:${"c".repeat(64)}`,
+          configRevision: 5,
+        },
+      },
+      monitorIntervalMs: 0,
+    },
+  ));
+  try {
+    await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-delta"]?.diagnostics.connectionState === "ready");
+
+    const revoked = ctx.homeWorld.actionAuthorityConfigurationOf("hwc-light");
+    assert.equal(revoked.status, "configured");
+    assert.equal(revoked.approved, false, "the settings projection sees the revocation, not a blank");
+
+    const result = ctx.homeWorld.configureActionAuthorityDelta([
+      { hwCapabilityId: "hwc-light", policyClass: "direct" },
+    ]);
+    assert.equal(result.status, "configured");
+
+    const changed = ctx.homeWorld.actionAuthorityConfigurationOf("hwc-light");
+    assert.equal(changed.status, "configured");
+    assert.equal(changed.approved, true, "an explicit selection re-approves deliberately");
+    assert.equal(changed.policyClass, "direct");
+
+    const written = JSON.parse(readFileSync(configPath, "utf8")) as {
+      bindings: readonly { hwCapabilityId: string; approved: boolean; policyClass: string; revision: number }[];
+    };
+    const detached = written.bindings.find((binding) => binding.hwCapabilityId === "hwc-detached");
+    assert.equal(detached?.approved, true, "the entry no page and no bridge can see survives the write");
+    assert.equal(detached?.policyClass, "administrator");
+    assert.equal(detached?.revision, 5, "an untouched entry keeps its revision");
+  } finally {
+    await fiber.dispose();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

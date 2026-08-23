@@ -35,6 +35,7 @@ export interface OnboardingCapabilityChoice {
   readonly suggestedPolicyClass: OnboardingPolicySuggestion;
   /** The saved confirmation method, present only when actually configured. */
   readonly currentPolicyClass?: OnboardingPolicySuggestion;
+  readonly configurationState?: "unconfigured" | "active" | "revoked" | "invalid";
 }
 
 export interface OnboardingChoiceProjection {

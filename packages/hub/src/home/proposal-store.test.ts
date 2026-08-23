@@ -455,7 +455,7 @@ test("a fresh validation clears the enable block and the record reads back", asy
   const store = new SqliteProposalStore({ path, now: () => createdAt });
   try {
     const ready = prepareToReady(store, store.create(input({ artifactCandidate, idempotencyKey: "unblock-readback" })).id);
-    store.markEnableBlocked({ proposalId: ready.id, actor: "system", reason: "方案里设备的确认方式还没有设置好。" });
+    store.markEnableBlocked({ proposalId: ready.id, actor: "system", reason: "方案里设备的确认方式还没有设置好。", kind: "not_configured" });
     const cleared = store.clearEnableBlock({ proposalId: ready.id, actor: "system" });
     assert.equal(cleared.enableBlockedReason, undefined);
     assert.equal(cleared.lifecycle, "ready");
@@ -527,6 +527,7 @@ test("demoted and enable-blocked proposals survive read-back and a store reopen"
       expectedRevision: blockedReady.revision,
       actor: "system",
       reason: "方案里有设备的动作已进入高影响保护，暂时不能交给自动化。",
+      kind: "protected",
     });
     assert.equal(blocked.lifecycle, "ready");
     const blockedAgain = store.get(blocked.id);

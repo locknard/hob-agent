@@ -227,6 +227,7 @@ export class HomeAgentRuntime {
           ...(this.options.homeOnboarding.actionAuthority === undefined ? {
             actionAuthority: {
               configure: (input) => this.context.homeWorld.configureActionAuthority(input),
+              configureDelta: (changes) => this.context.homeWorld.configureActionAuthorityDelta(changes),
             },
           } : {}),
           ...(this.options.homeOnboarding.observation === undefined ? {

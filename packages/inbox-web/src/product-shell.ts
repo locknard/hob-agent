@@ -423,8 +423,8 @@ export interface ProductShellModel {
       readonly label: string;
       readonly bridgeLabel: string;
       readonly policyClass: "direct" | "confirmation" | "administrator";
-      /** False while the value is still the type-based suggestion. */
-      readonly configured?: boolean;
+      /** Persisted state; the row renders and submits according to it. */
+      readonly state?: "unconfigured" | "active" | "revoked" | "invalid";
     }[];
     readonly savedNotice?: string;
   };
@@ -1288,11 +1288,23 @@ function renderActionPolicyEditor(model: NormalizedProductShellModel): string {
   if (editor === undefined || editor.capabilities.length === 0) return "";
   const notice = editor.savedNotice === undefined ? "" : `<p class="product-enable-notice" role="status" data-one-shot-notice>${escapeHtml(editor.savedNotice)}</p>`;
   const rows = editor.capabilities.map((capability) => {
+    const state = capability.state ?? "unconfigured";
+    if (state === "invalid") {
+      return `<li class="product-policy-row"><span class="product-policy-device">${escapeHtml(capability.label)}<small>${escapeHtml(capability.bridgeLabel)} · 配置记录损坏，需要重新设置后才能编辑</small></span></li>`;
+    }
+    // Only the active state pre-checks a radio. An unconfigured or revoked
+    // row submits nothing unless the household actively chooses — saving the
+    // page never adopts suggestions wholesale and never re-approves quietly.
     const options = (["direct", "confirmation", "administrator"] as const).map((value) => {
       const label = value === "direct" ? "直接动作" : value === "confirmation" ? "每次先确认" : "高影响 · 手机确认";
-      return `<label class="product-policy-option"><input type="radio" name="capability:${escapeHtml(capability.id)}" value="${value}"${capability.policyClass === value ? " checked" : ""}>${label}</label>`;
+      return `<label class="product-policy-option"><input type="radio" name="capability:${escapeHtml(capability.id)}" value="${value}"${state === "active" && capability.policyClass === value ? " checked" : ""}>${label}</label>`;
     }).join("");
-    return `<li class="product-policy-row"><span class="product-policy-device">${escapeHtml(capability.label)}<small>${escapeHtml(capability.bridgeLabel)}${capability.configured === false ? " · 建议，尚未保存" : ""}</small></span><span class="product-policy-options">${options}</span></li>`;
+    const hint = state === "revoked"
+      ? " · 授权已撤回，选择任一方式即重新授权"
+      : state === "unconfigured"
+        ? ` · 建议：${capability.policyClass === "direct" ? "直接动作" : capability.policyClass === "confirmation" ? "每次先确认" : "高影响 · 手机确认"}（尚未保存）`
+        : "";
+    return `<li class="product-policy-row"><span class="product-policy-device">${escapeHtml(capability.label)}<small>${escapeHtml(capability.bridgeLabel)}${hint}</small></span><span class="product-policy-options">${options}</span></li>`;
   }).join("");
   return `<section class="product-settings-section product-card" id="action-policy"><div><h2>设备动作的确认方式</h2><p class="product-muted">逐项决定每个动作要不要先问你；保存后会重新检查受影响的建议。</p></div>${notice}<form class="product-policy-form" method="post" action="/settings/action-policy"><ul class="product-policy-list">${rows}</ul><button class="product-primary-action" type="submit">保存确认方式</button></form></section>`;
 }
