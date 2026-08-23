@@ -1,7 +1,9 @@
 # Product bootstrap runtime
 
 Date: 2026-08-22
-Status: accepted direction; implementation follows as the next product milestone
+Status: accepted target; the current branch implements setup through a verified
+connection summary, while activation and the in-process handoff remain the next
+milestone
 
 ## Decision
 
@@ -26,14 +28,17 @@ can therefore open the product and complete setup before the Agent becomes activ
    The form collects provider, model id, optional HTTPS endpoint, and credential.
    The server performs one bounded paid probe and returns a household-readable
    result.
-4. Bridge setup offers registered product bundles. Home Assistant and Xiaomi appear
-   as equal adapter choices. Each adapter supplies its own schema-driven fields;
-   the Host owns credential collection and scoped storage.
-5. A read-only bridge sync produces the real household map. The existing member,
-   authority, safety, observation-consent, and first-question checkpoints continue
-   from that verified state.
-6. Activation commits one configuration generation and enters `starting`. The page
-   streams named stages until the operational Product Shell is ready.
+4. Bridge setup is catalog-driven. The current product screen offers Home Assistant;
+   Xiaomi joins the same choice list when an authorized production transport and its
+   setup registration are present. Each adapter supplies its own normalized config,
+   display endpoint and scoped credential references.
+5. The current read-only bridge probe returns a verified connection summary. The
+   next milestone mounts HomeWorld from that exact staged configuration to generate
+   the real household map and continue the action-policy, observation-consent and
+   first-question checkpoints.
+6. The target activation flow mounts the selected generation, commits it, and enters
+   `starting`. The page then streams named stages until the operational Product Shell
+   is ready.
 
 ## Configuration ownership
 
@@ -54,7 +59,11 @@ can therefore open the product and complete setup before the Agent becomes activ
   the active reference. The previous value remains available until activation
   succeeds.
 
-## Runtime composition
+## Target runtime composition
+
+The following table defines the accepted end state. The current branch owns the
+`pairing` and `setup` rows through the verified connection summary. The persistent
+Host handoff and the remaining rows are the next implementation slice.
 
 | State | Mounted ownership |
 | --- | --- |
@@ -64,10 +73,25 @@ can therefore open the product and complete setup before the Agent becomes activ
 | `operational` | HomeWorld, DSH Agent, review center, advice, media, observation, safety, Product Shell |
 | `recovery` | Product Shell, last stable generation, classified repair actions |
 
-State changes occur at the composition root. A configuration activation disposes
-the current Cordis fiber in reverse order and mounts the selected generation once.
-The Host Shell keeps the same origin and authenticated device session throughout
-the change.
+In the target runtime, state changes occur at the composition root. One persistent Product Host owns the
+loopback listener and the private-device session. Setup and operational services
+mount as mutually exclusive child fibers behind that Host; neither child owns a
+second listener. A configuration activation first mounts the selected generation,
+then commits it as active, then switches the Host surface. A failed mount disposes
+the candidate child and leaves the previous active generation unchanged. The Host
+keeps the same origin and authenticated device session throughout the change.
+
+The current setup cookie is already scoped to `/`. The target runtime treats it as
+the product session; its
+durable record contains only a digest, expiry, and the bound local principal. The
+operational Product Shell accepts that session directly; the product journey does
+not introduce a second Basic-authentication prompt after setup.
+
+Concrete setup support belongs to the ecosystem product bundle. The Hub setup
+controller consumes a neutral catalog of registered bridge setup adapters and
+stores only their validated config and credential references. Home Assistant,
+Xiaomi, and future peers never add product-specific branches to the controller or
+HomeWorld.
 
 ## HTTP and security boundary
 
@@ -86,26 +110,33 @@ the change.
 
 ## Implementation slices
 
-1. **Implemented:** the versioned non-secret configuration store commits an
+1. **Implemented on the product-bootstrap branch:** the versioned non-secret configuration store commits an
    owner-only, bounded, atomically replaced generation with optimistic revision,
    canonical credential references, secret-shaped field rejection, crash-resilient
    lock recovery, and deterministic tests. The single production `main` reads
    this activated generation whenever deployment environment values leave model
    or bridges unspecified.
-2. **Implemented:** launch parsing exposes a bootstrap minimum containing only the
+2. **Implemented on the product-bootstrap branch:** launch parsing exposes a bootstrap minimum containing only the
    validated private data directory. The composition root classifies `setup` or
    `operational` from non-secret metadata and reports only the activated generation.
    The operational parser composes model, bridges, credentials, policy and services
    from that generation while retaining one `main` and one `HomeAgentRuntime` root.
-3. Add pairing/session ownership and the `/setup` Host workspace.
-4. Connect model setup to the existing Keychain provisioner and DSH profile-scoped
-   probe.
-5. Connect bridge setup to `BridgeCatalog` schemas and bridge-scoped credentials,
-   then run the first read-only sync.
-6. Convert activation and recovery stages into the existing streamed Product Shell
-   waiting experience.
+3. **Implemented on the product-bootstrap branch:** pairing/setup-session ownership and
+   the `/setup` workspace cover the one-time pairing claim, household identity,
+   restartable non-secret draft, bounded forms, and a local attempt limiter.
+4. **Implemented on the product-bootstrap branch:** model setup stages a scoped
+   Keychain reference and runs a DSH profile-scoped probe without replacing the
+   active model profile.
+5. **Implemented on the product-bootstrap branch:** a neutral bridge setup catalog
+   stages bridge-scoped credentials and runs a Home Assistant authenticated,
+   read-only map probe without subscribing or writing.
+6. **Foundation implemented on the product-bootstrap branch:** one reusable
+   `ProductHttpHost`, an exact activation candidate, and a mountable Home Agent child
+   bundle. Next, compose them into the persistent Host, mount-before-commit
+   transition, product-session authentication, and continuous
+   `starting`/`recovery` feedback.
 7. Run browser, restart, credential-rotation, failed-probe, and real HA/custom-model
-   acceptance suites.
+   acceptance suites before declaring the milestone complete.
 
 ## Acceptance gates
 
