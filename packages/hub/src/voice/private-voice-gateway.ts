@@ -8,10 +8,12 @@ import type {
 
 export type PrivateVoiceGatewayStatus = "disabled" | "active" | "degraded" | "retrying" | "switching";
 export type PrivateVoiceCaptureMode = "encoded_audio" | "pcm_s16le";
+export type PrivateVoiceRecognitionMode = "final_only" | "partial";
 
 /** The narrow runtime seam keeps provider construction outside the stable gateway. */
 export interface PrivateVoiceGatewayRuntime {
   readonly status: PrivateVoiceProviderRuntimeStatus;
+  readonly recognitionMode?: PrivateVoiceRecognitionMode;
   readonly captureMode: PrivateVoiceCaptureMode;
   transcribe(input: PrivateVoiceTranscriptionInput): Promise<PrivateVoiceTranscriptionResult>;
   synthesize(input: PrivateVoiceSynthesisInput): Promise<PrivateVoiceSynthesisResult>;
@@ -35,6 +37,7 @@ export interface PrivateVoiceTurnLease {
   readonly leaseId: string;
   readonly configGeneration: number;
   readonly providerGeneration: string;
+  readonly recognitionMode: PrivateVoiceRecognitionMode;
   readonly captureMode: PrivateVoiceCaptureMode;
   transcribe(input: PrivateVoiceTranscriptionInput): Promise<PrivateVoiceTranscriptionResult>;
   synthesize(input: PrivateVoiceSynthesisInput): Promise<PrivateVoiceSynthesisResult>;
@@ -128,6 +131,10 @@ export class PrivateVoiceGateway {
     return this.current.runtime.status.status === "active" ? "active" : "degraded";
   }
 
+  get recognitionMode(): PrivateVoiceRecognitionMode {
+    return this.current?.runtime.recognitionMode ?? "final_only";
+  }
+
   /** Issues a frozen turn lease only to the current active provider generation. */
   beginTurn(): PrivateVoiceTurnLease | undefined {
     const generation = this.current;
@@ -165,6 +172,7 @@ export class PrivateVoiceGateway {
       leaseId: `lease-${this.nextTurn++}`,
       configGeneration: generation.configGeneration,
       providerGeneration: generation.providerGeneration,
+      recognitionMode: generation.runtime.recognitionMode ?? "final_only",
       captureMode: generation.runtime.captureMode,
       transcribe,
       synthesize,

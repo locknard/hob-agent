@@ -93,6 +93,10 @@ export class PrivateVoiceProviderRuntime {
   constructor(private readonly options: PrivateVoiceProviderRuntimeOptions) {}
 
   get status(): PrivateVoiceProviderRuntimeStatus { return this.statusValue; }
+  get recognitionMode(): "final_only" | "partial" {
+    const provider = this.asr;
+    return provider === undefined ? "final_only" : provider.provider.recognitionMode;
+  }
   get captureMode(): "encoded_audio" | "pcm_s16le" {
     return this.options.config.asr.transport === "wyoming" ? "pcm_s16le" : "encoded_audio";
   }

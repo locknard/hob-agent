@@ -99,6 +99,9 @@ export class OpenAiHttpVoiceTransport {
     this.clock = options.clock ?? Date.now;
   }
 
+  /** This bounded HTTP exchange exposes one final transcript, not partial events. */
+  get recognitionMode(): "final_only" { return "final_only"; }
+
   async transcribe(input: OpenAiHttpTranscriptionInput): Promise<OpenAiHttpVoiceTranscript> {
     let prepared: { readonly audio: Uint8Array; readonly mimeType: string; readonly locale?: string };
     try {

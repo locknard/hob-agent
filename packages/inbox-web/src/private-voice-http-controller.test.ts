@@ -89,6 +89,43 @@ test("owns its contracts without importing the proposal inbox HTTP service", () 
   assert.doesNotMatch(source, /proposal-inbox-http-service/);
 });
 
+test("projects the trusted final-only recognition capability from the configured ASR transport", async () => {
+  const controller = new PrivateVoiceHttpController({
+    voiceSettings: {
+      async projection() {
+        return {
+          status: "active" as const,
+          generation: 11,
+          configured: true as const,
+          asr: {
+            transport: "wyoming" as const,
+            endpoint: "tcp://asr.local",
+            credentialConfigured: false,
+          },
+          tts: {
+            transport: "wyoming" as const,
+            endpoint: "tcp://tts.local",
+            locale: "zh-CN",
+            credentialConfigured: false,
+          },
+          // Settings input cannot override the capability owned by the transport adapter.
+          recognitionMode: "partial",
+        };
+      },
+      async configure() { return { status: "unavailable" as const }; },
+      async disable() { return { status: "unavailable" as const }; },
+      async retry() { return "active" as const; },
+      cancelRetry() {},
+    },
+    productAdviceTurn: async () => undefined,
+  });
+  try {
+    assert.equal((await controller.settingsContext())?.recognitionMode, "final_only");
+  } finally {
+    await controller.dispose();
+  }
+});
+
 test("projects current-process ASR and TTS health from real calls without retaining payloads", async () => {
   let now = 1_000;
   let transcribeCalls = 0;
@@ -373,6 +410,7 @@ test("leases an active private voice browser turn through the controller", async
       status: "leased",
       voiceTurnId: "a".repeat(43),
       captureMode: "encoded_audio",
+      recognitionMode: "final_only",
     });
   } finally {
     await controller.dispose();

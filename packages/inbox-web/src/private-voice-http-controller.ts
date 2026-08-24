@@ -6,10 +6,12 @@ import type {
   ProductPrivateVoice,
   ProductPrivateVoiceHealth,
   ProductPrivateVoiceHealthTrack,
+  ProductPrivateVoiceRecognitionMode,
   ProductTurn,
 } from "./product-shell.js";
 
 export type PrivateVoiceCaptureMode = "encoded_audio" | "pcm_s16le";
+export type PrivateVoiceRecognitionMode = ProductPrivateVoiceRecognitionMode;
 
 export interface PrivateVoiceAudioFormat {
   readonly rate: number;
@@ -40,6 +42,7 @@ export type PrivateVoiceFailureReason =
 /** Frozen provider-generation capability; HTTP keeps it server-side behind an opaque browser turn id. */
 export interface PrivateVoiceTurnLease {
   readonly captureMode: PrivateVoiceCaptureMode;
+  readonly recognitionMode?: PrivateVoiceRecognitionMode;
   transcribe(input: {
     readonly audio: Uint8Array;
     readonly mimeType: string;
@@ -74,6 +77,7 @@ export interface PrivateVoiceTurnLease {
  */
 export interface PrivateVoiceProductPort {
   readonly status: PrivateVoiceProductPortStatus;
+  readonly recognitionMode?: PrivateVoiceRecognitionMode;
   /** Issues an exact provider-generation lease while the local bridge is active. */
   beginTurn(): PrivateVoiceTurnLease | undefined;
   /** Reconnects a degraded local provider. The provider owns concurrent retry reuse. */
@@ -359,10 +363,16 @@ export class PrivateVoiceHttpController {
   }
 
   renderState():
-    | { readonly status: "active" }
+    | { readonly status: "active"; readonly recognitionMode: PrivateVoiceRecognitionMode }
     | { readonly status: "recovering" | "retryable" | "unavailable" } {
     if (this.recoveryTask !== undefined) return { status: "recovering" };
-    if (this.activeVoice() !== undefined) return { status: "active" };
+    const voice = this.activeVoice();
+    if (voice !== undefined) {
+      return {
+        status: "active",
+        recognitionMode: normalizeRecognitionMode(voice.recognitionMode),
+      };
+    }
     return this.options.privateVoice?.status === "degraded" &&
       typeof this.options.privateVoice.retry === "function"
       ? { status: "retryable" }
@@ -638,6 +648,7 @@ export class PrivateVoiceHttpController {
       status: "leased",
       voiceTurnId: token,
       captureMode: lease.captureMode,
+      recognitionMode: normalizeRecognitionMode(lease.recognitionMode),
     });
   }
 
@@ -1762,6 +1773,7 @@ function sendVoiceJson(
         readonly status: "leased";
         readonly voiceTurnId: string;
         readonly captureMode: PrivateVoiceCaptureMode;
+        readonly recognitionMode: PrivateVoiceRecognitionMode;
       }
     | { readonly status: "no_input" | "unavailable" | "model_unavailable" | "failed" },
 ): void {
@@ -2121,8 +2133,21 @@ function normalizeProjection(value: unknown): ProductPrivateVoice | undefined {
         configured: true,
         asr,
         tts,
+        recognitionMode: recognitionModeForAsrTransport(asr.transport),
       };
 }
+
+function recognitionModeForAsrTransport(
+  _transport: string,
+): ProductPrivateVoiceRecognitionMode {
+  // Both shipped adapters return one bounded final transcript and expose no partial callback.
+  return "final_only";
+}
+
+function normalizeRecognitionMode(value: unknown): PrivateVoiceRecognitionMode {
+  return value === "partial" ? "partial" : "final_only";
+}
+
 function projectionAsr(
   value: unknown,
 ):

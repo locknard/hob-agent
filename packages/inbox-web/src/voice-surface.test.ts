@@ -41,6 +41,7 @@ interface VoiceSurfaceRenderOptions {
     | {
         readonly status: "active";
         readonly captureMode: "encoded_audio" | "pcm_s16le";
+        readonly recognitionMode?: "final_only" | "partial";
       }
     | { readonly status: "retryable" | "unavailable" };
   readonly intent?: {
@@ -178,6 +179,17 @@ test("describes the input recording and short answer replay cache as separate pr
   assert.match(html, /data-voice-capture-progress[^>]*hidden/);
   assert.match(html, /回答播报音频只在本机内存中保留最多 30 秒/);
   assert.doesNotMatch(html, /音频只用于这次转写，不会留存。/);
+});
+
+test("explains the trusted final-only recognition boundary without naming a provider", async () => {
+  const { renderVoiceSurface } = await loadVoiceSurface();
+  const html = renderVoiceSurface("listening", {
+    privateVoice: { status: "active", recognitionMode: "final_only" },
+  }) ?? "";
+
+  assert.match(html, /data-voice-recognition-mode="final_only"/);
+  assert.match(html, /说完后显示完整文字/);
+  assert.doesNotMatch(html, /whisper|Wyoming|provider|协议/i);
 });
 
 test("keeps reconnect alongside the single text exit while private voice recovers", async () => {

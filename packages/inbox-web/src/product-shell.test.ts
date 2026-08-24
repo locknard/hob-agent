@@ -1551,6 +1551,7 @@ test("renders configured private voice service state, change controls, and an ex
       configured: true,
       asr: { transport: "openai_http", endpoint: "http://voice.local/asr", model: "small", credentialConfigured: true },
       tts: { transport: "wyoming", endpoint: "http://voice.local/tts", model: "zh_CN-huayan-medium", locale: "zh-CN", voice: "花宴", credentialConfigured: true },
+      recognitionMode: "final_only",
       notice: "语音服务已准备好。",
     },
   }));
@@ -1571,6 +1572,8 @@ test("renders configured private voice service state, change controls, and an ex
   assert.match(html, /关闭只会停用家庭语音入口，不会停止外部服务。/);
   assert.match(html, />关闭语音</);
   assert.match(html, /语音服务已准备好。/);
+  assert.match(html, /data-private-voice-recognition-mode="final_only"/);
+  assert.match(html, /说完后显示完整文字/);
 });
 
 test("renders current-process voice health with honest zero-sample copy", () => {

@@ -505,6 +505,7 @@ export interface ProductOnboardingState {
 }
 
 export type ProductPrivateVoiceStatus = "disabled" | "active" | "degraded" | "retrying" | "switching";
+export type ProductPrivateVoiceRecognitionMode = "final_only" | "partial";
 
 export interface ProductPrivateVoiceAsr {
   readonly transport: string;
@@ -566,6 +567,8 @@ export type ProductPrivateVoice =
   | (ProductPrivateVoiceBase & {
     readonly status: Exclude<ProductPrivateVoiceStatus, "disabled">;
     readonly configured: true;
+    /** The active ASR adapter's honest display capability. */
+    readonly recognitionMode?: ProductPrivateVoiceRecognitionMode;
     readonly asr: ProductPrivateVoiceAsr;
     readonly tts: ProductPrivateVoiceTts;
     readonly health?: ProductPrivateVoiceHealth;
@@ -1842,6 +1845,7 @@ function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string 
     return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="disabled" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}<p class="product-muted">语音暂未开启，文字对话始终可用。</p>${configuration}<div class="product-private-voice-actions">${textExit}</div></div></section>`;
   }
   const configuration = renderPrivateVoiceConfiguration(voice, voice.status === "degraded", voice.status === "degraded" ? "编辑设置" : undefined);
+  const recognition = renderPrivateVoiceRecognition(voice.recognitionMode);
   const health = renderPrivateVoiceHealth(voice.health);
   const serviceRows = [
     `<li><span>语音识别</span><strong>${privateVoiceTransportLabel(voice.asr.transport)}</strong></li>`,
@@ -1857,7 +1861,17 @@ function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string 
         : voice.status === "retrying"
           ? `<p class="product-private-voice-state" role="progressbar" aria-label="语音连接进度" aria-valuetext="正在重新连接语音">正在重新连接语音</p><div class="product-private-voice-actions">${cancel}${textExit}</div>`
           : `<p class="product-private-voice-state" role="progressbar" aria-label="语音设置进度" aria-valuetext="正在应用新的语音设置" aria-live="polite">正在应用新的语音设置</p><div class="product-private-voice-actions">${textExit}</div>`;
-  return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}${content}${health}</div></section>`;
+  return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}${recognition}${content}${health}</div></section>`;
+}
+
+function renderPrivateVoiceRecognition(
+  mode: ProductPrivateVoiceRecognitionMode | undefined,
+): string {
+  if (mode !== "final_only" && mode !== "partial") return "";
+  const copy = mode === "partial"
+    ? "说话时会逐步显示当前听到的内容。"
+    : "这次会在你说完后显示完整文字。";
+  return `<p class="product-muted product-private-voice-recognition" data-private-voice-recognition-mode="${mode}">${copy}</p>`;
 }
 
 export type ProductOperationalModelStatus = "active" | "degraded" | "retrying" | "switching";

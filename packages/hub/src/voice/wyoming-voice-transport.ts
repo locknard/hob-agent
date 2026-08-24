@@ -121,6 +121,9 @@ export class WyomingVoiceTransport {
     this.limits = normalizeLimits(options.limits);
   }
 
+  /** The current adapter waits for one final transcript and does not expose partial frames. */
+  get recognitionMode(): "final_only" { return "final_only"; }
+
   async describe(input: WyomingVoiceDescribeInput = {}): Promise<WyomingVoiceDescribeResult> {
     return this.run(input.signal, async (session) => {
       await session.send({ type: "describe" });
