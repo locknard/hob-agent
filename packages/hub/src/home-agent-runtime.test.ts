@@ -375,6 +375,79 @@ test("coalesces migration cutover recovery on each neutral bridge-ready notifica
   }
 });
 
+test("reconciles ordinary automations on bridge-ready waves and drains the final run before stop", async () => {
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "automation-reconcile-ready-test",
+    },
+  });
+  let releaseFirst: (() => void) | undefined;
+  let releaseSecond: (() => void) | undefined;
+  const firstRun = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondRun = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  let reconcileCalls = 0;
+  try {
+    await runtime.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const proposals = runtime.context.homeProposals as unknown as {
+      reconcileAutomations(): Promise<void>;
+    };
+    proposals.reconcileAutomations = async () => {
+      reconcileCalls += 1;
+      if (reconcileCalls === 1) await firstRun;
+      if (reconcileCalls === 2) await secondRun;
+    };
+    const homeWorld = runtime.context.homeWorld as unknown as {
+      snapshot(): unknown;
+      notifyBridgeReady(metadata: { readonly bridgeId: string }): void;
+    };
+    homeWorld.snapshot = () => ({
+      bridges: {
+        "bridge-ready": {
+          diagnostics: { connectionState: "ready" },
+          watermark: { epochId: "epoch-ready", lastSeq: 2 },
+          metrics: { connection: "up", consistency: "ready" },
+        },
+      },
+    });
+
+    homeWorld.notifyBridgeReady({ bridgeId: "bridge-ready" });
+    homeWorld.notifyBridgeReady({ bridgeId: "bridge-ready" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reconcileCalls, 1, "duplicate ready notifications share one in-flight reconciliation");
+
+    releaseFirst?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    homeWorld.notifyBridgeReady({ bridgeId: "bridge-ready" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reconcileCalls, 2, "a ready notification after completion starts another reconciliation");
+
+    let stopped = false;
+    const stopTask = runtime.stop().then(() => { stopped = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(stopped, false, "stop waits for the final reconciliation");
+
+    homeWorld.notifyBridgeReady({ bridgeId: "bridge-ready" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reconcileCalls, 2, "stop unsubscribes before waiting for the final reconciliation");
+
+    releaseSecond?.();
+    await stopTask;
+    assert.equal(stopped, true);
+  } finally {
+    releaseFirst?.();
+    releaseSecond?.();
+    await runtime.stop();
+  }
+});
+
 test("mounts the read-only home automation migration service after HomeWorld and closes its SQLite store", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-runtime-home-automation-migrations-"));
   const path = join(directory, "home-automation-migrations.sqlite");

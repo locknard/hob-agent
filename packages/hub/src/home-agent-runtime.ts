@@ -255,6 +255,8 @@ class HomeAgentProductBundleRuntime {
   private migrationRecoveryTask: Promise<void> | undefined;
   private migrationCutoverRecoveryTask: Promise<MigrationCutoverRecoveryResult> | undefined;
   private unsubscribeMigrationCutoverRecovery: (() => void) | undefined;
+  private automationReconciliationTask: Promise<void> | undefined;
+  private unsubscribeAutomationReconciliation: (() => void) | undefined;
   private viewRecipeDraftStore: SqliteProductViewRecipeDraftStore | undefined;
 
   constructor(
@@ -359,12 +361,26 @@ class HomeAgentProductBundleRuntime {
         this.migrationCutoverRecoveryTask = task;
         void task.catch(() => undefined);
       };
+      const reconcileAutomations = (): void => {
+        if (this.automationReconciliationTask !== undefined) return;
+        const task = Promise.resolve()
+          .then(() => homeProposals.reconcileAutomations())
+          .catch(() => undefined);
+        this.automationReconciliationTask = task;
+        void task.finally(() => {
+          if (this.automationReconciliationTask === task) {
+            this.automationReconciliationTask = undefined;
+          }
+        }).catch(() => undefined);
+      };
       this.unsubscribeMigrationCutoverRecovery = homeWorld.onBridgeReady(recoverCutovers);
+      this.unsubscribeAutomationReconciliation = homeWorld.onBridgeReady(reconcileAutomations);
       // Covers the race where the initial ready sync committed before the
-      // listener was installed. The coordinator's per-bridge ready gate keeps
-      // an early or partial startup sweep read-only.
+      // listeners were installed. The coordinator's per-bridge ready gate
+      // keeps an early or partial startup sweep read-only, while the local
+      // single-flight keeps the ordinary reconciliation bounded.
       recoverCutovers();
-      void homeProposals.reconcileAutomations().catch(() => undefined);
+      reconcileAutomations();
       await this.mount(HomeRetentionService);
       if (this.options.mediaCatalog !== undefined) {
         await this.mount(HomeMediaCatalogService, this.options.mediaCatalog);
@@ -494,6 +510,9 @@ class HomeAgentProductBundleRuntime {
     try {
       this.unsubscribeMigrationCutoverRecovery?.();
       this.unsubscribeMigrationCutoverRecovery = undefined;
+      this.unsubscribeAutomationReconciliation?.();
+      this.unsubscribeAutomationReconciliation = undefined;
+      await this.automationReconciliationTask;
       await this.preparationRunner?.stop();
       await this.migrationRecoveryTask;
       await this.migrationCutoverRecoveryTask;
