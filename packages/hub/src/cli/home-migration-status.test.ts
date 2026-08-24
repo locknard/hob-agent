@@ -187,6 +187,37 @@ test("reports assessment, workflow, selection, and linked Proposal lifecycle as 
   }
 });
 
+test("reports a terminal failed-switch restoration without counting its retained receipt as active failure", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-migration-status-failed-switch-restored-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "proposals.sqlite");
+  try {
+    seedMigration(migrationPath, { workflowStatus: "assessed", privateName: "private" });
+    replaceEligibleWorkflow(migrationPath, makeFailedSwitchRestoredWorkflow("proposal-restored"));
+    seedProposal(proposalPath, {
+      id: "proposal-restored",
+      title: "private",
+      status: "approved",
+      lifecycle: "closed",
+      applicationStatus: "withdrawn",
+      deploymentStatus: "rolled_back",
+    });
+
+    const result = readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID);
+
+    assert.equal(result.outcome, "reported");
+    if (result.outcome === "reported") {
+      assert.equal(result.assessment.workflowCounts.restored, 1);
+      assert.equal(result.assessment.workflowCounts.needs_attention, 0);
+      assert.equal(result.assessment.failureCounts.switch_failed, 0);
+      assert.equal(result.proposals.lifecycleCounts.closed, 1);
+      assert.equal(result.proposals.deploymentCounts.rolled_back, 1);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("fails closed on malformed migration durability without creating a Proposal database", () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-migration-status-migration-corrupt-"));
   const migrationPath = join(directory, "migrations.sqlite");
@@ -553,6 +584,34 @@ function makeWorkflow(
   };
 }
 
+function makeFailedSwitchRestoredWorkflow(proposalId: string): Record<string, unknown> {
+  return {
+    status: "restored",
+    sourceFingerprint: `sha256:${"a".repeat(64)}`,
+    assessedAt: "2026-08-24T08:00:00.000Z",
+    proposalId,
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"b".repeat(64)}`,
+    translatedAt: "2026-08-24T08:00:00.500Z",
+    artifactId: "artifact-private",
+    artifactRevision: 1,
+    artifactContentHash: `sha256:${"c".repeat(64)}`,
+    compileResultId: `sha256:${"d".repeat(64)}`,
+    dryRunResultId: `sha256:${"e".repeat(64)}`,
+    simulatedAt: "2026-08-24T08:00:00.750Z",
+    readyAt: "2026-08-24T08:00:00.900Z",
+    reviewProposalRevision: 2,
+    approvedProposalRevision: 3,
+    switchOperationId: "f".repeat(32),
+    switchActor: "private-actor",
+    sourceWasEnabled: true,
+    switchStartedAt: "2026-08-24T08:00:01.000Z",
+    failedAt: "2026-08-24T08:00:02.000Z",
+    failureReason: "switch_failed",
+    restoredAt: "2026-08-24T08:00:03.000Z",
+  };
+}
+
 function replaceEligibleWorkflow(path: string, workflow: Record<string, unknown>): void {
   const db = new DatabaseSync(path);
   try {
@@ -617,9 +676,9 @@ function seedProposal(path: string, input: {
   readonly id: string;
   readonly title: string;
   readonly status: "approved";
-  readonly lifecycle: "active";
-  readonly applicationStatus: "running";
-  readonly deploymentStatus: "verified";
+  readonly lifecycle: "active" | "closed";
+  readonly applicationStatus: "running" | "withdrawn";
+  readonly deploymentStatus: "verified" | "rolled_back";
 }): void {
   const store = new SqliteProposalStore({ path });
   const db = (store as unknown as { db: DatabaseSync }).db;

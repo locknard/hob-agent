@@ -308,7 +308,9 @@ function parseMigrationRow(row: Row): ParsedMigration | undefined {
     if (status === "needs_attention") {
       if (!isWorkflowFailureReason(rule.workflow.failureReason)) return undefined;
       failureCounts[rule.workflow.failureReason] += 1;
-    } else if (rule.workflow.failureReason !== undefined) {
+    } else if (rule.workflow.failureReason !== undefined
+      && !(status === "restored"
+        && (rule.workflow.failureReason === "switch_failed" || rule.workflow.failureReason === "switch_unknown"))) {
       return undefined;
     }
     if (rule.workflow.proposalId !== undefined) {
