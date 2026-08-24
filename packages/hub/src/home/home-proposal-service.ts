@@ -77,8 +77,15 @@ export interface ProposalDeploymentPort {
     readonly intent: ProposalDeploymentIntent;
   }): Promise<ProposalDeploymentOutcome> | ProposalDeploymentOutcome;
   status?(request: { readonly deploymentId: string; readonly target: string }):
-    | Promise<{ readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string }>
-    | { readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string };
+    | Promise<ProposalDeploymentReadback>
+    | ProposalDeploymentReadback;
+  /** Supplies a workflow-aware readback before generic lifecycle projection. */
+  reconcileStatus?(request: {
+    readonly proposalId: string;
+    readonly lifecycle: ProposalEnvelope["lifecycle"];
+    readonly deploymentId: string;
+    readonly target: string;
+  }): ProposalDeploymentReconciliationResult | Promise<ProposalDeploymentReconciliationResult>;
   /** Allows an ecosystem workflow to keep target-only restart reconciliation read-only. */
   reconciliationGuard?(request: {
     readonly proposalId: string;
@@ -103,6 +110,16 @@ export interface ProposalDeploymentPort {
 }
 
 export type ProposalDeploymentReconciliationDisposition = "allow" | "defer";
+
+export type ProposalDeploymentReadback = {
+  readonly status: "running" | "paused" | "missing" | "unknown";
+  readonly configFingerprint?: string;
+};
+
+export type ProposalDeploymentReconciliationResult =
+  | { readonly disposition: "observed"; readonly target: ProposalDeploymentReadback }
+  | { readonly disposition: "recovery_required"; readonly reason: string }
+  | { readonly disposition: "defer" };
 
 export interface BorrowedHomeProposalServiceOptions {
   readonly store: SqliteProposalStore;
@@ -884,11 +901,41 @@ export class HomeProposalService extends Service {
         if (disposition !== "allow") continue;
       }
       if (deployment?.deploymentId === undefined || deployment.target === undefined) continue;
-      let observedResult: { readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string };
-      try {
-        observedResult = await status.call(port, { deploymentId: deployment.deploymentId, target: deployment.target });
-      } catch {
-        continue;
+      let observedResult: ProposalDeploymentReadback;
+      if (port.reconcileStatus !== undefined) {
+        let reconciliation: ProposalDeploymentReconciliationResult;
+        try {
+          reconciliation = await port.reconcileStatus.call(port, {
+            proposalId: proposal.id,
+            lifecycle: proposal.lifecycle,
+            deploymentId: deployment.deploymentId,
+            target: deployment.target,
+          });
+        } catch {
+          continue;
+        }
+        if (reconciliation.disposition === "defer") continue;
+        if (reconciliation.disposition === "recovery_required") {
+          if (proposal.lifecycle === "active" || proposal.lifecycle === "paused") {
+            try {
+              this.store.markRecoveryRequired({
+                proposalId: proposal.id,
+                actor: "system",
+                reason: reconciliation.reason,
+              });
+            } catch {
+              // Another writer converged first; the next pass observes the result.
+            }
+          }
+          continue;
+        }
+        observedResult = reconciliation.target;
+      } else {
+        try {
+          observedResult = await status.call(port, { deploymentId: deployment.deploymentId, target: deployment.target });
+        } catch {
+          continue;
+        }
       }
       const observed = observedResult.status;
       if (observed === "unknown") continue;

@@ -9,6 +9,7 @@ import type {
 import type {
   ProposalDeploymentPort,
   ProposalDeploymentReconciliationDisposition,
+  ProposalDeploymentReconciliationResult,
 } from "./home-proposal-service.js";
 import type { HomeAutomationMigrationFailRuleWorkflowInput } from "./home-automation-migration-service.js";
 import type {
@@ -157,6 +158,60 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return "allow";
     }
     return "defer";
+  }
+
+  async reconcileStatus(
+    request: Parameters<NonNullable<ProposalDeploymentPort["reconcileStatus"]>>[0],
+  ): Promise<ProposalDeploymentReconciliationResult> {
+    let lookup: HomeAutomationMigrationDeploymentLookup;
+    try {
+      lookup = this.runtime.findWorkflowForProposal(request.proposalId);
+    } catch {
+      return { disposition: "defer" };
+    }
+    if (lookup.status === "not_migration") {
+      return { disposition: "observed", target: await this.readTarget(request.deploymentId, request.target) };
+    }
+    if (lookup.status !== "governed"
+      || lookup.workflowStatus !== "verified"
+      || (request.lifecycle !== "active" && request.lifecycle !== "paused")
+      || !sameDeploymentIdentity(request.deploymentId, lookup.deploymentId)
+      || !sameDeploymentIdentity(request.target, lookup.deploymentTarget)
+      || !hasNonEmptyString(lookup.sourceBridgeId)
+      || !hasNonEmptyString(lookup.ruleRef)
+      || !hasNonEmptyString(lookup.sourceFingerprint)
+      || !hasNonEmptyString(lookup.deploymentConfigFingerprint)
+      || !hasNonEmptyString(lookup.switchOperationId)) {
+      return { disposition: "defer" };
+    }
+
+    let control: ForeignRuleControlHandle | undefined;
+    try {
+      control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
+    } catch {
+      return this.verifiedReconciliationFailure(lookup, "迁移自动化的运行状态暂时无法确认，需要继续恢复。");
+    }
+    if (control === undefined) {
+      return this.verifiedReconciliationFailure(lookup, "迁移自动化的运行状态暂时无法确认，需要继续恢复。");
+    }
+    const source = await this.readSource(control, lookup.ruleRef);
+    const target = await this.readTarget(request.deploymentId, request.target);
+    if (source.status === "unknown" || target.status === "unknown") {
+      return this.verifiedReconciliationFailure(lookup, "迁移自动化的运行状态暂时无法确认，需要继续恢复。");
+    }
+    if (source.status === "missing" || source.sourceFingerprint !== lookup.sourceFingerprint) {
+      return this.verifiedReconciliationFailure(lookup, "原有规则的运行状态发生变化，需要继续恢复。");
+    }
+    if (target.status === "missing") {
+      return this.verifiedReconciliationFailure(lookup, "迁移自动化已经不在目标平台，需要继续恢复原有规则。");
+    }
+    if (!hasNonEmptyString(target.configFingerprint)) {
+      return this.verifiedReconciliationFailure(lookup, "迁移自动化的配置指纹暂时无法确认，需要继续恢复。");
+    }
+    if (source.status === "running") {
+      return this.verifiedReconciliationFailure(lookup, "原有规则已经重新运行，需要继续恢复迁移状态。");
+    }
+    return { disposition: "observed", target };
   }
 
   async deploy(request: Parameters<ProposalDeploymentPort["deploy"]>[0]): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {
@@ -1184,6 +1239,24 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     } catch {
       return { status: "unknown" };
     }
+  }
+
+  private verifiedReconciliationFailure(
+    lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
+    reason: string,
+  ): ProposalDeploymentReconciliationResult {
+    try {
+      if (!this.runtime.failRuleWorkflow({
+        migrationId: lookup.migrationId,
+        ruleRef: lookup.ruleRef,
+        from: "verified",
+        reason: "verification_failed",
+        expectedSwitchOperationId: lookup.switchOperationId!,
+      })) return { disposition: "defer" };
+    } catch {
+      return { disposition: "defer" };
+    }
+    return { disposition: "recovery_required", reason };
   }
 }
 

@@ -8,6 +8,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 
 import { HomeProposalService } from "./home-proposal-service.js";
 import { BridgeAutomationDeployment } from "./bridge-automation-deployment.js";
+import { HomeAutomationMigrationDeployment } from "./home-automation-migration-deployment.js";
 import {
   ProposalStoreError,
   SqliteProposalStore,
@@ -1513,6 +1514,106 @@ test("drift survives persistence and the fingerprint baseline reaches the record
     statuses.set("hob_drift", { status: "running", configFingerprint: "sha256:approved-behavior" });
     await ctx.homeProposals.reconcileAutomations();
     assert.equal(store.get(active.id)?.deployment?.drifted, false, "restoring the behavior clears the drift");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("keeps a verified migration recovery-required when reconciliation reads a missing target", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T02:15:00.000Z" });
+  const ctx = new Context();
+  const events: string[] = [];
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const targetFingerprint = `sha256:${"b".repeat(64)}`;
+  const intent = {
+    deploymentId: "hob_migration_missing_target",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "native-1", nativeInstanceId: "entity-1" } }],
+  } as const;
+  const base: ProposalDeploymentPort = {
+    resolveIntent: () => intent,
+    deploy: async () => ({ status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target, configFingerprint: targetFingerprint }),
+    status: async () => {
+      events.push("target.status");
+      return { status: "missing" as const };
+    },
+    withdraw: async () => {
+      events.push("target.withdraw");
+      return { restored: true };
+    },
+  };
+  const runtime = {
+    findWorkflowForProposal: () => ({
+      status: "governed" as const,
+      workflowStatus: "verified" as const,
+      migrationId: "0123456789abcdef0123456789abcdef",
+      ruleRef: "opaque-rule-ref",
+      sourceBridgeId: "bridge-ha",
+      sourceFingerprint,
+      approvedProposalRevision: 1,
+      switchOperationId: "11111111111111111111111111111111",
+      deploymentId: intent.deploymentId,
+      deploymentTarget: intent.target,
+      deploymentConfigFingerprint: targetFingerprint,
+    }),
+    failRuleWorkflow: () => {
+      events.push("runtime.fail");
+      return true;
+    },
+  };
+  const sourceControl = {
+    status: async () => {
+      events.push("source.status");
+      return { status: "paused" as const, sourceFingerprint };
+    },
+    setEnabled: async () => {
+      events.push("source.set");
+      return { status: "running" as const, sourceFingerprint };
+    },
+  };
+  const deployment = new HomeAutomationMigrationDeployment(
+    base,
+    runtime as never,
+    { foreignRuleControlFor: () => sourceControl },
+  );
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, { store, deployment } as never);
+    const created = store.createMigrationGoverned({
+      ...candidate,
+      kind: "automation-draft",
+      artifactCandidate: automationCandidate,
+      dedupKey: "migration-missing-target-reconcile",
+      idempotencyKey: "migration-missing-target-reconcile:v1",
+      provenance: { producer: "home-automation-migration" },
+      intent: { ...candidate.intent, type: "automation-draft" },
+    });
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected migration proposal");
+    const ready = prepareToReady(store, created.proposal.id);
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "member:alice",
+      deploymentIntent: intent,
+    });
+    const active = store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      actor: "member:alice",
+      outcome: { status: "verified", deploymentId: intent.deploymentId, target: intent.target, configFingerprint: targetFingerprint },
+    });
+
+    await ctx.homeProposals.reconcileAutomations();
+
+    const after = store.get(active.id);
+    assert.equal(after?.lifecycle, "recovery_required");
+    assert.equal(after?.applicationStatus, "failed");
+    assert.equal(after?.deployment?.restoredAt, undefined);
+    assert.deepEqual(events, ["source.status", "target.status", "runtime.fail"]);
   } finally {
     await fiber?.dispose();
     await ctx.fiber.dispose();

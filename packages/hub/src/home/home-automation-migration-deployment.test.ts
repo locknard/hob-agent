@@ -280,6 +280,85 @@ test("allows target readback for stable verified migrations in active and paused
   assert.equal(guard("paused"), "allow");
 });
 
+test("projects verified target drift but requires recovery for an unknown target or two running rules", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedVerifiedLookup();
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "running", configFingerprint: `sha256:${"c".repeat(64)}` } as const;
+  };
+
+  const drifted = await wrapper.reconcileStatus?.({
+    proposalId: BASE_REQUEST.proposalId,
+    lifecycle: "active",
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+  });
+  assert.deepEqual(drifted, {
+    disposition: "observed",
+    target: { status: "running", configFingerprint: `sha256:${"c".repeat(64)}` },
+  });
+
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+  const pausedTarget = await wrapper.reconcileStatus?.({
+    proposalId: BASE_REQUEST.proposalId,
+    lifecycle: "active",
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+  });
+  assert.deepEqual(pausedTarget, {
+    disposition: "observed",
+    target: { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT },
+  });
+
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+  const conflict = await wrapper.reconcileStatus?.({
+    proposalId: BASE_REQUEST.proposalId,
+    lifecycle: "active",
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+  });
+  assert.equal(conflict?.disposition, "recovery_required");
+  assert.match((conflict as { readonly reason: string }).reason, /原有规则已经重新运行/);
+
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "unknown" } as const;
+  };
+  const unknown = await wrapper.reconcileStatus?.({
+    proposalId: BASE_REQUEST.proposalId,
+    lifecycle: "paused",
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+  });
+  assert.equal(unknown?.disposition, "recovery_required");
+  assert.match((unknown as { readonly reason: string }).reason, /暂时无法确认/);
+  assert.deepEqual(events, [
+    "source.status", "base.status",
+    "source.status", "base.status",
+    "source.status", "base.status", "runtime.fail",
+    "source.status", "base.status", "runtime.fail",
+  ]);
+});
+
 test("switches one ready migration only after CAS and verifies both neutral deployments", async () => {
   const { events, wrapper } = deploymentFixture();
 
