@@ -1358,6 +1358,116 @@ test("recovers the crash window between external deployment and the local record
   }
 });
 
+test("defers target-only reconciliation when the deployment guard keeps a migration recoverable", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T01:30:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_guarded", target: "ha-main" }),
+        status: async () => ({ status: "running" as const }),
+        reconciliationGuard: () => "defer" as const,
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "reconcile:guarded:v1",
+      dedupKey: "reconcile:guarded",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    const ready = prepareToReady(store, created.id);
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: { deploymentId: "hob_guarded", target: "ha-main", targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "native-1", nativeInstanceId: "entity-1" } }] },
+    });
+
+    await ctx.homeProposals.reconcileAutomations();
+
+    assert.equal(store.get(enabling.id)?.lifecycle, "enabling");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("coalesces concurrent closes and validates a loser before it can join", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T01:45:00.000Z" });
+  const ctx = new Context();
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  let releaseWithdraw: (() => void) | undefined;
+  let withdrawCount = 0;
+  const pendingCloses: Promise<unknown>[] = [];
+  const withdrawGate = new Promise<void>((resolve) => { releaseWithdraw = resolve; });
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => ({
+          deploymentId: "hob_close_once",
+          target: "ha-main",
+          targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "native-1", nativeInstanceId: "entity-1" } }],
+        }),
+        deploy: async () => ({ status: "verified" as const, deploymentId: "hob_close_once", target: "ha-main" }),
+        withdraw: async () => {
+          withdrawCount += 1;
+          await withdrawGate;
+          return { restored: true };
+        },
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "close:coalesced:v1",
+      dedupKey: "close:coalesced",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+    const active = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(active.deployment?.deploymentId, "hob_close_once");
+
+    const winner = ctx.homeProposals.closeAutomation({ proposalId: active.id, expectedRevision: active.revision, actor: "member:alice" });
+    pendingCloses.push(winner);
+    await Promise.resolve();
+    assert.equal(withdrawCount, 1);
+
+    const malformed = ctx.homeProposals.closeAutomation({ proposalId: active.id, expectedRevision: 0, actor: "member:bad" } as never);
+    pendingCloses.push(malformed);
+    const malformedResult = await Promise.race([
+      malformed.then(() => "resolved", (error: unknown) => error),
+      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 25)),
+    ]);
+    assert.ok(malformedResult instanceof TypeError && /expectedRevision is invalid/.test(malformedResult.message));
+
+    const loser = ctx.homeProposals.closeAutomation({ proposalId: active.id, expectedRevision: active.revision, actor: "member:bob" });
+    pendingCloses.push(loser);
+    releaseWithdraw?.();
+
+    const [closed, sameClosed] = await Promise.all([winner, loser]);
+    assert.equal(withdrawCount, 1);
+    assert.equal(closed.lifecycle, "closed");
+    assert.deepEqual(sameClosed, closed);
+  } finally {
+    releaseWithdraw?.();
+    await Promise.allSettled(pendingCloses);
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
 
 test("drift survives persistence and the fingerprint baseline reaches the record", async () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T02:00:00.000Z" });
@@ -1495,6 +1605,8 @@ test("resumes a migration that crashed while enabling without a second decision"
           actors.push(request.actor);
           return { status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target, configFingerprint: `sha256:${"c".repeat(64)}` };
         },
+        status: async () => ({ status: "running" as const }),
+        reconciliationGuard: () => "defer" as const,
       },
     } as never);
     const created = store.createMigrationGoverned({
@@ -1517,6 +1629,8 @@ test("resumes a migration that crashed while enabling without a second decision"
       deploymentIntent: intent,
     });
     assert.equal(enabling.lifecycle, "enabling");
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(enabling.id)?.lifecycle, "enabling");
     const active = await ctx.homeProposals.retryEnable({
       proposalId: enabling.id,
       expectedRevision: enabling.revision,
@@ -1549,6 +1663,8 @@ test("keeps a migration close failure recovery_required and recovers without a s
       deployment: {
         resolveIntent: () => intent,
         deploy: async () => ({ status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target, configFingerprint: `sha256:${"b".repeat(64)}` }),
+        status: async () => ({ status: "missing" as const }),
+        reconciliationGuard: () => "defer" as const,
         withdraw: async () => ({ restored: false, recoveryRequired: true, reason: "rollback_unknown" } as never),
         recover: async (request: unknown) => {
           recoveryRequests.push(request);
@@ -1575,6 +1691,8 @@ test("keeps a migration close failure recovery_required and recovers without a s
     completePreparation(store, created.proposal.id);
     const ready = ctx.homeProposals.markProposalReady({ proposalId: created.proposal.id });
     const active = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "member:alice" });
+    await ctx.homeProposals.reconcileAutomations();
+    assert.equal(store.get(active.id)?.lifecycle, "active");
 
     const required = await ctx.homeProposals.closeAutomation({ proposalId: active.id, actor: "member:alice" });
     assert.equal(required.lifecycle, "recovery_required");

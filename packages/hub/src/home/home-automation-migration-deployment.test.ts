@@ -191,6 +191,48 @@ function governedLookup(
   return { ...base, ...switching, ...(failureReason === undefined ? {} : { failureReason }) };
 }
 
+test("defers generic reconciliation for every migration workflow, including restored cross-store windows", () => {
+  const { runtime, wrapper } = deploymentFixture();
+  const guard = (lifecycle: "enabling" | "active" | "paused") =>
+    (wrapper as unknown as {
+      reconciliationGuard(input: { proposalId: string; lifecycle: string }): "allow" | "defer";
+    }).reconciliationGuard({ proposalId: BASE_REQUEST.proposalId, lifecycle });
+
+  runtime.findWorkflowForProposal = () => ({
+    status: "ready",
+    migrationId: "migration",
+    ruleRef: "rule",
+    sourceBridgeId: "bridge-ha",
+    sourceFingerprint: SOURCE_FINGERPRINT,
+    reviewProposalRevision: 2,
+  });
+  assert.equal(guard("enabling"), "defer");
+  for (const workflowStatus of ["switching", "verified", "rolling_back"] as const) {
+    runtime.findWorkflowForProposal = () => governedLookup(workflowStatus);
+    assert.equal(guard(workflowStatus === "verified" ? "active" : "enabling"), "defer", workflowStatus);
+  }
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "rollback_unknown");
+  assert.equal(guard("active"), "defer");
+  runtime.findWorkflowForProposal = () => ({ status: "ambiguous" });
+  assert.equal(guard("active"), "defer");
+  runtime.findWorkflowForProposal = () => { throw new Error("lookup unavailable"); };
+  assert.equal(guard("active"), "defer");
+
+  runtime.findWorkflowForProposal = () => ({
+    status: "governed",
+    workflowStatus: "restored",
+    migrationId: "migration",
+    ruleRef: "rule",
+    sourceBridgeId: "bridge-ha",
+    sourceFingerprint: SOURCE_FINGERPRINT,
+  });
+  assert.equal(guard("active"), "defer");
+  assert.equal(guard("paused"), "defer");
+
+  runtime.findWorkflowForProposal = () => ({ status: "not_migration" });
+  assert.equal(guard("active"), "allow");
+});
+
 test("switches one ready migration only after CAS and verifies both neutral deployments", async () => {
   const { events, wrapper } = deploymentFixture();
 

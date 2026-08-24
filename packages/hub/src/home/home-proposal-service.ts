@@ -79,6 +79,11 @@ export interface ProposalDeploymentPort {
   status?(request: { readonly deploymentId: string; readonly target: string }):
     | Promise<{ readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string }>
     | { readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string };
+  /** Allows an ecosystem workflow to keep target-only restart reconciliation read-only. */
+  reconciliationGuard?(request: {
+    readonly proposalId: string;
+    readonly lifecycle: ProposalEnvelope["lifecycle"];
+  }): ProposalDeploymentReconciliationDisposition | Promise<ProposalDeploymentReconciliationDisposition>;
   pause?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
   resume?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
   withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string }):
@@ -96,6 +101,8 @@ export interface ProposalDeploymentPort {
   }): Promise<{ readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string }>
     | { readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string };
 }
+
+export type ProposalDeploymentReconciliationDisposition = "allow" | "defer";
 
 export interface BorrowedHomeProposalServiceOptions {
   readonly store: SqliteProposalStore;
@@ -131,6 +138,7 @@ export class HomeProposalService extends Service {
   private readonly ownedStore: SqliteProposalStore | undefined;
   private readonly onPreparationQueued: BorrowedHomeProposalServiceOptions["onPreparationQueued"];
   private readonly deployment: ProposalDeploymentPort | undefined;
+  private readonly closeInFlight = new Map<string, Promise<ProposalEnvelope>>();
 
   constructor(ctx: Context, options: HomeProposalServiceOptions) {
     super(ctx, "homeProposals");
@@ -695,10 +703,29 @@ export class HomeProposalService extends Service {
 
   /** Closing withdraws the automation and restores the configuration it replaced. */
   async closeAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
+    validateCloseInput(input);
     const current = this.requireDeployed(input.proposalId);
+    if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
+      throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
+    }
+    const inFlight = this.closeInFlight.get(input.proposalId);
+    if (inFlight !== undefined) return inFlight;
     if (current.lifecycle === "recovery_required") {
       throw new ProposalStoreError("lifecycle_invalid", "This migration requires recovery before it can close");
     }
+    const operation = this.closeAutomationOnce(input, current);
+    this.closeInFlight.set(input.proposalId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.closeInFlight.get(input.proposalId) === operation) this.closeInFlight.delete(input.proposalId);
+    }
+  }
+
+  private async closeAutomationOnce(
+    input: ProposalLifecycleInput,
+    current: ProposalEnvelope,
+  ): Promise<ProposalEnvelope> {
     let restored = false;
     if (this.deployment?.withdraw !== undefined && current.deployment?.deploymentId !== undefined) {
       const result = await this.deployment.withdraw({
@@ -791,15 +818,28 @@ export class HomeProposalService extends Service {
    * automation is reflected instead of contradicted.
    */
   async reconcileAutomations(): Promise<void> {
-    const status = this.deployment?.status;
-    if (status === undefined) return;
+    const port = this.deployment;
+    const status = port?.status;
+    if (status === undefined || port === undefined) return;
     for (const proposal of this.listAutomations()) {
       const deployment = proposal.deployment;
-      if (deployment?.deploymentId === undefined || deployment.target === undefined) continue;
       if (proposal.lifecycle === "closed") continue;
+      if (port.reconciliationGuard !== undefined) {
+        let disposition: ProposalDeploymentReconciliationDisposition;
+        try {
+          disposition = await port.reconciliationGuard.call(port, {
+            proposalId: proposal.id,
+            lifecycle: proposal.lifecycle,
+          });
+        } catch {
+          continue;
+        }
+        if (disposition !== "allow") continue;
+      }
+      if (deployment?.deploymentId === undefined || deployment.target === undefined) continue;
       let observedResult: { readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string };
       try {
-        observedResult = await status.call(this.deployment, { deploymentId: deployment.deploymentId, target: deployment.target });
+        observedResult = await status.call(port, { deploymentId: deployment.deploymentId, target: deployment.target });
       } catch {
         continue;
       }
@@ -1036,6 +1076,22 @@ function isBoundedId(value: unknown): value is string {
     && value.trim() === value
     && value.length > 0
     && Buffer.byteLength(value, "utf8") <= 200;
+}
+
+function validateCloseInput(input: ProposalLifecycleInput): void {
+  if (!isRecord(input)) throw new TypeError("proposal close is required");
+  if (!isBoundedId(input.proposalId)) throw new TypeError("proposal close id is invalid");
+  if (input.expectedRevision !== undefined
+    && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) {
+    throw new TypeError("proposal close expectedRevision is invalid");
+  }
+  if (input.actor !== undefined && !isBoundedId(input.actor)) {
+    throw new TypeError("proposal close actor is invalid");
+  }
+  if (input.note !== undefined
+    && (typeof input.note !== "string" || input.note.trim().length === 0 || input.note.length > 1_000)) {
+    throw new TypeError("proposal close note is invalid");
+  }
 }
 
 function latestObservedAt(values: readonly (string | undefined)[], fallback: string): string {

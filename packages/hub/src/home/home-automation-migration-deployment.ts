@@ -6,7 +6,10 @@ import type {
   ForeignRuleControlStatusResult,
 } from "@hob/bridge-contract";
 
-import type { ProposalDeploymentPort } from "./home-proposal-service.js";
+import type {
+  ProposalDeploymentPort,
+  ProposalDeploymentReconciliationDisposition,
+} from "./home-proposal-service.js";
 import type {
   HomeAutomationMigrationRuleWorkflowFailureReason,
   HomeAutomationMigrationRuleWorkflowStatus,
@@ -121,6 +124,18 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return { status: "blocked", reason: "invalid_plan" };
     }
     return this.base.preflight(request);
+  }
+
+  reconciliationGuard(
+    request: Parameters<NonNullable<ProposalDeploymentPort["reconciliationGuard"]>>[0],
+  ): ProposalDeploymentReconciliationDisposition {
+    let lookup: HomeAutomationMigrationDeploymentLookup;
+    try {
+      lookup = this.runtime.findWorkflowForProposal(request.proposalId);
+    } catch {
+      return "defer";
+    }
+    return lookup.status === "not_migration" ? "allow" : "defer";
   }
 
   async deploy(request: Parameters<ProposalDeploymentPort["deploy"]>[0]): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {
