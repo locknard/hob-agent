@@ -11,9 +11,19 @@ import {
 } from "./home-migration-status.js";
 import { SqliteHomeAutomationMigrationStore } from "../home/home-automation-migration-store.js";
 import { SqliteProposalStore } from "../home/proposal-store.js";
+import { homeAutomationMigrationProposalIdentity } from "../home/home-automation-migration-preparation.js";
+import { computeHomeAutomationMigrationCandidateContentHash } from "../home/home-automation-migration-simulator.js";
 import { HOME_MIGRATION_STATUS_MAX_PROPOSAL_PAYLOAD_BYTES } from "../home/home-automation-migration-status-reader.js";
 
 const ASSESSMENT_ID = "a".repeat(32);
+const MIGRATION_SOURCE_FINGERPRINT = `sha256:${"a".repeat(64)}`;
+const MIGRATION_CANDIDATE_CONTENT = {
+  trigger: { kind: "schedule", timezone: "Etc/UTC", daysOfWeek: [1], at: "20:30" },
+  conditions: [],
+  actions: [{ kind: "notify_local", message: "Review the migration" }],
+  rollback: { kind: "no_remote_change" },
+  postconditions: [],
+} as const;
 
 test("requires one explicit lowercase assessment id", () => {
   assert.deepEqual(parseHomeMigrationStatusArgs(["--assessment-id", ASSESSMENT_ID]), {
@@ -109,6 +119,8 @@ test("reports assessment, workflow, selection, and linked Proposal lifecycle as 
       lifecycle: "active",
       applicationStatus: "running",
       deploymentStatus: "verified",
+      deploymentId: "native-id",
+      deploymentTarget: "provider-payload",
     });
 
     const before = statSync(migrationPath).mtimeMs;
@@ -201,6 +213,7 @@ test("reports a terminal failed-switch restoration without counting its retained
       lifecycle: "closed",
       applicationStatus: "withdrawn",
       deploymentStatus: "rolled_back",
+      revision: 5,
     });
 
     const result = readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID);
@@ -215,6 +228,125 @@ test("reports a terminal failed-switch restoration without counting its retained
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when a verified workflow candidate hash disagrees with its linked Proposal", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-migration-status-candidate-identity-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "proposals.sqlite");
+  try {
+    seedMigration(migrationPath, { workflowStatus: "verified", proposalId: "proposal-candidate-identity", privateName: "private" });
+    seedProposal(proposalPath, {
+      id: "proposal-candidate-identity",
+      title: "private",
+      status: "approved",
+      lifecycle: "active",
+      applicationStatus: "running",
+      deploymentStatus: "verified",
+      deploymentId: "native-id",
+      deploymentTarget: "provider-payload",
+    });
+    replaceEligibleWorkflow(migrationPath, {
+      ...makeWorkflow("verified", "proposal-candidate-identity"),
+      candidateContentHash: `sha256:${"9".repeat(64)}`,
+    });
+
+    assert.deepEqual(readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID), {
+      schemaVersion: "1",
+      outcome: "needs_attention",
+      assessmentId: ASSESSMENT_ID,
+      reason: "cross_store_inconsistent",
+      readMode: "durable_only",
+      remoteWritesPerformed: false,
+      localWritesPerformed: false,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when a ready workflow revision no longer matches its linked Proposal", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-migration-status-ready-revision-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "proposals.sqlite");
+  try {
+    seedMigration(migrationPath, { workflowStatus: "assessed", privateName: "private" });
+    replaceEligibleWorkflow(migrationPath, makeReadyWorkflow("proposal-ready-identity"));
+    seedReadyProposal(proposalPath, "proposal-ready-identity");
+
+    const before = readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID);
+    assert.equal(before.outcome, "reported");
+
+    replaceEligibleWorkflow(migrationPath, {
+      ...makeReadyWorkflow("proposal-ready-identity"),
+      candidateProposalRevision: 2,
+      reviewProposalRevision: 3,
+    });
+    assert.deepEqual(readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID), {
+      schemaVersion: "1",
+      outcome: "needs_attention",
+      assessmentId: ASSESSMENT_ID,
+      reason: "cross_store_inconsistent",
+      readMode: "durable_only",
+      remoteWritesPerformed: false,
+      localWritesPerformed: false,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when verified source, artifact, or deployment identity drifts", () => {
+  const cases: readonly [string, (workflow: Record<string, unknown>) => Record<string, unknown>][] = [
+    ["source identity", (workflow) => workflow],
+    ["artifact identity", (workflow) => ({ ...workflow, artifactContentHash: `sha256:${"9".repeat(64)}` })],
+    ["deployment identity", (workflow) => ({ ...workflow, deploymentTarget: "different-target" })],
+  ];
+  for (const [label, mutate] of cases) {
+    const directory = mkdtempSync(join(tmpdir(), "hob-migration-status-verified-identity-"));
+    const migrationPath = join(directory, "migrations.sqlite");
+    const proposalPath = join(directory, "proposals.sqlite");
+    try {
+      seedMigration(migrationPath, { workflowStatus: "assessed", privateName: "private" });
+      const original = makeWorkflow("verified", "proposal-verified-identity");
+      replaceEligibleWorkflow(migrationPath, mutate(original));
+      seedProposal(proposalPath, {
+        id: "proposal-verified-identity",
+        title: "private",
+        status: "approved",
+        lifecycle: "active",
+        applicationStatus: "running",
+        deploymentStatus: "verified",
+        deploymentId: "native-id",
+        deploymentTarget: "provider-payload",
+      });
+      if (label === "source identity") {
+        const db = new DatabaseSync(proposalPath);
+        try {
+          const row = db.prepare("SELECT payload_json FROM proposals WHERE proposal_id = ?")
+            .get("proposal-verified-identity") as { payload_json?: unknown } | undefined;
+          if (typeof row?.payload_json !== "string") throw new Error("missing proposal fixture");
+          const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+          payload.dedupKey = "home-automation-migration:source-drift";
+          db.prepare("UPDATE proposals SET payload_json = ? WHERE proposal_id = ?")
+            .run(JSON.stringify(payload), "proposal-verified-identity");
+        } finally {
+          db.close();
+        }
+      }
+      assert.deepEqual(readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID), {
+        schemaVersion: "1",
+        outcome: "needs_attention",
+        assessmentId: ASSESSMENT_ID,
+        reason: "cross_store_inconsistent",
+        readMode: "durable_only",
+        remoteWritesPerformed: false,
+        localWritesPerformed: false,
+      }, label);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -556,12 +688,12 @@ function makeWorkflow(
     ...(status === "assessed" || proposalId === undefined ? {} : { proposalId }),
     ...(status === "translated" ? {
       candidateProposalRevision: 1,
-      candidateContentHash: `sha256:${"b".repeat(64)}`,
+      candidateContentHash: computeHomeAutomationMigrationCandidateContentHash(MIGRATION_CANDIDATE_CONTENT),
       translatedAt: "2026-08-24T08:00:00.500Z",
     } : {}),
     ...(status === "verified" ? {
       candidateProposalRevision: 1,
-      candidateContentHash: `sha256:${"b".repeat(64)}`,
+      candidateContentHash: computeHomeAutomationMigrationCandidateContentHash(MIGRATION_CANDIDATE_CONTENT),
       artifactId: "artifact-private",
       artifactRevision: 1,
       artifactContentHash: `sha256:${"c".repeat(64)}`,
@@ -584,6 +716,27 @@ function makeWorkflow(
   };
 }
 
+function makeReadyWorkflow(proposalId: string): Record<string, unknown> {
+  const verified = makeWorkflow("verified", proposalId);
+  return {
+    status: "ready",
+    sourceFingerprint: verified.sourceFingerprint,
+    assessedAt: verified.assessedAt,
+    proposalId: verified.proposalId,
+    candidateProposalRevision: verified.candidateProposalRevision,
+    candidateContentHash: verified.candidateContentHash,
+    translatedAt: verified.translatedAt,
+    artifactId: verified.artifactId,
+    artifactRevision: verified.artifactRevision,
+    artifactContentHash: verified.artifactContentHash,
+    compileResultId: verified.compileResultId,
+    dryRunResultId: verified.dryRunResultId,
+    simulatedAt: verified.simulatedAt,
+    readyAt: "2026-08-24T08:00:00.900Z",
+    reviewProposalRevision: 2,
+  };
+}
+
 function makeFailedSwitchRestoredWorkflow(proposalId: string): Record<string, unknown> {
   return {
     status: "restored",
@@ -591,7 +744,7 @@ function makeFailedSwitchRestoredWorkflow(proposalId: string): Record<string, un
     assessedAt: "2026-08-24T08:00:00.000Z",
     proposalId,
     candidateProposalRevision: 1,
-    candidateContentHash: `sha256:${"b".repeat(64)}`,
+    candidateContentHash: computeHomeAutomationMigrationCandidateContentHash(MIGRATION_CANDIDATE_CONTENT),
     translatedAt: "2026-08-24T08:00:00.500Z",
     artifactId: "artifact-private",
     artifactRevision: 1,
@@ -679,23 +832,127 @@ function seedProposal(path: string, input: {
   readonly lifecycle: "active" | "closed";
   readonly applicationStatus: "running" | "withdrawn";
   readonly deploymentStatus: "verified" | "rolled_back";
+  readonly revision?: number;
+  readonly deploymentId?: string;
+  readonly deploymentTarget?: string;
+  readonly deploymentConfigFingerprint?: string;
 }): void {
   const store = new SqliteProposalStore({ path });
   const db = (store as unknown as { db: DatabaseSync }).db;
+  const workflowIdentity = homeAutomationMigrationProposalIdentity({
+    migrationId: ASSESSMENT_ID,
+    ruleRef: "rule-private",
+    sourceBridgeId: "bridge-private",
+    sourceEpochId: "epoch-private",
+    sourceLastSeq: 7,
+    sourceFingerprint: MIGRATION_SOURCE_FINGERPRINT,
+  });
+  const revision = input.revision ?? 4;
+  const deploymentConfigFingerprint = input.deploymentConfigFingerprint ?? `sha256:${"f".repeat(64)}`;
+  const deployment = {
+    status: input.deploymentStatus,
+    requestedAt: "2026-08-24T08:00:01.000Z",
+    ...(input.deploymentId === undefined ? {} : { deploymentId: input.deploymentId }),
+    ...(input.deploymentTarget === undefined ? {} : { target: input.deploymentTarget }),
+    ...(input.deploymentStatus === "verified" || input.deploymentConfigFingerprint !== undefined
+      ? { configFingerprint: deploymentConfigFingerprint } : {}),
+    ...(input.deploymentStatus === "verified" ? { verifiedAt: "2026-08-24T08:00:02.000Z" } : {}),
+  };
+  const audit = [
+    { id: "audit-created", at: "2026-08-24T08:00:00.000Z", action: "created", actor: "home-automation-migration", revision: 1 },
+    { id: "audit-prepared", at: "2026-08-24T08:00:00.500Z", action: "prepared", actor: "system", revision: 2 },
+    { id: "audit-approved", at: "2026-08-24T08:00:01.000Z", action: "approved", actor: "household-owner", revision: 3 },
+    ...(input.deploymentStatus === "verified"
+      ? [{ id: "audit-deployment", at: "2026-08-24T08:00:02.000Z", action: "deployment_verified", actor: "system", revision: 4 }]
+      : [{ id: "audit-deployment", at: "2026-08-24T08:00:02.000Z", action: "deployment_failed", actor: "system", revision: 4 }]),
+    ...(input.lifecycle === "closed"
+      ? [{ id: "audit-closed", at: "2026-08-24T08:00:03.000Z", action: "closed", actor: "household-owner", revision }]
+      : []),
+  ];
   db.prepare(`INSERT INTO proposals
     (proposal_id, producer, idempotency_key, status, revision, created_at, updated_at, payload_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(input.id, "home-automation-migration", "idempotency-private", input.status, 3,
+    .run(input.id, "home-automation-migration", workflowIdentity.idempotencyKey, input.status, revision,
       "2026-08-24T08:00:00.000Z", "2026-08-24T08:00:02.000Z", JSON.stringify({
         id: input.id,
-        revision: 3,
+        revision,
+        kind: "automation-draft",
+        idempotencyKey: workflowIdentity.idempotencyKey,
+        dedupKey: workflowIdentity.dedupKey,
+        createdAt: "2026-08-24T08:00:00.000Z",
+        updatedAt: "2026-08-24T08:00:02.000Z",
         reviewLane: "migration",
         provenance: { producer: "home-automation-migration" },
         status: input.status,
         lifecycle: input.lifecycle,
         applicationStatus: input.applicationStatus,
-        deployment: { status: input.deploymentStatus },
+        artifactCandidate: { schemaVersion: "1", content: MIGRATION_CANDIDATE_CONTENT },
+        preparedArtifact: {
+          artifactId: "artifact-private",
+          revision: 1,
+          contentHash: `sha256:${"c".repeat(64)}`,
+          compileResultId: `sha256:${"d".repeat(64)}`,
+          dryRunResultId: `sha256:${"e".repeat(64)}`,
+        },
+        deployment,
+        conflictCheck: { status: "checked", existingAutomationCount: 1, matches: [{ identity: "rule-private", relation: "possible_overlap" }] },
+        audit,
         title: input.title,
       }));
+  store.close();
+}
+
+function seedReadyProposal(path: string, proposalId: string): void {
+  const store = new SqliteProposalStore({ path });
+  const db = (store as unknown as { db: DatabaseSync }).db;
+  const identity = homeAutomationMigrationProposalIdentity({
+    migrationId: ASSESSMENT_ID,
+    ruleRef: "rule-private",
+    sourceBridgeId: "bridge-private",
+    sourceEpochId: "epoch-private",
+    sourceLastSeq: 7,
+    sourceFingerprint: MIGRATION_SOURCE_FINGERPRINT,
+  });
+  const createdAt = "2026-08-24T08:00:00.000Z";
+  const updatedAt = "2026-08-24T08:00:00.900Z";
+  db.prepare(`INSERT INTO proposals
+    (proposal_id, producer, idempotency_key, status, revision, created_at, updated_at, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    proposalId,
+    "home-automation-migration",
+    identity.idempotencyKey,
+    "pending_review",
+    2,
+    createdAt,
+    updatedAt,
+    JSON.stringify({
+      id: proposalId,
+      revision: 2,
+      kind: "automation-draft",
+      idempotencyKey: identity.idempotencyKey,
+      dedupKey: identity.dedupKey,
+      createdAt,
+      updatedAt,
+      reviewLane: "migration",
+      provenance: { producer: "home-automation-migration" },
+      status: "pending_review",
+      lifecycle: "ready",
+      applicationStatus: "not_available",
+      artifactCandidate: { schemaVersion: "1", content: MIGRATION_CANDIDATE_CONTENT },
+      preparedArtifact: {
+        artifactId: "artifact-private",
+        revision: 1,
+        contentHash: `sha256:${"c".repeat(64)}`,
+        compileResultId: `sha256:${"d".repeat(64)}`,
+        dryRunResultId: `sha256:${"e".repeat(64)}`,
+      },
+      conflictCheck: { status: "checked", existingAutomationCount: 1, matches: [{ identity: "rule-private", relation: "possible_overlap" }] },
+      audit: [
+        { id: "audit-created", at: createdAt, action: "created", actor: "home-automation-migration", revision: 1 },
+        { id: "audit-prepared", at: updatedAt, action: "prepared", actor: "system", revision: 2 },
+      ],
+      title: "private",
+    }),
+  );
   store.close();
 }
