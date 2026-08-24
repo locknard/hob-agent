@@ -200,9 +200,10 @@ function targetState(
 async function waitForServiceCommand(
   socket: FakeSocket,
   service: "turn_on" | "turn_off",
+  afterSentCount = 0,
 ): Promise<Record<string, unknown>> {
   return waitFor(
-    () => [...socket.sent].reverse().find((message) => (
+    () => [...socket.sent].slice(afterSentCount).reverse().find((message) => (
       message.type === "call_service"
       && message.domain === "automation"
       && message.service === service
@@ -212,7 +213,7 @@ async function waitForServiceCommand(
   );
 }
 
-test("runs a real HA cutover through verified deployment and read-back rollback", async () => {
+async function createReadyMigrationFixture() {
   const directory = mkdtempSync(join(tmpdir(), "hob-home-agent-ha-runtime-"));
   const socket = new FakeSocket();
   const fetchFake = createFetchFake();
@@ -375,6 +376,18 @@ test("runs a real HA cutover through verified deployment and read-back rollback"
     const workflow = completedWorkflow?.rules.find((candidate) => candidate.ruleRef === rule.ruleRef)?.workflow;
     assert.equal(workflow?.status, "ready");
 
+    return { directory, socket, fetchFake, runtime, world, baseline, target, assessed, rule, prepared, review };
+  } catch (error) {
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+test("runs a real HA cutover through verified deployment and read-back rollback", async () => {
+  const fixture = await createReadyMigrationFixture();
+  const { directory, socket, fetchFake, runtime, world, baseline, target, assessed, rule, prepared, review } = fixture;
+  try {
     const expectedWatermark = {
       bridgeId: baseline.bridgeId,
       epochId: baseline.epochId,
@@ -491,6 +504,113 @@ test("runs a real HA cutover through verified deployment and read-back rollback"
       `http://ha.local:8123/api/config/automation/config/${deployment.deploymentId}`,
     ]);
     assert.equal(fetchFake.requests.filter((request) => request.method === "GET").every((request) => allowedReadUrls.has(request.url)), true);
+  } finally {
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovers a failed HA rollback with a fresh receipt and no blind replay", async () => {
+  const fixture = await createReadyMigrationFixture();
+  const { directory, socket, fetchFake, runtime, assessed, rule, prepared } = fixture;
+  try {
+    const proposalBeforeEnable = runtime.context.homeProposals.get(prepared.proposalId);
+    if (proposalBeforeEnable === undefined) assert.fail("Prepared migration proposal is unavailable");
+    const enabling = runtime.context.homeProposals.enableProposal({
+      proposalId: prepared.proposalId,
+      expectedRevision: proposalBeforeEnable.revision,
+      reviewer: "household-owner",
+    });
+    const pauseCommand = await waitForServiceCommand(socket, "turn_off");
+    assert.deepEqual(pauseCommand.target, { entity_id: "automation.arrival_light" });
+    if (typeof pauseCommand.id !== "number") assert.fail("Source pause command id is unavailable");
+    fetchFake.setSourceState("off");
+    socket.receive({ id: pauseCommand.id, type: "result", success: true, result: null });
+    const enabled = await enabling;
+    assert.equal(enabled.lifecycle, "active", JSON.stringify(enabled));
+    const deployment = enabled.deployment;
+    if (deployment?.deploymentId === undefined || deployment.target === undefined) {
+      assert.fail("Verified target deployment identity is unavailable");
+    }
+    assert.equal(fetchFake.targetAutomations.has(deployment.deploymentId), true);
+
+    const proposalBeforeClose = runtime.context.homeProposals.get(prepared.proposalId);
+    if (proposalBeforeClose === undefined) assert.fail("Active migration proposal is unavailable");
+    const firstRestoreSentCount = socket.sent.length;
+    const closing = runtime.context.homeProposals.closeAutomation({
+      proposalId: prepared.proposalId,
+      expectedRevision: proposalBeforeClose.revision,
+      actor: "household-owner",
+    });
+    const firstRestore = await waitForServiceCommand(socket, "turn_on", firstRestoreSentCount);
+    assert.deepEqual(firstRestore.target, { entity_id: "automation.arrival_light" });
+    if (typeof firstRestore.id !== "number") assert.fail("First source restore command id is unavailable");
+    socket.receive({
+      id: firstRestore.id,
+      type: "result",
+      success: false,
+      error: { code: "restore_failed", message: "source restore unavailable" },
+    });
+    const failedClose = await closing;
+    assert.equal(failedClose.lifecycle, "recovery_required", JSON.stringify(failedClose));
+    assert.equal(fetchFake.sourceState(), "off");
+    assert.equal(fetchFake.targetAutomations.has(deployment.deploymentId), false);
+    assert.equal(fetchFake.requests.filter((request) => request.method === "DELETE").length, 1);
+    assert.equal(failedClose.applicationStatus, "failed");
+
+    const failedWorkflow = runtime.context.homeAutomationMigrations.findWorkflowForProposal(prepared.proposalId);
+    if (failedWorkflow.status !== "governed") assert.fail("Failed rollback workflow is not governed");
+    assert.equal(failedWorkflow.workflowStatus, "needs_attention");
+    assert.equal(failedWorkflow.failureReason, "rollback_unknown");
+    if (failedWorkflow.rollbackOperationId === undefined) assert.fail("Failed rollback receipt is unavailable");
+    const firstRollbackOperationId = failedWorkflow.rollbackOperationId;
+
+    const proposalBeforeRecovery = runtime.context.homeProposals.get(prepared.proposalId);
+    if (proposalBeforeRecovery === undefined) assert.fail("Recovery-required migration proposal is unavailable");
+    const recoverySentCount = socket.sent.length;
+    const recovering = runtime.context.homeProposals.recoverAutomation({
+      proposalId: prepared.proposalId,
+      expectedRevision: proposalBeforeRecovery.revision,
+      actor: "household-recovery-member",
+    });
+    const secondRestore = await waitForServiceCommand(socket, "turn_on", recoverySentCount);
+    assert.deepEqual(secondRestore.target, { entity_id: "automation.arrival_light" });
+    if (typeof secondRestore.id !== "number") assert.fail("Second source restore command id is unavailable");
+    assert.notEqual(secondRestore.id, firstRestore.id, "recovery must issue a new WebSocket command");
+    const recoveringWorkflow = runtime.context.homeAutomationMigrations.findWorkflowForProposal(prepared.proposalId);
+    if (recoveringWorkflow.status !== "governed") assert.fail("Recovery rollback workflow is not governed");
+    assert.equal(recoveringWorkflow.workflowStatus, "rolling_back");
+    if (recoveringWorkflow.rollbackOperationId === undefined) assert.fail("Recovery rollback receipt is unavailable");
+    assert.notEqual(recoveringWorkflow.rollbackOperationId, firstRollbackOperationId, "recovery must issue a fresh rollback receipt");
+
+    fetchFake.setSourceState("on");
+    socket.receive({ id: secondRestore.id, type: "result", success: true, result: null });
+    const recovered = await recovering;
+    assert.equal(recovered.lifecycle, "closed", JSON.stringify(recovered));
+    assert.equal(fetchFake.sourceState(), "on");
+    assert.equal(fetchFake.targetAutomations.has(deployment.deploymentId), false);
+    assert.equal(recovered.applicationStatus, "withdrawn");
+    assert.equal(recovered.deployment?.status, "rolled_back");
+    assert.equal(recovered.audit.filter((event) => event.action === "approved").length, 1, "recovery must not create a second approval");
+    const restoredWorkflow = runtime.context.homeAutomationMigrations.findWorkflowForProposal(prepared.proposalId);
+    if (restoredWorkflow.status !== "governed") assert.fail("Restored workflow is not governed");
+    assert.equal(restoredWorkflow.workflowStatus, "restored");
+
+    const serviceCalls = socket.sent.filter((message) => message.type === "call_service");
+    assert.equal(serviceCalls.length, 3);
+    assert.equal(serviceCalls.filter((message) => message.service === "turn_off").length, 1);
+    assert.equal(serviceCalls.filter((message) => message.service === "turn_on").length, 2);
+    assert.equal(serviceCalls.filter((message) => message.domain !== "automation").length, 0);
+    assert.equal(serviceCalls.every((message) => (
+      message.domain === "automation"
+      && message.target !== undefined
+      && JSON.stringify(message.target) === JSON.stringify({ entity_id: "automation.arrival_light" })
+    )), true);
+    assert.equal(fetchFake.requests.filter((request) => request.method === "POST").length, 1);
+    assert.equal(fetchFake.requests.filter((request) => request.method === "DELETE").length, 1);
+    assert.equal(fetchFake.requests.filter((request) => request.method !== "GET").every((request) => (
+      request.url.endsWith(`/api/config/automation/config/${deployment.deploymentId}`)
+    )), true);
   } finally {
     await runtime.stop();
     rmSync(directory, { recursive: true, force: true });
