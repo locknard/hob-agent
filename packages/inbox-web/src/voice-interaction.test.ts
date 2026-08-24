@@ -11,9 +11,15 @@ class Element {
   readonly nodes = new Map<string, Element>();
   readonly listeners = new Map<string, Handler>();
   readonly dataset: Record<string, string> = {};
+  private _textContent = "";
+  textContentWrites = 0;
   hidden = false;
   disabled = false;
-  textContent = "";
+  get textContent(): string { return this._textContent; }
+  set textContent(value: string) {
+    this._textContent = value;
+    this.textContentWrites += 1;
+  }
   getAttribute(name: string): string | null {
     return this.attributes.get(name) ?? null;
   }
@@ -162,6 +168,7 @@ interface Harness {
   restart: Button;
   speechStop: Button;
   transcript: Element;
+  captureProgress: Element;
   answer: Element;
   conversation: Anchor;
   detail: Element;
@@ -211,6 +218,7 @@ function createHarness(
     "[data-voice-status]",
     "[data-voice-detail]",
     "[data-voice-transcript]",
+    "[data-voice-capture-progress]",
     "[data-voice-fallback]",
     "[data-voice-answer]",
   ];
@@ -341,6 +349,7 @@ function createHarness(
     restart,
     speechStop,
     transcript: root.nodes.get("[data-voice-transcript]")!,
+    captureProgress: root.nodes.get("[data-voice-capture-progress]")!,
     answer: root.nodes.get("[data-voice-answer]")!,
     conversation,
     detail: root.nodes.get("[data-voice-detail]")!,
@@ -356,6 +365,52 @@ function createHarness(
 async function flush(): Promise<void> {
   for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
+
+test("shows honest capture and upload stages without fabricating a partial transcript", async () => {
+  const transcription = deferred<any>();
+  const h = createHarness({
+    fetch: (url) => {
+      if (url === "/test/transcribe") return transcription.promise;
+      return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
+    },
+  });
+
+  h.start.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "listening");
+  assert.equal(h.captureProgress.hidden, false);
+  assert.equal(h.captureProgress.textContent, "正在录音；还没有收到声音。");
+  assert.equal(h.transcript.textContent, "还没有转写");
+  assert.equal(h.transcript.dataset.voiceTranscriptKind, "empty");
+
+  FakeRecorder.instances[0]!.emit([1, 2, 3]);
+  assert.equal(h.captureProgress.textContent, "正在录音；已收到声音。");
+  const heardWrites = h.captureProgress.textContentWrites;
+  FakeRecorder.instances[0]!.emit([4, 5, 6]);
+  assert.equal(h.captureProgress.textContent, "正在录音；已收到声音。");
+  assert.equal(h.captureProgress.textContentWrites, heardWrites);
+  assert.equal(h.transcript.textContent, "还没有转写");
+
+  h.stop.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "transcribing");
+  assert.equal(h.transcript.textContent, "还没有转写");
+  assert.equal(h.transcript.dataset.voiceTranscriptKind, "empty");
+  assert.equal(h.captureProgress.textContent, "录音已完成，正在转成文字；完成后显示全文。");
+  assert.doesNotMatch(h.captureProgress.textContent, /字节|provider|audio/i);
+
+  transcription.resolve({
+    ok: true,
+    json: async () => ({
+      status: "accepted",
+      adviceId: "turn_final_boundary",
+      transcript: "客厅现在怎么样",
+    }),
+  });
+  await flush();
+  assert.equal(h.transcript.textContent, "客厅现在怎么样");
+  assert.equal(h.transcript.dataset.voiceTranscriptKind, "final");
+});
 
 test("pauses private voice for ten minutes after three consecutive no-input turns while keeping text available and recovering after expiry", async () => {
   let now = 1_000;
@@ -771,17 +826,19 @@ test("keeps the current upload controller when an older upload settles", async (
   });
   h.start.click();
   await flush();
-  FakeRecorder.instances[0]!.emit();
+  FakeRecorder.instances[0]!.emit([1]);
   h.stop.click();
   await flush();
   h.start.click();
   await flush();
-  FakeRecorder.instances[1]!.emit();
+  FakeRecorder.instances[1]!.emit([2, 3, 4]);
   h.stop.click();
   await flush();
+  assert.equal(h.captureProgress.textContent, "录音已完成，正在转成文字；完成后显示全文。");
 
   first.resolve({ ok: true, json: async () => ({ status: "no_input" }) });
   await flush();
+  assert.equal(h.captureProgress.textContent, "录音已完成，正在转成文字；完成后显示全文。");
   h.cancel.click();
   assert.equal(h.calls.filter((call) => call.url.endsWith("/transcribe")).at(-1)!.init.signal.aborted, true);
 });

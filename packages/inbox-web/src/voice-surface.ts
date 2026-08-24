@@ -94,7 +94,7 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
       eyebrow: "整理语音",
       heading: "正在确认刚才听到的内容",
       status: "转成文字",
-      detail: "原始录音只用于这次转写，请求结束后从内存丢弃。",
+      detail: "录音已完成，正在转成文字；完成后显示全文。原始录音只用于这次转写，请求结束后从内存丢弃。",
       recovery: { href: "/conversation", label: "改用文字" },
     },
     thinking: {
@@ -191,6 +191,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const statusNode = voiceRoot.querySelector("[data-voice-status]");
   const detailNode = voiceRoot.querySelector("[data-voice-detail]");
   const transcriptNode = voiceRoot.querySelector("[data-voice-transcript]");
+  const captureProgressNode = voiceRoot.querySelector("[data-voice-capture-progress]");
   const startButton = voiceRoot.querySelector("[data-voice-start]");
   const stopButton = voiceRoot.querySelector("[data-voice-stop]");
   const cancelButton = voiceRoot.querySelector("[data-voice-cancel]");
@@ -214,6 +215,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   let chunks = [];
   let pcmChunks = [];
   let pcmBytes = 0;
+  let captureHasSound = false;
   let pcmRate = 0;
   let timer;
   let requestController;
@@ -252,7 +254,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       "等待下一步",
       "没有听清。再说一次就好。",
     ],
-    transcribing: ["转成文字", "正在使用私人的语音服务确认这一次请求。"],
+    transcribing: ["转成文字", "录音已完成，正在转成文字；完成后显示全文。"],
     thinking: ["正在处理", "正在查看家里的信息；你可以取消等待。"],
     speaking: ["正在播报", "可以停止播报，或直接再次说话。"],
     playback_failed: [
@@ -375,6 +377,24 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     if (node instanceof HTMLElement && typeof value === "string")
       node.textContent = value;
   };
+  const setCaptureProgress = (stage) => {
+    if (!(captureProgressNode instanceof HTMLElement)) return;
+    if (stage === "recording") {
+      setText(captureProgressNode, "正在录音；还没有收到声音。");
+    } else if (stage === "recording_heard") {
+      setText(captureProgressNode, "正在录音；已收到声音。");
+    } else if (stage === "uploading") {
+      setText(captureProgressNode, "录音已完成，正在转成文字；完成后显示全文。");
+    } else {
+      setText(captureProgressNode, "");
+    }
+    captureProgressNode.dataset.voiceCaptureStage = stage;
+  };
+  const markCaptureHeard = () => {
+    if (captureHasSound) return;
+    captureHasSound = true;
+    setCaptureProgress("recording_heard");
+  };
   const setState = (next, detail, recovery) => {
     state = next;
     voiceRoot.dataset.voiceState = next;
@@ -402,6 +422,8 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       transcriptNode.hidden =
         (next === "text_mode" || next === "model_unavailable") &&
         transcriptNode.dataset.voiceTranscriptKind === "empty";
+    if (captureProgressNode instanceof HTMLElement)
+      captureProgressNode.hidden = next !== "listening" && next !== "transcribing";
     if (startButton instanceof HTMLButtonElement)
       startButton.hidden =
         availability !== "active" ||
@@ -461,6 +483,8 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     chunks = [];
     pcmChunks = [];
     pcmBytes = 0;
+    captureHasSound = false;
+    setCaptureProgress("empty");
     if (timer !== undefined) {
       clearTimeout(timer);
       timer = undefined;
@@ -833,6 +857,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       return;
     }
     setState("transcribing");
+    setCaptureProgress("uploading");
     const controller = new AbortController();
     requestController = controller;
     const headers = {
@@ -1017,8 +1042,10 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
             generation === turnGeneration &&
             recorder === capturedRecorder &&
             event.data?.size > 0
-          )
+          ) {
             chunks.push(event.data);
+            markCaptureHeard();
+          }
         };
         capturedRecorder.onstop = () => {
           if (generation !== turnGeneration || recorder !== capturedRecorder) return;
@@ -1059,11 +1086,13 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
           }
           pcmChunks.push(bytes);
           pcmBytes += bytes.length;
+          markCaptureHeard();
         };
         source.connect(processor);
         processor.connect(capturedAudioContext.destination);
       }
       setState("listening");
+      setCaptureProgress("recording");
       timer = setTimeout(() => finishCapture(turnGeneration), maxTurnMs);
     } catch (error) {
       if (generation !== turnGeneration) return;
@@ -1175,7 +1204,7 @@ export function renderVoiceSurface(
     : options.notice === "unavailable"
       ? '<p class="product-notice" data-one-shot-notice role="status">私人语音仍在恢复中。文字对话现在就能继续。</p>'
       : "";
-  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${recovery}${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-background hidden>稍后处理</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。当前语音只用于家庭问答，不会直接发起设备或媒体动作；如需动作，请在文字对话中明确选择相应入口。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
+  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p><p class="product-muted product-voice-progress" data-voice-capture-progress aria-live="polite" hidden></p>${recovery}${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-background hidden>稍后处理</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。当前语音只用于家庭问答，不会直接发起设备或媒体动作；如需动作，请在文字对话中明确选择相应入口。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
 }
 function renderVoiceIntent(
   transcript: string,

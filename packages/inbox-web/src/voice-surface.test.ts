@@ -172,6 +172,8 @@ test("describes the input recording and short answer replay cache as separate pr
   }) ?? "";
 
   assert.match(html, /原始录音只用于这次转写，请求结束后从内存丢弃。/);
+  assert.match(html, /录音已完成，正在转成文字；完成后显示全文。/);
+  assert.match(html, /data-voice-capture-progress[^>]*hidden/);
   assert.match(html, /回答播报音频只在本机内存中保留最多 30 秒/);
   assert.doesNotMatch(html, /音频只用于这次转写，不会留存。/);
 });
