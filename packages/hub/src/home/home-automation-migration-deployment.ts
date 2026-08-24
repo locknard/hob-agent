@@ -147,7 +147,16 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     } catch {
       return "defer";
     }
-    return lookup.status === "not_migration" ? "allow" : "defer";
+    if (lookup.status === "not_migration") return "allow";
+    // Once a migration is durably verified, active and paused proposal rows
+    // need the ordinary target readback so bridge-ready reconciliation can
+    // surface native edits, while cutover/recovery windows remain guarded.
+    if (lookup.status === "governed"
+      && lookup.workflowStatus === "verified"
+      && (request.lifecycle === "active" || request.lifecycle === "paused")) {
+      return "allow";
+    }
+    return "defer";
   }
 
   async deploy(request: Parameters<ProposalDeploymentPort["deploy"]>[0]): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {

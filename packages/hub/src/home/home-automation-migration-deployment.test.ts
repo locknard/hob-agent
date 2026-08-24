@@ -226,7 +226,7 @@ function governedRestoredLookup(): Extract<HomeAutomationMigrationDeploymentLook
   };
 }
 
-test("defers generic reconciliation for every migration workflow, including restored cross-store windows", () => {
+test("defers generic reconciliation during migration transitions and restored cross-store windows", () => {
   const { runtime, wrapper } = deploymentFixture();
   const guard = (lifecycle: "enabling" | "active" | "paused") =>
     (wrapper as unknown as {
@@ -244,7 +244,7 @@ test("defers generic reconciliation for every migration workflow, including rest
   assert.equal(guard("enabling"), "defer");
   for (const workflowStatus of ["switching", "verified", "rolling_back"] as const) {
     runtime.findWorkflowForProposal = () => governedLookup(workflowStatus);
-    assert.equal(guard(workflowStatus === "verified" ? "active" : "enabling"), "defer", workflowStatus);
+    assert.equal(guard(workflowStatus === "verified" ? "active" : "enabling"), workflowStatus === "verified" ? "allow" : "defer", workflowStatus);
   }
   runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "rollback_unknown");
   assert.equal(guard("active"), "defer");
@@ -266,6 +266,18 @@ test("defers generic reconciliation for every migration workflow, including rest
 
   runtime.findWorkflowForProposal = () => ({ status: "not_migration" });
   assert.equal(guard("active"), "allow");
+});
+
+test("allows target readback for stable verified migrations in active and paused lifecycles", () => {
+  const { runtime, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedVerifiedLookup();
+  const guard = (lifecycle: "active" | "paused") =>
+    (wrapper as unknown as {
+      reconciliationGuard(input: { proposalId: string; lifecycle: string }): "allow" | "defer";
+    }).reconciliationGuard({ proposalId: BASE_REQUEST.proposalId, lifecycle });
+
+  assert.equal(guard("active"), "allow");
+  assert.equal(guard("paused"), "allow");
 });
 
 test("switches one ready migration only after CAS and verifies both neutral deployments", async () => {
