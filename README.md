@@ -158,6 +158,22 @@ reports pending identity-governance work only as aggregate counts. Aggregate
 logical journal capacity makes the fail-closed ingest quota visible before an
 unattended pilot; it does not silently prune evidence.
 
+For one explicit Home Assistant migration assessment, use the existing
+HomeWorld and migration services with a configured bridge id:
+
+```sh
+pnpm assess:home-migration -- --bridge-id <configured-bridge-id>
+```
+
+The command waits for that bridge's ready cut, reads its bounded
+`foreignRules@2` catalog, runs the existing neutral migration assessment, and
+stores the durable assessment under `HOB_DATA_DIR`. It prints only an opaque
+assessment id, aggregate rule dispositions, a fixed status, and
+`remoteWritesPerformed: false`. It requires only `HOB_DATA_DIR` and
+`HOB_BRIDGES`; it does not load a model, create a Proposal, call
+`foreignRuleControl@1`, deploy an automation, or control a device. Candidate,
+simulation, approval, and deployment remain separate governed stages.
+
 To preview canonical-journal retention without connecting a bridge, loading a
 model, deleting evidence, or writing a retention audit, reuse `HOB_DATA_DIR`
 and `HOB_BRIDGES` and select one configured bridge:

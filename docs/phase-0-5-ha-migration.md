@@ -103,4 +103,18 @@ verified → rolling_back → restored
 6. 暂停、关闭、回退和重启恢复；
 7. 真实家庭纵切与 Phase 1 适配器门槛评估。
 
+真实 HA 的只读 assessment operator 使用：
+
+```sh
+pnpm assess:home-migration -- --bridge-id <configured-bridge-id>
+```
+
+该命令只读取现有 `HOB_DATA_DIR`/`HOB_BRIDGES` 配置下的一个明确桥，等待
+当前一致性 cut，通过 `foreignRules@2` 和 `foreignRuleMigration@1` 完成中立
+分类，并把 assessment 持久化到本地 `home-automation-migrations.sqlite`。
+输出只包含 opaque assessment id、规则聚合计数和固定状态；远端写入标记始终为
+`false`。它不创建第二 runtime，不调用 `foreignRuleControl@1`、
+`automations@1` 或 `actions@1`，也不替代 Proposal、Artifact、simulation、一次
+决定或 deployment gate。
+
 每一步都以确定性测试、`pnpm test`、`pnpm check`、`git diff --check` 和真实浏览器双视口证据交付。任何实现都以本决议的状态机、权限边界、首期子集和 fail-closed 规则为验收依据。
