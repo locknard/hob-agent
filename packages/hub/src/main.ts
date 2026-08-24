@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 
 import { parseModelReference } from "@hob-agent/agent-layer/model-reference";
 import {
+  EncryptedFileSecretVault,
   MacOSKeychainSecretVault,
   type SecretVault,
   type WritableSecretVault,
@@ -59,7 +60,7 @@ export interface HomeHubMainOptions {
   readonly createProductRuntime?: (options: ProductRuntimeSupervisorOptions) => Promise<HomeHubRuntime> | HomeHubRuntime;
   /** Test seam for the operational product bundle mounted below the supervisor's Cordis root. */
   readonly mountProductBundle?: typeof mountHomeAgentProductBundle;
-  /** Test seam; production resolves selected profiles from macOS Keychain. */
+  /** Test seam; production selects Keychain or the explicit encrypted local vault. */
   readonly modelCredentialVault?: WritableSecretVault;
   /** Local terminal presentation for the short-lived setup and recovery pairing codes. */
   readonly writeProductTerminal?: (message: string) => void;
@@ -181,6 +182,7 @@ export async function resolveHomeHubProcessOptions(
 ): Promise<HomeHubProcessOptions> {
   const prepared = await prepareProductLaunch(environment);
   const { dataDirectory } = prepared.selection;
+  const selectedVault = vault ?? await selectConfiguredCredentialVault(environment, dataDirectory);
   const activated = prepared.activated;
   const effectiveEnvironment: LaunchEnvironment = activated === undefined
     ? environment
@@ -193,22 +195,22 @@ export async function resolveHomeHubProcessOptions(
       };
   const modelReference = effectiveEnvironment.HOB_MODEL?.trim();
   if (!modelReference) {
-    return createHomeHubProcessOptions(effectiveEnvironment);
+    return createHomeHubProcessOptions(effectiveEnvironment, undefined, Object.freeze({}), selectedVault);
   }
   let provider;
   try {
     provider = parseModelReference(modelReference).provider;
   } catch {
-    return createHomeHubProcessOptions(effectiveEnvironment);
+    return createHomeHubProcessOptions(effectiveEnvironment, undefined, Object.freeze({}), selectedVault);
   }
   const selectedCredential = activated !== undefined && environment.HOB_MODEL === undefined
-    ? { profile: activated.modelProfile, vault: vault ?? new MacOSKeychainSecretVault() }
-    : await loadSelectedModelCredential(dataDirectory, provider, vault);
+    ? { profile: activated.modelProfile, vault: selectedVault }
+    : await loadSelectedModelCredential(dataDirectory, provider, selectedVault);
   // Validate the complete launch contract before touching the optional
   // authority file so malformed bridge/model input keeps its bounded error.
-  readHomeHubLaunchConfig(effectiveEnvironment, selectedCredential, vault);
+  readHomeHubLaunchConfig(effectiveEnvironment, selectedCredential, selectedVault);
   const actionAuthorityConfig = await loadActionAuthorityConfigurationIfConfigured(dataDirectory);
-  return createHomeHubProcessOptions(effectiveEnvironment, selectedCredential, actionAuthorityConfig, vault);
+  return createHomeHubProcessOptions(effectiveEnvironment, selectedCredential, actionAuthorityConfig, selectedVault);
 }
 
 /** Builds an operational candidate from the exact map revision that setup verified. */
@@ -225,7 +227,7 @@ async function resolveCandidateHomeHubProcessOptions(
     HOB_MODEL_BASE_URL: candidate.modelBaseURL,
     HOB_BRIDGES: JSON.stringify(candidate.bridges),
   };
-  const secretVault = vault ?? new MacOSKeychainSecretVault();
+  const secretVault = vault ?? await selectConfiguredCredentialVault(environment, dataDirectory);
   const selectedCredential: SelectedModelCredential = {
     profile: candidate.modelProfile,
     vault: secretVault,
@@ -257,6 +259,16 @@ async function prepareProductLaunch(environment: LaunchEnvironment): Promise<Pre
   };
 }
 
+async function selectConfiguredCredentialVault(
+  environment: LaunchEnvironment,
+  dataDirectory: string,
+): Promise<WritableSecretVault> {
+  if (environment.HOB_VAULT_KEY_FILE !== undefined) {
+    return EncryptedFileSecretVault.open({ dataDirectory, keyFile: environment.HOB_VAULT_KEY_FILE });
+  }
+  return new MacOSKeychainSecretVault();
+}
+
 async function loadActionAuthorityConfigurationIfConfigured(
   dataDirectory: string,
 ): Promise<ActionAuthorityConfig> {
@@ -286,12 +298,21 @@ export async function main(options: HomeHubMainOptions = {}): Promise<RunningHom
   const dataDirectory = prepared.selection.dataDirectory;
   const mountProductBundle = options.mountProductBundle ?? mountHomeAgentProductBundle;
   const writeProductTerminal = options.writeProductTerminal ?? ((message: string) => { process.stdout.write(message); });
-  const productModelCredentialVault = options.modelCredentialVault ?? new MacOSKeychainSecretVault();
+  const encryptedVaultSelected = options.modelCredentialVault === undefined && environment.HOB_VAULT_KEY_FILE !== undefined;
+  const productModelCredentialVault = options.modelCredentialVault
+    ?? await selectConfiguredCredentialVault(environment, dataDirectory);
+  const credentialRefSource = encryptedVaultSelected ? "vault" as const : "keychain" as const;
   const bridgeProductBundle = options.bridgeProductBundle ?? builtinBridgeProductBundle;
   const productOptions: ProductRuntimeSupervisorOptions = {
     dataDirectory,
     port: productSetupPort(environment.HOB_SETUP_PORT),
     modelCredentialVault: productModelCredentialVault,
+    bridgeCredentialVault: productModelCredentialVault,
+    credentialRefSource,
+    voiceSetup: {
+      vault: productModelCredentialVault,
+      credentialRefSource,
+    },
     bridgeProductBundle,
     announce: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("setup", announcement)),
     announceRecovery: (announcement) => writeProductTerminal(renderProductPairingAnnouncement("recovery", announcement)),

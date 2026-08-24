@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 
 import {
+  formatDurableSecretRef,
   MacOSKeychainSecretVault,
+  type DurableSecretRefSource,
   type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
 
@@ -51,8 +53,10 @@ export type ProductBridgePrepareOutcome =
   | { readonly status: "prepared"; readonly prepared: ProductBridgePreparedProbe }
   | Exclude<ProductBridgeProbeOutcome, { readonly status: "ready" }>;
 
-interface ProductBridgeSetupOptions {
+export interface ProductBridgeSetupOptions {
   readonly vault?: WritableSecretVault;
+  /** Source for newly staged durable locators; macOS compatibility defaults to keychain. */
+  readonly credentialRefSource?: DurableSecretRefSource;
   /** The product-owned bundle is the source of setup peers for an executable runtime. */
   readonly bundle?: BridgeProductBundle;
   /** Narrow test seam for isolated setup behavior. */
@@ -65,9 +69,11 @@ export class ProductBridgeSetup {
   private readonly vault: WritableSecretVault;
   private readonly registrations: ReadonlyMap<string, ProductBridgeSetupRegistration>;
   private readonly createStageNonce: () => string;
+  private readonly credentialRefSource: DurableSecretRefSource;
 
   constructor(options: ProductBridgeSetupOptions = {}) {
     this.vault = options.vault ?? new MacOSKeychainSecretVault();
+    this.credentialRefSource = options.credentialRefSource ?? "keychain";
     if (options.bundle !== undefined && options.registrations !== undefined) {
       throw new TypeError("Bridge setup accepts either a product bundle or isolated registrations");
     }
@@ -123,7 +129,12 @@ export class ProductBridgeSetup {
       label: prepared.label,
       ...(prepared.endpoint === undefined ? {} : { endpoint: prepared.endpoint }),
       config: prepared.config,
-      credentialRefs: Object.freeze({ [prepared.credentialAlias]: `keychain:hob-agent/bridge:${bridgeId}:${prepared.credentialAlias}` }),
+      credentialRefs: Object.freeze({
+        [prepared.credentialAlias]: formatDurableSecretRef(
+          this.credentialRefSource,
+          `hob-agent/bridge:${bridgeId}:${prepared.credentialAlias}`,
+        ),
+      }),
     });
   }
 
@@ -206,7 +217,7 @@ function validateStage(stage: ProductBridgeSetupStage): void {
   const entries = Object.entries(stage.credentialRefs);
   if (entries.length !== 1) throw new TypeError("Bridge setup stage is invalid");
   const [alias, reference] = entries[0]!;
-  if (!STAGE_NONCE.test(alias) || reference !== `keychain:hob-agent/bridge:${stage.bridgeId}:${alias}`) {
+  if (!STAGE_NONCE.test(alias) || !new RegExp(`^(?:keychain|vault):hob-agent/bridge:${stage.bridgeId}:${alias}$`, "u").test(reference)) {
     throw new TypeError("Bridge setup stage is invalid");
   }
 }

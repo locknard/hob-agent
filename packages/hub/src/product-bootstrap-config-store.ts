@@ -273,7 +273,7 @@ function validateDraft(value: ProductBootstrapConfigDraft | Record<string, unkno
     const credentialRefs: Record<string, string> = {};
     for (const [alias, rawReference] of Object.entries(bridge.credentialRefs)) {
       const reference = boundedString(rawReference, 300, "Bridge credential reference");
-      if (!ID.test(alias) || (reference !== `keychain:hob-agent/bridge:${bridgeId}:${alias}` && !/^env:[A-Z][A-Z0-9_]*$/u.test(reference))) {
+      if (!ID.test(alias) || (!new RegExp(`^(?:keychain|vault):hob-agent/bridge:${bridgeId}:${alias}$`, "u").test(reference) && !/^env:[A-Z][A-Z0-9_]*$/u.test(reference))) {
         throw new TypeError("Bridge credential reference is invalid");
       }
       credentialRefs[alias] = reference;
@@ -354,7 +354,7 @@ function voiceEndpoint(transport: "wyoming" | "openai_http", value: unknown, has
 
 function voiceCredentialRef(kind: "asr" | "tts", value: unknown): string {
   const reference = boundedString(value, 512, "Voice credential reference");
-  if (!new RegExp(`^keychain:hob-agent/voice:${kind}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, "u").test(reference)) {
+  if (!new RegExp(`^(?:keychain|vault):hob-agent/voice:${kind}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, "u").test(reference)) {
     throw new TypeError("Voice configuration is invalid");
   }
   return reference;
@@ -389,11 +389,9 @@ function validateModelProfile(value: unknown, provider: string, requiredScope?: 
   const setup = /^([A-Za-z0-9_-]+):setup:([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(value.id);
   const operational = /^([A-Za-z0-9_-]+):operational:([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(value.id);
   const validSetup = setup !== null && setup[1] === provider
-    && value.secretRef.startsWith(`keychain:hob-agent/setup-model:${setup[2]}:`)
-    && /^keychain:hob-agent\/setup-model:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/u.test(value.secretRef);
+    && new RegExp(`^(?:keychain|vault):hob-agent/setup-model:${setup[2]}:[A-Za-z0-9_-]+$`, "u").test(value.secretRef);
   const validOperational = operational !== null && operational[1] === provider
-    && value.secretRef.startsWith(`keychain:hob-agent/model:${operational[2]}:`)
-    && /^keychain:hob-agent\/model:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/u.test(value.secretRef);
+    && new RegExp(`^(?:keychain|vault):hob-agent/model:${operational[2]}:[A-Za-z0-9_-]+$`, "u").test(value.secretRef);
   if ((requiredScope === "operational" ? !validOperational : !(validSetup || validOperational))) {
     throw new TypeError("Model profile is invalid");
   }

@@ -1,5 +1,7 @@
 import {
+  formatDurableSecretRef,
   MacOSKeychainSecretVault,
+  type DurableSecretRefSource,
   type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
 import { Context, Service } from "@deepseek-ai/cordis";
@@ -92,6 +94,8 @@ export type ProductVoiceTransportProbe = (input: {
 
 export interface ProductVoiceSetupOptions {
   readonly vault?: WritableSecretVault;
+  /** Source for newly staged durable locators; macOS compatibility defaults to keychain. */
+  readonly credentialRefSource?: DurableSecretRefSource;
   readonly probe?: ProductVoiceTransportProbe;
   /** Injected only for deterministic staged-locator tests. */
   readonly createStageNonce?: () => string;
@@ -114,18 +118,20 @@ export class ProductVoiceSetup {
   private readonly vault: WritableSecretVault;
   private readonly transportProbe: ProductVoiceTransportProbe;
   private readonly createStageNonce: () => string;
+  private readonly credentialRefSource: DurableSecretRefSource;
 
   constructor(options: ProductVoiceSetupOptions = {}) {
     this.vault = options.vault ?? new MacOSKeychainSecretVault();
     this.transportProbe = options.probe ?? probeConfiguredVoiceTransport;
     this.createStageNonce = options.createStageNonce ?? (() => globalThis.crypto.randomUUID().replace(/-/gu, ""));
+    this.credentialRefSource = options.credentialRefSource ?? "keychain";
   }
 
   prepare(input: { readonly setupId: string; readonly track: ProductVoiceTrackInput }): ProductVoicePrepareOutcome {
     const prepared = prepareInput(input);
     if ("status" in prepared) return prepared;
 
-    const staged = createStage(prepared, this.createStageNonce());
+    const staged = createStage(prepared, this.createStageNonce(), this.credentialRefSource);
     const credential = credentialValue(prepared.track.credential);
     return Object.freeze({
       status: "prepared",
@@ -260,12 +266,16 @@ function prepareInput(input: { readonly setupId: string; readonly track: Product
   }
 }
 
-function createStage(input: { readonly setupId: string; readonly track: ProductVoiceTrackInput }, nonce: string): ProductVoiceSetupStage {
+function createStage(
+  input: { readonly setupId: string; readonly track: ProductVoiceTrackInput },
+  nonce: string,
+  source: DurableSecretRefSource,
+): ProductVoiceSetupStage {
   if (!STAGE_NONCE.test(nonce)) throw new TypeError("Voice setup staging nonce is invalid");
   const credential = credentialValue(input.track.credential);
   const credentialRef = credential === undefined
     ? undefined
-    : `keychain:hob-agent/voice:${input.track.kind}:${input.setupId}:${nonce}`;
+    : formatDurableSecretRef(source, `hob-agent/voice:${input.track.kind}:${input.setupId}:${nonce}`);
   if (input.track.kind === "asr") {
     return Object.freeze({
       kind: "asr",
@@ -335,7 +345,7 @@ function validateStagedCredentialReference(stage: ProductVoiceSetupStage): void 
   validateCredentialFreeStage({ ...stage, credentialRef: undefined } as ProductVoiceSetupStage);
   const reference = stage.credentialRef;
   const match = typeof reference === "string"
-    ? /^keychain:hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(reference)
+    ? /^(?:keychain|vault):hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(reference)
     : null;
   if (match === null || match[1] !== stage.kind) throw new TypeError("Voice setup stage is invalid");
 }

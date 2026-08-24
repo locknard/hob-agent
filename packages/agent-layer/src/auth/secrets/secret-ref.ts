@@ -7,11 +7,13 @@
  * return a secret value.
  */
 
-export type SecretRefSource = "env" | "keychain";
+export type SecretRefSource = "env" | "keychain" | "vault";
+export type DurableSecretRefSource = "keychain" | "vault";
 
 export type SecretRef =
   | { source: "env"; id: string }
-  | { source: "keychain"; id: string };
+  | { source: "keychain"; id: string }
+  | { source: "vault"; id: string };
 
 export type SecretRefAvailability =
   | { status: "available"; ref: SecretRef }
@@ -30,8 +32,9 @@ export interface ReadOnlySecretRefAvailabilityOptions {
 
 const ENV_ID = /^[A-Z][A-Z0-9_]{0,127}$/;
 const KEYCHAIN_ID = /^([^/\s:\r\n]+)\/([^/\s\r\n]+)$/;
+const VAULT_ID = /^hob-agent\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u;
 
-/** Parse one of the exact Phase 0 canonical forms: env:NAME or keychain:service/account. */
+/** Parse one of the exact Phase 0 canonical forms: env:NAME, keychain:service/account, or vault:hob-agent/id. */
 export function parseSecretRef(value: unknown): SecretRef {
   if (typeof value !== "string" || value.length === 0 || /\s/.test(value)) {
     throw invalidRef();
@@ -52,6 +55,12 @@ export function parseSecretRef(value: unknown): SecretRef {
     return { source: "keychain", id };
   }
 
+  if (value.startsWith("vault:")) {
+    const id = value.slice("vault:".length);
+    if (!VAULT_ID.test(id) || hasDotPathSegment(id)) throw invalidRef();
+    return { source: "vault", id };
+  }
+
   throw invalidRef();
 }
 
@@ -65,6 +74,7 @@ export function isSecretRef(value: unknown): value is SecretRef {
     const match = KEYCHAIN_ID.exec(candidate.id);
     return Boolean(match && match[1] !== "." && match[1] !== ".." && match[2] !== "." && match[2] !== "..");
   }
+  if (candidate.source === "vault") return VAULT_ID.test(candidate.id) && !hasDotPathSegment(candidate.id);
   return false;
 }
 
@@ -72,6 +82,11 @@ export function isSecretRef(value: unknown): value is SecretRef {
 export function formatSecretRef(value: unknown): string {
   if (!isSecretRef(value)) throw invalidRef();
   return `${value.source}:${value.id}`;
+}
+
+/** Formats a new durable locator without allowing setup code to invent a source. */
+export function formatDurableSecretRef(source: DurableSecretRefSource, id: string): string {
+  return formatSecretRef({ source, id });
 }
 
 /** Stable non-secret key useful for comparing or indexing refs. */
@@ -86,8 +101,8 @@ export function isValidSecretRef(value: unknown): value is SecretRef {
  * Check availability without resolving a SecretRef.
  *
  * Env values are consulted only for an explicitly allowlisted id. A valid
- * keychain ref is reported as unknown because passive status paths must not
- * call `security`, trigger an unlock prompt, or otherwise read Keychain.
+ * keychain and vault refs are reported as unknown because passive status paths
+ * must not prompt Keychain or read encrypted local state.
  */
 export function readOnlySecretRefAvailability(
   value: unknown,
@@ -96,7 +111,7 @@ export function readOnlySecretRefAvailability(
   const ref = toSecretRef(value);
   if (!ref) return { status: "blocked", reason: "invalid-ref" };
 
-  if (ref.source === "keychain") {
+  if (ref.source === "keychain" || ref.source === "vault") {
     return { status: "unknown", reason: "configured", ref };
   }
 
@@ -125,4 +140,8 @@ function toSecretRef(value: unknown): SecretRef | undefined {
 function invalidRef(): Error {
   // Do not interpolate the rejected input: it may itself contain a secret.
   return new Error("Invalid SecretRef");
+}
+
+function hasDotPathSegment(value: string): boolean {
+  return value.split("/").some((segment) => segment === "." || segment === "..");
 }

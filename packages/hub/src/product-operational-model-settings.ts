@@ -370,7 +370,7 @@ function candidateForConfiguration(configuration: Exclude<Awaited<ReturnType<Pro
 function managedModelOwner(profile: AuthProfile): { readonly candidateId: string; readonly credentialRef: string } | undefined {
   const reference = profile.secretRef;
   if (typeof reference !== "string") return undefined;
-  const match = /^keychain:hob-agent\/(model|setup-model):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(reference);
+  const match = /^(?:keychain|vault):hob-agent\/(model|setup-model):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(reference);
   if (match === null || match[1] === undefined || match[2] === undefined) return undefined;
   const profileKind = match[1] === "model" ? "operational" : "setup";
   if (profile.id !== `${profile.provider}:${profileKind}:${match[2]}`) return undefined;

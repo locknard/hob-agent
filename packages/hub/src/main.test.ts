@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { Context } from "@deepseek-ai/cordis";
 import { ProductHttpHost } from "@hob-agent/inbox-web/product-http-host";
+import { EncryptedFileSecretVault } from "@hob-agent/agent-layer/model-credentials";
 
 import {
   createHomeHubProcessOptions,
@@ -43,6 +44,71 @@ const MUSIC_ASSISTANT_ENV = {
   HOB_MUSIC_ASSISTANT_CREDENTIAL_REF: "env:HOB_MUSIC_ASSISTANT_TOKEN",
   HOB_MUSIC_ASSISTANT_TOKEN: "music-assistant-private-token",
 };
+
+test("selects one encrypted vault and the vault source for all product setup owners", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-encrypted-vault-"));
+  const keyFile = join(dataDirectory, "vault-key");
+  await writeFile(keyFile, "c".repeat(64), { mode: 0o600 });
+  let productOptions: ProductRuntimeSupervisorOptions | undefined;
+  try {
+    const running = await main({
+      env: { HOB_DATA_DIR: dataDirectory, HOB_VAULT_KEY_FILE: keyFile },
+      createProductRuntime: async (input) => {
+        productOptions = input;
+        return { context: new Context(), stop: async () => undefined };
+      },
+    });
+    assert.notEqual(productOptions, undefined);
+    assert.equal(productOptions!.modelCredentialVault instanceof EncryptedFileSecretVault, true);
+    assert.equal(productOptions!.bridgeCredentialVault, productOptions!.modelCredentialVault);
+    assert.equal(productOptions!.voiceSetup?.vault, productOptions!.modelCredentialVault);
+    assert.equal(productOptions!.credentialRefSource, "vault");
+    assert.equal(productOptions!.voiceSetup?.credentialRefSource, "vault");
+    const sharedVault = productOptions!.modelCredentialVault!;
+    for (const [reference, value] of [
+      ["vault:hob-agent/model:composition:model", "model-secret"],
+      ["vault:hob-agent/bridge:composition:access-token", "bridge-secret"],
+      ["vault:hob-agent/voice:asr:composition:asr", "asr-secret"],
+      ["vault:hob-agent/voice:tts:composition:tts", "tts-secret"],
+    ] as const) {
+      await sharedVault.write(reference, value);
+      assert.equal(await sharedVault.read(reference), value);
+    }
+    await running.shutdown.shutdown(0);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test("resolves an activated vault profile through the explicit encrypted vault", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-vault-resolution-"));
+  const keyFile = join(dataDirectory, "vault-key");
+  await writeFile(keyFile, "d".repeat(64), { mode: 0o600 });
+  try {
+    const vault = await EncryptedFileSecretVault.open({ dataDirectory, keyFile });
+    await vault.write("vault:hob-agent/model:gpt-home:stage-a", "vault-model-secret");
+    await new ProductBootstrapConfigStore(dataDirectory).commit(0, {
+      householdName: "梧桐家",
+      agentName: "小满",
+      modelReference: "gpt/gpt-5.4",
+      modelProfile: {
+        id: "gpt:operational:gpt-home",
+        provider: "gpt",
+        kind: "api_key",
+        secretRef: "vault:hob-agent/model:gpt-home:stage-a",
+      },
+      bridges: [],
+    });
+    const options = await resolveHomeHubProcessOptions({
+      HOB_DATA_DIR: dataDirectory,
+      HOB_VAULT_KEY_FILE: keyFile,
+    });
+    assert.equal(options.runtime.agent.profile?.secretRef, "vault:hob-agent/model:gpt-home:stage-a");
+    assert.equal(options.runtime.agent.vault instanceof EncryptedFileSecretVault, true);
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
 
 test("classifies first-run and activated product launch without exposing secrets", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "hob-main-launch-selection-"));

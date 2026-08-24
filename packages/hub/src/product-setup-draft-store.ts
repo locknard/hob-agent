@@ -1062,7 +1062,7 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
 
 function voiceCredentialRef(draftId: string, kind: "asr" | "tts", value: unknown): string {
   const reference = boundedString(value, 512, "Voice credential reference");
-  if (!new RegExp(`^keychain:hob-agent/voice:${kind}:${draftId}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, "u").test(reference)) {
+  if (!new RegExp(`^(?:keychain|vault):hob-agent/voice:${kind}:${draftId}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, "u").test(reference)) {
     throw new TypeError("Voice setup stage is invalid");
   }
   return reference;
@@ -1196,7 +1196,7 @@ function validateModelProfileEvidence(
 ): ProductBootstrapConfigDraft["modelProfile"] {
   if (!/^[A-Za-z0-9_-]{1,64}$/u.test(model.provider) || /\s/u.test(model.modelId)
     || profileId !== `${model.provider}:setup:${draftId}`
-    || !new RegExp(`^keychain:hob-agent/setup-model:${draftId}:[A-Za-z0-9_-]+$`, "u").test(credentialRef)) {
+    || !new RegExp(`^(?:keychain|vault):hob-agent/setup-model:${draftId}:[A-Za-z0-9_-]+$`, "u").test(credentialRef)) {
     throw new Error("Setup model evidence is invalid");
   }
   return Object.freeze({ id: profileId, provider: model.provider, kind: "api_key", secretRef: credentialRef });
@@ -1239,7 +1239,7 @@ function validateBridgeCredentialRefs(bridgeId: unknown, value: unknown): Readon
   const refs: Record<string, string> = {};
   for (const [alias, rawReference] of Object.entries(value)) {
     const reference = boundedString(rawReference, 512, "Bridge credential reference");
-    if (!IDENTIFIER.test(alias) || reference !== `keychain:hob-agent/bridge:${id}:${alias}`) {
+    if (!IDENTIFIER.test(alias) || !new RegExp(`^(?:keychain|vault):hob-agent/bridge:${id}:${alias}$`, "u").test(reference)) {
       throw new TypeError("Setup bridge credential references are invalid");
     }
     refs[alias] = reference;
@@ -1348,7 +1348,7 @@ function validateModelStage(draftId: string, stage: ProductModelSetupStage): {
   const profileId = boundedString(stage.profile.id, 256, "Model profile id");
   const credentialRef = boundedString(stage.profile.secretRef, 512, "Model credential reference");
   if (stage.profile.kind !== "api_key" || profileId !== `${provider}:setup:${draftId}`
-    || !credentialRef.startsWith(`keychain:hob-agent/setup-model:${draftId}:`)) {
+    || !new RegExp(`^(?:keychain|vault):hob-agent/setup-model:${draftId}:`, "u").test(credentialRef)) {
     throw new TypeError("Setup model stage is invalid");
   }
   const modelId = boundedString(stage.modelId, 256, "Model id");

@@ -36,6 +36,20 @@ test("provisions the primary API-key profile without persisting the secret", asy
   assert.deepEqual((await new AuthProfileConfigStore(path).load()).order.deepseek, ["deepseek:primary"]);
 });
 
+test("provisions and loads a primary profile with the selected encrypted-vault source", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-model-credential-vault-"));
+  const writes = new Map<string, string>();
+  const vault = {
+    read: async (reference: string) => writes.get(reference),
+    write: async (reference: string, value: string) => { writes.set(reference, value); },
+    delete: async (reference: string) => { writes.delete(reference); },
+  };
+  const profile = await provisionPrimaryModelApiKey(directory, "gpt", "vault-secret", vault, "vault");
+  assert.equal(profile.secretRef, "vault:hob-agent/gpt:primary");
+  assert.equal(writes.get(profile.secretRef), "vault-secret");
+  assert.deepEqual(await loadSelectedModelCredential(directory, "gpt", vault), { profile, vault });
+});
+
 test("loads only the explicitly ordered profile for the selected provider", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-model-credential-select-"));
   const store = new AuthProfileConfigStore(join(directory, "auth-profiles.json"));

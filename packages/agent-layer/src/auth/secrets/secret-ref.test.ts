@@ -9,16 +9,20 @@ import {
   type SecretRef,
 } from "./secret-ref.js";
 
-test("parses and formats the two Phase 0 canonical SecretRef forms", () => {
+test("parses and formats the three Phase 0 canonical SecretRef forms", () => {
   const env = parseSecretRef("env:OPENAI_API_KEY");
   const keychain = parseSecretRef("keychain:hob-agent/gpt:primary");
+  const vault = parseSecretRef("vault:hob-agent/gpt:primary");
 
   assert.deepEqual(env, { source: "env", id: "OPENAI_API_KEY" });
   assert.deepEqual(keychain, { source: "keychain", id: "hob-agent/gpt:primary" });
+  assert.deepEqual(vault, { source: "vault", id: "hob-agent/gpt:primary" });
   assert.equal(formatSecretRef(env), "env:OPENAI_API_KEY");
   assert.equal(formatSecretRef(keychain), "keychain:hob-agent/gpt:primary");
+  assert.equal(formatSecretRef(vault), "vault:hob-agent/gpt:primary");
   assert.equal(isSecretRef(env), true);
   assert.equal(isSecretRef(keychain), true);
+  assert.equal(isSecretRef(vault), true);
 });
 
 test("rejects non-canonical refs, paths, whitespace, newlines, and unknown sources", () => {
@@ -88,6 +92,17 @@ test("keychain availability is passive and never invokes a reader or prompt", ()
     ref: { source: "keychain", id: "hob-agent/gpt:primary" },
   });
   assert.equal(reads, 0);
+});
+
+test("vault availability is passive and reports only configured metadata", () => {
+  assert.deepEqual(readOnlySecretRefAvailability("vault:hob-agent/gpt:primary", {
+    env: {},
+    envAllowlist: [],
+  }), {
+    status: "unknown",
+    reason: "configured",
+    ref: { source: "vault", id: "hob-agent/gpt:primary" },
+  });
 });
 
 test("invalid refs are blocked by availability without exposing input values", () => {

@@ -464,7 +464,7 @@ function voiceCredentialOwners(configuration: ProductBootstrapConfiguration | un
     ["tts", configuration.voice.tts.credentialRef],
   ] as const) {
     if (credentialRef === undefined) continue;
-    const match = /^keychain:hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(credentialRef);
+    const match = /^(?:keychain|vault):hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(credentialRef);
     if (match === null || match[1] !== track || match[2] === undefined) continue;
     owners.push({ candidateId: match[2], track, credentialRef, committedGeneration: configuration.generation });
   }

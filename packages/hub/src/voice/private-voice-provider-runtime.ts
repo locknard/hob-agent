@@ -20,7 +20,7 @@ export type { ProductVoiceRuntimeConfig } from "../product-bootstrap-config-stor
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 const MAX_TEXT_CHARS = 4_096;
 const AUDIO_MIME_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u;
-const VOICE_CREDENTIAL_REF = /^keychain:hob-agent\/voice:(asr|tts):[A-Za-z0-9][A-Za-z0-9_-]{0,127}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+const VOICE_CREDENTIAL_REF = /^(?:keychain|vault):hob-agent\/voice:(asr|tts):[A-Za-z0-9][A-Za-z0-9_-]{0,127}:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 
 export type PrivateVoiceProviderRuntimeStatus =
   | { readonly status: "active" }

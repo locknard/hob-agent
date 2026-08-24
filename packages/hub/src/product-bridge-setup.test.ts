@@ -50,6 +50,24 @@ async function reserveBridgeLease(stage: Parameters<ProductSetupDraftStore["rese
   return { lease, dispose: () => rm(directory, { recursive: true, force: true }) };
 }
 
+test("uses the selected encrypted-vault source for new bridge setup locators", () => {
+  const setup = new ProductBridgeSetup({
+    credentialRefSource: "vault",
+    registrations: [registration],
+    createStageNonce: () => "vault-stage",
+  });
+  const prepared = setup.prepare({
+    setupId: "draft-home",
+    adapterType: "fixture-peer",
+    config: { serverAddress: "fixture://peer.local" },
+    credential: "request-secret",
+  });
+  assert.equal(prepared.status, "prepared");
+  if (prepared.status !== "prepared") assert.fail("expected prepared bridge probe");
+  const stage = setup.stageSetup(prepared.prepared, "draft-home");
+  assert.equal(stage.credentialRefs["access-token"], `vault:hob-agent/bridge:${stage.bridgeId}:access-token`);
+});
+
 test("prepares bridge metadata before its durable credential lease authorizes a vault write", async () => {
   const vault = new MemoryVault();
   const setup = new ProductBridgeSetup({ vault, registrations: [registration], createStageNonce: () => "stage-1" });

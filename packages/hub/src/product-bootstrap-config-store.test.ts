@@ -44,6 +44,38 @@ test("commits and reloads one composition-root product configuration generation"
   }
 });
 
+test("accepts vault locators for model, bridge, and private voice configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-config-vault-refs-"));
+  try {
+    const committed = await new ProductBootstrapConfigStore(directory).commit(0, {
+      householdName: "梧桐家",
+      agentName: "小满",
+      modelReference: "custom/model",
+      modelProfile: {
+        id: "custom:setup:vault-draft",
+        provider: "custom",
+        kind: "api_key",
+        secretRef: "vault:hob-agent/setup-model:vault-draft:stage-a",
+      },
+      bridges: [{
+        bridgeId: "ha-home",
+        adapterType: "home-assistant",
+        config: { baseUrl: "http://ha.local:8123", authenticationPrincipal: "owner" },
+        credentialRefs: { "access-token": "vault:hob-agent/bridge:ha-home:access-token" },
+      }],
+      voice: {
+        asr: { transport: "openai_http", endpoint: "http://127.0.0.1:9880", credentialRef: "vault:hob-agent/voice:asr:vault-draft:asr-a" },
+        tts: { transport: "openai_http", endpoint: "http://127.0.0.1:9880", credentialRef: "vault:hob-agent/voice:tts:vault-draft:tts-a", locale: "zh-CN" },
+      },
+    });
+    assert.equal(committed.modelProfile.secretRef, "vault:hob-agent/setup-model:vault-draft:stage-a");
+    assert.equal(committed.bridges[0]?.credentialRefs["access-token"], "vault:hob-agent/bridge:ha-home:access-token");
+    assert.equal(committed.voice?.asr.credentialRef, "vault:hob-agent/voice:asr:vault-draft:asr-a");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("preserves the active generation across stale writes and secret-shaped bridge config", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-product-config-guard-"));
   try {

@@ -4,6 +4,11 @@ export interface SecretVault {
   read(reference: string): Promise<string | undefined>;
 }
 
+export interface WritableSecretVault extends SecretVault {
+  write(reference: string, value: string): Promise<void>;
+  delete(reference: string): Promise<void>;
+}
+
 /** Reads only explicitly allowlisted process-environment references. */
 export class EnvironmentSecretVault implements SecretVault {
   private readonly allowed: ReadonlySet<string>;
@@ -28,7 +33,7 @@ export class EnvironmentSecretVault implements SecretVault {
   }
 }
 
-/** Test-only vault; production wiring must use OS keychain or encrypted storage. */
+/** Test-only vault; production wiring selects OS keychain or encrypted storage. */
 export class InMemorySecretVault implements SecretVault {
   constructor(private readonly values: Record<string, string>) {}
   async read(reference: string): Promise<string | undefined> { return this.values[reference]; }

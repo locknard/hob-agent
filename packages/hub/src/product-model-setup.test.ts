@@ -41,6 +41,19 @@ async function reserveSetupLease(stage: Parameters<ProductSetupDraftStore["reser
   return { lease, dispose: () => rm(directory, { recursive: true, force: true }) };
 }
 
+test("uses the selected encrypted-vault source for new model setup locators", () => {
+  const setup = new ProductModelSetup({ credentialRefSource: "vault", createStageNonce: () => "vault-stage" });
+  const preparation = setup.prepare({
+    setupId: "vault-draft",
+    provider: "gpt",
+    modelId: "gpt-5",
+    apiKey: "request-secret",
+  });
+  assert.equal(preparation.status, "prepared");
+  if (preparation.status !== "prepared") assert.fail("expected a prepared model candidate");
+  assert.equal(setup.stageSetup(preparation.prepared, "vault-draft").profile.secretRef, "vault:hob-agent/setup-model:vault-draft:vault-stage");
+});
+
 test("executes a durably leased custom OpenAI-compatible model probe without selecting a primary profile", async () => {
   const vault = new MemoryVault();
   const calls: Array<{ profileId: string; secretRef: string; modelId: string; baseURL?: string }> = [];

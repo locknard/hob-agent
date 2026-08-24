@@ -547,7 +547,7 @@ function createBridgeCredentialSource(
         : undefined;
       if (locator === undefined) return { configured: false };
       const ref = parseSecretRef(locator);
-      if (ref.source === "keychain") return { configured: true };
+      if (ref.source === "keychain" || ref.source === "vault") return { configured: true };
       const value = environment[ref.id];
       return { configured: typeof value === "string" && value.trim() !== "" };
     },

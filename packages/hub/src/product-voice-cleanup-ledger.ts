@@ -7,7 +7,7 @@ const MAX_ENTRIES = 16;
 const MAX_FILE_BYTES = 16_384;
 const LOCK_STALE_AFTER_MS = 30_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
-const VOICE_REF = /^keychain:hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+const VOICE_REF = /^(?:keychain|vault):hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const LEASE_AUTHORITY = Symbol("product-voice-cleanup-ledger");
 
 export type ProductVoiceCleanupTrack = "asr" | "tts";

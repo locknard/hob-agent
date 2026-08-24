@@ -3,9 +3,11 @@ import { join } from "node:path";
 
 import {
   AuthProfileConfigStore,
+  formatDurableSecretRef,
   MacOSKeychainSecretVault,
   provisionApiKeyProfile,
   type AuthProfile,
+  type DurableSecretRefSource,
   type SecretVault,
   type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
@@ -34,7 +36,7 @@ export async function loadSelectedModelCredential(
     profile === undefined
     || profile.provider !== provider
     || profile.kind !== "api_key"
-    || profile.secretRef !== `keychain:hob-agent/${profile.id}`
+    || !isPrimaryProfileReference(profile.secretRef, profile.id)
   ) {
     throw new Error(`Invalid ordered credential profile for ${provider}`);
   }
@@ -47,15 +49,27 @@ export async function provisionPrimaryModelApiKey(
   provider: SupportedModelProvider,
   apiKey: string,
   vault: WritableSecretVault = new MacOSKeychainSecretVault(),
+  credentialRefSource: DurableSecretRefSource = "keychain",
 ): Promise<AuthProfile> {
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   const profile: AuthProfile = {
     id: `${provider}:primary`,
     provider,
     kind: "api_key",
-    secretRef: `keychain:hob-agent/${provider}:primary`,
+    secretRef: formatDurableSecretRef(credentialRefSource, `hob-agent/${provider}:primary`),
   };
   const store = new AuthProfileConfigStore(modelCredentialConfigPath(dataDirectory));
   await provisionApiKeyProfile(vault, { upsert: (selected) => store.upsertAndSelect(selected) }, profile, apiKey);
   return profile;
+}
+
+function isPrimaryProfileReference(reference: unknown, profileId: string): reference is string {
+  if (typeof reference !== "string") return false;
+  try {
+    const source = reference.startsWith("vault:") ? "vault" : reference.startsWith("keychain:") ? "keychain" : undefined;
+    if (source === undefined) return false;
+    return reference === formatDurableSecretRef(source, `hob-agent/${profileId}`);
+  } catch {
+    return false;
+  }
 }

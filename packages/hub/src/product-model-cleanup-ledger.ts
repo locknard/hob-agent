@@ -263,7 +263,7 @@ function validReference(value: unknown): { readonly candidateId: string; readonl
 }
 function modelCredentialReference(candidateId: string, credentialRef: string): boolean {
   const nonce = "[A-Za-z0-9][A-Za-z0-9_-]{0,127}";
-  return new RegExp(`^keychain:hob-agent/(?:model|setup-model):${candidateId}:${nonce}$`, "u").test(credentialRef);
+  return new RegExp(`^(?:keychain|vault):hob-agent/(?:model|setup-model):${candidateId}:${nonce}$`, "u").test(credentialRef);
 }
 function validGeneration(value: unknown, label: string, zero = false): number { if (!Number.isSafeInteger(value) || Number(value) < (zero ? 0 : 1)) throw invalid(label); return Number(value); }
 function validCommitted(value: unknown, expected: number): number { const committed = validGeneration(value, "Committed generation"); if (committed !== expected + 1) throw invalid(); return committed; }

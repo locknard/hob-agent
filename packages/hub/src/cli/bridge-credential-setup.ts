@@ -2,8 +2,10 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import {
+  formatDurableSecretRef,
   MacOSKeychainSecretVault,
   parseSecretRef,
+  type DurableSecretRefSource,
   type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
 
@@ -23,6 +25,7 @@ export async function setupBridgeCredential(
   environment: Readonly<Record<string, string | undefined>> = process.env,
   input: NodeJS.ReadableStream = process.stdin,
   vault: WritableSecretVault = new MacOSKeychainSecretVault(),
+  credentialRefSource: DurableSecretRefSource = "keychain",
 ): Promise<BridgeCredentialSetupResult> {
   const bridgeId = environment.HOB_BRIDGE_ID?.trim();
   const alias = environment.HOB_BRIDGE_CREDENTIAL_ALIAS?.trim();
@@ -32,7 +35,7 @@ export async function setupBridgeCredential(
   if (!alias || !SCOPE_PART.test(alias)) {
     throw new Error("HOB_BRIDGE_CREDENTIAL_ALIAS must be a canonical credential alias");
   }
-  const credentialRef = `keychain:hob-agent/bridge:${bridgeId}:${alias}`;
+  const credentialRef = formatDurableSecretRef(credentialRefSource, `hob-agent/bridge:${bridgeId}:${alias}`);
   parseSecretRef(credentialRef);
   const secret = await readSecretInput(input, process.stderr, "Bridge credential: ");
   await vault.write(credentialRef, secret);

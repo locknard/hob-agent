@@ -1,13 +1,10 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import type { SecretVault } from "./secret-vault.js";
+import type { SecretVault, WritableSecretVault } from "./secret-vault.js";
 import { parseSecretRef } from "./secret-ref.js";
 
-export interface WritableSecretVault extends SecretVault {
-  write(reference: string, value: string): Promise<void>;
-  delete(reference: string): Promise<void>;
-}
+export type { WritableSecretVault } from "./secret-vault.js";
 
 export interface KeychainCommandResult {
   ok: boolean;

@@ -25,6 +25,22 @@ class MemoryVault {
   delete(reference: string): Promise<void> { this.deleted.push(reference); this.values.delete(reference); return Promise.resolve(); }
 }
 
+test("uses the selected encrypted-vault source for new voice setup locators", async () => {
+  const setup = new ProductVoiceSetup({
+    credentialRefSource: "vault",
+    createStageNonce: () => "vault-stage",
+    vault: new MemoryVault(),
+    probe: async () => ({ status: "ready" as const, latencyMs: 1 }),
+  });
+  const result = await probeCredentialed(setup, {
+    setupId: "vault-family",
+    track: { kind: "tts", transport: "openai_http", endpoint: "http://127.0.0.1:9880", credential: "request-secret", locale: "zh-CN" },
+  });
+  assert.equal(result.status, "ready");
+  if (result.status !== "ready") assert.fail("expected ready voice probe");
+  assert.equal(result.staged.credentialRef, "vault:hob-agent/voice:tts:vault-family:vault-stage");
+});
+
 test("stages independent Wyoming ASR and HTTP TTS settings without selecting a primary", async () => {
   const vault = new MemoryVault();
   const calls: Array<{ kind: string; transport: string; endpoint: string; credential?: string; model?: string }> = [];

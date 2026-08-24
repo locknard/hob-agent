@@ -3,6 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Context, type Fiber } from "@deepseek-ai/cordis";
 import {
   MacOSKeychainSecretVault,
+  type DurableSecretRefSource,
   type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
 import { ModelProviderResolver, type ModelProviderCandidate } from "@hob-agent/agent-layer/model-provider-resolver";
@@ -151,6 +152,10 @@ export interface ProductRuntimeSupervisorOptions {
   readonly voiceSetup?: ProductVoiceSetupOptions;
   /** Durable model credential owner shared by setup and operational settings. */
   readonly modelCredentialVault?: WritableSecretVault;
+  /** The same durable owner used by bridge setup and mounted bridge resolution. */
+  readonly bridgeCredentialVault?: WritableSecretVault;
+  /** Source used by newly-created setup locators; keychain remains the compatibility default. */
+  readonly credentialRefSource?: DurableSecretRefSource;
   /** Test seam for the one resolver identity created under this product root. */
   readonly createModelProviderResolver?: (context: Context) => ModelProviderResolver;
   /** Test seam for the one model setup owner shared by setup and operational settings. */
@@ -175,8 +180,10 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
   readonly context = new Context();
   private readonly now: () => Date;
   private readonly voiceCredentialVault: WritableSecretVault;
+  private readonly bridgeCredentialVault: WritableSecretVault;
   private readonly bridgeProductBundle: BridgeProductBundle;
   private readonly modelCredentialVault: WritableSecretVault;
+  private readonly credentialRefSource: DurableSecretRefSource;
   private readonly modelSetup: ProductModelSetup;
   private readonly modelCleanupLedger: ProductModelCleanupLedger;
   private readonly modelProviderResolver: ModelProviderResolver;
@@ -204,8 +211,10 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
   constructor(private readonly options: ProductRuntimeSupervisorOptions) {
     this.now = options.now ?? (() => new Date());
     this.bridgeProductBundle = options.bridgeProductBundle ?? builtinBridgeProductBundle;
-    this.voiceCredentialVault = options.voiceSetup?.vault ?? new MacOSKeychainSecretVault();
     this.modelCredentialVault = options.modelCredentialVault ?? new MacOSKeychainSecretVault();
+    this.voiceCredentialVault = options.voiceSetup?.vault ?? this.modelCredentialVault;
+    this.bridgeCredentialVault = options.bridgeCredentialVault ?? this.modelCredentialVault;
+    this.credentialRefSource = options.credentialRefSource ?? options.voiceSetup?.credentialRefSource ?? "keychain";
     this.setupDrafts = options.setupDrafts;
     this.setupDraftStore = options.setupDrafts === undefined
       ? new ProductSetupDraftStore(options.dataDirectory, this.now)
@@ -214,7 +223,10 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     this.productSessions = options.productSessions ?? new ProductSessionStore(options.dataDirectory, this.now);
     this.voiceCleanupLedger = new ProductVoiceCleanupLedger(options.dataDirectory, this.now);
     this.modelCleanupLedger = new ProductModelCleanupLedger(options.dataDirectory, this.now);
-    this.modelSetup = options.modelSetup ?? new ProductModelSetup({ vault: this.modelCredentialVault });
+    this.modelSetup = options.modelSetup ?? new ProductModelSetup({
+      vault: this.modelCredentialVault,
+      credentialRefSource: this.credentialRefSource,
+    });
     this.modelProviderResolver = options.createModelProviderResolver?.(this.context)
       ?? new ModelProviderResolver(this.context);
     this.modelSettings = new ProductOperationalModelSettings({
@@ -267,6 +279,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
       await this.context.plugin(ProductVoiceSetupService, {
         ...this.options.voiceSetup,
         vault: this.voiceCredentialVault,
+        credentialRefSource: this.credentialRefSource,
       });
       if (this.setupDrafts === undefined) {
         const store = this.setupDraftStore;
@@ -274,7 +287,11 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
         this.setupDrafts = new ProductSetupController(
           store,
           this.modelSetup,
-          new ProductBridgeSetup({ bundle: this.bridgeProductBundle }),
+          new ProductBridgeSetup({
+            bundle: this.bridgeProductBundle,
+            vault: this.bridgeCredentialVault,
+            credentialRefSource: this.credentialRefSource,
+          }),
           this.context.productVoiceSetup,
         );
       }
@@ -819,7 +836,7 @@ function activeVoiceCredentialOwners(configuration: ProductBootstrapConfiguratio
     ["tts", configuration.voice.tts.credentialRef],
   ] as const).flatMap(([track, credentialRef]) => {
     if (credentialRef === undefined) return [];
-    const parsed = /^keychain:hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(credentialRef);
+    const parsed = /^(?:keychain|vault):hob-agent\/voice:(asr|tts):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(credentialRef);
     if (parsed === null || parsed[1] !== track || parsed[2] === undefined) return [];
     return [{
       candidateId: parsed[2],
@@ -847,7 +864,7 @@ function activeModelCredentialOwner(configuration: ProductBootstrapConfiguration
   if (configuration === undefined) return undefined;
   const reference = configuration.modelProfile.secretRef;
   if (typeof reference !== "string") return undefined;
-  const match = /^keychain:hob-agent\/(model|setup-model):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(reference);
+  const match = /^(?:keychain|vault):hob-agent\/(model|setup-model):([A-Za-z0-9][A-Za-z0-9_-]{0,127}):[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.exec(reference);
   if (match === null || match[1] === undefined || match[2] === undefined) return undefined;
   const profileKind = match[1] === "model" ? "operational" : "setup";
   if (configuration.modelProfile.id !== `${configuration.modelProfile.provider}:${profileKind}:${match[2]}`) return undefined;

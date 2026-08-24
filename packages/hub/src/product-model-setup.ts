@@ -1,6 +1,8 @@
 import {
   MacOSKeychainSecretVault,
+  formatDurableSecretRef,
   type AuthProfile,
+  type DurableSecretRefSource,
   type WritableSecretVault,
 } from "@hob-agent/agent-layer/model-credentials";
 import {
@@ -70,6 +72,8 @@ type ProductModelLiveProbe = (input: {
 
 export interface ProductModelSetupOptions {
   readonly vault?: WritableSecretVault;
+  /** Source for newly staged durable locators; macOS compatibility defaults to keychain. */
+  readonly credentialRefSource?: DurableSecretRefSource;
   readonly probe?: ProductModelLiveProbe;
   /** Injected only to make locator lifecycle tests deterministic. */
   readonly createStageNonce?: () => string;
@@ -87,11 +91,13 @@ export class ProductModelSetup {
   private readonly vault: WritableSecretVault;
   private readonly liveProbe: ProductModelLiveProbe;
   private readonly createStageNonce: () => string;
+  private readonly credentialRefSource: DurableSecretRefSource;
 
   constructor(options: ProductModelSetupOptions = {}) {
     this.vault = options.vault ?? new MacOSKeychainSecretVault();
     this.liveProbe = options.probe ?? probeDshApiKeyProfile;
     this.createStageNonce = options.createStageNonce ?? cryptoRandomStageNonce;
+    this.credentialRefSource = options.credentialRefSource ?? "keychain";
   }
 
   /** Validates request-local model material without writing its credential. */
@@ -106,7 +112,7 @@ export class ProductModelSetup {
   stageSetup(prepared: ProductModelPreparedProbe, setupId: string): ProductModelSetupStage {
     validatePrepared(prepared);
     validateSetupId(setupId);
-    return createSetupStage(setupId, prepared, this.createStageNonce());
+    return createSetupStage(setupId, prepared, this.createStageNonce(), this.credentialRefSource);
   }
 
   /** Creates the strict metadata-only profile that operational settings can reserve before writing. */
@@ -119,7 +125,7 @@ export class ProductModelSetup {
         id: `${prepared.provider}:operational:${candidateId}`,
         provider: prepared.provider,
         kind: "api_key",
-        secretRef: `keychain:hob-agent/model:${candidateId}:${nonce}`,
+        secretRef: formatDurableSecretRef(this.credentialRefSource, `hob-agent/model:${candidateId}:${nonce}`),
       }),
       modelId: prepared.modelId,
       ...(prepared.baseURL === undefined ? {} : { baseURL: prepared.baseURL }),
@@ -182,8 +188,8 @@ export class ProductModelSetup {
 function validateStage(stage: ProductModelSetupStage): void {
   const reference = stage.profile.secretRef;
   if (stage.profile.kind !== "api_key" || reference === undefined) throw new TypeError("Setup model stage is invalid");
-  const setup = /^keychain:hob-agent\/setup-model:([^:]+):[A-Za-z0-9_-]+$/u.exec(reference);
-  const operational = /^keychain:hob-agent\/model:([^:]+):[A-Za-z0-9_-]+$/u.exec(reference);
+  const setup = /^(?:keychain|vault):hob-agent\/setup-model:([^:]+):[A-Za-z0-9_-]+$/u.exec(reference);
+  const operational = /^(?:keychain|vault):hob-agent\/model:([^:]+):[A-Za-z0-9_-]+$/u.exec(reference);
   const validSetup = setup !== null && stage.profile.id === `${stage.profile.provider}:setup:${setup[1]}`;
   const validOperational = operational !== null && stage.profile.id === `${stage.profile.provider}:operational:${operational[1]}`;
   if (!validSetup && !validOperational) {
@@ -217,9 +223,14 @@ function prepareInput(input: ProductModelSetupInput): ProductModelSetupInput | E
   }
 }
 
-function createSetupStage(setupId: string, input: ProductModelPreparedProbe, nonce: string): ProductModelSetupStage {
+function createSetupStage(
+  setupId: string,
+  input: ProductModelPreparedProbe,
+  nonce: string,
+  source: DurableSecretRefSource,
+): ProductModelSetupStage {
   if (!SETUP_ID.test(nonce)) throw new TypeError("Setup model staging nonce is invalid");
-  const secretRef = `keychain:hob-agent/setup-model:${setupId}:${nonce}`;
+  const secretRef = formatDurableSecretRef(source, `hob-agent/setup-model:${setupId}:${nonce}`);
   return Object.freeze({
     profile: Object.freeze({
       id: `${input.provider}:setup:${setupId}`,
