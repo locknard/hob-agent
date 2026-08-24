@@ -153,6 +153,11 @@ test("sqlite store round-trips an eligible source fingerprint across restart", a
         actionClass: "reversible",
         sourceFingerprint,
         disposition: "eligible",
+        workflow: {
+          status: "assessed",
+          sourceFingerprint,
+          assessedAt: createdAt,
+        },
       }],
     }), true);
     first.close();
@@ -220,6 +225,166 @@ test("sqlite store rejects an assessment status that disagrees with rule disposi
     }), /corrupt/);
     assert.equal(store.get(discovered.migrationId)?.status, "discovered");
     store.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("sqlite rule workflow transition is a strict per-rule CAS", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-workflow-cas-"));
+  const path = join(directory, "migrations.sqlite");
+  const sourceFingerprint = `sha256:${"d".repeat(64)}`;
+  const eligibleRules = [{
+    ruleRef: "ha-rule-1",
+    name: "晚间灯光",
+    enabled: true,
+    updatedAt: createdAt,
+    triggerClass: "state" as const,
+    conditionClass: "flat_and" as const,
+    actionClass: "reversible" as const,
+    sourceFingerprint,
+    disposition: "eligible" as const,
+    workflow: { status: "assessed" as const, sourceFingerprint, assessedAt: createdAt },
+  }];
+  try {
+    const owner = new SqliteHomeAutomationMigrationStore({ path });
+    owner.discover({ ...discovered, analysisMode: "trusted_neutral", rules: discovered.rules });
+    assert.equal(owner.assess({ migrationId: discovered.migrationId, status: "assessed", assessedAt: createdAt, rules: eligibleRules }), true);
+    const contender = new SqliteHomeAutomationMigrationStore({ path });
+    const command = {
+      migrationId: discovered.migrationId,
+      ruleRef: "ha-rule-1",
+      from: "assessed" as const,
+      to: "translated" as const,
+      transitionedAt: createdAt,
+      proposalId: "proposal-cas",
+      candidateProposalRevision: 1,
+      candidateContentHash: `sha256:${"e".repeat(64)}`,
+    };
+    assert.equal(owner.transitionRuleWorkflow(command), true);
+    assert.equal(contender.transitionRuleWorkflow(command), false);
+    assert.equal(owner.get(discovered.migrationId)?.rules[0]?.workflow?.status, "translated");
+    assert.throws(() => owner.transitionRuleWorkflow({ ...command, from: "translated", to: "simulated", nativeBody: "blocked" } as never), /workflow transition is invalid/);
+    contender.close();
+    owner.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("sqlite workflow JSON rejects bridge-shaped or semantically incomplete records", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-workflow-corrupt-"));
+  const path = join(directory, "migrations.sqlite");
+  const sourceFingerprint = `sha256:${"f".repeat(64)}`;
+  try {
+    const store = new SqliteHomeAutomationMigrationStore({ path });
+    store.discover({ ...discovered, analysisMode: "trusted_neutral" });
+    assert.equal(store.assess({
+      migrationId: discovered.migrationId,
+      status: "assessed",
+      assessedAt: createdAt,
+      rules: [{
+        ruleRef: "ha-rule-1",
+        name: "晚间灯光",
+        enabled: true,
+        updatedAt: createdAt,
+        triggerClass: "state",
+        conditionClass: "flat_and",
+        actionClass: "reversible",
+        sourceFingerprint,
+        disposition: "eligible",
+        workflow: { status: "assessed", sourceFingerprint, assessedAt: createdAt },
+      }],
+    }), true);
+    store.close();
+    const raw = new DatabaseSync(path);
+    raw.prepare("UPDATE home_automation_migrations SET rules_json = ? WHERE migration_id = ?").run(JSON.stringify([{
+      ruleRef: "ha-rule-1",
+      triggerClass: "state",
+      conditionClass: "flat_and",
+      actionClass: "reversible",
+      sourceFingerprint,
+      disposition: "eligible",
+      workflow: {
+        status: "translated",
+        sourceFingerprint,
+        assessedAt: createdAt,
+        proposalId: "proposal-corrupt",
+        candidateProposalRevision: 1,
+        candidateContentHash: `sha256:${"1".repeat(64)}`,
+        translatedAt: createdAt,
+        bridgeId: "must-not-persist",
+      },
+    }]), discovered.migrationId);
+    raw.close();
+    const reopened = new SqliteHomeAutomationMigrationStore({ path });
+    assert.throws(() => reopened.get(discovered.migrationId), /stored home automation migration is corrupt/i);
+    reopened.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("sqlite persisted ready workflow rejects a proposal revision gap", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-ready-gap-"));
+  const path = join(directory, "migrations.sqlite");
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  try {
+    const store = new SqliteHomeAutomationMigrationStore({ path });
+    store.discover({ ...discovered, analysisMode: "trusted_neutral" });
+    assert.equal(store.assess({
+      migrationId: discovered.migrationId,
+      status: "assessed",
+      assessedAt: createdAt,
+      rules: [{
+        ruleRef: "ha-rule-1",
+        name: "晚间灯光",
+        enabled: true,
+        updatedAt: createdAt,
+        triggerClass: "state",
+        conditionClass: "flat_and",
+        actionClass: "reversible",
+        sourceFingerprint,
+        disposition: "eligible",
+        workflow: { status: "assessed", sourceFingerprint, assessedAt: createdAt },
+      }],
+    }), true);
+    store.close();
+
+    const raw = new DatabaseSync(path);
+    raw.prepare("UPDATE home_automation_migrations SET rules_json = ? WHERE migration_id = ?").run(JSON.stringify([{
+      ruleRef: "ha-rule-1",
+      name: "晚间灯光",
+      enabled: true,
+      updatedAt: createdAt,
+      triggerClass: "state",
+      conditionClass: "flat_and",
+      actionClass: "reversible",
+      sourceFingerprint,
+      disposition: "eligible",
+      workflow: {
+        status: "ready",
+        sourceFingerprint,
+        assessedAt: createdAt,
+        proposalId: "proposal-gap",
+        candidateProposalRevision: 1,
+        candidateContentHash: `sha256:${"b".repeat(64)}`,
+        translatedAt: createdAt,
+        artifactId: "artifact-gap",
+        artifactRevision: 1,
+        artifactContentHash: `sha256:${"c".repeat(64)}`,
+        compileResultId: `sha256:${"d".repeat(64)}`,
+        dryRunResultId: `sha256:${"e".repeat(64)}`,
+        simulatedAt: createdAt,
+        readyAt: createdAt,
+        reviewProposalRevision: 3,
+      },
+    }]), discovered.migrationId);
+    raw.close();
+
+    const reopened = new SqliteHomeAutomationMigrationStore({ path });
+    assert.throws(() => reopened.get(discovered.migrationId), /stored home automation migration is corrupt/i);
+    reopened.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

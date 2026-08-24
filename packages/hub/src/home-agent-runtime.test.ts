@@ -264,6 +264,8 @@ test("mounts the read-only home automation migration service after HomeWorld and
     await runtime.start();
     assert.equal(runtime.context.homeAutomationMigrations.name, "homeAutomationMigrations");
     assert.equal(runtime.context.homeAutomationMigrations.path, path);
+    assert.equal(typeof runtime.context.homeAutomationMigrations.prepareRuleReview, "function");
+    assert.equal(typeof runtime.context.homeAutomationMigrations.refreshRuleWorkflow, "function");
     assert.equal(existsSync(path), true);
   } finally {
     await runtime.stop();

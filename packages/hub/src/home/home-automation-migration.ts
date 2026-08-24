@@ -26,6 +26,21 @@ export type HomeAutomationMigrationRuleReason =
   | "unsupported_action"
   | "analysis_incomplete";
 
+/** Per-rule progression links an assessed rule to existing proposal/artifact owners. */
+export type HomeAutomationMigrationRuleWorkflowStatus =
+  | "assessed"
+  | "translated"
+  | "simulated"
+  | "ready"
+  | "needs_attention";
+
+/** Fixed failure vocabulary for durable translation and simulation links. */
+export type HomeAutomationMigrationRuleWorkflowFailureReason =
+  | "compile_failed"
+  | "compile_unavailable"
+  | "simulation_failed"
+  | "simulation_unavailable";
+
 export type HomeAutomationMigrationCloseReason = "household_closed" | "superseded" | "stale_source";
 
 /** A translator result contains only bounded neutral classification. */
@@ -67,6 +82,51 @@ export interface HomeAutomationMigrationRuleAssessment {
   readonly sourceFingerprint?: string;
   readonly disposition: HomeAutomationMigrationRuleDisposition;
   readonly reason?: HomeAutomationMigrationRuleReason;
+  /** Durable, per-rule link state; present only for eligible rules. */
+  readonly workflow?: HomeAutomationMigrationRuleWorkflow;
+}
+
+/**
+ * Neutral workflow references owned by the proposal/artifact subsystem.
+ * Candidate content and bridge/provider/native fields never cross this boundary.
+ */
+export interface HomeAutomationMigrationRuleWorkflow {
+  readonly status: HomeAutomationMigrationRuleWorkflowStatus;
+  readonly sourceFingerprint: string;
+  readonly assessedAt: string;
+  readonly proposalId?: string;
+  readonly candidateProposalRevision?: number;
+  readonly candidateContentHash?: string;
+  readonly artifactId?: string;
+  readonly artifactRevision?: number;
+  readonly artifactContentHash?: string;
+  readonly translatedAt?: string;
+  readonly compileResultId?: string;
+  readonly dryRunResultId?: string;
+  readonly simulatedAt?: string;
+  readonly readyAt?: string;
+  readonly reviewProposalRevision?: number;
+  readonly failedAt?: string;
+  readonly failureReason?: HomeAutomationMigrationRuleWorkflowFailureReason;
+}
+
+/** Strict CAS command for one rule's durable workflow link. */
+export interface HomeAutomationMigrationRuleWorkflowTransition {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: HomeAutomationMigrationRuleWorkflowStatus;
+  readonly to: Exclude<HomeAutomationMigrationRuleWorkflowStatus, "assessed" | "needs_attention"> | "needs_attention";
+  readonly transitionedAt: string;
+  readonly proposalId?: string;
+  readonly candidateProposalRevision?: number;
+  readonly candidateContentHash?: string;
+  readonly artifactId?: string;
+  readonly artifactRevision?: number;
+  readonly artifactContentHash?: string;
+  readonly compileResultId?: string;
+  readonly dryRunResultId?: string;
+  readonly reviewProposalRevision?: number;
+  readonly failureReason?: HomeAutomationMigrationRuleWorkflowFailureReason;
 }
 
 /** Bounded, restart-safe assessment data. It contains no native rule body. */
@@ -128,6 +188,8 @@ export const HOME_AUTOMATION_MIGRATION_LIMITS = Object.freeze({
   maxRules: 256,
   maxRuleRefLength: 200,
   maxNameLength: 256,
+  maxProposalIdLength: 200,
+  maxArtifactIdLength: 200,
   maxBridgeIdLength: 200,
   maxEpochIdLength: 256,
   maxInputBytes: 64 * 1024,

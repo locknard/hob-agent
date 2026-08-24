@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   HomeAutomationMigrationIdempotencyConflictError,
   HomeAutomationMigrationService,
+  type HomeAutomationMigrationAssessment,
   type HomeAutomationMigrationInput,
 } from "./home-automation-migration-service.js";
 import {
@@ -211,6 +212,370 @@ test("eligible analysis without a valid source fingerprint remains needs_attenti
   assert.equal(malformed.assessment.status, "needs_attention");
   assert.equal(malformed.assessment.rules[0]?.disposition, "needs_attention");
   assert.equal("sourceFingerprint" in malformed.assessment.rules[0]!, false);
+});
+
+test("eligible rules advance through an independent durable workflow with neutral refs only", async () => {
+  const sourceFingerprint = `sha256:${"1".repeat(64)}`;
+  const candidateContentHash = `sha256:${"2".repeat(64)}`;
+  const compileResultId = `sha256:${"3".repeat(64)}`;
+  const dryRunResultId = `sha256:${"4".repeat(64)}`;
+  const migration = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "a".repeat(32),
+    idempotencyKeyFactory: () => "b".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "flat_and" },
+        action: { kind: "reversible" },
+        sourceFingerprint,
+      }),
+    },
+  });
+  const created = await migration.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  const lifecycle = migration as unknown as {
+    translateRule(input: unknown): HomeAutomationMigrationAssessment | undefined;
+    simulateRule(input: unknown): HomeAutomationMigrationAssessment | undefined;
+    readyRule(input: unknown): HomeAutomationMigrationAssessment | undefined;
+  };
+  assert.equal(created.assessment.rules[0]?.workflow?.status, "assessed");
+  const translated = lifecycle.translateRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-neutral-1",
+    candidateProposalRevision: 1,
+    candidateContentHash,
+  });
+  assert.equal(translated?.rules[0]?.workflow?.status, "translated");
+  assert.equal(translated?.rules[0]?.workflow?.sourceFingerprint, sourceFingerprint);
+  assert.equal("bridgeId" in (translated?.rules[0]?.workflow ?? {}), false);
+  assert.equal("nativeId" in (translated?.rules[0]?.workflow ?? {}), false);
+  assert.equal("provider" in (translated?.rules[0]?.workflow ?? {}), false);
+
+  const simulated = lifecycle.simulateRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "translated",
+    artifactId: "artifact-neutral-1",
+    artifactRevision: 2,
+    artifactContentHash: `sha256:${"5".repeat(64)}`,
+    compileResultId,
+    dryRunResultId,
+  });
+  assert.equal(simulated?.rules[0]?.workflow?.status, "simulated");
+  assert.equal(simulated?.rules[0]?.workflow?.compileResultId, compileResultId);
+  assert.throws(() => lifecycle.readyRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "simulated",
+    reviewProposalRevision: 3,
+  }), /immediately follow/);
+  const ready = lifecycle.readyRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "simulated",
+    reviewProposalRevision: 2,
+  });
+  assert.equal(ready?.rules[0]?.workflow?.status, "ready");
+  assert.equal(ready?.rules[0]?.workflow?.reviewProposalRevision, 2);
+  assert.equal(ready?.status, "assessed");
+});
+
+test("workflow failure keeps a fixed reason and metadata or unsupported rules cannot advance", async () => {
+  const failedService = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "e".repeat(32),
+    idempotencyKeyFactory: () => "f".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "flat_and" },
+        action: { kind: "reversible" },
+        sourceFingerprint: `sha256:${"6".repeat(64)}`,
+      }),
+    },
+  });
+  const failed = await failedService.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  const failedLifecycle = failedService as unknown as {
+    translateRule(input: unknown): HomeAutomationMigrationAssessment | undefined;
+    failRuleWorkflow(input: unknown): HomeAutomationMigrationAssessment | undefined;
+  };
+  const translated = failedLifecycle.translateRule({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-neutral-2",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"7".repeat(64)}`,
+  });
+  const failedWorkflow = failedLifecycle.failRuleWorkflow({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "translated",
+    reason: "compile_failed",
+  });
+  assert.equal(translated?.rules[0]?.workflow?.status, "translated");
+  assert.equal(failedWorkflow?.rules[0]?.workflow?.status, "needs_attention");
+  assert.equal(failedWorkflow?.rules[0]?.workflow?.failureReason, "compile_failed");
+  assert.equal(failedWorkflow?.rules[0]?.workflow?.candidateContentHash, `sha256:${"7".repeat(64)}`);
+  const retried = failedService.retryRuleWorkflow({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    proposalId: "proposal-neutral-retry",
+    candidateProposalRevision: 2,
+    candidateContentHash: `sha256:${"8".repeat(64)}`,
+  });
+  assert.equal(retried?.rules[0]?.workflow?.status, "translated");
+  assert.equal(retried?.rules[0]?.workflow?.failureReason, undefined);
+
+  const simulated = failedService.simulateRule({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "translated",
+    artifactId: "artifact-failure-retry",
+    artifactRevision: 1,
+    artifactContentHash: `sha256:${"9".repeat(64)}`,
+    compileResultId: `sha256:${"a".repeat(64)}`,
+    dryRunResultId: `sha256:${"b".repeat(64)}`,
+  });
+  const simulationFailure = failedService.failRuleWorkflow({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "simulated",
+    reason: "simulation_failed",
+  });
+  assert.equal(simulated?.rules[0]?.workflow?.status, "simulated");
+  assert.equal(simulationFailure?.rules[0]?.workflow?.status, "needs_attention");
+  assert.equal(simulationFailure?.rules[0]?.workflow?.artifactId, "artifact-failure-retry");
+  const simulationRetry = failedService.retryRuleWorkflow({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    artifactId: "artifact-failure-retry-2",
+    artifactRevision: 2,
+    artifactContentHash: `sha256:${"c".repeat(64)}`,
+    compileResultId: `sha256:${"d".repeat(64)}`,
+    dryRunResultId: `sha256:${"e".repeat(64)}`,
+  });
+  assert.equal(simulationRetry?.rules[0]?.workflow?.status, "simulated");
+  assert.equal(simulationRetry?.rules[0]?.workflow?.artifactRevision, 2);
+  assert.equal(failedService.failRuleWorkflow({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "simulated",
+    reason: "simulation_failed",
+    nativeBody: "rejected",
+  } as never), undefined);
+  assert.equal(failedService.retryRuleWorkflow(new Proxy({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+  }, { get() { throw new Error("provider getter"); } }) as never), undefined);
+  assert.equal(failedService.translateRule({
+    migrationId: failed.assessment.migrationId,
+    ruleRef: "missing-rule",
+    from: "assessed",
+    proposalId: "proposal-neutral-missing",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"f".repeat(64)}`,
+  }), undefined);
+
+  const metadata = new HomeAutomationMigrationService({ store: new InMemoryHomeAutomationMigrationStore(), clock: () => now });
+  const metadataAssessment = await metadata.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  const metadataLifecycle = metadata as unknown as { translateRule(input: unknown): HomeAutomationMigrationAssessment | undefined };
+  assert.equal(metadataLifecycle.translateRule({
+    migrationId: metadataAssessment.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-neutral-3",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"8".repeat(64)}`,
+  }), undefined);
+
+  const unsupportedService = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "9".repeat(32),
+    idempotencyKeyFactory: () => "a".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "unsupported" },
+        action: { kind: "reversible" },
+      }),
+    },
+  });
+  const unsupported = await unsupportedService.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  const unsupportedLifecycle = unsupportedService as unknown as { translateRule(input: unknown): HomeAutomationMigrationAssessment | undefined };
+  assert.equal(unsupportedLifecycle.translateRule({
+    migrationId: unsupported.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-neutral-4",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"9".repeat(64)}`,
+  }), undefined);
+});
+
+test("each eligible rule keeps an independent workflow across a SQLite restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-workflow-"));
+  const path = join(directory, "migrations.sqlite");
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  try {
+    const firstStore = new SqliteHomeAutomationMigrationStore({ path });
+    const first = new HomeAutomationMigrationService({
+      store: firstStore,
+      clock: () => now,
+      migrationIdFactory: () => "1".repeat(32),
+      idempotencyKeyFactory: () => "2".repeat(32),
+      translator: {
+        assess: async (request) => ({
+          ruleRef: request.ruleRef,
+          trigger: { kind: "state" },
+          condition: { kind: "flat_and" },
+          action: { kind: "reversible" },
+          sourceFingerprint,
+        }),
+      },
+    });
+    const created = await first.create({ catalog: catalog() });
+    const translated = first.translateRule({
+      migrationId: created.assessment.migrationId,
+      ruleRef: "ha-rule-1",
+      from: "assessed",
+      proposalId: "proposal-restart-safe",
+      candidateProposalRevision: 3,
+      candidateContentHash: `sha256:${"b".repeat(64)}`,
+    });
+    assert.equal(translated?.rules[0]?.workflow?.status, "translated");
+    assert.equal(translated?.rules[1]?.workflow?.status, "assessed");
+    first.close();
+
+    const secondStore = new SqliteHomeAutomationMigrationStore({ path });
+    const second = new HomeAutomationMigrationService({ store: secondStore, clock: () => now });
+    const restarted = second.get(created.assessment.migrationId);
+    assert.equal(restarted?.rules[0]?.workflow?.status, "translated");
+    assert.equal(restarted?.rules[1]?.workflow?.status, "assessed");
+    const simulated = second.simulateRule({
+      migrationId: created.assessment.migrationId,
+      ruleRef: "ha-rule-1",
+      from: "translated",
+      artifactId: "artifact-restart-safe",
+      artifactRevision: 4,
+      artifactContentHash: `sha256:${"c".repeat(64)}`,
+      compileResultId: `sha256:${"d".repeat(64)}`,
+      dryRunResultId: `sha256:${"e".repeat(64)}`,
+    });
+    const ready = second.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 4 });
+    assert.equal(simulated?.rules[0]?.workflow?.status, "simulated");
+    assert.equal(ready?.rules[0]?.workflow?.status, "ready");
+    assert.equal(ready?.rules[0]?.workflow?.reviewProposalRevision, 4);
+    assert.equal(ready?.status, "assessed");
+    second.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("assessment retry recovers aggregate needs_attention before workflow transitions", async () => {
+  let secondAvailable = false;
+  const sourceFingerprint = `sha256:${"b".repeat(64)}`;
+  const service = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "3".repeat(32),
+    idempotencyKeyFactory: () => "4".repeat(32),
+    translator: {
+      assess: async (request) => {
+        if (request.ruleRef === "ha-rule-2" && !secondAvailable) throw new Error("temporarily unavailable");
+        return {
+          ruleRef: request.ruleRef,
+          trigger: { kind: "state" as const },
+          condition: { kind: "flat_and" as const },
+          action: { kind: "reversible" as const },
+          sourceFingerprint,
+        };
+      },
+    },
+  });
+  const created = await service.create({ catalog: catalog() });
+  assert.equal(created.assessment.status, "needs_attention");
+  assert.equal(service.translateRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-before-retry",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"c".repeat(64)}`,
+  }), undefined);
+  secondAvailable = true;
+  const retried = await service.retry({ migrationId: created.assessment.migrationId });
+  assert.equal(retried?.status, "assessed");
+  assert.equal(retried?.rules[0]?.workflow?.status, "assessed");
+  assert.equal(retried?.rules[1]?.workflow?.status, "assessed");
+  const translated = service.translateRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-after-retry",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"c".repeat(64)}`,
+  });
+  assert.equal(translated?.rules[0]?.workflow?.status, "translated");
+});
+
+test("workflow transitions stay closed while the aggregate assessment is not assessed", async () => {
+  const needsService = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "5".repeat(32),
+    idempotencyKeyFactory: () => "6".repeat(32),
+    translator: {
+      assess: async (request) => request.ruleRef === "ha-rule-1"
+        ? { ruleRef: request.ruleRef, trigger: { kind: "state" }, condition: { kind: "flat_and" }, action: { kind: "reversible" }, sourceFingerprint: `sha256:${"d".repeat(64)}` }
+        : undefined,
+    },
+  });
+  const needs = await needsService.create({ catalog: catalog() });
+  assert.equal(needs.assessment.status, "needs_attention");
+  assert.equal(needsService.translateRule({
+    migrationId: needs.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-needs-aggregate",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"e".repeat(64)}`,
+  }), undefined);
+
+  const closedService = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "7".repeat(32),
+    idempotencyKeyFactory: () => "8".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "flat_and" },
+        action: { kind: "reversible" },
+        sourceFingerprint: `sha256:${"f".repeat(64)}`,
+      }),
+    },
+  });
+  const closed = await closedService.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  assert.equal(closedService.closeAssessment({ migrationId: closed.assessment.migrationId, reason: "household_closed" })?.status, "closed");
+  assert.equal(closedService.translateRule({
+    migrationId: closed.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-closed",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"1".repeat(64)}`,
+  }), undefined);
 });
 
 test("request payload cannot smuggle analysis or native rule body", async () => {

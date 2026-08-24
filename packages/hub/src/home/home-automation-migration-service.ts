@@ -9,6 +9,10 @@ import {
   type HomeAutomationMigrationInput,
   type HomeAutomationMigrationRuleAnalysis,
   type HomeAutomationMigrationRuleAssessment,
+  type HomeAutomationMigrationRuleWorkflow,
+  type HomeAutomationMigrationRuleWorkflowFailureReason,
+  type HomeAutomationMigrationRuleWorkflowStatus,
+  type HomeAutomationMigrationRuleWorkflowTransition,
 } from "./home-automation-migration.js";
 import type { HomeAutomationMigrationStore } from "./home-automation-migration-store.js";
 
@@ -18,6 +22,9 @@ export type {
   HomeAutomationMigrationCreateResult,
   HomeAutomationMigrationInput,
   HomeAutomationMigrationRuleAnalysis,
+  HomeAutomationMigrationRuleWorkflow,
+  HomeAutomationMigrationRuleWorkflowFailureReason,
+  HomeAutomationMigrationRuleWorkflowStatus,
 };
 export { HomeAutomationMigrationIdempotencyConflictError } from "./home-automation-migration.js";
 
@@ -42,6 +49,53 @@ export interface HomeAutomationMigrationTranslatorRequest {
 
 export interface HomeAutomationMigrationRunOptions {
   readonly signal?: AbortSignal;
+}
+
+export interface HomeAutomationMigrationTranslateRuleInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "assessed";
+  readonly proposalId: string;
+  readonly candidateProposalRevision: number;
+  readonly candidateContentHash: string;
+}
+
+export interface HomeAutomationMigrationSimulateRuleInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "translated";
+  readonly artifactId: string;
+  readonly artifactRevision: number;
+  readonly artifactContentHash: string;
+  readonly compileResultId: string;
+  readonly dryRunResultId: string;
+}
+
+export interface HomeAutomationMigrationReadyRuleInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "simulated";
+  readonly reviewProposalRevision: number;
+}
+
+export interface HomeAutomationMigrationFailRuleWorkflowInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "translated" | "simulated";
+  readonly reason: HomeAutomationMigrationRuleWorkflowFailureReason;
+}
+
+export interface HomeAutomationMigrationRetryRuleWorkflowInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly proposalId?: string;
+  readonly candidateProposalRevision?: number;
+  readonly candidateContentHash?: string;
+  readonly artifactId?: string;
+  readonly artifactRevision?: number;
+  readonly artifactContentHash?: string;
+  readonly compileResultId?: string;
+  readonly dryRunResultId?: string;
 }
 
 export interface HomeAutomationMigrationServiceOptions {
@@ -105,7 +159,7 @@ export class HomeAutomationMigrationService {
       migrationId,
       status: aggregateStatus(classified),
       assessedAt,
-      rules: classified,
+      rules: initializeRuleWorkflows(classified, assessedAt),
     } as const;
     if (!this.store.assess(transition)) throw new Error("Migration assessment disappeared before classification");
     const assessment = this.store.get(migrationId);
@@ -140,6 +194,75 @@ export class HomeAutomationMigrationService {
     const current = this.store.get(input?.migrationId);
     if (current === undefined || current.status !== "needs_attention") return current;
     return this.resumeAssessment(current, options.signal);
+  }
+
+  /** Links one eligible rule to an existing neutral proposal/artifact revision. */
+  translateRule(input: HomeAutomationMigrationTranslateRuleInput): HomeAutomationMigrationAssessment | undefined {
+    return this.transitionRuleWorkflow({ ...input, to: "translated" });
+  }
+
+  /** Links one translated rule to existing compile and dry-run attestations. */
+  simulateRule(input: HomeAutomationMigrationSimulateRuleInput): HomeAutomationMigrationAssessment | undefined {
+    return this.transitionRuleWorkflow({ ...input, to: "simulated" });
+  }
+
+  /** Marks one simulated rule ready after its existing attestations are complete. */
+  readyRule(input: HomeAutomationMigrationReadyRuleInput): HomeAutomationMigrationAssessment | undefined {
+    return this.transitionRuleWorkflow({ ...input, to: "ready" });
+  }
+
+  /** Records a fixed compile or simulation failure without storing its payload. */
+  failRuleWorkflow(input: HomeAutomationMigrationFailRuleWorkflowInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictWorkflowFailureInput(input)) return undefined;
+    return this.transitionRuleWorkflow({
+      migrationId: input.migrationId,
+      ruleRef: input.ruleRef,
+      from: input.from,
+      to: "needs_attention",
+      failureReason: input.reason,
+    });
+  }
+
+  /** Explicitly retries a failed per-rule link with fresh neutral refs. */
+  retryRuleWorkflow(input: HomeAutomationMigrationRetryRuleWorkflowInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictRetryRuleWorkflowInput(input)) return undefined;
+    const current = this.store.get(input?.migrationId);
+    const workflow = current?.rules.find((rule) => rule.ruleRef === input?.ruleRef)?.workflow;
+    if (workflow?.status !== "needs_attention") return undefined;
+    if (workflow.failureReason === "compile_failed" || workflow.failureReason === "compile_unavailable") {
+      if (input.proposalId === undefined || input.candidateProposalRevision === undefined || input.candidateContentHash === undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
+        || input.artifactContentHash !== undefined || input.compileResultId !== undefined || input.dryRunResultId !== undefined) return undefined;
+      return this.transitionRuleWorkflow({
+        migrationId: input.migrationId,
+        ruleRef: input.ruleRef,
+        from: "needs_attention",
+        to: "translated",
+        proposalId: input.proposalId,
+        candidateProposalRevision: input.candidateProposalRevision,
+        candidateContentHash: input.candidateContentHash,
+      });
+    }
+    if (workflow.failureReason === "simulation_failed" || workflow.failureReason === "simulation_unavailable") {
+      if (input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
+        || input.artifactId === undefined || input.artifactRevision === undefined || input.artifactContentHash === undefined
+        || input.compileResultId === undefined || input.dryRunResultId === undefined) return undefined;
+      return this.transitionRuleWorkflow({
+        migrationId: input.migrationId,
+        ruleRef: input.ruleRef,
+        from: "needs_attention",
+        to: "simulated",
+        artifactId: input.artifactId,
+        artifactRevision: input.artifactRevision,
+        artifactContentHash: input.artifactContentHash,
+        compileResultId: input.compileResultId,
+        dryRunResultId: input.dryRunResultId,
+      });
+    }
+    return undefined;
+  }
+
+  retryRule(input: HomeAutomationMigrationRetryRuleWorkflowInput): HomeAutomationMigrationAssessment | undefined {
+    return this.retryRuleWorkflow(input);
   }
 
   closeAssessment(input: { readonly migrationId: string; readonly reason: HomeAutomationMigrationCloseReason }): HomeAutomationMigrationAssessment | undefined {
@@ -208,9 +331,16 @@ export class HomeAutomationMigrationService {
       migrationId: assessment.migrationId,
       status: aggregateStatus(classified),
       assessedAt,
-      rules: classified,
+      rules: initializeRuleWorkflows(classified, assessedAt, assessment.rules),
     })) return this.store.get(assessment.migrationId) ?? assessment;
     return this.store.get(assessment.migrationId) ?? assessment;
+  }
+
+  private transitionRuleWorkflow(input: Omit<HomeAutomationMigrationRuleWorkflowTransition, "transitionedAt">): HomeAutomationMigrationAssessment | undefined {
+    const transitionedAt = this.clock();
+    assertTimestamp(transitionedAt, "migration workflow transition time");
+    if (!this.store.transitionRuleWorkflow({ ...input, transitionedAt })) return undefined;
+    return this.store.get(input.migrationId);
   }
 }
 
@@ -313,6 +443,30 @@ function needsAttentionAssessment(rule: NormalizedRule): HomeAutomationMigration
   };
 }
 
+function initializeRuleWorkflows(
+  rules: readonly HomeAutomationMigrationRuleAssessment[],
+  assessedAt: string,
+  previousRules: readonly HomeAutomationMigrationRuleAssessment[] = [],
+): HomeAutomationMigrationRuleAssessment[] {
+  const previousByRef = new Map(previousRules.map((rule) => [rule.ruleRef, rule]));
+  return rules.map((rule) => {
+    if (rule.disposition !== "eligible") return { ...rule };
+    if (rule.sourceFingerprint === undefined) throw new Error("Eligible migration rule is missing its source fingerprint");
+    const previous = previousByRef.get(rule.ruleRef);
+    if (previous?.disposition === "eligible" && previous.sourceFingerprint === rule.sourceFingerprint && previous.workflow !== undefined) {
+      return { ...rule, workflow: { ...previous.workflow } };
+    }
+    return {
+      ...rule,
+      workflow: {
+        status: "assessed",
+        sourceFingerprint: rule.sourceFingerprint,
+        assessedAt,
+      },
+    };
+  });
+}
+
 function classifyWithAnalysis(rule: NormalizedRule, result: HomeAutomationMigrationRuleAnalysis): HomeAutomationMigrationRuleAssessment {
   const triggerClass = result.trigger.kind;
   const conditionClass = result.condition.kind;
@@ -344,6 +498,40 @@ function aggregateStatus(rules: readonly HomeAutomationMigrationRuleAssessment[]
   return "assessed";
 }
 
+function isStrictWorkflowFailureInput(value: unknown): value is HomeAutomationMigrationFailRuleWorkflowInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "reason"])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && (value.from === "translated" || value.from === "simulated")
+      && isWorkflowFailureReason(value.reason);
+  } catch {
+    return false;
+  }
+}
+
+function isStrictRetryRuleWorkflowInput(value: unknown): value is HomeAutomationMigrationRetryRuleWorkflowInput {
+  try {
+    if (!isRecord(value) || !hasOnlyKeys(value, [
+      "migrationId", "ruleRef", "proposalId", "candidateProposalRevision", "candidateContentHash", "artifactId", "artifactRevision",
+      "artifactContentHash", "compileResultId", "dryRunResultId",
+    ]) || !isMigrationId(value.migrationId)
+      || !isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)) return false;
+    if ((value.proposalId === undefined) !== (value.candidateProposalRevision === undefined)
+      || value.proposalId !== undefined && !isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
+      || value.candidateProposalRevision !== undefined && !isPositiveSafeInteger(value.candidateProposalRevision)
+      || value.candidateContentHash !== undefined && !isDigest(value.candidateContentHash)
+      || value.artifactId !== undefined && !isBoundedText(value.artifactId, HOME_AUTOMATION_MIGRATION_LIMITS.maxArtifactIdLength)
+      || value.artifactRevision !== undefined && !isPositiveSafeInteger(value.artifactRevision)
+      || value.artifactContentHash !== undefined && !isDigest(value.artifactContentHash)
+      || value.compileResultId !== undefined && !isDigest(value.compileResultId)
+      || value.dryRunResultId !== undefined && !isDigest(value.dryRunResultId)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isStrictAnalysis(value: unknown): value is HomeAutomationMigrationRuleAnalysis {
   const baseKeys = ["ruleRef", "trigger", "condition", "action"] as const;
   const eligibleKeys = [...baseKeys, "sourceFingerprint"] as const;
@@ -364,6 +552,19 @@ function isStrictAnalysis(value: unknown): value is HomeAutomationMigrationRuleA
 
 function isSourceFingerprint(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value);
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value);
+}
+
+function isMigrationId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{32}$/u.test(value);
+}
+
+function isWorkflowFailureReason(value: unknown): value is HomeAutomationMigrationRuleWorkflowFailureReason {
+  return value === "compile_failed" || value === "compile_unavailable"
+    || value === "simulation_failed" || value === "simulation_unavailable";
 }
 
 function create128BitHex(): string {

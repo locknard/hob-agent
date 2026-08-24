@@ -11,12 +11,17 @@ import {
   type HomeAutomationMigrationCloseCommand,
   type HomeAutomationMigrationDiscovery,
   type HomeAutomationMigrationRuleAssessment,
+  type HomeAutomationMigrationRuleWorkflow,
+  type HomeAutomationMigrationRuleWorkflowFailureReason,
+  type HomeAutomationMigrationRuleWorkflowStatus,
+  type HomeAutomationMigrationRuleWorkflowTransition,
   type HomeAutomationMigrationStatus,
 } from "./home-automation-migration.js";
 
 export interface HomeAutomationMigrationStore {
   discover(input: HomeAutomationMigrationDiscovery): HomeAutomationMigrationStoreBeginResult;
   assess(input: HomeAutomationMigrationAssessmentTransition): boolean;
+  transitionRuleWorkflow(input: HomeAutomationMigrationRuleWorkflowTransition): boolean;
   get(migrationId: string): HomeAutomationMigrationAssessment | undefined;
   list(): readonly HomeAutomationMigrationAssessment[];
   replay(input: { readonly idempotencyKey: string; readonly inputDigest: string }): HomeAutomationMigrationAssessment | undefined;
@@ -66,6 +71,7 @@ export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigra
     const current = this.records.get(input.migrationId);
     if (current === undefined || (current.status !== "discovered" && current.status !== "needs_attention")) return false;
     assertStableRuleMetadata(current.rules, input.rules);
+    assertAssessmentWorkflowTransition(current.rules, input.rules);
     if (Date.parse(input.assessedAt) < Date.parse(current.assessedAt ?? current.createdAt)) {
       throw new TypeError("Migration assessment time precedes previous assessment");
     }
@@ -75,6 +81,22 @@ export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigra
       status: input.status,
       assessedAt: input.assessedAt,
     });
+    return true;
+  }
+
+  transitionRuleWorkflow(input: HomeAutomationMigrationRuleWorkflowTransition): boolean {
+    this.assertOpen();
+    validateWorkflowTransition(input);
+    const current = this.records.get(input.migrationId);
+    if (current === undefined || current.status !== "assessed") return false;
+    const ruleIndex = current.rules.findIndex((rule) => rule.ruleRef === input.ruleRef);
+    if (ruleIndex < 0) return false;
+    const currentRule = current.rules[ruleIndex]!;
+    if (currentRule.disposition !== "eligible" || currentRule.workflow === undefined
+      || currentRule.workflow.status !== input.from) return false;
+    const nextWorkflow = buildWorkflowTransition(currentRule.workflow, input);
+    const rules = current.rules.map((rule, index) => index === ruleIndex ? { ...rule, workflow: nextWorkflow } : { ...rule });
+    this.records.set(current.migrationId, { ...current, rules });
     return true;
   }
 
@@ -231,10 +253,57 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
         return false;
       }
       assertStableRuleMetadata(current.rules, input.rules);
+      assertAssessmentWorkflowTransition(current.rules, input.rules);
       if (Date.parse(input.assessedAt) < Date.parse(current.assessedAt ?? current.createdAt)) throw new TypeError("Migration assessment time precedes previous assessment");
       const result = this.db.prepare(`UPDATE home_automation_migrations
         SET rules_json = ?, status = ?, assessed_at = ? WHERE migration_id = ? AND status = ?`)
         .run(serializeRules(input.rules), input.status, input.assessedAt, input.migrationId, current.status);
+      if (Number(result.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.db.exec("COMMIT");
+      this.ensurePrivateFiles();
+      return true;
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
+  }
+
+  transitionRuleWorkflow(input: HomeAutomationMigrationRuleWorkflowTransition): boolean {
+    this.assertOpen();
+    validateWorkflowTransition(input);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+          source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+        FROM home_automation_migrations WHERE migration_id = ?`).get(input.migrationId) as Row | undefined;
+      if (row === undefined || typeof row.rules_json !== "string") {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const current = fromRow(row);
+      if (current.status !== "assessed") {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const ruleIndex = current.rules.findIndex((rule) => rule.ruleRef === input.ruleRef);
+      if (ruleIndex < 0) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const currentRule = current.rules[ruleIndex]!;
+      if (currentRule.disposition !== "eligible" || currentRule.workflow === undefined
+        || currentRule.workflow.status !== input.from) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const nextWorkflow = buildWorkflowTransition(currentRule.workflow, input);
+      const nextRules = current.rules.map((rule, index) => index === ruleIndex ? { ...rule, workflow: nextWorkflow } : { ...rule });
+      const result = this.db.prepare(`UPDATE home_automation_migrations
+        SET rules_json = ? WHERE migration_id = ? AND rules_json = ?`)
+        .run(serializeRules(nextRules), input.migrationId, row.rules_json);
       if (Number(result.changes) !== 1) {
         this.db.exec("ROLLBACK");
         return false;
@@ -455,6 +524,203 @@ function validateTransition(input: HomeAutomationMigrationAssessmentTransition):
   assertStoredAggregateStatus(input.status, input.rules);
 }
 
+function assertAssessmentWorkflowTransition(
+  before: readonly HomeAutomationMigrationRuleAssessment[],
+  after: readonly HomeAutomationMigrationRuleAssessment[],
+): void {
+  for (let index = 0; index < before.length; index += 1) {
+    const previous = before[index]!;
+    const next = after[index]!;
+    if (previous.workflow === undefined) {
+      if (next.workflow !== undefined && next.workflow.status !== "assessed") {
+        throw new Error("Migration assessment workflow must start at assessed");
+      }
+      continue;
+    }
+    if (next.workflow === undefined) continue;
+    if (!workflowEqual(previous.workflow, next.workflow)) {
+      throw new Error("Migration assessment cannot mutate a rule workflow");
+    }
+  }
+}
+
+function workflowEqual(left: HomeAutomationMigrationRuleWorkflow, right: HomeAutomationMigrationRuleWorkflow): boolean {
+  const keys: readonly (keyof HomeAutomationMigrationRuleWorkflow)[] = [
+    "status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash",
+    "artifactId", "artifactRevision", "artifactContentHash", "translatedAt", "compileResultId", "dryRunResultId",
+    "simulatedAt", "readyAt", "reviewProposalRevision", "failedAt", "failureReason",
+  ];
+  return keys.every((key) => left[key] === right[key]);
+}
+
+function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTransition): void {
+  const allowedKeys = [
+    "migrationId", "ruleRef", "from", "to", "transitionedAt", "proposalId", "candidateProposalRevision",
+    "candidateContentHash", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "failureReason",
+    "reviewProposalRevision",
+  ] as const;
+  if (!isRecord(input) || !hasOnlyKeys(input, allowedKeys)
+    || !isMigrationId(input.migrationId)
+    || !isBoundedText(input.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+    || !isWorkflowStatus(input.from) || !isWorkflowTarget(input.to)
+    || !isIsoTimestamp(input.transitionedAt)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.proposalId !== undefined && !isBoundedText(input.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.candidateProposalRevision !== undefined && !isPositiveSafeInteger(input.candidateProposalRevision)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.reviewProposalRevision !== undefined && !isPositiveSafeInteger(input.reviewProposalRevision)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.candidateContentHash !== undefined && !isDigest(input.candidateContentHash)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.artifactId !== undefined && !isBoundedText(input.artifactId, HOME_AUTOMATION_MIGRATION_LIMITS.maxArtifactIdLength)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.artifactRevision !== undefined && !isPositiveSafeInteger(input.artifactRevision)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.artifactContentHash !== undefined && !isDigest(input.artifactContentHash)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.compileResultId !== undefined && !isDigest(input.compileResultId)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.dryRunResultId !== undefined && !isDigest(input.dryRunResultId)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.failureReason !== undefined && !isWorkflowFailureReason(input.failureReason)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.to === "translated") {
+    if ((input.from !== "assessed" && input.from !== "needs_attention") || input.proposalId === undefined
+      || input.candidateProposalRevision === undefined || input.candidateContentHash === undefined
+      || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
+      || input.failureReason !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.to === "simulated") {
+    if ((input.from !== "translated" && input.from !== "needs_attention") || input.artifactId === undefined
+      || input.artifactRevision === undefined || input.artifactContentHash === undefined
+      || input.compileResultId === undefined || input.dryRunResultId === undefined
+      || input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
+      || input.reviewProposalRevision !== undefined || input.failureReason !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.to === "ready") {
+    if (input.from !== "simulated" || input.reviewProposalRevision === undefined || input.proposalId !== undefined || input.candidateProposalRevision !== undefined
+      || input.candidateContentHash !== undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
+      || input.artifactContentHash !== undefined || input.compileResultId !== undefined
+      || input.dryRunResultId !== undefined || input.failureReason !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.from === "translated") {
+    if (input.failureReason !== "compile_failed" && input.failureReason !== "compile_unavailable") {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+    if (input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
+      || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.from === "simulated") {
+    if (input.failureReason !== "simulation_failed" && input.failureReason !== "simulation_unavailable") {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+    if (input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
+      || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+}
+
+function buildWorkflowTransition(
+  current: HomeAutomationMigrationRuleWorkflow,
+  input: HomeAutomationMigrationRuleWorkflowTransition,
+): HomeAutomationMigrationRuleWorkflow {
+  const currentTime = workflowLastTimestamp(current);
+  if (Date.parse(input.transitionedAt) < Date.parse(currentTime)) {
+    throw new TypeError("Migration workflow time precedes previous transition");
+  }
+  if (input.to === "translated") {
+    if (input.from === "needs_attention"
+      && current.failureReason !== "compile_failed" && current.failureReason !== "compile_unavailable") {
+      throw new TypeError("Migration workflow recovery stage does not match failure reason");
+    }
+    return {
+      status: "translated",
+      sourceFingerprint: current.sourceFingerprint,
+      assessedAt: current.assessedAt,
+      proposalId: input.proposalId!,
+      candidateProposalRevision: input.candidateProposalRevision!,
+      candidateContentHash: input.candidateContentHash!,
+      translatedAt: input.transitionedAt,
+    };
+  }
+  if (input.to === "simulated") {
+    if (input.from === "needs_attention"
+      && current.failureReason !== "simulation_failed" && current.failureReason !== "simulation_unavailable") {
+      throw new TypeError("Migration workflow recovery stage does not match failure reason");
+    }
+    return {
+      status: "simulated",
+      sourceFingerprint: current.sourceFingerprint,
+      assessedAt: current.assessedAt,
+      proposalId: current.proposalId!,
+      candidateProposalRevision: current.candidateProposalRevision!,
+      candidateContentHash: current.candidateContentHash!,
+      translatedAt: current.translatedAt!,
+      artifactId: input.artifactId!,
+      artifactRevision: input.artifactRevision!,
+      artifactContentHash: input.artifactContentHash!,
+      compileResultId: input.compileResultId!,
+      dryRunResultId: input.dryRunResultId!,
+      simulatedAt: input.transitionedAt,
+    };
+  }
+  if (input.to === "ready") {
+    if (current.candidateProposalRevision! >= Number.MAX_SAFE_INTEGER
+      || input.reviewProposalRevision !== current.candidateProposalRevision! + 1) {
+      throw new TypeError("Migration workflow review revision must immediately follow the candidate revision");
+    }
+    return {
+      status: "ready",
+      sourceFingerprint: current.sourceFingerprint,
+      assessedAt: current.assessedAt,
+      proposalId: current.proposalId!,
+      candidateProposalRevision: current.candidateProposalRevision!,
+      candidateContentHash: current.candidateContentHash!,
+      translatedAt: current.translatedAt!,
+      artifactId: current.artifactId!,
+      artifactRevision: current.artifactRevision!,
+      artifactContentHash: current.artifactContentHash!,
+      compileResultId: current.compileResultId!,
+      dryRunResultId: current.dryRunResultId!,
+      simulatedAt: current.simulatedAt!,
+      readyAt: input.transitionedAt,
+      reviewProposalRevision: input.reviewProposalRevision!,
+    };
+  }
+  return {
+    ...current,
+    status: "needs_attention",
+    failedAt: input.transitionedAt,
+    failureReason: input.failureReason!,
+  };
+}
+
+function workflowLastTimestamp(value: HomeAutomationMigrationRuleWorkflow): string {
+  return value.failedAt ?? value.readyAt ?? value.simulatedAt ?? value.translatedAt ?? value.assessedAt;
+}
+
 function validateClose(input: HomeAutomationMigrationCloseCommand): void {
   if (!input || !isMigrationId(input.migrationId) || !isIsoTimestamp(input.closedAt) || !isCloseReason(input.reason)) {
     throw new TypeError("Home automation migration close command is invalid");
@@ -467,7 +733,7 @@ function validateRules(value: unknown): HomeAutomationMigrationRuleAssessment[] 
   }
   const refs = new Set<string>();
   const rules = value.map((item) => {
-    if (!isRecord(item) || !hasOnlyKeys(item, ["ruleRef", "name", "enabled", "updatedAt", "triggerClass", "conditionClass", "actionClass", "sourceFingerprint", "disposition", "reason"])
+    if (!isRecord(item) || !hasOnlyKeys(item, ["ruleRef", "name", "enabled", "updatedAt", "triggerClass", "conditionClass", "actionClass", "sourceFingerprint", "disposition", "reason", "workflow"])
       || !isBoundedText(item.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
       || refs.has(item.ruleRef)
       || !isRuleClass(item.triggerClass) || !isConditionClass(item.conditionClass) || !isRuleClass(item.actionClass)
@@ -480,9 +746,10 @@ function validateRules(value: unknown): HomeAutomationMigrationRuleAssessment[] 
     if (item.updatedAt !== undefined && !isIsoTimestamp(item.updatedAt)) throw new Error("Stored home automation migration is corrupt");
     if (item.sourceFingerprint !== undefined && !isSourceFingerprint(item.sourceFingerprint)) throw new Error("Stored home automation migration is corrupt");
     if (item.reason !== undefined && !isRuleReason(item.reason)) throw new Error("Stored home automation migration is corrupt");
+    const workflow = item.workflow === undefined ? undefined : validateWorkflow(item.workflow, item.sourceFingerprint);
     if (item.disposition === "eligible" && item.reason !== undefined) throw new Error("Stored home automation migration is corrupt");
     if (item.disposition !== "eligible" && item.reason === undefined) throw new Error("Stored home automation migration is corrupt");
-    if (!isRuleAssessmentSemantics(item)) throw new Error("Stored home automation migration is corrupt");
+    if (!isRuleAssessmentSemantics(item, workflow)) throw new Error("Stored home automation migration is corrupt");
     return {
       ruleRef: item.ruleRef,
       ...(item.name === undefined ? {} : { name: item.name }),
@@ -494,6 +761,7 @@ function validateRules(value: unknown): HomeAutomationMigrationRuleAssessment[] 
       ...(item.sourceFingerprint === undefined ? {} : { sourceFingerprint: item.sourceFingerprint }),
       disposition: item.disposition,
       ...(item.reason === undefined ? {} : { reason: item.reason }),
+      ...(workflow === undefined ? {} : { workflow }),
     } satisfies HomeAutomationMigrationRuleAssessment;
   });
   return rules;
@@ -506,6 +774,115 @@ function serializeRules(rules: readonly HomeAutomationMigrationRuleAssessment[])
     throw new TypeError("Home automation migration rules exceed the byte bound");
   }
   return encoded;
+}
+
+function validateWorkflow(value: unknown, parentSourceFingerprint: unknown): HomeAutomationMigrationRuleWorkflow {
+  if (!isRecord(value) || !isSourceFingerprint(parentSourceFingerprint)
+    || !isSourceFingerprint(value.sourceFingerprint) || value.sourceFingerprint !== parentSourceFingerprint
+    || !isWorkflowStatus(value.status) || !isIsoTimestamp(value.assessedAt)) {
+    throw new Error("Stored home automation migration is corrupt");
+  }
+  const base = {
+    sourceFingerprint: value.sourceFingerprint,
+    assessedAt: value.assessedAt,
+  };
+  if (value.status === "assessed") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt"])) throw new Error("Stored home automation migration is corrupt");
+    return { status: "assessed", ...base };
+  }
+  if (value.status === "translated") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt"])
+      || !isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
+      || !isPositiveSafeInteger(value.candidateProposalRevision) || !isDigest(value.candidateContentHash)
+      || !isIsoTimestamp(value.translatedAt) || Date.parse(value.translatedAt) < Date.parse(value.assessedAt)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "translated", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+    };
+  }
+  if (value.status === "simulated") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt"])
+      || !isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
+      || !isPositiveSafeInteger(value.candidateProposalRevision) || !isDigest(value.candidateContentHash)
+      || !isIsoTimestamp(value.translatedAt) || !isBoundedText(value.artifactId, HOME_AUTOMATION_MIGRATION_LIMITS.maxArtifactIdLength)
+      || !isPositiveSafeInteger(value.artifactRevision) || !isDigest(value.artifactContentHash)
+      || !isDigest(value.compileResultId) || !isDigest(value.dryRunResultId)
+      || !isIsoTimestamp(value.simulatedAt)
+      || Date.parse(value.translatedAt) < Date.parse(value.assessedAt)
+      || Date.parse(value.simulatedAt) < Date.parse(value.translatedAt)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "simulated", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+      artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+      compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+    };
+  }
+  if (value.status === "ready") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision"])
+      || !isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
+      || !isPositiveSafeInteger(value.candidateProposalRevision) || !isDigest(value.candidateContentHash)
+      || !isIsoTimestamp(value.translatedAt) || !isBoundedText(value.artifactId, HOME_AUTOMATION_MIGRATION_LIMITS.maxArtifactIdLength)
+      || !isPositiveSafeInteger(value.artifactRevision) || !isDigest(value.artifactContentHash)
+      || !isDigest(value.compileResultId) || !isDigest(value.dryRunResultId)
+      || !isIsoTimestamp(value.simulatedAt) || !isIsoTimestamp(value.readyAt)
+      || !isPositiveSafeInteger(value.reviewProposalRevision)
+      || value.candidateProposalRevision >= Number.MAX_SAFE_INTEGER
+      || value.reviewProposalRevision !== value.candidateProposalRevision + 1
+      || Date.parse(value.translatedAt) < Date.parse(value.assessedAt)
+      || Date.parse(value.simulatedAt) < Date.parse(value.translatedAt)
+      || Date.parse(value.readyAt) < Date.parse(value.simulatedAt)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "ready", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+      artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+      compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId,
+      simulatedAt: value.simulatedAt, readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+    };
+  }
+  const failureReason = value.failureReason;
+  if (!isWorkflowFailureReason(failureReason) || !isIsoTimestamp(value.failedAt)) {
+    throw new Error("Stored home automation migration is corrupt");
+  }
+  if (failureReason === "compile_failed" || failureReason === "compile_unavailable") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "failedAt", "failureReason"])
+      || !isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
+      || !isPositiveSafeInteger(value.candidateProposalRevision) || !isDigest(value.candidateContentHash)
+      || !isIsoTimestamp(value.translatedAt)
+      || Date.parse(value.translatedAt) < Date.parse(value.assessedAt)
+      || Date.parse(value.failedAt) < Date.parse(value.translatedAt)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "needs_attention", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+      failedAt: value.failedAt, failureReason,
+    };
+  }
+  if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "failedAt", "failureReason"])
+    || !isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
+    || !isPositiveSafeInteger(value.candidateProposalRevision) || !isDigest(value.candidateContentHash)
+    || !isIsoTimestamp(value.translatedAt) || !isBoundedText(value.artifactId, HOME_AUTOMATION_MIGRATION_LIMITS.maxArtifactIdLength)
+    || !isPositiveSafeInteger(value.artifactRevision) || !isDigest(value.artifactContentHash)
+    || !isDigest(value.compileResultId) || !isDigest(value.dryRunResultId)
+    || !isIsoTimestamp(value.simulatedAt)
+    || Date.parse(value.translatedAt) < Date.parse(value.assessedAt)
+    || Date.parse(value.simulatedAt) < Date.parse(value.translatedAt)
+    || Date.parse(value.failedAt) < Date.parse(value.simulatedAt)) {
+    throw new Error("Stored home automation migration is corrupt");
+  }
+  return {
+    status: "needs_attention", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+    candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+    artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+    compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId,
+    simulatedAt: value.simulatedAt, failedAt: value.failedAt, failureReason,
+  };
 }
 
 function assertStableRuleMetadata(
@@ -530,7 +907,10 @@ function cloneAssessment(value: HomeAutomationMigrationAssessment): HomeAutomati
 }
 
 function cloneRules(rules: readonly HomeAutomationMigrationRuleAssessment[]): HomeAutomationMigrationRuleAssessment[] {
-  return rules.map((rule) => ({ ...rule }));
+  return rules.map((rule) => ({
+    ...rule,
+    ...(rule.workflow === undefined ? {} : { workflow: { ...rule.workflow } }),
+  }));
 }
 
 function compareAssessment(left: HomeAutomationMigrationAssessment, right: HomeAutomationMigrationAssessment): number {
@@ -598,19 +978,19 @@ function isRuleReason(value: unknown): value is NonNullable<HomeAutomationMigrat
     || value === "unsupported_action" || value === "analysis_incomplete";
 }
 
-function isRuleAssessmentSemantics(value: Record<string, unknown>): boolean {
+function isRuleAssessmentSemantics(value: Record<string, unknown>, workflow: HomeAutomationMigrationRuleWorkflow | undefined): boolean {
   if (value.disposition === "eligible") {
     return (value.triggerClass === "state" || value.triggerClass === "time")
       && value.conditionClass === "flat_and" && value.actionClass === "reversible"
-      && isSourceFingerprint(value.sourceFingerprint);
+      && isSourceFingerprint(value.sourceFingerprint) && workflow !== undefined;
   }
   if (value.disposition === "metadata_only") {
     return value.triggerClass === "metadata_only" && value.conditionClass === "metadata_only"
       && value.actionClass === "metadata_only" && value.sourceFingerprint === undefined
-      && value.reason === "translation_unavailable";
+      && value.reason === "translation_unavailable" && workflow === undefined;
   }
   if (value.disposition === "unsupported") {
-    if (value.sourceFingerprint !== undefined) return false;
+    if (value.sourceFingerprint !== undefined || workflow !== undefined) return false;
     if (value.reason === "unsupported_trigger") {
       return value.triggerClass === "unsupported"
         && (value.conditionClass === "flat_and" || value.conditionClass === "unsupported")
@@ -629,7 +1009,21 @@ function isRuleAssessmentSemantics(value: Record<string, unknown>): boolean {
   return value.disposition === "needs_attention"
     && value.reason === "analysis_incomplete"
     && value.sourceFingerprint === undefined
+    && workflow === undefined
     && (value.triggerClass === "unknown" || value.conditionClass === "unknown" || value.actionClass === "unknown");
+}
+
+function isWorkflowStatus(value: unknown): value is HomeAutomationMigrationRuleWorkflowStatus {
+  return value === "assessed" || value === "translated" || value === "simulated" || value === "ready" || value === "needs_attention";
+}
+
+function isWorkflowTarget(value: unknown): value is Exclude<HomeAutomationMigrationRuleWorkflowStatus, "assessed"> {
+  return value === "translated" || value === "simulated" || value === "ready" || value === "needs_attention";
+}
+
+function isWorkflowFailureReason(value: unknown): value is HomeAutomationMigrationRuleWorkflowFailureReason {
+  return value === "compile_failed" || value === "compile_unavailable"
+    || value === "simulation_failed" || value === "simulation_unavailable";
 }
 
 function isConditionClass(value: unknown): value is HomeAutomationMigrationRuleAssessment["conditionClass"] {
@@ -660,7 +1054,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
+  try {
+    return Object.keys(value).every((key) => allowed.includes(key));
+  } catch {
+    return false;
+  }
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  try {
+    const keys = Object.keys(value);
+    return keys.length === expected.length && keys.every((key) => expected.includes(key));
+  } catch {
+    return false;
+  }
 }
 
 function isMemoryPath(path: string): boolean {
