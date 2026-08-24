@@ -82,9 +82,25 @@ fingerprint、bridge watermark、原生 identity 和 provider payload 保持在 
 
 每个可选择规则由服务端签发短期 opaque `selectionToken`。Hub 把 token 绑定到
 当前产品 principal、精确 assessment/source cut、`migrationId + ruleRef` 和运行时
-generation，并在服务端保留映射。Token 有界、不可跨 principal 重放，进程重启、
-过期、source cut 变化或完成一次提交后即失效；页面重新读取 projection 可取得新的
-token。浏览器表单只提交 token，actor 由已认证产品 session 注入。
+generation。Raw token 只进入当前认证页面和有界的进程内 token cache；SQLite
+selection audit 只保存 token digest、绑定关系和状态。Token 不可跨 principal 重放，
+进程重启、过期、source cut 变化或完成一次提交后即失效；页面重新读取 projection
+可取得新的 token。浏览器表单只提交 token，actor 由已认证产品 session 注入。
+
+Migration SQLite 是 selection audit 的唯一耐久 owner。每条记录保存 selection id、
+迁移与规则引用、source bridge/epoch/seq/fingerprint、认证 principal、私人设备绑定结果、
+token digest、runtime generation、签发/过期时间、revision、闭合状态和可选 Proposal
+引用；它不保存 raw token、session credential、原生规则 body 或 provider payload。
+状态使用 `issued → processing → prepared`，以及终结出口 `unavailable`、`expired`、
+`invalidated`。`issued → processing` 使用 revision/generation CAS；同 token、同 principal
+重放返回既有结果，不同 principal、旧 generation 和变化后的 source cut 均不创建
+Proposal。
+
+选择 actor 永久记录在 selection audit 中，后续 producer-owned Proposal `created`
+事件不会覆盖这条身份事实。若进程在 Proposal 创建后、selection completion 前退出，
+重启恢复只按确定性 Proposal identity 补写关联；找不到精确 Proposal 时记录
+`unavailable`，系统不会以 `system` 或 producer 身份重新选择。Token 签发对同一
+principal、rule、source cut 和 generation 幂等，避免页面刷新制造无界审计记录。
 
 选择状态使用闭集：
 
