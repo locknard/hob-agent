@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx packages/hub/src/main.ts",
     "validate:home": "tsx packages/hub/src/cli/home-validation.ts",
+    "preflight:home-migration": "tsx packages/hub/src/cli/home-migration-preflight.ts",
     "assess:home-migration": "tsx packages/hub/src/cli/home-migration-assess.ts",
     "preview:home-migration": "tsx packages/hub/src/cli/home-migration-candidate-preview.ts",
     "status:home-migration": "tsx packages/hub/src/cli/home-migration-status.ts",

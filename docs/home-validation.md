@@ -48,3 +48,11 @@ model paths so the validation cut is the same cut the product will later read.
 
 Credentials remain explicit environment input. The command must not discover
 browser storage, enumerate Keychain, or scan unrelated files for a token.
+
+For the Phase 0.5 migration operator path, run `pnpm preflight:home-migration`
+before assessment. That separate command checks the required migration variables
+(`HOB_DATA_DIR`, `HOB_BRIDGES`, `HOB_HOME_DIR`, and
+`HOB_MIGRATION_BRIDGE_ID`) and local directory/configuration availability without
+starting HomeWorld or reading a credential. A successful preflight is only a
+configuration handoff to assessment; it does not prove bridge reachability or a
+real migration cutover.

@@ -76,6 +76,7 @@ locators. For example:
 
 ```sh
 export HOB_BRIDGES='[{"bridgeId":"ha-main","adapterType":"home-assistant","config":{"baseUrl":"http://homeassistant.local:8123","authenticationPrincipal":"home-owner"},"credentialRefs":{"access-token":"keychain:hob-agent/bridge:ha-main:access-token"}}]'
+export HOB_MIGRATION_BRIDGE_ID='ha-main'
 export HOB_BRIDGE_ID='ha-main'
 export HOB_BRIDGE_CREDENTIAL_ALIAS='access-token'
 # Enter the HA token without echo; the utility retains only its locator.
@@ -162,8 +163,18 @@ For one explicit Home Assistant migration assessment, use the existing
 HomeWorld and migration services with a configured bridge id:
 
 ```sh
-pnpm assess:home-migration -- --bridge-id <configured-bridge-id>
+pnpm preflight:home-migration
+pnpm assess:home-migration -- --bridge-id "$HOB_MIGRATION_BRIDGE_ID"
 ```
+
+The preflight requires `HOB_DATA_DIR`, `HOB_BRIDGES`, `HOB_HOME_DIR`, and
+`HOB_MIGRATION_BRIDGE_ID`. It performs only bounded local configuration and
+directory checks, never reads a credential, starts HomeWorld, or connects to
+Home Assistant. Exit code `0` means the configuration can start the next
+assessment command; it is not evidence that a real migration cutover passed.
+Missing, invalid, unavailable, and unconfigured-bridge cases use fixed exit
+codes and direct repair text without echoing paths, endpoints, bridge ids, or
+secrets.
 
 The command waits for that bridge's ready cut, reads its bounded
 `foreignRules@2` catalog, runs the existing neutral migration assessment, and

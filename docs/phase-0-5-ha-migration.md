@@ -195,10 +195,26 @@ Proposal 后进入既有 deployment seam。
 6. 暂停、关闭、回退和重启恢复；
 7. 真实家庭纵切与 Phase 1 适配器门槛评估。
 
+真实 HA 评估前先执行只读操作员前置检查：
+
+```sh
+pnpm preflight:home-migration
+```
+
+该检查要求显式设置 `HOB_DATA_DIR`、`HOB_BRIDGES`、`HOB_HOME_DIR` 和
+`HOB_MIGRATION_BRIDGE_ID`。它只校验本地配置形状、目录可访问性、已注册的
+Home Assistant bridge 以及所选 bridge 是否存在；不创建目录，不读取凭据，不取得
+runtime owner lease，不启动 HomeWorld，不连接 HA。退出码固定为 `0`（配置可启动）、
+`2`（缺少变量）、`3`（配置非法）、`4`（目录不可用）或 `5`（bridge 选择不可用），
+输出包含直接修复提示且不回显路径、bridge id、endpoint 或凭据。
+
+退出码 `0` 只证明下一步可以运行 assessment；它不证明 HA 可达、catalog/read cut 已就绪、
+真实迁移纵切已通过，亦不替代 assessment、candidate、Proposal 审批、部署、读回或回退门槛。
+
 真实 HA 的只读 assessment operator 使用：
 
 ```sh
-pnpm assess:home-migration -- --bridge-id <configured-bridge-id>
+pnpm assess:home-migration -- --bridge-id "$HOB_MIGRATION_BRIDGE_ID"
 ```
 
 该命令只读取现有 `HOB_DATA_DIR`/`HOB_BRIDGES` 配置下的一个明确桥，等待
