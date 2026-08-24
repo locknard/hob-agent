@@ -645,6 +645,7 @@ interface InboxHttpPort {
   getProductReviewProjection?(actor?: InboxReviewActor, selectedProposalId?: string): InboxProductReviewProjection | Promise<InboxProductReviewProjection>;
   getProductShellProjection?(actor?: InboxReviewActor, batchRequestId?: string): InboxProductShellProjection | Promise<InboxProductShellProjection>;
   acknowledgeCompletionNotification?(adviceId: string): boolean;
+  acknowledgeMediaActionCompletionNotification?(turnId: string): boolean;
   acknowledgeSafety?(input: { readonly alertId: string; readonly actor: InboxReviewActor }): unknown | Promise<unknown>;
   canControl?(): boolean;
   requestControl?(input: { readonly capabilityId: string; readonly actor: InboxReviewActor }): InboxControlResult | Promise<InboxControlResult>;
@@ -2098,6 +2099,10 @@ export class ProposalInboxHttpService extends Service {
         sendHtml(response, 200, html, false);
         const completion = shellProjection?.completionNotification;
         if (completion !== undefined) this.inbox.acknowledgeCompletionNotification?.(completion.adviceId);
+        const mediaCompletion = shellProjection?.mediaActionCompletionNotification;
+        if ((route === "home" || route === "conversation") && mediaCompletion !== undefined) {
+          this.inbox.acknowledgeMediaActionCompletionNotification?.(mediaCompletion.turnId);
+        }
       }
     } catch {
       send(response, 500, "Product page unavailable");

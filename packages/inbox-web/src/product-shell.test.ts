@@ -143,6 +143,36 @@ test("shows one Hub-owned background completion notice with the original convers
   assert.match(html, /href="\/conversation\/advice-background-1"/);
 });
 
+test("shows a separate low-disruption media completion notice without media details", () => {
+  const clarification = renderProductShell({
+    ...model(),
+    mediaActionCompletionNotification: {
+      turnId: "media-clarification-1",
+      status: "clarification",
+      completedAt: "2026-08-24T08:00:00.000Z",
+    },
+  } as ProductShellModel);
+
+  assert.match(clarification, /data-media-completion="clarification"/);
+  assert.match(clarification, /媒体命令需要补充/);
+  assert.match(clarification, /href="\/conversation\/media-clarification-1"/);
+  const clarificationBanner = clarification.match(/<section class="product-media-completion-notification"[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.doesNotMatch(clarificationBanner, /(?:question|ticket|mediaRef|opaque-ref)=/iu);
+  assert.doesNotMatch(clarificationBanner, /2026-08-24T08:00:00\.000Z/);
+
+  const failed = renderProductShell({
+    ...model(),
+    mediaActionCompletionNotification: {
+      turnId: "media-failed-1",
+      status: "failed",
+      completedAt: "2026-08-24T08:01:00.000Z",
+    },
+  } as ProductShellModel);
+  assert.match(failed, /data-media-completion="failed"/);
+  assert.match(failed, /媒体命令没有完成/);
+  assert.match(failed, /href="\/conversation\/media-failed-1"/);
+});
+
 test("keeps an acknowledged safety fact visible while lowering the announcement level", () => {
   const html = renderProductShell(model({
     safetyAlerts: [{

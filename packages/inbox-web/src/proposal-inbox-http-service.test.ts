@@ -137,6 +137,38 @@ class MediaActionInbox extends StubInbox {
   }
 }
 
+class MediaCompletionInbox extends MediaActionInbox {
+  mediaCompletionNotification: {
+    readonly turnId: string;
+    readonly status: "clarification" | "failed";
+    readonly completedAt: string;
+  } | undefined = {
+    turnId: "media-completion-1",
+    status: "clarification",
+    completedAt: "2026-08-24T08:00:00.000Z",
+  };
+  readonly mediaCompletionAcknowledgements: string[] = [];
+
+  getProductShellProjection() {
+    return {
+      connection: { state: "quiet" as const, lastContact: "刚刚" },
+      spaces: [],
+      controlSpaces: [],
+      activity: [],
+      ...(this.mediaCompletionNotification === undefined ? {} : {
+        mediaActionCompletionNotification: this.mediaCompletionNotification,
+      }),
+    };
+  }
+
+  acknowledgeMediaActionCompletionNotification(turnId: string) {
+    if (this.mediaCompletionNotification?.turnId !== turnId) return false;
+    this.mediaCompletionAcknowledgements.push(turnId);
+    this.mediaCompletionNotification = undefined;
+    return true;
+  }
+}
+
 class ControlInbox extends StubInbox {
   readonly controls: unknown[] = [];
   readonly undos: unknown[] = [];
@@ -2571,6 +2603,45 @@ test("starts an explicit private media action once, keeps its question out of re
     });
     assert.equal(stopped.status, 303);
     assert.deepEqual((ctx.homeInbox as unknown as MediaActionInbox).mediaCancels, ["media-turn-1"]);
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("acknowledges a media completion notice only after a successful GET page", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MediaCompletionInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization };
+  const inbox = ctx.homeInbox as unknown as MediaCompletionInbox;
+  try {
+    const missing = await fetch(`${origin}/not-a-product-route`, { headers });
+    assert.equal(missing.status, 404);
+    assert.deepEqual(inbox.mediaCompletionAcknowledgements, []);
+
+    const head = await fetch(`${origin}/home`, { method: "HEAD", headers });
+    assert.equal(head.status, 200);
+    assert.deepEqual(inbox.mediaCompletionAcknowledgements, []);
+
+    const page = await fetch(`${origin}/home`, { headers });
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.match(html, /data-media-completion="clarification"/);
+    assert.match(html, /媒体命令需要补充/);
+    assert.match(html, /href="\/conversation\/media-completion-1"/);
+    assert.deepEqual(inbox.mediaCompletionAcknowledgements, ["media-completion-1"]);
+
+    const refreshed = await fetch(`${origin}/home`, { headers });
+    assert.equal(refreshed.status, 200);
+    assert.doesNotMatch(await refreshed.text(), /data-media-completion=/);
+    assert.deepEqual(inbox.mediaCompletionAcknowledgements, ["media-completion-1"]);
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();

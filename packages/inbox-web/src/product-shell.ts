@@ -270,6 +270,12 @@ export interface ProductAdviceCompletionNotification {
   readonly completedAt: string;
 }
 
+export interface ProductMediaActionCompletionNotification {
+  readonly turnId: string;
+  readonly status: "clarification" | "failed";
+  readonly completedAt: string;
+}
+
 export interface ProductUndo {
   readonly id: string;
   readonly label: string;
@@ -545,6 +551,7 @@ export interface ProductShellModel {
   /** A bounded server-held question that returns after the model recovers. */
   readonly conversationDraft?: string;
   readonly completionNotification?: ProductAdviceCompletionNotification;
+  readonly mediaActionCompletionNotification?: ProductMediaActionCompletionNotification;
   readonly undo?: ProductUndo;
   readonly controlFeedback?: ProductControlFeedback;
   readonly activity?: readonly ProductActivityRecord[];
@@ -902,6 +909,12 @@ function renderAdviceCompletionNotification(notification: ProductAdviceCompletio
   return `<section class="product-completion-notification" data-host-owned="true" data-background-completion="${escapeHtml(notification.status)}" role="status" aria-live="polite"><strong>${message}</strong><a href="/conversation/${encodedPathSegment(notification.adviceId)}">查看这条对话</a></section>`;
 }
 
+function renderMediaActionCompletionNotification(notification: ProductMediaActionCompletionNotification | undefined): string {
+  if (notification === undefined) return "";
+  const message = notification.status === "clarification" ? "媒体命令需要补充" : "媒体命令没有完成";
+  return `<section class="product-media-completion-notification" data-host-owned="true" data-media-completion="${escapeHtml(notification.status)}" role="status" aria-live="polite"><strong>${message}</strong><a href="/conversation/${escapeHtml(encodedPathSegment(notification.turnId))}">查看这条对话</a></section>`;
+}
+
 function renderShellFrame(model: NormalizedProductShellModel, page: string, options: ProductShellRenderOptions): string {
   const route = model.route;
   const agentName = model.household.agentName ?? "家庭助手";
@@ -909,12 +922,15 @@ function renderShellFrame(model: NormalizedProductShellModel, page: string, opti
   const memberName = model.household.memberName ?? "当前成员";
   const safety = model.safetyAlert === undefined ? "" : renderSafetyBanner(model.safetyAlert);
   const completion = renderAdviceCompletionNotification(model.completionNotification);
+  const mediaCompletion = route === "overview" || route === "conversation"
+    ? renderMediaActionCompletionNotification(model.mediaActionCompletionNotification)
+    : "";
   const viewSwitcher = renderHostViewSwitcher(model.view, options);
   const desktopNav = ROUTES.map((item) => navigationLink(item, route, model, options)).join("");
   const mobileRoutes: readonly ProductShellRoute[] = ["overview", "reviews", "control", "activity", "settings"];
   const mobileCurrentRoute = route === "conversation" ? "overview" : route === "onboarding" ? "settings" : route;
   const mobileNav = mobileRoutes.map((item) => navigationLink(item, mobileCurrentRoute, model, options, true)).join("");
-  return `<div class="product-shell" data-route="${escapeHtml(route)}" data-connection-state="${escapeHtml(model.connection.state)}"${model.view === undefined ? "" : ` data-view-provider="${escapeHtml(model.view.activeId)}"`}>${safety}${completion}${viewSwitcher}<a class="product-skip-link" href="#product-main">跳到主要内容</a><div class="product-layout"><aside class="product-sidebar" aria-label="家庭导航"><a class="product-brand" href="${routeHref("overview", options)}"><span class="product-brand-mark" aria-hidden="true">h</span><span class="product-brand-copy"><strong>${escapeHtml(agentName)}</strong>${householdName === undefined ? "" : `<small>${escapeHtml(householdName)}</small>`}<small>HobAgent</small></span></a><nav aria-label="家庭导航">${desktopNav}</nav><div class="product-profile"><span class="product-profile-mark" aria-hidden="true">${escapeHtml(memberName.slice(0, 1))}</span><span class="product-profile-copy"><strong>${escapeHtml(memberName)}</strong></span></div></aside><div class="product-content"><main class="product-main" id="product-main">${page}</main><nav class="product-mobile-nav" aria-label="移动家庭导航">${mobileNav}</nav></div></div></div>`;
+  return `<div class="product-shell" data-route="${escapeHtml(route)}" data-connection-state="${escapeHtml(model.connection.state)}"${model.view === undefined ? "" : ` data-view-provider="${escapeHtml(model.view.activeId)}"`}>${safety}${completion}${mediaCompletion}${viewSwitcher}<a class="product-skip-link" href="#product-main">跳到主要内容</a><div class="product-layout"><aside class="product-sidebar" aria-label="家庭导航"><a class="product-brand" href="${routeHref("overview", options)}"><span class="product-brand-mark" aria-hidden="true">h</span><span class="product-brand-copy"><strong>${escapeHtml(agentName)}</strong>${householdName === undefined ? "" : `<small>${escapeHtml(householdName)}</small>`}<small>HobAgent</small></span></a><nav aria-label="家庭导航">${desktopNav}</nav><div class="product-profile"><span class="product-profile-mark" aria-hidden="true">${escapeHtml(memberName.slice(0, 1))}</span><span class="product-profile-copy"><strong>${escapeHtml(memberName)}</strong></span></div></aside><div class="product-content"><main class="product-main" id="product-main">${page}</main><nav class="product-mobile-nav" aria-label="移动家庭导航">${mobileNav}</nav></div></div></div>`;
 }
 
 function renderOverview(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {

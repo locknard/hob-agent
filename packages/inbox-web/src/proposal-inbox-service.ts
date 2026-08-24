@@ -41,6 +41,7 @@ import type {
   ProductTurnStage,
   ProductSafetyAlert,
   ProductAdviceCompletionNotification,
+  ProductMediaActionCompletionNotification,
   ProductBatchActionResult,
   ProductBatchControl,
   ProductBatchPolicyClass,
@@ -341,6 +342,7 @@ export interface InboxProductShellProjection {
   readonly activity: readonly ProductActivityRecord[];
   readonly safetyAlerts?: readonly ProductSafetyAlert[];
   readonly completionNotification?: ProductAdviceCompletionNotification;
+  readonly mediaActionCompletionNotification?: ProductMediaActionCompletionNotification;
   readonly batchControl?: ProductBatchControl;
 }
 
@@ -362,6 +364,12 @@ interface HomeMediaActionTurnsPort {
   events(id: string, afterSeq?: number): readonly { readonly seq: number; readonly type: string; readonly at: string }[];
   subscribe(id: string, listener: (event: { readonly seq: number; readonly type: string; readonly at: string }) => void, afterSeq?: number): () => void;
   cancel(id: string): boolean;
+  peekNextCompletionNotification?(): {
+    readonly turnId: string;
+    readonly status: "clarification" | "failed";
+    readonly completedAt: string;
+  } | undefined;
+  acknowledgeCompletionNotification?(turnId: string): boolean;
 }
 
 export type InboxMediaActionAvailability =
@@ -544,6 +552,9 @@ export class ProposalInboxService extends Service {
     const completionNotification = projectAdviceCompletionNotification(
       this.advice?.peekNextCompletionNotification?.(),
     );
+    const mediaActionCompletionNotification = projectMediaActionCompletionNotification(
+      this.mediaActionTurns?.peekNextCompletionNotification?.(),
+    );
     const projection = projectProductWorld(world, now, actionDescriptorFor);
     const batchControl = this.batchControlProjection(projection, batchRequestId);
     const energy = projectEnergyToday(world, this.world, now, this.timezone);
@@ -557,6 +568,7 @@ export class ProposalInboxService extends Service {
       activity: projectRuntimeActivity(this.runtime?.activities?.() ?? [], now),
       ...(safetyAlerts === undefined ? {} : { safetyAlerts }),
       ...(completionNotification === undefined ? {} : { completionNotification }),
+      ...(mediaActionCompletionNotification === undefined ? {} : { mediaActionCompletionNotification }),
       ...(batchControl === undefined ? {} : { batchControl }),
     };
   }
@@ -631,6 +643,11 @@ export class ProposalInboxService extends Service {
   acknowledgeCompletionNotification(adviceId: string): boolean {
     if (this.advice?.acknowledgeCompletionNotification === undefined) return false;
     return this.advice.acknowledgeCompletionNotification(adviceId);
+  }
+
+  acknowledgeMediaActionCompletionNotification(turnId: string): boolean {
+    if (this.mediaActionTurns?.acknowledgeCompletionNotification === undefined) return false;
+    return this.mediaActionTurns.acknowledgeCompletionNotification(turnId);
   }
 
   canAcknowledgeSafety(actor: InboxReviewActor): boolean {
@@ -1302,6 +1319,20 @@ function projectAdviceCompletionNotification(value: unknown): ProductAdviceCompl
     || !Number.isFinite(Date.parse(value.completedAt))) return undefined;
   return {
     adviceId: value.adviceId,
+    status: value.status,
+    completedAt: value.completedAt,
+  };
+}
+
+function projectMediaActionCompletionNotification(value: unknown): ProductMediaActionCompletionNotification | undefined {
+  if (!isUnknownRecord(value)
+    || typeof value.turnId !== "string"
+    || !isProductResourceId(value.turnId)
+    || (value.status !== "clarification" && value.status !== "failed")
+    || typeof value.completedAt !== "string"
+    || !Number.isFinite(Date.parse(value.completedAt))) return undefined;
+  return {
+    turnId: value.turnId,
     status: value.status,
     completedAt: value.completedAt,
   };

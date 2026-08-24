@@ -121,6 +121,8 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-safety-banner { position: relative; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem max(1rem, env(safe-area-inset-right)) .85rem max(1rem, env(safe-area-inset-left)); background: var(--shell-red); color: white; }
 .product-completion-notification { position: relative; z-index: 19; display: flex; align-items: center; justify-content: center; gap: 1rem; min-height: 2.75rem; padding: .65rem max(1rem, env(safe-area-inset-right)) .65rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-blue-soft); color: var(--shell-text); }
 .product-completion-notification a { color: var(--shell-blue); font-weight: 650; }
+.product-media-completion-notification { position: relative; z-index: 19; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .5rem 1rem; min-height: 2.75rem; padding: .65rem max(1rem, env(safe-area-inset-right)) .65rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-amber-soft); color: var(--shell-text); }
+.product-media-completion-notification a { display: inline-flex; align-items: center; min-height: 2.75rem; color: var(--shell-blue); font-weight: 650; }
 .product-host-view-switcher { position: relative; z-index: 18; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .45rem .8rem; min-width: 0; min-height: 3rem; padding: .45rem max(1rem, env(safe-area-inset-right)) .45rem max(1rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--shell-rule); background: var(--shell-surface); }
 .product-host-view-switcher nav[data-host-view-shortcuts] { display: inline-flex; gap: .2rem; padding: .2rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-bg); }
 .product-host-view-switcher nav[data-host-view-shortcuts] a { min-height: 2.75rem; display: inline-flex; align-items: center; gap: .35rem; padding: .35rem .7rem; border-radius: 999px; color: var(--shell-muted); text-decoration: none; font-size: .82rem; }
@@ -801,6 +803,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   :root { --shell-rule: #8c96a5; --shell-muted: #465367; --shell-subtle: #465367; }
   .product-card, .product-status-card, .product-activity-item, .product-mobile-nav { border-width: 2px; }
   .product-safety-banner { border-block-end: 3px solid #fff; }
+  .product-media-completion-notification { border-block-end-width: 2px; }
 }
 
 @media (prefers-color-scheme: dark) and (prefers-contrast: more) {

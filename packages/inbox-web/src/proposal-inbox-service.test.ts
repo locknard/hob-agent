@@ -572,8 +572,21 @@ class StubAdvice extends Service {
 class StubMediaActionTurns extends Service {
   readonly started: unknown[] = [];
   readonly cancelled: string[] = [];
+  mediaCompletionNotification: {
+    readonly turnId: string;
+    readonly status: "clarification" | "failed";
+    readonly completedAt: string;
+  } | undefined;
+  readonly mediaCompletionAcknowledgements: string[] = [];
   constructor(ctx: Context) { super(ctx, "homeMediaActionTurns"); }
   availability() { return { status: "ready" as const }; }
+  peekNextCompletionNotification() { return this.mediaCompletionNotification; }
+  acknowledgeCompletionNotification(turnId: string) {
+    if (this.mediaCompletionNotification?.turnId !== turnId) return false;
+    this.mediaCompletionAcknowledgements.push(turnId);
+    this.mediaCompletionNotification = undefined;
+    return true;
+  }
   async start(input: unknown) {
     this.started.push(input);
     return this.get("media-turn-1")!;
@@ -1049,6 +1062,37 @@ test("projects one durable background completion notification from the Hub owner
   assert.equal(ctx.homeInbox.getProductShellProjection().completionNotification, undefined);
 
   await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("projects and acknowledges a separate media completion notification", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  const mediaFiber = await ctx.plugin(StubMediaActionTurns);
+  const fiber = await ctx.plugin(ProposalInboxService);
+  const media = ctx.get("homeMediaActionTurns") as unknown as StubMediaActionTurns;
+  media.mediaCompletionNotification = {
+    turnId: "media-clarification-1",
+    status: "clarification",
+    completedAt: "2026-08-24T08:00:00.000Z",
+  };
+
+  assert.deepEqual(ctx.homeInbox.getProductShellProjection().mediaActionCompletionNotification, {
+    turnId: "media-clarification-1",
+    status: "clarification",
+    completedAt: "2026-08-24T08:00:00.000Z",
+  });
+  assert.deepEqual(ctx.homeInbox.getProductShellProjection().mediaActionCompletionNotification, {
+    turnId: "media-clarification-1",
+    status: "clarification",
+    completedAt: "2026-08-24T08:00:00.000Z",
+  });
+  assert.equal(ctx.homeInbox.acknowledgeMediaActionCompletionNotification("media-clarification-1"), true);
+  assert.deepEqual(media.mediaCompletionAcknowledgements, ["media-clarification-1"]);
+  assert.equal(ctx.homeInbox.getProductShellProjection().mediaActionCompletionNotification, undefined);
+
+  await fiber.dispose();
+  await mediaFiber.dispose();
   await ctx.fiber.dispose();
 });
 
