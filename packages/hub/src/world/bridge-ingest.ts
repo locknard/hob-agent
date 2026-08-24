@@ -3,6 +3,9 @@ import { WorldState, type WorldDeviceView } from "./world-state.js";
 import type { ZodType } from "zod";
 import {
   bridgeEventSchema,
+  CAUSALITY_EXTENSION_KEY,
+  causalityPayloadSchema,
+  type CausalityPayload,
   type HubBridgeDiagnostics as ContractHubBridgeDiagnostics,
   type IngestRecord,
   type SchemaRegistration,
@@ -40,7 +43,11 @@ export type {
 
 export type ValidationResult =
   | { ok: true }
-  | { ok: false; reason: Extract<CoreReasonCode, "invalid_payload" | "unsupported" | "protocol_error">; nativeId?: string };
+  | {
+    ok: false;
+    reason: Extract<CoreReasonCode, "invalid_payload" | "unsupported" | "protocol_error"> | "extension_rejected";
+    nativeId?: string;
+  };
 
 export interface BridgeIngestOptions {
   bridgeId: string;
@@ -82,7 +89,12 @@ export interface IngestResult {
   broken?: boolean;
   /** A security boundary failure that requires an explicit rebind before retry. */
   fatal?: boolean;
-  reason?: CoreReasonCode | "sequence_gap" | "manifest_mismatch" | "replay_device_removed" | "remote_identity_mismatch";
+  reason?: CoreReasonCode
+    | "sequence_gap"
+    | "manifest_mismatch"
+    | "replay_device_removed"
+    | "remote_identity_mismatch"
+    | "extension_rejected";
 }
 
 export type HubBridgeDiagnostics = ContractHubBridgeDiagnostics;
@@ -94,6 +106,7 @@ export type BridgeHealthStatus = "up" | "degraded";
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
 const DEFAULT_SYNC_TIMEOUT_MS = 120_000;
 const DEFAULT_DIAGNOSTIC_SAMPLE_LIMIT = 32;
+const MAX_CAUSALITY_DISTANCE = 32;
 const DEFAULT_RESOURCE_BUDGET: ResourceBudget = {
   maxFields: 4_096,
   maxStringLength: 4_096,
@@ -128,6 +141,8 @@ export class BridgeIngest {
   private readonly stateFoldWindowMs: number;
   private readonly pendingStates = new Map<string, StateEvent>();
   private readonly stateKeysSeen = new Set<string>();
+  /** Accepted state sequence numbers are the only legal causality targets. */
+  private readonly acceptedStateSeqs = new Set<number>();
   private capabilitySchemas = new Map<string, string>();
   private replayCapabilitySchemas = new Map<string, string>();
   private deviceHealthByNativeId = new Map<string, DeviceHealthStatus>();
@@ -135,7 +150,11 @@ export class BridgeIngest {
   private bridgeHealthStatus: BridgeHealthStatus = "up";
   private replayBridgeHealthStatus: BridgeHealthStatus = "up";
   private activeEpochId: string | undefined;
+  /** Durable event watermark; extension rejection records do not advance it. */
   private highWater = 0;
+  /** Sequence fence also includes non-watermark extension rejections. */
+  private sequenceCursor = 0;
+  private syncCompleteSeq: number | undefined;
   private replayCounts: ReplayCounts = { device: 0, state: 0 };
   private epochBroken = false;
   private awaitingFreshEpoch = false;
@@ -241,10 +260,10 @@ export class BridgeIngest {
       return { accepted: false, epochId, seq, broken: true, reason: "sequence_gap" };
     }
     if (event.kind === "sync-start") return this.rejectProtocol(envelope);
-    if (seq <= this.highWater) {
+    if (seq <= this.sequenceCursor) {
       return { accepted: false, epochId, seq, duplicate: true };
     }
-    if (seq > this.highWater + 1) return this.breakEpoch(envelope);
+    if (seq > this.sequenceCursor + 1) return this.breakEpoch(envelope);
 
     const replay = this.state.replaySnapshotId() !== undefined;
     if (!replay && event.kind === "sync-complete") return this.rejectProtocol(envelope);
@@ -262,10 +281,14 @@ export class BridgeIngest {
       return this.commitRejection(envelope, "resource_exhausted", extractNativeId(event));
     }
 
-    const validation = await this.validate(event);
+    const validation = await this.validate(event, seq);
     if (!validation.ok) {
       if (validation.reason === "unsupported") this.diagnosticState.unsupportedSchemaCount += 1;
       this.diagnosticState.droppedInvalidCount += 1;
+      if (validation.reason === "extension_rejected") {
+        this.addDiagnosticSample(envelope);
+        return this.commitExtensionRejection(envelope);
+      }
       this.applyInvalidPresence(event);
       if (replay) this.countReplay(event);
       return this.commitRejection(envelope, validation.reason, validation.nativeId ?? extractNativeId(event));
@@ -274,7 +297,7 @@ export class BridgeIngest {
     if (replay) this.countReplay(event);
     const result = await this.commitLegal(envelope);
     if (!result.accepted) return result;
-    this.applyAccepted(event);
+    this.applyAccepted(event, envelope.seq);
     if (event.kind === "sync-complete") {
       this.flushStates();
       return this.finishReplay(envelope);
@@ -329,8 +352,14 @@ export class BridgeIngest {
     if (!validWatermark(watermark)) throw new TypeError("invalid persisted bridge watermark");
     this.pendingStates.clear();
     this.stateKeysSeen.clear();
+    this.acceptedStateSeqs.clear();
     this.activeEpochId = watermark.epochId;
     this.highWater = watermark.lastSeq;
+    const rejectedSequence = this.journal.rejections(this.bridgeId)
+      .filter((rejection) => rejection.epochId === watermark.epochId)
+      .reduce((max, rejection) => Math.max(max, rejection.seq), 0);
+    this.sequenceCursor = Math.max(watermark.lastSeq, rejectedSequence);
+    this.syncCompleteSeq = undefined;
     this.epochBroken = broken;
     this.awaitingFreshEpoch = true;
     this.syncStartedAt = undefined;
@@ -371,9 +400,9 @@ export class BridgeIngest {
         && envelope.event.kind !== "state"
         && envelope.event.kind !== "device-health"
         && envelope.event.kind !== "bridge-health") continue;
-      const validation = await this.validate(envelope.event);
+      const validation = await this.validate(envelope.event, envelope.seq);
       if (!validation.ok) continue;
-      this.applyAccepted(envelope.event);
+      this.applyAccepted(envelope.event, envelope.seq);
     }
     this.flushStates();
 
@@ -388,6 +417,8 @@ export class BridgeIngest {
     const receivedAt = completeRecord.receivedAt;
     this.activeEpochId = watermark.epochId;
     this.highWater = watermark.lastSeq;
+    this.sequenceCursor = watermark.lastSeq;
+    this.syncCompleteSeq = watermark.lastSeq;
     this.epochBroken = false;
     this.awaitingFreshEpoch = false;
     this.syncStartedAt = undefined;
@@ -459,7 +490,7 @@ export class BridgeIngest {
     return result;
   }
 
-  private async validate(event: BridgeEvent): Promise<ValidationResult> {
+  private async validate(event: BridgeEvent, seq?: number): Promise<ValidationResult> {
     if (!bridgeEventSchema.safeParse(event).success) {
       return { ok: false, reason: "invalid_payload", nativeId: extractNativeId(event) };
     }
@@ -486,9 +517,15 @@ export class BridgeIngest {
         const payloadSchema = this.extensionSchemas.get(event.ext);
         if (payloadSchema === undefined) return { ok: false, reason: "unsupported" };
         try {
-          return payloadSchema.safeParse(event.payload).success
-            ? { ok: true }
-            : { ok: false, reason: "invalid_payload" };
+          const parsed = payloadSchema.safeParse(event.payload);
+          if (!parsed.success) return { ok: false, reason: "invalid_payload" };
+          if (event.ext === CAUSALITY_EXTENSION_KEY) {
+            const causality = causalityPayloadSchema.safeParse(parsed.data);
+            if (seq === undefined || !causality.success || !this.isCausalityReferenceValid(seq, causality.data)) {
+              return { ok: false, reason: "extension_rejected" };
+            }
+          }
+          return { ok: true };
         } catch {
           return { ok: false, reason: "invalid_payload" };
         }
@@ -500,11 +537,14 @@ export class BridgeIngest {
   private startEpoch(envelope: Envelope): void {
     this.pendingStates.clear();
     this.stateKeysSeen.clear();
+    this.acceptedStateSeqs.clear();
     this.replayCapabilitySchemas.clear();
     this.replayDeviceHealthByNativeId.clear();
     this.replayBridgeHealthStatus = "up";
     this.activeEpochId = envelope.epochId;
     this.highWater = 0;
+    this.sequenceCursor = 0;
+    this.syncCompleteSeq = undefined;
     this.replayCounts = { device: 0, state: 0 };
     this.epochBroken = false;
     this.awaitingFreshEpoch = false;
@@ -539,6 +579,7 @@ export class BridgeIngest {
     try {
       this.journal.appendAtomic({ bridgeId: this.bridgeId, receivedAt: this.clock(), envelope });
       this.highWater = envelope.seq;
+      this.sequenceCursor = envelope.seq;
       return { accepted: true, epochId: envelope.epochId, seq: envelope.seq };
     } catch (error) {
       if (error instanceof JournalCapacityError) {
@@ -560,11 +601,39 @@ export class BridgeIngest {
         ...(nativeId === undefined ? {} : { nativeId }),
       }, { epochId: envelope.epochId, lastSeq: envelope.seq });
       this.highWater = envelope.seq;
+      this.sequenceCursor = envelope.seq;
       return {
         accepted: false,
         epochId: envelope.epochId,
         seq: envelope.seq,
         reason: reason as CoreReasonCode | "replay_device_removed" | "remote_identity_mismatch",
+      };
+    } catch (error) {
+      if (error instanceof JournalCapacityError) await this.handleCapacity(error);
+      else this.diagnosticState.connectionState = "quarantined";
+      return { accepted: false, epochId: envelope.epochId, seq: envelope.seq, reason: "resource_exhausted" };
+    }
+  }
+
+  /**
+   * Causality rejection is a diagnostic ledger entry, not a core event
+   * rejection: it must not advance the durable watermark or mutate world
+   * state, while the sequence fence still moves past the rejected envelope.
+   */
+  private async commitExtensionRejection(envelope: Envelope): Promise<IngestResult> {
+    try {
+      this.journal.recordRejection({
+        bridgeId: this.bridgeId,
+        epochId: envelope.epochId,
+        seq: envelope.seq,
+        reason: "extension_rejected",
+      });
+      this.sequenceCursor = envelope.seq;
+      return {
+        accepted: false,
+        epochId: envelope.epochId,
+        seq: envelope.seq,
+        reason: "extension_rejected",
       };
     } catch (error) {
       if (error instanceof JournalCapacityError) await this.handleCapacity(error);
@@ -592,7 +661,7 @@ export class BridgeIngest {
 
   private recordRetentionConflict(): void {
     if (this.activeEpochId === undefined) return;
-    const fromSeq = this.highWater + 1;
+    const fromSeq = this.sequenceCursor + 1;
     const gap: HistoryGapRecord = {
       bridgeId: this.bridgeId,
       epochId: this.activeEpochId,
@@ -614,13 +683,14 @@ export class BridgeIngest {
     }
   }
 
-  private applyAccepted(event: BridgeEvent): void {
+  private applyAccepted(event: BridgeEvent, seq: number): void {
     switch (event.kind) {
       case "device-upserted":
         this.state.applyDescriptor(event.device, true);
         this.recordCapabilitySchemas(event.device);
         break;
       case "state":
+        this.acceptedStateSeqs.add(seq);
         const key = `${event.state.nativeId}\u0000${event.state.nativeInstanceId}`;
         if (this.stateKeysSeen.has(key)) this.diagnosticState.foldedStateCount += 1;
         this.stateKeysSeen.add(key);
@@ -678,6 +748,7 @@ export class BridgeIngest {
     this.diagnosticState.lastSyncCompleteAt = this.clock();
     this.journal.closeHistoryGaps(this.bridgeId, envelope.epochId);
     this.journal.markConsistent?.(this.bridgeId, { epochId: envelope.epochId, lastSeq: envelope.seq });
+    this.syncCompleteSeq = envelope.seq;
     this.syncStartedAt = undefined;
     return { accepted: true, epochId: envelope.epochId, seq: envelope.seq };
   }
@@ -690,7 +761,7 @@ export class BridgeIngest {
   }
 
   private breakEpoch(envelope: Envelope): IngestResult {
-    const fromSeq = this.highWater + 1;
+    const fromSeq = this.sequenceCursor + 1;
     const toSeq = envelope.seq - 1;
     this.epochBroken = true;
     this.diagnosticState.connectionState = "degraded";
@@ -710,6 +781,16 @@ export class BridgeIngest {
       this.diagnosticState.connectionState = "degraded";
     });
     return { accepted: false, epochId: envelope.epochId, seq: envelope.seq, broken: true, reason: "sequence_gap" };
+  }
+
+  private isCausalityReferenceValid(seq: number, payload: CausalityPayload): boolean {
+    if (!Number.isSafeInteger(payload.refSeq) || payload.refSeq <= 0) return false;
+    const distance = seq - payload.refSeq;
+    if (distance < 1 || distance > MAX_CAUSALITY_DISTANCE) return false;
+    if (!this.acceptedStateSeqs.has(payload.refSeq)) return false;
+    return this.syncCompleteSeq === undefined
+      || payload.refSeq >= this.syncCompleteSeq
+      || seq <= this.syncCompleteSeq;
   }
 
   private addDiagnosticSample(envelope: Envelope): void {

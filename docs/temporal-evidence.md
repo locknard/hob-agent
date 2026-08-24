@@ -48,6 +48,20 @@ epochs are not silently joined to the current one. Later work may add an
 explicit imported-history contract, but imported evidence must retain its
 different provenance and confidence.
 
+## Causality evidence
+
+An adapter may place one `causality@1` extension event after a live state event.
+The Hub accepts the annotation only when `refSeq` names an accepted state in the
+same epoch, remains within 32 sequence positions, and does not cross the
+verified snapshot boundary. A rejected annotation enters the extension
+rejection ledger without changing world state or the durable core watermark.
+
+The Home Agent can query causality only for an exact capability and provenance
+returned by the evidence tool. Its result contains a closed source category and
+coverage reasons; principal, rule, artifact, native, and provider references
+remain inside the Hub. An absent, unknown, stale, partial, or unavailable cause
+stays explicit and never becomes a guessed explanation.
+
 ## Proposal relationship
 
 This slice makes evidence inspectable; it does not make approval equivalent to

@@ -79,6 +79,8 @@ import {
   type ForeignRulesHandle,
 } from "@hob/bridge-contract";
 import {
+  CAUSALITY_EXTENSION,
+  CAUSALITY_EXTENSION_KEY,
   ORG_HINTS_EXTENSION,
   type OrgHintPayload,
 } from "@hob/bridge-contract";
@@ -138,6 +140,8 @@ export interface HomeAssistantNativeStateEvent {
   state: string;
   attrs: Record<string, unknown>;
   ts: string;
+  /** Sanitized presence of HA context.user_id; raw context never crosses this seam. */
+  userId?: string;
 }
 
 export const DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS = 5_000;
@@ -637,11 +641,15 @@ export class HomeAssistantBridge {
       || typeof newState.state !== "string"
       || typeof event.time_fired !== "string"
     ) return;
+    const userId = isRecord(event.context)
+      ? boundedHomeAssistantUserId(event.context.user_id)
+      : undefined;
     const nativeEvent: HomeAssistantNativeStateEvent = {
       entityId,
       state: newState.state,
       attrs: newState.attributes,
       ts: event.time_fired,
+      ...(userId === undefined ? {} : { userId }),
     };
     this.options.onNativeStateEvent?.(nativeEvent);
   }
@@ -880,6 +888,18 @@ export function deriveHomeAssistantRemoteInstanceId(
   return `ha:${createHash("sha256").update(material).digest("hex")}`;
 }
 
+/**
+ * Keeps the HA user identifier out of the neutral model while retaining a
+ * stable, bridge-domain-scoped principal reference for confirmed attribution.
+ */
+export function deriveHomeAssistantPrincipalRef(bridgeId: string, userId: string): string | undefined {
+  const domain = boundedHomeAssistantUserId(bridgeId);
+  const principal = boundedHomeAssistantUserId(userId);
+  if (domain === undefined || principal === undefined) return undefined;
+  const material = `home-assistant-causality-principal-v1\n${domain}\n${principal}`;
+  return `principal:${createHash("sha256").update(material).digest("hex")}`;
+}
+
 export function createHomeAssistantBridgeAdapter(
   context: ContractAdapterFactoryContext<HomeAssistantAdapterConfig>,
   dependencies: HomeAssistantBridgeAdapterDependencies = {},
@@ -917,6 +937,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         FOREIGN_RULES_EXTENSION,
         FOREIGN_RULE_MIGRATION_EXTENSION,
         FOREIGN_RULE_CONTROL_EXTENSION,
+        CAUSALITY_EXTENSION,
         ORG_HINTS_EXTENSION,
         ACTIONS_EXTENSION,
         AUTOMATIONS_EXTENSION,
@@ -1882,7 +1903,21 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         if (state === undefined) continue;
         if (sameScalarRecord(this.stateAttrsByNativeInstanceId.get(state.nativeInstanceId), state.attrs)) continue;
         this.stateAttrsByNativeInstanceId.set(state.nativeInstanceId, { ...state.attrs });
-        yield current.envelope({ kind: "state", state });
+        const stateEnvelope = current.envelope({ kind: "state", state });
+        yield stateEnvelope;
+        const principalRef = item.event.userId === undefined
+          ? undefined
+          : deriveHomeAssistantPrincipalRef(this.context.bridgeId, item.event.userId);
+        yield current.envelope({
+          kind: "ext",
+          ext: CAUSALITY_EXTENSION_KEY,
+          payload: {
+            refSeq: stateEnvelope.seq,
+            cause: principalRef === undefined
+              ? { kind: "unknown" }
+              : { kind: "user", principalRef },
+          },
+        });
         const nextHealth = healthForNativeState(item.event.state);
         if (this.healthByNativeId.get(binding.nativeId) !== nextHealth) {
           this.healthByNativeId.set(binding.nativeId, nextHealth);
@@ -3173,6 +3208,16 @@ function nonEmptyString(value: unknown): string | undefined {
 function boundedRegistryText(value: unknown, maxLength: number): string | undefined {
   const text = nonEmptyString(value);
   return text === undefined || text.length > maxLength ? undefined : text;
+}
+
+function boundedHomeAssistantUserId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text === "" || text !== value
+    || text.length > 256
+    || /[\u0000-\u001f\u007f\s]/u.test(text)
+    ? undefined
+    : text;
 }
 
 function createNodeSocket(url: string): WebSocketLike {

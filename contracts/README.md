@@ -14,8 +14,8 @@ projected into these shapes before they reach hub or agent-layer code.
 
 - `bridge-contract.ts` is the canonical implementation.
 - `index.ts` is the production package entry point and exports the canonical core,
-  adapter conformance helper, actions, foreign-rules and organization-hints
-  surfaces. Consumers use `@hob/bridge-contract` so the workspace dependency
+  adapter conformance helper, actions, foreign-rules, causality, and
+  organization-hints surfaces. Consumers use `@hob/bridge-contract` so the workspace dependency
   graph preserves the future process boundary.
 - `bridge-testing.ts` is the dedicated `@hob/bridge-contract/testing` entry. It
   supplies a deterministic v6.3 synthetic adapter for Hub and third-party bridge
@@ -54,6 +54,10 @@ frozen core surfaces:
 - `bridge-org-hints.ts` defines the first closed `orgHints@1` stream payload:
   an explicit, bounded `non_spatial` disposition that remains a hint and never
   changes identity or authority.
+- `bridge-causality.ts` defines the closed `causality@1` stream payload. A
+  bounded `CauseRef` annotates one accepted state sequence in the same epoch;
+  platform-native user, rule, context, and entity identifiers never cross the
+  contract.
 - Closed identity-claim provenance (`device_reported`,
   `independent_registry`, `platform_registry`, or `inferred`) and bridge-scoped
   credential materials (`secret_text`, `oauth`, and `certificate`). The

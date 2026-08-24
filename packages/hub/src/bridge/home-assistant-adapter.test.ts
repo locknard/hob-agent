@@ -22,6 +22,7 @@ import {
   MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS,
   HomeAssistantBridgeAdapter,
   createHomeAssistantBridgeAdapter,
+  deriveHomeAssistantPrincipalRef,
   deriveHomeAssistantRemoteInstanceId,
   homeAssistantSemanticKind,
   toHomeAssistantWebSocketUrl,
@@ -548,6 +549,7 @@ test("factory construction is synchronous and does not resolve credentials or to
       { id: "foreignRules", version: "2.0.0" },
       { id: "foreignRuleMigration", version: "1.0.0" },
       { id: "foreignRuleControl", version: "1.0.0" },
+      { id: "causality", version: "1.0.0" },
       { id: "orgHints", version: "1.0.0" },
       { id: "actions", version: "1.0.0" },
       { id: "automations", version: "1.0.0" },
@@ -985,6 +987,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
       { key: "foreignRules@2", available: true },
       { key: "foreignRuleMigration@1", available: true },
       { key: "foreignRuleControl@1", available: true },
+      { key: "causality@1", available: false },
       { key: "orgHints@1", available: false },
       { key: "actions@1", available: true },
       { key: "automations@1", available: true },
@@ -1077,6 +1080,12 @@ test("incremental state events stay bound to the stable registry id and emit hea
   assert.equal(stateEnvelope.value?.seq, 6);
   assert.equal((stateEnvelope.value?.event as Extract<BridgeEvent, { kind: "state" }>).state.nativeInstanceId, "entity-stable-1");
   assert.equal(JSON.stringify(stateEnvelope.value).includes("do-not-forward"), false);
+  const causalityEnvelope = await iterator.next();
+  assert.deepEqual(causalityEnvelope.value?.event, {
+    kind: "ext",
+    ext: "causality@1",
+    payload: { refSeq: stateEnvelope.value!.seq, cause: { kind: "unknown" } },
+  });
   const healthEnvelope = await iterator.next();
   assert.deepEqual(healthEnvelope.value?.event, {
     kind: "device-health",
@@ -1087,6 +1096,93 @@ test("incremental state events stay bound to the stable registry id and emit hea
   await adapter.control.dispose();
   controller.abort();
   assert.equal((await iterator.next()).done, true);
+});
+
+test("emits a hashed user causality extension immediately after a live state envelope", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket);
+  await first;
+  for (let index = 0; index < 4; index += 1) await iterator.next();
+
+  const subscription = socket.sent.find((message) => message.type === "subscribe_events");
+  assert.notEqual(subscription, undefined);
+  const next = iterator.next();
+  socket.receive({
+    id: subscription!.id,
+    type: "event",
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-18T00:00:02.000Z",
+      context: { user_id: "native-user-id", id: "native-context-id", parent_id: "native-parent-id" },
+      data: {
+        entity_id: "light.kitchen",
+        new_state: { state: "off", attributes: {} },
+      },
+    },
+  });
+  const stateEnvelope = await next;
+  assert.equal(stateEnvelope.value?.event.kind, "state");
+  const causalityEnvelope = await iterator.next();
+  assert.deepEqual(causalityEnvelope.value?.event, {
+    kind: "ext",
+    ext: "causality@1",
+    payload: {
+      refSeq: stateEnvelope.value!.seq,
+      cause: { kind: "user", principalRef: deriveHomeAssistantPrincipalRef("bridge-ha", "native-user-id") },
+    },
+  });
+  assert.equal(JSON.stringify(causalityEnvelope.value).includes("native-user-id"), false);
+  assert.equal(JSON.stringify(causalityEnvelope.value).includes("native-context-id"), false);
+  assert.equal(causalityEnvelope.value!.seq, stateEnvelope.value!.seq + 1);
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("emits limited unknown causality without guessing physical or foreign-rule causes", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket);
+  await first;
+  for (let index = 0; index < 4; index += 1) await iterator.next();
+
+  const subscription = socket.sent.find((message) => message.type === "subscribe_events");
+  assert.notEqual(subscription, undefined);
+  const next = iterator.next();
+  socket.receive({
+    id: subscription!.id,
+    type: "event",
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-18T00:00:03.000Z",
+      data: {
+        entity_id: "light.kitchen",
+        new_state: { state: "off", attributes: {} },
+      },
+    },
+  });
+  const stateEnvelope = await next;
+  const causalityEnvelope = await iterator.next();
+  assert.deepEqual(causalityEnvelope.value?.event, {
+    kind: "ext",
+    ext: "causality@1",
+    payload: {
+      refSeq: stateEnvelope.value!.seq,
+      cause: { kind: "unknown" },
+    },
+  });
+
+  await adapter.control.dispose();
+  controller.abort();
 });
 
 test("suppresses consecutive HA events whose neutral state did not change", async () => {
@@ -1273,6 +1369,8 @@ test("fails closed when the bounded native event queue overflows", async () => {
   });
   socket.receive(stateChanged("light.kitchen", "on"));
   await firstIncremental;
+  const firstCausality = await iterator.next();
+  assert.equal(firstCausality.value?.event.kind, "ext");
   socket.receive(stateChanged("light.kitchen", "off"));
   socket.receive(stateChanged("light.kitchen", "on"));
   await assert.rejects(iterator.next(), (error: unknown) =>

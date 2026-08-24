@@ -19,6 +19,10 @@ import {
 } from "@hob/bridge-contract";
 import { orgHintPayloadSchema } from "@hob/bridge-contract";
 import {
+  CAUSALITY_EXTENSION,
+  causalityPayloadSchema,
+} from "@hob/bridge-contract";
+import {
   bridgeActionDescriptorRequestSchema,
   bridgeActionDescriptorSchema,
   bridgeActionCurrentStateSchema,
@@ -313,6 +317,51 @@ export interface HomeWorldEvidenceResult {
   readonly events: readonly HomeWorldEvidenceEvent[];
   readonly coverage: readonly HomeWorldEvidenceCoverage[];
   readonly truncated: boolean;
+}
+
+export type HomeWorldCausalityAttribution =
+  | "user"
+  | "foreign_rule"
+  | "hob_artifact"
+  | "physical"
+  | "unknown";
+
+export type HomeWorldCausalityReason =
+  | "capability_unavailable"
+  | "causality_unavailable"
+  | "causality_unknown"
+  | "journal_unavailable"
+  | "state_not_retained"
+  | "cause_not_retained"
+  | "state_value_unknown"
+  | "missing_consistent_baseline"
+  | "target_stale"
+  | "bridge_not_ready"
+  | "history_gap";
+
+/** Exact, read-only causality lookup for one neutral state provenance. */
+export interface HomeWorldCausalityQuery {
+  readonly hwCapabilityId: string;
+  readonly provenance: {
+    readonly bridgeId: string;
+    readonly epochId: string;
+    readonly seq: number;
+  };
+}
+
+export interface HomeWorldCausalityResult {
+  readonly status: "complete" | "partial" | "unknown" | "unavailable";
+  readonly hwCapabilityId: string;
+  readonly provenance: HomeWorldCausalityQuery["provenance"];
+  readonly attribution?: HomeWorldCausalityAttribution;
+  readonly hwId?: string;
+  readonly semanticKind?: CapabilitySemanticKind;
+  readonly value?: string | number | boolean | null;
+  readonly observedAt?: string;
+  readonly sourceTs?: string;
+  readonly sourceTsQuality?: StateEvent["time"]["sourceTsQuality"];
+  readonly origin?: StateEvent["origin"];
+  readonly reasons: readonly HomeWorldCausalityReason[];
 }
 
 /** Closed read-side result used by deployment preflight; no provider data crosses it. */
@@ -765,6 +814,104 @@ export class HomeWorldService extends Service {
     } catch {
       return { status: "unavailable" };
     }
+  }
+
+  /** Looks up one post-baseline state and its bounded neutral cause attribution. */
+  queryCausality(input: HomeWorldCausalityQuery): HomeWorldCausalityResult {
+    validateCausalityQuery(input);
+    const provenance = { ...input.provenance };
+    const unavailable = (
+      reason: HomeWorldCausalityReason,
+    ): HomeWorldCausalityResult => ({
+      status: "unavailable",
+      hwCapabilityId: input.hwCapabilityId,
+      provenance,
+      reasons: [reason],
+    });
+    const capability = this.snapshot().devices
+      .flatMap((device) => device.capabilities)
+      .find((candidate) => candidate.hwCapabilityId === input.hwCapabilityId);
+    if (capability === undefined) return unavailable("capability_unavailable");
+    const binding = capability.bindings.find((candidate) => candidate.bridgeId === provenance.bridgeId);
+    if (binding === undefined) return unavailable("capability_unavailable");
+    const runtime = this.runtimesById.get(provenance.bridgeId);
+    if (runtime === undefined) return unavailable("capability_unavailable");
+    if (runtime.extensionAvailability[causalityExtensionKey()] !== "available") {
+      return unavailable("causality_unavailable");
+    }
+    if (runtime.journal.queryCausalityRecords === undefined) return unavailable("journal_unavailable");
+    const consistent = runtime.journal.consistentWatermark?.(provenance.bridgeId);
+    if (consistent === undefined) {
+      return {
+        status: "unknown",
+        hwCapabilityId: input.hwCapabilityId,
+        provenance,
+        reasons: ["missing_consistent_baseline"],
+      };
+    }
+    if (consistent.epochId !== provenance.epochId || provenance.seq <= consistent.lastSeq) {
+      return {
+        status: "unknown",
+        hwCapabilityId: input.hwCapabilityId,
+        provenance,
+        reasons: ["target_stale"],
+      };
+    }
+    let page: ReturnType<NonNullable<IngestJournal["queryCausalityRecords"]>>;
+    try {
+      page = runtime.journal.queryCausalityRecords({
+        bridgeId: provenance.bridgeId,
+        epochId: provenance.epochId,
+        refSeq: provenance.seq,
+      });
+    } catch {
+      return unavailable("journal_unavailable");
+    }
+    const stateEvent = page.state?.envelope.event;
+    if (stateEvent?.kind !== "state"
+      || stateEvent.state.nativeId !== binding.nativeId
+      || stateEvent.state.nativeInstanceId !== binding.nativeInstanceId) {
+      return unavailable("state_not_retained");
+    }
+    const base = {
+      hwCapabilityId: input.hwCapabilityId,
+      provenance,
+      hwId: capability.hwId,
+      ...(capability.semanticKind === undefined ? {} : { semanticKind: capability.semanticKind }),
+      observedAt: page.state?.receivedAt,
+      ...(stateEvent.state.time.sourceTs === undefined ? {} : { sourceTs: stateEvent.state.time.sourceTs }),
+      sourceTsQuality: stateEvent.state.time.sourceTsQuality,
+      origin: stateEvent.state.origin,
+    };
+    const qualityReasons: HomeWorldCausalityReason[] = [];
+    if (runtime.ingest.diagnostics().connectionState !== "ready") qualityReasons.push("bridge_not_ready");
+    if (runtime.journal.historyGaps(provenance.bridgeId).some((gap) => (
+      gap.epochId === provenance.epochId && gap.fromSeq <= provenance.seq
+    ))) qualityReasons.push("history_gap");
+    if (page.causality === undefined) {
+      return { ...base, status: "unknown", reasons: ["cause_not_retained", ...qualityReasons] };
+    }
+    const causalityEvent = page.causality.envelope.event;
+    if (causalityEvent.kind !== "ext") {
+      return { ...base, status: "unknown", reasons: ["cause_not_retained", ...qualityReasons] };
+    }
+    const parsed = causalityPayloadSchema.safeParse(causalityEvent.payload);
+    if (!parsed.success) return { ...base, status: "unknown", reasons: ["cause_not_retained", ...qualityReasons] };
+    const attribution = causalityAttribution(parsed.data.cause.kind);
+    if (parsed.data.cause.kind === "unknown") {
+      return { ...base, status: "unknown", attribution, reasons: ["causality_unknown", ...qualityReasons] };
+    }
+    const value = evidenceScalarForCapability(capability, stateEvent.state.attrs);
+    if (value === undefined) {
+      return { ...base, status: "partial", attribution, reasons: ["state_value_unknown", ...qualityReasons] };
+    }
+    return {
+      ...base,
+      status: qualityReasons.length === 0 ? "complete" : "partial",
+      attribution,
+      value,
+      reasons: qualityReasons,
+    };
   }
 
   /**
@@ -2246,6 +2393,7 @@ function registeredExtensionSchemas(
   return new Map([
     ...(configured?.entries() ?? []),
     ["orgHints@1", orgHintPayloadSchema] as const,
+    [canonicalExtensionKey(CAUSALITY_EXTENSION), causalityPayloadSchema] as const,
   ]);
 }
 
@@ -2583,6 +2731,17 @@ function validateEvidenceQuery(input: HomeWorldEvidenceQuery): number {
   return limit;
 }
 
+function validateCausalityQuery(input: HomeWorldCausalityQuery): void {
+  if (!input || typeof input !== "object"
+    || typeof input.hwCapabilityId !== "string" || input.hwCapabilityId.length === 0 || input.hwCapabilityId.length > 200
+    || !input.provenance || typeof input.provenance !== "object"
+    || typeof input.provenance.bridgeId !== "string" || input.provenance.bridgeId.length === 0 || input.provenance.bridgeId.length > 200
+    || typeof input.provenance.epochId !== "string" || input.provenance.epochId.length === 0 || input.provenance.epochId.length > 200
+    || !Number.isSafeInteger(input.provenance.seq) || input.provenance.seq <= 0) {
+    throw new TypeError("home causality query is invalid or unbounded");
+  }
+}
+
 function validateActivityQuery(input: HomeWorldActivityQuery): number {
   const limit = input?.limit ?? 20;
   if (!input || typeof input !== "object"
@@ -2601,8 +2760,18 @@ function evidenceBindingKey(nativeId: string, nativeInstanceId: string): string 
   return `${nativeId}\u0000${nativeInstanceId}`;
 }
 
+function causalityExtensionKey(): string {
+  return canonicalExtensionKey(CAUSALITY_EXTENSION);
+}
+
 function activityBindingKey(bridgeId: string, nativeId: string, nativeInstanceId: string): string {
   return `${bridgeId}\u0000${nativeId}\u0000${nativeInstanceId}`;
+}
+
+function causalityAttribution(value: string): HomeWorldCausalityAttribution {
+  return value === "user" || value === "foreign_rule" || value === "hob_artifact" || value === "physical"
+    ? value
+    : "unknown";
 }
 
 function evidenceScalar(value: unknown): string | number | boolean | null | undefined {

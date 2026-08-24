@@ -7,3 +7,4 @@ export * from "./bridge-foreign-rules.js";
 export * from "./bridge-foreign-rule-migration.js";
 export * from "./bridge-foreign-rule-control.js";
 export * from "./bridge-org-hints.js";
+export * from "./bridge-causality.js";

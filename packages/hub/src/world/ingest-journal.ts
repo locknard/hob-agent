@@ -69,6 +69,18 @@ export interface JournalLiveStateActivityPage {
   readonly truncated: boolean;
 }
 
+/** Exact state/cause lookup used by the World owning boundary. */
+export interface JournalCausalityQuery {
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly refSeq: number;
+}
+
+export interface JournalCausalityPage {
+  readonly state?: IngestRecord;
+  readonly causality?: IngestRecord;
+}
+
 export interface JournalCapacityStatus {
   readonly usedBytes: number;
   readonly maxBytes: number;
@@ -159,6 +171,8 @@ export interface IngestJournal {
   queryLiveStateRecords?(query: JournalLiveStateQuery): JournalLiveStatePage;
   /** Optional metadata-only activity seam; values never leave the journal. */
   queryLiveStateActivity?(query: JournalLiveStateActivityQuery): JournalLiveStateActivityPage;
+  /** Optional exact causality seam; raw rows remain inside the World boundary. */
+  queryCausalityRecords?(query: JournalCausalityQuery): JournalCausalityPage;
   records(bridgeId?: string): IngestRecord[];
   rejections(bridgeId?: string): RejectionRecord[];
   historyGaps(bridgeId?: string): HistoryGapRecord[];
@@ -196,6 +210,7 @@ const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
 const DEFAULT_EVIDENCE_WINDOW_MS = 168 * 60 * 60 * 1_000;
 const MAX_EVIDENCE_WINDOW_MS = 366 * 24 * 60 * 60 * 1_000;
 const MAX_RETENTION_REFERENCES = 1_000;
+const MAX_CAUSALITY_DISTANCE = 32;
 
 /**
  * The Phase 0 journal deliberately exposes a small SQLite seam. Every legal
@@ -696,6 +711,35 @@ export class SqliteIngestJournal implements IngestJournal {
     };
   }
 
+  queryCausalityRecords(query: JournalCausalityQuery): JournalCausalityPage {
+    validateCausalityQuery(query);
+    const stateRow = this.db.prepare(`SELECT bridge_id, received_at, envelope_json
+      FROM ingest_events
+      WHERE bridge_id = ? AND epoch_id = ? AND seq = ? AND kind = 'state'
+      LIMIT 1`).get(query.bridgeId, query.epochId, query.refSeq) as SqlRow | undefined;
+    const causalityRow = this.db.prepare(`SELECT bridge_id, received_at, envelope_json
+      FROM ingest_events
+      WHERE bridge_id = ? AND epoch_id = ? AND kind = 'ext'
+        AND seq > ? AND seq <= ?
+        AND json_extract(envelope_json, '$.event.ext') = 'causality@1'
+        AND json_extract(envelope_json, '$.event.payload.refSeq') = ?
+      ORDER BY seq ASC LIMIT 1`).get(
+        query.bridgeId,
+        query.epochId,
+        query.refSeq,
+        query.refSeq + MAX_CAUSALITY_DISTANCE,
+        query.refSeq,
+      ) as SqlRow | undefined;
+    const recordFromRow = (row: SqlRow | undefined): IngestRecord | undefined => row === undefined
+      ? undefined
+      : {
+        bridgeId: String(row.bridge_id),
+        receivedAt: String(row.received_at),
+        envelope: JSON.parse(String(row.envelope_json)) as Envelope,
+      };
+    return { state: recordFromRow(stateRow), causality: recordFromRow(causalityRow) };
+  }
+
   rejections(bridgeId?: string): RejectionRecord[] {
     const rows = (bridgeId === undefined
       ? this.db.prepare("SELECT bridge_id, epoch_id, seq, reason, native_id FROM ingest_rejections ORDER BY id").all()
@@ -847,6 +891,15 @@ function validateLiveStateActivityQuery(query: JournalLiveStateActivityQuery): v
     || Date.parse(query.since) > Date.parse(query.until)
     || !Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 50) {
     throw new TypeError("live state activity query is invalid or unbounded");
+  }
+}
+
+function validateCausalityQuery(query: JournalCausalityQuery): void {
+  if (!query || typeof query !== "object"
+    || typeof query.bridgeId !== "string" || query.bridgeId.length === 0 || query.bridgeId.length > 200
+    || typeof query.epochId !== "string" || query.epochId.length === 0 || query.epochId.length > 200
+    || !Number.isSafeInteger(query.refSeq) || query.refSeq <= 0) {
+    throw new TypeError("causality query is invalid or unbounded");
   }
 }
 
