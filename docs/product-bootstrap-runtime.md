@@ -13,6 +13,11 @@ starting, operational, and recovery product states from one composition root.
 The DSH Agent, bridge adapters, observation scheduler, and action plane mount
 from one activated configuration generation.
 
+Phase 0 and Phase 0.5 use one TypeScript service and one DSH Agent Runtime. The
+Home Assistant adapter mounts in-process as a trusted adapter behind the neutral
+bridge contract. A managed bridge sidecar and a second execution runtime belong
+to the Phase 1 adapter-host gate and are absent from the Phase 0 product.
+
 A first-time household opens the product and completes setup before the Agent
 becomes active. An activated household starts from its saved generation; launch
 environment model and bridge values remain available to diagnostic CLI commands
@@ -173,7 +178,8 @@ joins through the same catalog seam.
   bridge while every secret remains in the credential vault.
 - Restart reconstructs the same active generation and device session.
 - A failed model or bridge probe leaves the operational generation unchanged.
-- Activation mounts one DSH runtime and one selected instance of each configured
-  bridge.
+- Activation mounts one DSH runtime and one selected in-process instance of each
+  configured Phase 0 bridge. Sidecar lifecycle ownership is a Phase 1 adapter-host
+  acceptance gate.
 - The Product Shell presents continuous setup, starting, recovery, and completion
   feedback on desktop and mobile with reduced-motion and increased-contrast modes.

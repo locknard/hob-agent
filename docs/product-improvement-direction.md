@@ -16,7 +16,8 @@ v4 还原评审结论 · 当前代码
 - DR-009 手机与 Web 双端一等，每组功能双视口同轮验收。
 - DR-012 多视图与用户自定义布局是产品能力。
 - DR-002 的拒绝闩锁、5 条注意力容量、显式暂缓（业务稿逐条确认保留）。
-- 三档动作闸门（直接做 / 确认档 / 管理员档）与 10 秒撤销窗口。
+- 三档动作闸门（直接做 / 确认档 / 高影响档）与 10 秒撤销窗口。高影响档
+  依据在场状态和绑定私人设备确认，产品不要求成人管理员角色。
 - 运行时确认、安全告警与持久建议的对象独立性；运行时拒绝不写闩锁。
 - 本轮已落地的四项信任修复（按钮层级、失联诚实、红色归位、倒计时自然语言）。
 
@@ -60,7 +61,7 @@ v4 还原评审结论 · 当前代码
 | 安全告警 | Host 安全层，穿透一切布局 | 否 |
 | 自动化建议（`automation-draft`） | 提案主线，一次启用决定 | 是 |
 | 硬件/家庭洞察（`household-insight`） | 建议卡，无启用路径，只有“有帮助”反馈 | 是（动作文案独立） |
-| 系统治理（`identity-link` / `capability-binding` / `action-authority-binding`） | 各自 Hub owner 的管理员入口 | 否，移出收件箱 |
+| 系统治理（`identity-link` / `capability-binding` / `action-authority-binding`） | 各自 Hub owner 的治理入口 | 否，移出收件箱 |
 
 ## 三、修改方向
 
@@ -129,3 +130,18 @@ v4 还原评审结论 · 当前代码
 - **成功指标**沿用业务稿：启用后是否很快被关闭或频繁人工覆盖，比批准率更重要。
 - 每阶段完成定义：`pnpm test`、`pnpm check`、双视口浏览器验证、相关文档同步修订，
   全部有新鲜输出。
+
+## 六、Phase 0.5 架构对齐
+
+下一阶段按 [`phase-0-5-ha-migration.md`](./phase-0-5-ha-migration.md) 推进 HA
+迁移。后台准备完成证据、冲突、权限、Artifact 编译和无写入模拟；家庭成员对
+`ready` 的精确方案作出一次启用决定；Hub 完成 HA 部署、读回验证、持续状态和回退。
+迁移状态使用 `discovered → assessed → translated → simulated → ready →
+switching → verified`，失败进入 `needs_attention`，已验证行为的回退使用
+`rolling_back → restored`。
+
+Phase 0.5 运行在单一 TypeScript 服务、单一 Cordis 组合根和唯一 DSH Agent Runtime
+内。HA 适配器以同一服务中的受信中立适配器运行；Phase 1 才按适配器宿主门槛评估
+TypeScript 进程内适配器或受管 sidecar。迁移首期采用有界 schedule/capability 触发、
+扁平 AND 条件和中立 `set_level`、`set_boolean`、`notify_local` 动作，首个真实
+切换覆盖可恢复的灯光与开关 capability。

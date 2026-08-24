@@ -17,7 +17,11 @@ presentation projection. Adapter-native payloads, credentials, bridge clients,
 Cordis context and executors remain outside the Agent and layout contracts.
 
 The V4 migration has one authenticated Product Shell and one household command
-path. The retired Inbox runtime and Control Center have been removed.
+path. The retired Inbox runtime and Control Center have been removed. The next
+product boundary is the Phase 0.5 HA migration state machine recorded in
+[`phase-0-5-ha-migration.md`](./phase-0-5-ha-migration.md). Phase 0 and Phase
+0.5 remain one TypeScript service with in-process trusted bridge adapters; a
+managed sidecar host is a Phase 1 entry-gated shape.
 
 ## Runtime ownership
 
@@ -140,7 +144,9 @@ The action plane applies three policy classes:
 2. `confirmation` for broader reversible effects that require an explicit
    present-person confirmation;
 3. `administrator` for locks, valves, security and other high-impact effects,
-   approved on a private device bound to an adult administrator.
+   approved by a present household member on a bound private device. The
+   product authority model uses presence and device binding; it does not
+   require an adult administrator role.
 
 State verification requires a recent successful bridge contact. A stale bridge
 turns both action verification and safety resolution into `unknown`. Startup
@@ -169,7 +175,10 @@ counts, expiry semantics and badges.
   queue.
 - “Only this time” closes the current proposal. “Do not suggest this again”
   records the durable deduplication latch and returns a visible acknowledgement.
-- Direction approval, trial and enablement remain separate consent steps.
+- Preparation completes evidence, policy, compilation and simulation before a
+  ready proposal reaches the household. The household makes one enablement
+  decision for that exact prepared revision, and enablement starts the governed
+  deployment path.
 
 ## Advice, correction and media closure
 
@@ -348,10 +357,11 @@ bundles first-class without adding presentation branches to the Home domain.
 
 ## Current architectural direction
 
-The next product milestone is the single-process bootstrap state machine recorded
+The current product milestone is the single-process bootstrap state machine recorded
 in [`product-bootstrap-runtime.md`](./product-bootstrap-runtime.md). It makes local
 pairing, model selection and probe, bridge setup, scoped credential storage, and
-configuration activation available before the operational Agent mounts. Subsequent
-work broadens household coverage through richer neutral capability descriptions,
-additional bridge adapters, declarative layout providers and real-home reliability
-evidence inside the same DSH/Cordis runtime and existing Hub owners.
+configuration activation available before the operational Agent mounts. The next
+implementation milestone is the HA migration state machine recorded in
+[`phase-0-5-ha-migration.md`](./phase-0-5-ha-migration.md), followed by real-home
+reliability evidence and Phase 1 adapter entry review inside the same DSH/Cordis
+runtime and existing Hub owners.
