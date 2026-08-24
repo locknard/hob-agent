@@ -56,6 +56,14 @@ import {
   type ForeignRuleMigrationUnsupportedReason,
 } from "@hob/bridge-contract";
 import {
+  FOREIGN_RULE_CONTROL_EXTENSION,
+  foreignRuleControlSetEnabledRequestSchema,
+  foreignRuleControlStatusRequestSchema,
+  type ForeignRuleControlHandle,
+  type ForeignRuleControlSetEnabledResult,
+  type ForeignRuleControlStatusResult,
+} from "@hob/bridge-contract";
+import {
   FOREIGN_RULES_EXTENSION,
   MAX_FOREIGN_RULES,
   type ForeignRuleCatalog,
@@ -828,6 +836,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       extensions: Object.freeze([
         FOREIGN_RULES_EXTENSION,
         FOREIGN_RULE_MIGRATION_EXTENSION,
+        FOREIGN_RULE_CONTROL_EXTENSION,
         ORG_HINTS_EXTENSION,
         ACTIONS_EXTENSION,
         AUTOMATIONS_EXTENSION,
@@ -862,6 +871,13 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     if (name === "foreignRuleMigration@1") {
       const handle: ForeignRuleMigrationHandle = {
         translate: (request, options) => this.translateForeignRule(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
+    if (name === "foreignRuleControl@1") {
+      const handle: ForeignRuleControlHandle = {
+        status: (request, options) => this.foreignRuleControlStatus(request, options.signal),
+        setEnabled: (request, options) => this.setForeignRuleEnabled(request, options.signal),
       };
       return handle as ExtensionHandleRegistry[K];
     }
@@ -944,6 +960,124 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       nativeId: binding.nativeId,
       nativeInstanceId: binding.nativeInstanceId,
     };
+  }
+
+  private async foreignRuleControlStatus(
+    requestValue: unknown,
+    signal: AbortSignal,
+  ): Promise<ForeignRuleControlStatusResult> {
+    const parsed = foreignRuleControlStatusRequestSchema.safeParse(requestValue);
+    if (!parsed.success) return { status: "unknown", reason: "invalid_response" };
+    if (signal.aborted || this.lifecycle !== "running") return { status: "unknown", reason: "unavailable" };
+    const nativeConfigId = this.foreignRuleConfigIdsByRef.get(parsed.data.ruleRef);
+    if (nativeConfigId === undefined) return { status: "missing" };
+    try {
+      return await this.readForeignRuleControlState(nativeConfigId, signal);
+    } catch {
+      return { status: "unknown", reason: "unavailable" };
+    }
+  }
+
+  private async setForeignRuleEnabled(
+    requestValue: unknown,
+    signal: AbortSignal,
+  ): Promise<ForeignRuleControlSetEnabledResult> {
+    const parsed = foreignRuleControlSetEnabledRequestSchema.safeParse(requestValue);
+    if (!parsed.success) return { status: "rejected", reason: "failed" };
+    if (signal.aborted) return { status: "unknown", reason: "cancelled" };
+    if (this.lifecycle !== "running" || this.bridge === undefined) return { status: "rejected", reason: "unavailable" };
+    const nativeConfigId = this.foreignRuleConfigIdsByRef.get(parsed.data.ruleRef);
+    if (nativeConfigId === undefined) return { status: "rejected", reason: "not_found" };
+
+    let preflight: ForeignRuleControlConfigRead;
+    try {
+      preflight = await this.readForeignRuleControlConfig(nativeConfigId, signal);
+    } catch {
+      return { status: "rejected", reason: "unavailable" };
+    }
+    if (preflight.status === "missing") return { status: "rejected", reason: "not_found" };
+    if (preflight.status === "unavailable") return { status: "rejected", reason: "unavailable" };
+    if (preflight.status === "invalid") return { status: "rejected", reason: "failed" };
+    if (preflight.sourceFingerprint !== parsed.data.expectedSourceFingerprint) {
+      return { status: "rejected", reason: "stale_source" };
+    }
+
+    try {
+      await this.bridge.callService({
+        domain: "automation",
+        service: parsed.data.enabled ? "turn_on" : "turn_off",
+        entityId: `automation.${nativeConfigId}`,
+      }, signal);
+    } catch {
+      return signal.aborted
+        ? { status: "unknown", reason: "cancelled" }
+        : { status: "unknown", reason: "upstream_unavailable" };
+    }
+
+    try {
+      const observed = await this.readForeignRuleControlState(nativeConfigId, signal);
+      const expectedStatus = parsed.data.enabled ? "running" : "paused";
+      if (observed.status === expectedStatus
+        && observed.sourceFingerprint === parsed.data.expectedSourceFingerprint) {
+        return observed;
+      }
+      return signal.aborted
+        ? { status: "unknown", reason: "cancelled" }
+        : { status: "unknown", reason: "upstream_unavailable" };
+    } catch {
+      return signal.aborted
+        ? { status: "unknown", reason: "cancelled" }
+        : { status: "unknown", reason: "upstream_unavailable" };
+    }
+  }
+
+  private async readForeignRuleControlState(
+    nativeConfigId: string,
+    signal: AbortSignal,
+  ): Promise<ForeignRuleControlStatusResult> {
+    const accessToken = await this.resolveAccessToken();
+    const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+    const stateResponse = await fetchImpl(
+      new URL(`/api/states/automation.${nativeConfigId}`, this.context.config.baseUrl),
+      { signal, headers: { authorization: `Bearer ${accessToken}` } },
+    );
+    if (stateResponse.status === 404) return { status: "missing" };
+    if (!stateResponse.ok) return { status: "unknown", reason: "unavailable" };
+    let stateBody: unknown;
+    try {
+      stateBody = await stateResponse.json();
+    } catch {
+      return { status: "unknown", reason: "invalid_response" };
+    }
+    if (!isRecord(stateBody) || (stateBody.state !== "on" && stateBody.state !== "off")) {
+      return { status: "unknown", reason: "invalid_response" };
+    }
+    const config = await this.readForeignRuleControlConfig(nativeConfigId, signal);
+    if (config.status === "missing") return { status: "missing" };
+    if (config.status === "unavailable") return { status: "unknown", reason: "unavailable" };
+    if (config.status === "invalid") return { status: "unknown", reason: "invalid_response" };
+    return {
+      status: stateBody.state === "on" ? "running" : "paused",
+      sourceFingerprint: config.sourceFingerprint,
+    };
+  }
+
+  private async readForeignRuleControlConfig(
+    nativeConfigId: string,
+    signal: AbortSignal,
+  ): Promise<ForeignRuleControlConfigRead> {
+    let response: { readonly ok: boolean; readonly statusCode: number; readonly body?: unknown };
+    try {
+      response = await this.automationConfigRequest("GET", nativeConfigId, signal);
+    } catch {
+      return { status: "unavailable" };
+    }
+    if (response.statusCode === 404) return { status: "missing" };
+    if (!response.ok) return { status: "unavailable" };
+    const fingerprint = sourceAutomationFingerprint(response.body);
+    return fingerprint === undefined
+      ? { status: "invalid" }
+      : { status: "ok", sourceFingerprint: fingerprint };
   }
 
   private async foreignRuleConfigRequest(
@@ -1492,6 +1626,12 @@ type ForeignRuleTranslationProjection =
   | { readonly status: "translated"; readonly title: string; readonly plan: ForeignRuleMigrationPlan }
   | { readonly status: "unsupported"; readonly reason: ForeignRuleMigrationUnsupportedReason }
   | { readonly status: "unavailable"; readonly reason: "upstream_unavailable" | "invalid_response" | "cancelled" };
+
+type ForeignRuleControlConfigRead =
+  | { readonly status: "ok"; readonly sourceFingerprint: string }
+  | { readonly status: "missing" }
+  | { readonly status: "unavailable" }
+  | { readonly status: "invalid" };
 
 const HOME_ASSISTANT_WEEKDAY_TO_NUMBER: Readonly<Record<string, number>> = Object.freeze({
   sun: 0,
@@ -2345,6 +2485,14 @@ function automationConfigFingerprint(stored: Record<string, unknown>): string {
     mode: stored.mode,
   });
   return `sha256:${createHash("sha256").update(material).digest("hex")}`;
+}
+
+/** The source fingerprint is the same canonical whole-config identity returned by migration translation. */
+function sourceAutomationFingerprint(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const canonical = canonicalNativeJson(value);
+  if (canonical === undefined || Buffer.byteLength(canonical, "utf8") > MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES) return undefined;
+  return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
 /** Deep equality on the behavioral fields; storage may add bookkeeping keys. */

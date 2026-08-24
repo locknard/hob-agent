@@ -62,6 +62,14 @@ verified → rolling_back → restored
 
 部署成功只在 HA 读回匹配目标、配置指纹和运行状态后显示为 `verified`。读回出现未知、超时或漂移时，Hub 显示 `needs_attention` 并保留切换前快照。暂停、关闭和回退都由 Hub 发送带幂等键的明确命令，并分别记录 actor、revision、bridge watermark 和结果。
 
+### 切换写侧桥合同
+
+原 HA 规则使用独立、版本化的 `foreignRuleControl@1` 中立扩展进行状态读回和启停。该扩展只接受 `foreignRules@2` 产生的 opaque `ruleRef`、Hub 生成的操作幂等键和预期 source fingerprint；原生配置 id、entity、service、URL 与原生响应始终留在适配器内部。`automations@1` 继续只管理 Hub 创建的自动化，两个扩展互不扩张权限。
+
+家庭成员批准精确 `ready` revision 后，Hub 先读回原规则的运行状态和配置指纹，再原子记录 `switching`。首期切换先停用原规则并确认其为暂停状态，再通过现有 Proposal 部署通道创建并验证 Hob 自动化；这段有界切换窗口不允许原规则和新规则同时运行。Hub 只有在原规则保持暂停、新规则运行、部署 identity 和配置指纹全部匹配时记录 `verified`。任一步出现 stale source、超时、未知结果或读回不一致时，Hub 停止后续写入；已知失败恢复原规则，未知结果先读回再决定恢复或继续，系统不盲目重放命令。
+
+回退固定执行 `verified → rolling_back → restored`：Hub 先停止并撤下 Hob 自动化，确认其不再运行，再按切换前快照恢复原规则并读回。回退中的未知结果保留两个自动化的最后已知状态、操作幂等键、actor、精确 Proposal/Artifact revision、source fingerprint 和 bridge watermark，并进入可恢复的 `needs_attention`。
+
 ## Phase 1 原生适配器进入门槛
 
 原生 Matter、Zigbee、BLE、ESPHome 或其他协议适配器在 Phase 0.5 的迁移证据达到以下门槛后进入评审：

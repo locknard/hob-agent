@@ -9,6 +9,7 @@ import {
 import { runBridgeAdapterConformance } from "@hob/bridge-contract";
 import type { ActionsExtension, AutomationsExtension, BridgeActionDescriptor } from "@hob/bridge-contract";
 import type { ForeignRuleMigrationHandle, ForeignRulesHandle } from "@hob/bridge-contract";
+import type { ForeignRuleControlHandle } from "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
 import {
@@ -442,6 +443,7 @@ test("factory construction is synchronous and does not resolve credentials or to
     extensions: [
       { id: "foreignRules", version: "2.0.0" },
       { id: "foreignRuleMigration", version: "1.0.0" },
+      { id: "foreignRuleControl", version: "1.0.0" },
       { id: "orgHints", version: "1.0.0" },
       { id: "actions", version: "1.0.0" },
       { id: "automations", version: "1.0.0" },
@@ -825,6 +827,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
     extensionHandles: [
       { key: "foreignRules@2", available: true },
       { key: "foreignRuleMigration@1", available: true },
+      { key: "foreignRuleControl@1", available: true },
       { key: "orgHints@1", available: false },
       { key: "actions@1", available: true },
       { key: "automations@1", available: true },
@@ -1182,6 +1185,41 @@ function foreignRuleMigrationFetchFake(
   return { fetchImpl, requests };
 }
 
+function foreignRuleControlFetchFake(config: unknown, initialState: "on" | "off" = "on") {
+  const requests: Array<{ method: string; url: string; headers: Record<string, string> }> = [];
+  let configBody = config;
+  let state = initialState;
+  let invalidConfigJson = false;
+  let configStatus = 200;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    requests.push({
+      method,
+      url,
+      headers: { ...(init?.headers as Record<string, string>) },
+    });
+    if (url.endsWith("/api/config")) return new Response(JSON.stringify({ time_zone: "Asia/Shanghai" }), { status: 200 });
+    if (url.endsWith("/api/states/automation.arrival_light")) {
+      return new Response(JSON.stringify({ state }), { status: 200 });
+    }
+    if (url.endsWith("/api/config/automation/config/arrival_light")) {
+      return invalidConfigJson
+        ? new Response("not-json", { status: configStatus })
+        : new Response(JSON.stringify(configBody), { status: configStatus });
+    }
+    return new Response("{}", { status: 404 });
+  };
+  return {
+    fetchImpl,
+    requests,
+    setState(next: "on" | "off") { state = next; },
+    setConfig(next: unknown) { configBody = next; },
+    setInvalidConfig(next: boolean) { invalidConfigJson = next; },
+    setConfigStatus(next: number) { configStatus = next; },
+  };
+}
+
 const automationTarget = {
   hwCapabilityId: "cap-light",
   binding: { bridgeId: "bridge-ha", nativeId: "device-1", nativeInstanceId: "entity-stable-1" },
@@ -1297,6 +1335,244 @@ test("rejects a schedule whose timezone differs from the Home Assistant instance
   assert.equal((result as { reason: string }).reason, "unsupported");
   assert.equal(fake.requests.some((request) => request.method === "POST"), false, "a shifted schedule never reaches the config API");
   await adapter.control.dispose();
+});
+
+test("reads one foreign rule through an opaque ruleRef with a neutral fingerprint", async () => {
+  const socket = new FakeSocket();
+  const nativeConfig = {
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  };
+  const fake = foreignRuleControlFetchFake(nativeConfig);
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+
+  const catalog = await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog();
+  const ruleRef = catalog?.rules[0]?.ruleRef;
+  assert.equal(typeof ruleRef, "string");
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const result = await handle.status({ ruleRef: ruleRef! }, { signal: new AbortController().signal });
+
+  assert.equal(result.status, "running");
+  if (result.status !== "running") assert.fail("expected a running foreign rule");
+  assert.match(result.sourceFingerprint, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(result).includes("arrival_light"), false);
+  assert.deepEqual(fake.requests.map((request) => request.url), [
+    "http://ha.local:8123/api/states/automation.arrival_light",
+    "http://ha.local:8123/api/config/automation/config/arrival_light",
+  ]);
+  await adapter.control.dispose();
+  void first;
+});
+
+test("rejects a stale foreign source before sending a service command", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const result = await handle.setEnabled({
+    ruleRef,
+    expectedSourceFingerprint: `sha256:${"b".repeat(64)}`,
+    enabled: false,
+    operationId: "0123456789abcdef0123456789abcdef",
+  }, { signal: new AbortController().signal });
+
+  assert.deepEqual(result, { status: "rejected", reason: "stale_source" });
+  assert.equal(socket.sent.some((message) => message.type === "call_service"), false);
+  await adapter.control.dispose();
+  void first;
+});
+
+test("reports a foreign rule missing from the bound opaque catalog without writing", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+
+  assert.deepEqual(await handle.status({ ruleRef: "ha-rule:missing" }, { signal: new AbortController().signal }), {
+    status: "missing",
+  });
+  assert.deepEqual(await handle.setEnabled({
+    ruleRef: "ha-rule:missing",
+    expectedSourceFingerprint: `sha256:${"a".repeat(64)}`,
+    enabled: false,
+    operationId: "0123456789abcdef0123456789abcdef",
+  }, { signal: new AbortController().signal }), { status: "rejected", reason: "not_found" });
+  assert.equal(socket.sent.some((message) => message.type === "call_service"), false);
+  await adapter.control.dispose();
+  void first;
+});
+
+test("sets a foreign rule and verifies target state and source fingerprint after the service ack", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
+  if (observed.status !== "running") assert.fail("expected a running source rule");
+
+  const pending = handle.setEnabled({
+    ruleRef,
+    expectedSourceFingerprint: observed.sourceFingerprint,
+    enabled: false,
+    operationId: "fedcba9876543210fedcba9876543210",
+  }, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.at(-1)!;
+  assert.equal(command.type, "call_service");
+  assert.equal(command.domain, "automation");
+  assert.equal(command.service, "turn_off");
+  assert.deepEqual(command.target, { entity_id: "automation.arrival_light" });
+  fake.setState("off");
+  socket.receive({ id: command.id, type: "result", success: true, result: null });
+
+  const result = await pending;
+  assert.deepEqual(result, { status: "paused", sourceFingerprint: observed.sourceFingerprint });
+  assert.equal(JSON.stringify(result).includes("arrival_light"), false);
+  await adapter.control.dispose();
+  void first;
+});
+
+test("returns effect-uncertain when Home Assistant does not acknowledge a foreign rule toggle", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
+  if (observed.status !== "running") assert.fail("expected a running source rule");
+
+  const pending = handle.setEnabled({
+    ruleRef,
+    expectedSourceFingerprint: observed.sourceFingerprint,
+    enabled: false,
+    operationId: "00112233445566778899aabbccddeeff",
+  }, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.at(-1)!;
+  socket.receive({ id: command.id, type: "result", success: false, error: { message: "upstream unavailable" } });
+
+  assert.deepEqual(await pending, { status: "unknown", reason: "upstream_unavailable" });
+  await adapter.control.dispose();
+  void first;
+});
+
+test("does not verify a foreign rule after an acknowledged toggle when its config fingerprint drifts", async () => {
+  const socket = new FakeSocket();
+  const nativeConfig = {
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  };
+  const fake = foreignRuleControlFetchFake(nativeConfig);
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
+  if (observed.status !== "running") assert.fail("expected a running source rule");
+
+  const pending = handle.setEnabled({
+    ruleRef,
+    expectedSourceFingerprint: observed.sourceFingerprint,
+    enabled: false,
+    operationId: "fedcba9876543210fedcba9876543210",
+  }, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.at(-1)!;
+  fake.setConfig({ ...nativeConfig, alias: "被改写的规则" });
+  fake.setState("off");
+  socket.receive({ id: command.id, type: "result", success: true, result: null });
+
+  assert.deepEqual(await pending, { status: "unknown", reason: "upstream_unavailable" });
+  await adapter.control.dispose();
+  void first;
+});
+
+test("fails closed when foreign rule configuration read-back is invalid", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  fake.setInvalidConfig(true);
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+
+  assert.deepEqual(await handle.status({ ruleRef }, { signal: new AbortController().signal }), {
+    status: "unknown",
+    reason: "invalid_response",
+  });
+  await adapter.control.dispose();
+  void first;
 });
 
 test("translates one opaque foreign rule through a read-only versioned migration extension", async () => {

@@ -14,6 +14,7 @@ import {
   type ForeignRuleMigrationPlan,
   type ForeignRuleMigrationUnsupportedReason,
   type ForeignRuleSummary,
+  type ForeignRuleControlHandle,
   type ForeignRulesHandle,
 } from "@hob/bridge-contract";
 import { orgHintPayloadSchema } from "@hob/bridge-contract";
@@ -1078,6 +1079,11 @@ export class HomeWorldService extends Service {
     return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
   }
 
+  /** Returns the Hub-owned foreign-rule control handle only for a bounded, ready bridge. */
+  foreignRuleControlFor(bridgeId: string): ForeignRuleControlHandle | undefined {
+    return boundedMigrationText(bridgeId, 256) ? this.liveForeignRuleControlHandle(bridgeId) : undefined;
+  }
+
   /**
    * The household-facing name behind a capability, for gate disclosure:
    * the device name first, then the stable semantic label. A capability
@@ -1173,6 +1179,23 @@ export class HomeWorldService extends Service {
       return undefined;
     }
     return handle !== undefined && typeof handle.deploy === "function" ? handle : undefined;
+  }
+
+  private liveForeignRuleControlHandle(bridgeId: string): ForeignRuleControlHandle | undefined {
+    const runtime = this.runtimesById.get(bridgeId);
+    if (runtime === undefined
+      || runtime.extensionAvailability["foreignRuleControl@1"] !== "available"
+      || runtime.ingest.diagnostics().connectionState !== "ready") return undefined;
+    try {
+      const handle = runtime.adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle | undefined;
+      return handle !== undefined
+        && typeof handle.status === "function"
+        && typeof handle.setEnabled === "function"
+        ? handle
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   actionDescriptorFor(hwCapabilityId: string): BridgeActionDescriptor | undefined {
