@@ -394,9 +394,15 @@ test("shows honest capture and upload stages without fabricating a partial trans
   h.stop.click();
   await flush();
   assert.equal(h.root.dataset.voiceState, "transcribing");
+  assert.equal(h.detail.textContent, "原始录音只用于这次转写，请求结束后从内存丢弃。");
   assert.equal(h.transcript.textContent, "还没有转写");
   assert.equal(h.transcript.dataset.voiceTranscriptKind, "empty");
-  assert.equal(h.captureProgress.textContent, "录音已完成，正在转成文字；完成后显示全文。");
+  const finalizingCopy = "录音已完成，正在转成文字；完成后显示全文。";
+  assert.equal(h.captureProgress.textContent, finalizingCopy);
+  assert.equal(
+    `${h.detail.textContent}\n${h.captureProgress.textContent}`.split(finalizingCopy).length - 1,
+    1,
+  );
   assert.doesNotMatch(h.captureProgress.textContent, /字节|provider|audio/i);
 
   transcription.resolve({
@@ -834,6 +840,7 @@ test("keeps the current upload controller when an older upload settles", async (
   FakeRecorder.instances[1]!.emit([2, 3, 4]);
   h.stop.click();
   await flush();
+  assert.equal(h.detail.textContent, "原始录音只用于这次转写，请求结束后从内存丢弃。");
   assert.equal(h.captureProgress.textContent, "录音已完成，正在转成文字；完成后显示全文。");
 
   first.resolve({ ok: true, json: async () => ({ status: "no_input" }) });

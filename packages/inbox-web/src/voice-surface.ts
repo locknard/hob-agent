@@ -94,7 +94,7 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
       eyebrow: "整理语音",
       heading: "正在确认刚才听到的内容",
       status: "转成文字",
-      detail: "录音已完成，正在转成文字；完成后显示全文。原始录音只用于这次转写，请求结束后从内存丢弃。",
+      detail: "原始录音只用于这次转写，请求结束后从内存丢弃。",
       recovery: { href: "/conversation", label: "改用文字" },
     },
     thinking: {
@@ -254,7 +254,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       "等待下一步",
       "没有听清。再说一次就好。",
     ],
-    transcribing: ["转成文字", "录音已完成，正在转成文字；完成后显示全文。"],
+    transcribing: ["转成文字", "原始录音只用于这次转写，请求结束后从内存丢弃。"],
     thinking: ["正在处理", "正在查看家里的信息；你可以取消等待。"],
     speaking: ["正在播报", "可以停止播报，或直接再次说话。"],
     playback_failed: [
