@@ -126,6 +126,13 @@ export interface HomePreparationStatus {
   readonly updatedAt: string;
 }
 
+type AutomationMutationKind = "retryEnable" | "recoverAutomation" | "closeAutomation";
+
+interface AutomationMutationInFlight {
+  readonly kind: AutomationMutationKind;
+  readonly promise: Promise<ProposalEnvelope>;
+}
+
 declare module "@deepseek-ai/cordis" {
   interface Context {
     homeProposals: HomeProposalService;
@@ -138,7 +145,7 @@ export class HomeProposalService extends Service {
   private readonly ownedStore: SqliteProposalStore | undefined;
   private readonly onPreparationQueued: BorrowedHomeProposalServiceOptions["onPreparationQueued"];
   private readonly deployment: ProposalDeploymentPort | undefined;
-  private readonly closeInFlight = new Map<string, Promise<ProposalEnvelope>>();
+  private readonly automationMutationInFlight = new Map<string, AutomationMutationInFlight>();
 
   constructor(ctx: Context, options: HomeProposalServiceOptions) {
     super(ctx, "homeProposals");
@@ -527,6 +534,11 @@ export class HomeProposalService extends Service {
 
   /** Retries a failed enablement through the same governed deployment seam and intent. */
   async retryEnable(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
+    validateLifecycleInput(input, "deployment retry");
+    return this.claimAutomationMutation(input, "retryEnable", () => this.retryEnableOnce(input));
+  }
+
+  private async retryEnableOnce(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
     const current = this.store.get(input.proposalId);
     // A process can restart after approval has persisted `enabling` but before
     // the migration decorator records its switching outcome. Only the
@@ -704,22 +716,18 @@ export class HomeProposalService extends Service {
   /** Closing withdraws the automation and restores the configuration it replaced. */
   async closeAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
     validateCloseInput(input);
+    return this.claimAutomationMutation(input, "closeAutomation", () => this.closeAutomationOnceWithLease(input));
+  }
+
+  private async closeAutomationOnceWithLease(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
     const current = this.requireDeployed(input.proposalId);
     if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
       throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
     }
-    const inFlight = this.closeInFlight.get(input.proposalId);
-    if (inFlight !== undefined) return inFlight;
     if (current.lifecycle === "recovery_required") {
       throw new ProposalStoreError("lifecycle_invalid", "This migration requires recovery before it can close");
     }
-    const operation = this.closeAutomationOnce(input, current);
-    this.closeInFlight.set(input.proposalId, operation);
-    try {
-      return await operation;
-    } finally {
-      if (this.closeInFlight.get(input.proposalId) === operation) this.closeInFlight.delete(input.proposalId);
-    }
+    return this.closeAutomationOnce(input, current);
   }
 
   private async closeAutomationOnce(
@@ -749,6 +757,11 @@ export class HomeProposalService extends Service {
 
   /** Continues one already-decided migration recovery; it never creates a new review decision. */
   async recoverAutomation(input: ProposalLifecycleInput & { readonly actor: string }): Promise<ProposalEnvelope> {
+    validateRecoveryInput(input);
+    return this.claimAutomationMutation(input, "recoverAutomation", () => this.recoverAutomationOnce(input));
+  }
+
+  private async recoverAutomationOnce(input: ProposalLifecycleInput & { readonly actor: string }): Promise<ProposalEnvelope> {
     const current = this.store.get(input.proposalId);
     if (current === undefined) throw new ProposalStoreError("not_found", "Proposal was not found");
     const started = this.store.beginRecoveryAttempt(input);
@@ -796,6 +809,40 @@ export class HomeProposalService extends Service {
       expectedRevision: started.revision,
       actor: input.actor,
     });
+  }
+
+  private claimAutomationMutation(
+    input: ProposalLifecycleInput,
+    kind: AutomationMutationKind,
+    operation: () => Promise<ProposalEnvelope>,
+  ): Promise<ProposalEnvelope> {
+    const current = this.store.get(input.proposalId);
+    if (current === undefined) throw new ProposalStoreError("not_found", "Proposal was not found");
+    if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
+      throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
+    }
+    const inFlight = this.automationMutationInFlight.get(input.proposalId);
+    if (inFlight !== undefined) {
+      if (inFlight.kind !== kind) {
+        throw new ProposalStoreError("lifecycle_invalid", "Another automation change is already in progress");
+      }
+      return inFlight.promise;
+    }
+
+    // Defer the store transition until the lease is visible. Concurrent valid
+    // callers can then join against the same pre-transition revision, while a
+    // stale or malformed caller is rejected before it can ride the lease.
+    const promise = Promise.resolve().then(operation);
+    const owner: AutomationMutationInFlight = { kind, promise };
+    this.automationMutationInFlight.set(input.proposalId, owner);
+    void promise.finally(() => {
+      if (this.automationMutationInFlight.get(input.proposalId) === owner) {
+        this.automationMutationInFlight.delete(input.proposalId);
+      }
+    }).catch(() => {
+      // The original operation promise carries the failure to its caller.
+    });
+    return promise;
   }
 
   /** The household's deployed automations, most recent first. */
@@ -1078,20 +1125,31 @@ function isBoundedId(value: unknown): value is string {
     && Buffer.byteLength(value, "utf8") <= 200;
 }
 
-function validateCloseInput(input: ProposalLifecycleInput): void {
-  if (!isRecord(input)) throw new TypeError("proposal close is required");
-  if (!isBoundedId(input.proposalId)) throw new TypeError("proposal close id is invalid");
+function validateLifecycleInput(input: ProposalLifecycleInput, label: string): void {
+  if (!isRecord(input)) throw new TypeError(`proposal ${label} is required`);
+  if (!isBoundedId(input.proposalId)) throw new TypeError(`proposal ${label} id is invalid`);
   if (input.expectedRevision !== undefined
     && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) {
-    throw new TypeError("proposal close expectedRevision is invalid");
+    throw new TypeError(`proposal ${label} expectedRevision is invalid`);
   }
   if (input.actor !== undefined && !isBoundedId(input.actor)) {
-    throw new TypeError("proposal close actor is invalid");
+    throw new TypeError(`proposal ${label} actor is invalid`);
   }
   if (input.note !== undefined
     && (typeof input.note !== "string" || input.note.trim().length === 0 || input.note.length > 1_000)) {
-    throw new TypeError("proposal close note is invalid");
+    throw new TypeError(`proposal ${label} note is invalid`);
   }
+}
+
+function validateRecoveryInput(input: ProposalLifecycleInput & { readonly actor: string }): void {
+  validateLifecycleInput(input, "recovery");
+  if (typeof input.actor !== "string" || input.actor.trim().length === 0 || input.actor.length > 200) {
+    throw new TypeError("proposal recovery actor is invalid");
+  }
+}
+
+function validateCloseInput(input: ProposalLifecycleInput): void {
+  validateLifecycleInput(input, "close");
 }
 
 function latestObservedAt(values: readonly (string | undefined)[], fallback: string): string {

@@ -1939,3 +1939,257 @@ test("a changed world demotes a prepared plan instead of spending the decision",
     store.close();
   }
 });
+
+test("coalesces concurrent retry enables after validating every caller", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T04:00:00.000Z" });
+  const ctx = new Context();
+  const intent = {
+    deploymentId: "hob_retry_once",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "native-1", nativeInstanceId: "entity-1" } }],
+  } as const;
+  let releaseDeploy: (() => void) | undefined;
+  const deployGate = new Promise<void>((resolve) => { releaseDeploy = resolve; });
+  let deployCount = 0;
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  const pending: Promise<unknown>[] = [];
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => intent,
+        deploy: async () => {
+          deployCount += 1;
+          if (deployCount > 1) await deployGate;
+          return deployCount === 1
+            ? { status: "failed" as const, reason: "temporary deployment outage" }
+            : { status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target };
+        },
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "retry:coalesced:v1",
+      dedupKey: "retry:coalesced",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+    const failed = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(failed.lifecycle, "enable_failed");
+    assert.equal(deployCount, 1);
+
+    const winner = ctx.homeProposals.retryEnable({ proposalId: failed.id, actor: "member:alice" });
+    pending.push(winner);
+    await Promise.resolve();
+    assert.equal(deployCount, 2);
+
+    const malformed = ctx.homeProposals.retryEnable({ proposalId: failed.id, expectedRevision: 0 } as never);
+    pending.push(malformed);
+    await assert.rejects(
+      malformed,
+      (error: unknown) => error instanceof TypeError && /deployment retry expectedRevision is invalid/.test(error.message),
+    );
+
+    const stale = ctx.homeProposals.retryEnable({
+      proposalId: failed.id,
+      expectedRevision: failed.revision - 1,
+      actor: "member:stale",
+    });
+    pending.push(stale);
+    await assert.rejects(
+      stale,
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "revision_conflict",
+    );
+
+    const loser = ctx.homeProposals.retryEnable({ proposalId: failed.id, actor: "member:bob" });
+    pending.push(loser);
+    releaseDeploy?.();
+
+    const [enabled, sameEnabled] = await Promise.all([winner, loser]);
+    assert.equal(deployCount, 2);
+    assert.equal(enabled.lifecycle, "active");
+    assert.deepEqual(sameEnabled, enabled);
+  } finally {
+    releaseDeploy?.();
+    await Promise.allSettled(pending);
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("coalesces concurrent migration recoveries after validating every caller", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T04:10:00.000Z" });
+  const ctx = new Context();
+  const intent = {
+    deploymentId: "hob_recovery_once",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "native-1", nativeInstanceId: "entity-1" } }],
+  } as const;
+  let releaseRecover: (() => void) | undefined;
+  const recoverGate = new Promise<void>((resolve) => { releaseRecover = resolve; });
+  let recoverCount = 0;
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  const pending: Promise<unknown>[] = [];
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        recover: async () => {
+          recoverCount += 1;
+          await recoverGate;
+          return { restored: true };
+        },
+      },
+    } as never);
+
+    const created = store.createMigrationGoverned({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "recovery:coalesced:v1",
+      dedupKey: "recovery:coalesced",
+      provenance: { producer: "home-automation-migration" },
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected migration proposal");
+    const ready = prepareToReady(store, created.proposal.id);
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "member:reviewer",
+      deploymentIntent: intent,
+    });
+    const active = store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      actor: "member:reviewer",
+      outcome: { status: "verified", deploymentId: intent.deploymentId, target: intent.target },
+    });
+    const required = store.markRecoveryRequired({
+      proposalId: active.id,
+      expectedRevision: active.revision,
+      actor: "system",
+      reason: "rollback_unknown",
+    });
+
+    const winner = ctx.homeProposals.recoverAutomation({
+      proposalId: required.id,
+      expectedRevision: required.revision,
+      actor: "member:alice",
+    });
+    pending.push(winner);
+    await Promise.resolve();
+    assert.equal(recoverCount, 1);
+
+    const malformed = ctx.homeProposals.recoverAutomation({ proposalId: required.id, expectedRevision: 0, actor: "member:bad" } as never);
+    pending.push(malformed);
+    await assert.rejects(
+      malformed,
+      (error: unknown) => error instanceof TypeError && /recovery expectedRevision is invalid/.test(error.message),
+    );
+
+    const stale = ctx.homeProposals.recoverAutomation({
+      proposalId: required.id,
+      expectedRevision: required.revision - 1,
+      actor: "member:stale",
+    });
+    pending.push(stale);
+    await assert.rejects(
+      stale,
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "revision_conflict",
+    );
+
+    const loser = ctx.homeProposals.recoverAutomation({ proposalId: required.id, actor: "member:bob" });
+    pending.push(loser);
+    releaseRecover?.();
+
+    const [closed, sameClosed] = await Promise.all([winner, loser]);
+    assert.equal(recoverCount, 1);
+    assert.equal(closed.lifecycle, "closed");
+    assert.deepEqual(sameClosed, closed);
+    assert.equal(closed.audit.filter((event) => event.action === "recovery_started").length, 1);
+    assert.equal(closed.audit.filter((event) => event.action === "closed").length, 1);
+  } finally {
+    releaseRecover?.();
+    await Promise.allSettled(pending);
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("rejects close while retry owns the proposal mutation lease", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T04:20:00.000Z" });
+  const ctx = new Context();
+  const intent = {
+    deploymentId: "hob_retry_close_conflict",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "native-1", nativeInstanceId: "entity-1" } }],
+  } as const;
+  let releaseDeploy: (() => void) | undefined;
+  const deployGate = new Promise<void>((resolve) => { releaseDeploy = resolve; });
+  let deployCount = 0;
+  let withdrawCount = 0;
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  const pending: Promise<unknown>[] = [];
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => intent,
+        deploy: async () => {
+          deployCount += 1;
+          if (deployCount > 1) await deployGate;
+          return deployCount === 1
+            ? { status: "failed" as const, reason: "temporary deployment outage" }
+            : { status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target };
+        },
+        withdraw: async () => {
+          withdrawCount += 1;
+          return { restored: true };
+        },
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "retry:close-conflict:v1",
+      dedupKey: "retry:close-conflict",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+    const failed = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "household-owner" });
+    assert.equal(failed.lifecycle, "enable_failed");
+
+    const retry = ctx.homeProposals.retryEnable({ proposalId: failed.id, actor: "member:alice" });
+    pending.push(retry);
+    const close = ctx.homeProposals.closeAutomation({ proposalId: failed.id, actor: "member:bob" });
+    pending.push(close);
+    await assert.rejects(
+      close,
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "lifecycle_invalid",
+    );
+    assert.equal(withdrawCount, 0);
+
+    releaseDeploy?.();
+    const active = await retry;
+    assert.equal(active.lifecycle, "active");
+    assert.equal(deployCount, 2);
+  } finally {
+    releaseDeploy?.();
+    await Promise.allSettled(pending);
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
