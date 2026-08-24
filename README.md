@@ -223,6 +223,21 @@ non-regular, malformed, oversized, or cross-store-inconsistent input returns a
 fixed `needs_attention` reason. An assessment with no linked workflow reports
 zero Proposal aggregates and does not require a Proposal database.
 
+To read the two durable Proposal success metrics at an explicit historical
+boundary, run:
+
+```sh
+pnpm metrics:proposal-success -- --as-of "2026-08-25T00:00:00.000Z"
+```
+
+The command opens `HOB_DATA_DIR/proposals.sqlite` read-only and emits only
+metadata aggregates. Enable rate uses one review decision per automation
+proposal; 30-day survival uses the `deployment_verified` audit time, excludes
+future rows/events and immature cohorts, and returns a null rate when a mature
+cohort contains unknown history. It never emits titles, household identity,
+actors, notes, provider/native payloads, or proposal ids. Exit code `2` means
+durable evidence is insufficient.
+
 To preview canonical-journal retention without connecting a bridge, loading a
 model, deleting evidence, or writing a retention audit, reuse `HOB_DATA_DIR`
 and `HOB_BRIDGES` and select one configured bridge:
