@@ -22,6 +22,12 @@ export interface HomeAutomationMigrationSourceControlPort {
   foreignRuleControlFor(bridgeId: string): ForeignRuleControlHandle | undefined;
 }
 
+/** Exact metadata drift state for foreign rules other than the migrated source. */
+export type HomeAutomationMigrationForeignRuleCatalogState =
+  | { readonly status: "unchanged" }
+  | { readonly status: "changed" }
+  | { readonly status: "unavailable" };
+
 /** One exact migration workflow projection, with no provider/native payload. */
 export type HomeAutomationMigrationDeploymentLookup =
   | { readonly status: "not_migration" }
@@ -59,6 +65,15 @@ export type HomeAutomationMigrationDeploymentLookup =
 /** Narrow runtime query/mutation seam. It never performs a bridge write. */
 export interface HomeAutomationMigrationDeploymentRuntimePort {
   findWorkflowForProposal(proposalId: string): HomeAutomationMigrationDeploymentLookup;
+  /**
+   * Reads the current same-bridge catalog against the assessment cut. The
+   * source rule is excluded because the cutover intentionally pauses it;
+   * every other metadata change is treated as possible conflict drift.
+   */
+  readForeignRuleCatalog(input: {
+    readonly migrationId: string;
+    readonly ruleRef: string;
+  }): Promise<HomeAutomationMigrationForeignRuleCatalogState> | HomeAutomationMigrationForeignRuleCatalogState;
   startRuleSwitch(input: {
     readonly migrationId: string;
     readonly ruleRef: string;
@@ -116,6 +131,8 @@ const ROLLBACK_UNKNOWN_REASON = "迁移回退结果暂时无法确认，已停�
 const ROLLBACK_TARGET_FINGERPRINT_FAILURE_REASON = "迁移回退的目标指纹无法验证，需要人工确认后恢复。";
 const SWITCH_TARGET_FINGERPRINT_FAILURE_REASON = "迁移自动化的部署指纹无法验证，已停止后续写入。";
 const SEMANTIC_PREFLIGHT_FAILURE_REASON = "方案里的设备当前状态或能力语义已经变化，需要重新准备后再启用；家里的设置保持原样。";
+const FOREIGN_RULE_CATALOG_CHANGED_REASON = "现有规则目录发生变化，需要重新评估后再继续运行。";
+const FOREIGN_RULE_CATALOG_UNAVAILABLE_REASON = "现有规则冲突状态暂时无法确认，需要继续恢复迁移状态。";
 
 /**
  * Governs migration cutover around the existing BridgeAutomationDeployment.
@@ -194,6 +211,22 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       || !hasNonEmptyString(lookup.deploymentConfigFingerprint)
       || !hasNonEmptyString(lookup.switchOperationId)) {
       return { disposition: "defer" };
+    }
+
+    let foreignRuleCatalog: HomeAutomationMigrationForeignRuleCatalogState;
+    try {
+      foreignRuleCatalog = await this.runtime.readForeignRuleCatalog({
+        migrationId: lookup.migrationId,
+        ruleRef: lookup.ruleRef,
+      });
+    } catch {
+      return this.verifiedReconciliationFailure(lookup, FOREIGN_RULE_CATALOG_UNAVAILABLE_REASON);
+    }
+    if (foreignRuleCatalog.status === "unavailable") {
+      return this.verifiedReconciliationFailure(lookup, FOREIGN_RULE_CATALOG_UNAVAILABLE_REASON);
+    }
+    if (foreignRuleCatalog.status === "changed") {
+      return this.verifiedReconciliationFailure(lookup, FOREIGN_RULE_CATALOG_CHANGED_REASON);
     }
 
     let control: ForeignRuleControlHandle | undefined;

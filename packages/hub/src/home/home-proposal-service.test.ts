@@ -1562,6 +1562,7 @@ test("keeps a verified migration recovery-required when reconciliation reads a m
       events.push("runtime.fail");
       return true;
     },
+    readForeignRuleCatalog: () => ({ status: "unchanged" as const }),
   };
   const sourceControl = {
     status: async () => {

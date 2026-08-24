@@ -204,6 +204,36 @@ test("assesses the exact HomeWorld catalog cut idempotently without retaining na
   }
 });
 
+test("detects exact same-bridge foreign catalog changes without interpreting rule names", async () => {
+  const { context, world, worldFiber, migrationFiber } = await setup(":memory:");
+  try {
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessment.outcome, "created");
+    const unchanged = await context.homeAutomationMigrations.readForeignRuleCatalog({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+    });
+    assert.deepEqual(unchanged, { status: "unchanged" });
+
+    world.catalogs[0] = {
+      ...world.catalogs[0]!,
+      lastSeq: SOURCE.lastSeq + 1,
+      rules: [
+        ...world.catalogs[0]!.rules,
+        { ruleRef: "rule-restored", name: "Living room light", enabled: true },
+      ],
+    };
+    const changed = await context.homeAutomationMigrations.readForeignRuleCatalog({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+    });
+    assert.deepEqual(changed, { status: "changed" });
+  } finally {
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
 test("creates a review-only Artifact candidate only after an exact eligible assessment", async () => {
   const { context, world, worldFiber, migrationFiber } = await setup(":memory:");
   try {

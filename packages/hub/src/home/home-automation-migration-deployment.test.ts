@@ -128,6 +128,7 @@ function deploymentFixture() {
       events.push("runtime.fail");
       return true;
     },
+    readForeignRuleCatalog: () => ({ status: "unchanged" as const }),
   };
   const control = {
     status: async () => {
@@ -278,6 +279,34 @@ test("allows target readback for stable verified migrations in active and paused
 
   assert.equal(guard("active"), "allow");
   assert.equal(guard("paused"), "allow");
+});
+
+test("projects another same-bridge foreign rule into recovery instead of keeping the migration active", async () => {
+  const { events, runtime, control, base, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedVerifiedLookup();
+  runtime.readForeignRuleCatalog = () => {
+    events.push("foreign.catalog");
+    return { status: "changed" as const };
+  };
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+
+  const result = await wrapper.reconcileStatus?.({
+    proposalId: BASE_REQUEST.proposalId,
+    lifecycle: "active",
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+  });
+
+  assert.equal(result?.disposition, "recovery_required");
+  assert.match((result as { readonly reason: string }).reason, /规则目录|重新评估/);
+  assert.deepEqual(events, ["foreign.catalog", "runtime.fail"], "catalog drift is fail-closed before source/target reads");
 });
 
 test("projects verified target drift but requires recovery for an unknown target or two running rules", async () => {

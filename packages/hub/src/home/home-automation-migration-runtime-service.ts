@@ -62,6 +62,7 @@ import type {
 import type {
   HomeAutomationMigrationDeploymentLookup,
   HomeAutomationMigrationDeploymentRuntimePort,
+  HomeAutomationMigrationForeignRuleCatalogState,
 } from "./home-automation-migration-deployment.js";
 import type {
   HomeAutomationMigrationFailRuleWorkflowInput,
@@ -393,6 +394,40 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
       };
     } catch {
       return { status: "ambiguous" };
+    }
+  }
+
+  /**
+   * Compares the current same-bridge rule metadata with the assessment cut.
+   * The migrated source is intentionally ignored because cutover pauses it;
+   * any other addition, removal, or metadata change is possible conflict drift.
+   */
+  async readForeignRuleCatalog(input: {
+    readonly migrationId: string;
+    readonly ruleRef: string;
+  }): Promise<HomeAutomationMigrationForeignRuleCatalogState> {
+    try {
+      if (!isExactObject(input, ["migrationId", "ruleRef"])
+        || !isBoundedId(input.migrationId)
+        || !isBoundedId(input.ruleRef)) {
+        return { status: "unavailable" };
+      }
+      const assessment = this.migration.get(input.migrationId);
+      if (assessment === undefined || assessment.status !== "assessed") return { status: "unavailable" };
+      const sourceRules = assessment.rules.filter((rule) => rule.ruleRef !== input.ruleRef);
+      const catalogs = await this.world.foreignRuleCatalog();
+      if (!Array.isArray(catalogs)) return { status: "unavailable" };
+      const matches = catalogs.filter((catalog) => catalog.bridgeId === assessment.sourceBridgeId);
+      if (matches.length !== 1) return { status: "unavailable" };
+      const [catalog] = matches;
+      if (!isExactAvailableCatalog(catalog)
+        || catalog.epochId !== assessment.sourceEpochId) return { status: "unavailable" };
+      const currentRules = catalog.rules.filter((rule) => rule.ruleRef !== input.ruleRef);
+      return sameForeignRuleMetadata(sourceRules, currentRules)
+        ? { status: "unchanged" }
+        : { status: "changed" };
+    } catch {
+      return { status: "unavailable" };
     }
   }
 
@@ -1091,6 +1126,36 @@ function isExactAvailableCatalog(value: unknown): value is HomeWorldForeignRuleC
     && isBoundedId(value.epochId)
     && isPositiveSafeInteger(value.lastSeq)
     && Array.isArray(value.rules);
+}
+
+function sameForeignRuleMetadata(
+  assessed: readonly {
+    readonly ruleRef: string;
+    readonly name?: string;
+    readonly enabled?: boolean;
+    readonly updatedAt?: string;
+  }[],
+  current: readonly {
+    readonly ruleRef: string;
+    readonly name?: string;
+    readonly enabled?: boolean;
+    readonly updatedAt?: string;
+  }[],
+): boolean {
+  const normalize = (rules: readonly {
+    readonly ruleRef: string;
+    readonly name?: string;
+    readonly enabled?: boolean;
+    readonly updatedAt?: string;
+  }[]) => JSON.stringify([...rules]
+    .map((rule) => ({
+      ruleRef: rule.ruleRef,
+      ...(rule.name === undefined ? {} : { name: rule.name }),
+      ...(rule.enabled === undefined ? {} : { enabled: rule.enabled }),
+      ...(rule.updatedAt === undefined ? {} : { updatedAt: rule.updatedAt }),
+    }))
+    .sort((left, right) => left.ruleRef < right.ruleRef ? -1 : left.ruleRef > right.ruleRef ? 1 : 0));
+  return normalize(assessed) === normalize(current);
 }
 
 function deterministicCutIdempotencyKey(bridgeId: string, epochId: string, lastSeq: number): string {
