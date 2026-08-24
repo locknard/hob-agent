@@ -1880,6 +1880,56 @@ test("keeps an unknown migration outcome honest and offers the recovery lifecycl
   assert.doesNotMatch(recovery, /运行中|已关闭|暂停|关闭并恢复/);
 });
 
+test("renders migration selection rows before deployed automation cards with bounded household actions", () => {
+  const html = renderProductShell(model({
+    route: "automations",
+    migrationSelections: [
+      { name: "晚间灯光", status: "selectable", selectionToken: "a".repeat(32) },
+      { name: "起床灯", status: "prepared", proposalId: "proposal-opaque" },
+      { name: "旧规则", status: "unavailable" },
+    ],
+  } as never));
+
+  const selectionStart = html.indexOf("晚间灯光");
+  const automationStart = html.indexOf("data-automation-id=");
+  assert.ok(selectionStart >= 0 && (automationStart < 0 || selectionStart < automationStart));
+  assert.match(html, /准备迁移建议/);
+  assert.match(html, /先查看并批准/);
+  assert.match(html, new RegExp(`name="selectionToken" value="${"a".repeat(32)}"`));
+  assert.match(html, /href="\/review-center\?proposal=proposal-opaque"/);
+  assert.match(html, /旧规则/);
+  assert.match(html, /暂时无法准备|稍后重新检查/);
+  assert.doesNotMatch(html, /native-rule|sourceFingerprint|sha256:|ruleRef/);
+  assert.equal((html.match(/name="selectionToken"/g) ?? []).length, 1);
+});
+
+test("keeps migration selection empty and failure copy calm without inventing a candidate", () => {
+  const empty = renderProductShell(model({ route: "automations", migrationSelections: [] } as never));
+  assert.doesNotMatch(empty, /准备迁移建议/);
+
+  const unavailable = renderProductShell(model({
+    route: "automations",
+    migrationSelections: [{ name: "旧规则", status: "unavailable" }],
+  } as never));
+  assert.doesNotMatch(unavailable, /<button[^>]*>准备迁移建议/);
+  assert.match(unavailable, /暂时无法准备|稍后重新检查/);
+});
+
+test("fails closed when a migration selection model contains an unsafe token or proposal identity", () => {
+  const html = renderProductShell(model({
+    route: "automations",
+    migrationSelections: [
+      { name: "坏令牌", status: "selectable", selectionToken: "<script>" },
+      { name: "坏链接", status: "prepared", proposalId: "//attacker.invalid" },
+    ],
+  } as never));
+
+  assert.doesNotMatch(html, /name="selectionToken"/);
+  assert.doesNotMatch(html, /attacker\.invalid/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /暂时无法准备|稍后重新检查/);
+});
+
 test("a blocked plan stops honestly with only the revise and decline exits", () => {
   const html = renderProductShell(model({
     route: "reviews",

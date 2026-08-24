@@ -839,6 +839,137 @@ test("projects the migration lane onto automation outcomes without native payloa
   await ctx.fiber.dispose();
 });
 
+test("projects authenticated migration selections as safe three-state product rows", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  const seenActors: unknown[] = [];
+  const selectionPort = {
+    list(actor: unknown) {
+      seenActors.push(actor);
+      return [
+        { name: "晚间灯光", status: "selectable", token: "a".repeat(32) },
+        { name: "起床灯", status: "prepared", proposalId: "proposal-migration" },
+        { name: "旧规则", status: "unavailable", ruleRef: "native-rule", sourceFingerprint: "sha256:secret" },
+      ];
+    },
+  };
+  const fiber = await ctx.plugin(ProposalInboxService, { migrationSelection: selectionPort } as never);
+
+  const projection = ctx.homeInbox.getProductShellProjection(runtimeAdminActor);
+  assert.deepEqual(projection.migrationSelections, [
+    { name: "晚间灯光", status: "selectable", selectionToken: "a".repeat(32) },
+    { name: "起床灯", status: "prepared", proposalId: "proposal-migration" },
+    { name: "旧规则", status: "unavailable", unavailableReason: "assessment_unavailable" },
+  ]);
+  assert.deepEqual(seenActors, [runtimeAdminActor]);
+  assert.equal("ruleRef" in (projection.migrationSelections?.[2] ?? {}), false);
+  assert.equal("sourceFingerprint" in (projection.migrationSelections?.[2] ?? {}), false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("does not list private migration selections without an authenticated product actor", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  let listed = 0;
+  const selectionPort = {
+    list() {
+      listed += 1;
+      return [{ name: "私有规则", status: "selectable", token: "a".repeat(32) }];
+    },
+  };
+  const fiber = await ctx.plugin(ProposalInboxService, { migrationSelection: selectionPort } as never);
+
+  const projection = ctx.homeInbox.getProductShellProjection();
+  assert.deepEqual(projection.migrationSelections, []);
+  assert.equal(listed, 0);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("keeps a shared present session read-only while still showing the private rule name", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  const selectionPort = {
+    list(actor: unknown) {
+      assert.deepEqual(actor, { ...runtimeAdminActor, device: { kind: "shared" } });
+      return [{ name: "私有规则", status: "selectable" }];
+    },
+  };
+  const fiber = await ctx.plugin(ProposalInboxService, { migrationSelection: selectionPort } as never);
+
+  const projection = ctx.homeInbox.getProductShellProjection({ ...runtimeAdminActor, device: { kind: "shared" } });
+  assert.deepEqual(projection.migrationSelections, [{
+    name: "私有规则",
+    status: "unavailable",
+    unavailableReason: "private_device_required",
+  }]);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("prepares a migration selection only for the authenticated private present actor", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  const prepared: unknown[] = [];
+  const selectionPort = {
+    list() { return []; },
+    async prepare(input: unknown) {
+      prepared.push(input);
+      return { status: "prepared", proposalId: "proposal-opaque" };
+    },
+  };
+  const fiber = await ctx.plugin(ProposalInboxService, { migrationSelection: selectionPort } as never);
+  const inbox = ctx.homeInbox as unknown as {
+    prepareMigrationSelection(input: { readonly selectionToken: string; readonly actor: unknown }): Promise<unknown>;
+  };
+
+  await assert.rejects(
+    () => inbox.prepareMigrationSelection({
+      selectionToken: "a".repeat(32),
+      actor: { ...runtimeAdminActor, device: { kind: "shared" } },
+    }),
+    /migration_selection_unavailable/,
+  );
+  await inbox.prepareMigrationSelection({ selectionToken: "a".repeat(32), actor: runtimeAdminActor });
+  assert.deepEqual(prepared, [{ selectionToken: "a".repeat(32), actor: runtimeAdminActor }]);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("fails closed on malformed and duplicate migration selection rows", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  const fiber = await ctx.plugin(ProposalInboxService, {
+    migrationSelection: {
+      list() {
+        return [
+          { name: "晚间灯光", status: "selectable", token: "b".repeat(32) },
+          { name: "重复晚间灯光", status: "selectable", token: "b".repeat(32) },
+          { name: "迁移建议", status: "prepared", proposalId: "proposal-1" },
+          { name: "重复迁移建议", status: "prepared", proposalId: "proposal-1" },
+          { name: "坏名称\u0000", status: "selectable", token: "c".repeat(32) },
+          { name: "坏令牌", status: "selectable", token: "C".repeat(32) },
+          { name: "未知状态", status: "unknown", token: "d".repeat(32) },
+        ];
+      },
+    },
+  } as never);
+
+  const projection = ctx.homeInbox.getProductShellProjection(runtimeAdminActor);
+  assert.deepEqual(projection.migrationSelections, [
+    { name: "晚间灯光", status: "selectable", selectionToken: "b".repeat(32) },
+    { name: "迁移建议", status: "prepared", proposalId: "proposal-1" },
+  ]);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("only forwards automation recovery for a projected recovery_required lifecycle", async () => {
   const ctx = new Context();
   const proposalsFiber = await ctx.plugin(StubMigrationAutomationProposals);

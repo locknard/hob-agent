@@ -39,6 +39,7 @@ import {
   type ProductOnboardingBridgeChoice,
   type ProductOnboardingState,
   type ProductShellModel,
+  type ProductMigrationSelection,
   type ProductPrivateVoice,
   type ProductOperationalModelNotice,
   type ProductShellRoute,
@@ -212,6 +213,18 @@ for (const policyForm of document.querySelectorAll("[data-policy-form]")) {
   submit.disabled = true;
   policyForm.addEventListener("change", () => {
     submit.disabled = false;
+  }, { once: true });
+}
+
+for (const migrationForm of document.querySelectorAll("[data-migration-selection-form]")) {
+  if (!(migrationForm instanceof HTMLFormElement)) continue;
+  migrationForm.addEventListener("submit", (event) => {
+    const submit = event.submitter;
+    if (!(submit instanceof HTMLButtonElement)) return;
+    submit.disabled = true;
+    migrationForm.setAttribute("aria-busy", "true");
+    const status = migrationForm.querySelector("[data-migration-selection-status]");
+    if (status instanceof HTMLElement) status.textContent = "正在准备迁移建议…";
   }, { once: true });
 }
 
@@ -645,6 +658,7 @@ interface InboxHttpPort {
   }): Promise<InboxConversationCorrectionResult>;
   getProductReviewProjection?(actor?: InboxReviewActor, selectedProposalId?: string): InboxProductReviewProjection | Promise<InboxProductReviewProjection>;
   getProductShellProjection?(actor?: InboxReviewActor, batchRequestId?: string): InboxProductShellProjection | Promise<InboxProductShellProjection>;
+  prepareMigrationSelection?(input: { readonly selectionToken: string; readonly actor: InboxReviewActor }): Promise<unknown>;
   acknowledgeCompletionNotification?(adviceId: string): boolean;
   acknowledgeMediaActionCompletionNotification?(turnId: string): boolean;
   acknowledgeSafety?(input: { readonly alertId: string; readonly actor: InboxReviewActor }): unknown | Promise<unknown>;
@@ -915,7 +929,11 @@ export class ProposalInboxHttpService extends Service {
           productRoute === "settings" ? boundedLayoutDraftId(url.searchParams.get("layout")) : undefined,
           productRoute === "settings" && url.searchParams.get("preview") === "1",
           productRoute === "settings" ? boundedLayoutDraftNotice(url.searchParams.get("layoutNotice")) : undefined,
-          undefined,
+          productRoute === "review-center"
+            ? productNoticeCopy(url.searchParams.get("notice"))
+            : productRoute === "automations"
+              ? migrationSelectionNoticeCode(url.searchParams.get("notice"))
+              : undefined,
           productRoute === "settings" && method === "GET" ? this.consumeActionPolicyReceipt(url.searchParams.get("policy")) : undefined,
           productRoute === "settings" && method === "GET" ? this.privateVoiceHttp.consumeSettingsReceipt(url.searchParams.get("voice")) : undefined,
           productRoute === "settings" && method === "GET" ? this.operationalModelHttp.consumeSettingsReceipt(url.searchParams.get("model")) : undefined,
@@ -1807,6 +1825,37 @@ export class ProposalInboxHttpService extends Service {
         if (proposalId === undefined) return send(response, 404, "Proposal not found");
         return this.sendProductRoute(response, "review-center", url.pathname, method === "HEAD", undefined, proposalId, undefined, undefined, requestedViewId, storedDefaultViewId, request.headers.cookie, persistViewPreference, undefined, false, undefined, productNoticeCopy(url.searchParams.get("notice")));
       }
+      if (method === "POST" && url.pathname === "/automations/migration/prepare") {
+        if (this.principal === undefined || !canUsePrivateProposalReviewPrincipal(this.principal)) {
+          return send(response, 403, "Migration selection needs a bound private device");
+        }
+        if (this.inbox.prepareMigrationSelection === undefined) {
+          return send(response, 404, "Migration selection unavailable");
+        }
+        if (mediaType(request.headers["content-type"]) !== "application/x-www-form-urlencoded") {
+          return send(response, 415, "Unsupported migration selection content type");
+        }
+        let body: string;
+        try {
+          body = await readBoundedBody(request);
+        } catch (error) {
+          return send(response, isPayloadTooLarge(error) ? 413 : 400, "Invalid migration selection");
+        }
+        const selectionInput = migrationSelectionInput(body);
+        if (selectionInput === undefined) return send(response, 400, "Invalid migration selection");
+        try {
+          const result = await this.inbox.prepareMigrationSelection({
+            selectionToken: selectionInput.selectionToken,
+            actor: this.principal,
+          });
+          if (isPreparedMigrationSelectionResult(result)) {
+            return redirect(response, `/review-center?proposal=${encodeURIComponent(result.proposalId)}`);
+          }
+        } catch {
+          // Closed migration selection failures return to the list without raw error text.
+        }
+        return redirect(response, "/automations?notice=migration_selection_unavailable");
+      }
       if (method === "POST" && url.pathname === "/observations/run") {
         if (request.headers.origin !== this.origin) return send(response, 403, "Observation origin rejected");
         if (!this.inbox.canObserveNow()) return send(response, 404, "Observation unavailable");
@@ -2317,7 +2366,18 @@ export class ProposalInboxHttpService extends Service {
     const readProjection = this.inbox.getProductShellProjection;
     if (readProjection === undefined) return undefined;
     try {
-      return await readProjection.call(this.inbox, this.principal, batchRequestId);
+      const value = await readProjection.call(this.inbox, this.principal, batchRequestId);
+      if (!isRecord(value)) return undefined;
+      if (value.migrationSelections === undefined) return value as unknown as InboxProductShellProjection;
+      return {
+        ...(value as unknown as InboxProductShellProjection),
+        migrationSelections: this.principal?.present === true
+          ? normalizeMigrationSelections(
+            value.migrationSelections,
+            canUsePrivateProposalReviewPrincipal(this.principal),
+          )
+          : [],
+      };
     } catch {
       return undefined;
     }
@@ -2721,6 +2781,10 @@ function productNoticeCopy(code: string | null): string | undefined {
   return code === "enable_temporarily_unavailable"
     ? "这次启用暂时没能完成，家里的设置保持原样；稍后再试一次。"
     : undefined;
+}
+
+function migrationSelectionNoticeCode(code: string | null): "migration_selection_unavailable" | undefined {
+  return code === "migration_selection_unavailable" ? code : undefined;
 }
 
 function actionPolicySelectionInput(body: string): {
@@ -3134,6 +3198,9 @@ function productShellModel(route: ProductRoute, context: ProductRouteRenderConte
     ...(context.conversationDraft === undefined ? {} : { conversationDraft: context.conversationDraft }),
     ...(context.controlFeedback === undefined ? {} : { controlFeedback: context.controlFeedback }),
     ...(context.proposalNotice === undefined ? {} : { proposalNotice: context.proposalNotice }),
+    ...(route === "automations" && context.proposalNotice === "migration_selection_unavailable"
+      ? { migrationSelectionNotice: "unavailable" as const }
+      : {}),
     ...(context.actionPolicy === undefined ? {} : { actionPolicy: context.actionPolicy }),
     ...(context.privateVoice === undefined ? {} : { privateVoice: context.privateVoice }),
     ...(context.operationalModel === undefined ? {} : { operationalModel: context.operationalModel }),
@@ -3212,6 +3279,54 @@ function normalizeProductReviewProjection(value: unknown, actor?: InboxReviewAct
       ? { expiredSummary: value.expiredSummary.slice(0, 1_000) }
       : {}),
   };
+}
+
+function normalizeMigrationSelections(value: unknown, privateDevice: boolean): readonly ProductMigrationSelection[] {
+  if (!Array.isArray(value)) return [];
+  const seenTokens = new Set<string>();
+  const seenProposalIds = new Set<string>();
+  const selections: ProductMigrationSelection[] = [];
+  for (const item of value.slice(0, 50)) {
+    if (!isRecord(item)
+      || typeof item.name !== "string"
+      || item.name.length < 1
+      || item.name.length > 512
+      || /[\u0000-\u001F\u007F]/u.test(item.name)) continue;
+    if (item.status === "selectable") {
+      const token = item.selectionToken;
+      if (typeof token !== "string" || !/^[a-f0-9]{32}$/u.test(token)) {
+        if (!privateDevice) selections.push({ name: item.name, status: "unavailable", unavailableReason: "private_device_required" });
+        continue;
+      }
+      if (seenTokens.has(token)) continue;
+      seenTokens.add(token);
+      selections.push(privateDevice
+        ? { name: item.name, status: "selectable", selectionToken: token }
+        : { name: item.name, status: "unavailable", unavailableReason: "private_device_required" });
+      continue;
+    }
+    if (item.status === "prepared") {
+      const proposalId = item.proposalId;
+      if (typeof proposalId !== "string"
+        || proposalId.length < 1
+        || proposalId.length > 256
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(proposalId)
+        || seenProposalIds.has(proposalId)) continue;
+      seenProposalIds.add(proposalId);
+      selections.push({ name: item.name, status: "prepared", proposalId });
+      continue;
+    }
+    if (item.status === "unavailable") {
+      selections.push({
+        name: item.name,
+        status: "unavailable",
+        ...(item.unavailableReason === "private_device_required"
+          ? { unavailableReason: "private_device_required" as const }
+          : { unavailableReason: "assessment_unavailable" as const }),
+      });
+    }
+  }
+  return selections;
 }
 
 function boundedCount(value: unknown): number {
@@ -3969,6 +4084,24 @@ function proposalDecisionInput(body: string): number | undefined {
   const form = new URLSearchParams(body);
   if (form.getAll("expectedRevision").length !== 1 || [...form.keys()].some((key) => key !== "expectedRevision")) return undefined;
   return positiveInteger(form.get("expectedRevision"));
+}
+
+function migrationSelectionInput(body: string): { readonly selectionToken: string } | undefined {
+  const form = new URLSearchParams(body);
+  if (form.getAll("selectionToken").length !== 1 || [...form.keys()].some((key) => key !== "selectionToken")) return undefined;
+  const selectionToken = form.get("selectionToken");
+  return selectionToken !== null && /^[a-f0-9]{32}$/u.test(selectionToken)
+    ? { selectionToken }
+    : undefined;
+}
+
+function isPreparedMigrationSelectionResult(value: unknown): value is { readonly status: "prepared"; readonly proposalId: string } {
+  return isRecord(value)
+    && value.status === "prepared"
+    && typeof value.proposalId === "string"
+    && value.proposalId.length >= 1
+    && value.proposalId.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value.proposalId);
 }
 
 function positiveInteger(value: string | null): number | undefined {

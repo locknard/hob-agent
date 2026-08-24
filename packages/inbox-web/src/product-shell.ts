@@ -133,6 +133,17 @@ export interface ProductAutomation {
   readonly recentActivity?: readonly string[];
 }
 
+export type ProductMigrationSelectionStatus = "selectable" | "prepared" | "unavailable";
+
+/** A safe, household-facing migration candidate; the hidden form carries only its opaque token. */
+export interface ProductMigrationSelection {
+  readonly name: string;
+  readonly status: ProductMigrationSelectionStatus;
+  readonly selectionToken?: string;
+  readonly proposalId?: string;
+  readonly unavailableReason?: "private_device_required" | "assessment_unavailable";
+}
+
 export interface ProductSpace {
   readonly id: string;
   readonly name: string;
@@ -540,6 +551,8 @@ export interface ProductShellModel {
   readonly proposals?: readonly ProductProposal[];
   readonly selectedProposal?: ProductProposal;
   readonly automations?: readonly ProductAutomation[];
+  readonly migrationSelections?: readonly ProductMigrationSelection[];
+  readonly migrationSelectionNotice?: "unavailable";
   /** Counts for the ordinary and migration review lanes. */
   readonly standardProposalCount?: number;
   readonly migrationProposalCount?: number;
@@ -797,6 +810,24 @@ function localHref(value: string | undefined, fallback: string): string {
 
 function encodedPathSegment(value: string): string {
   return encodeURIComponent(value);
+}
+
+function safeMigrationSelectionName(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 512
+    && !/[\u0000-\u001F\u007F]/u.test(value);
+}
+
+function safeMigrationSelectionToken(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{32}$/u.test(value);
+}
+
+function safeMigrationProposalId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value);
 }
 
 function list(items: readonly string[] | undefined, className = "product-list"): string {
@@ -1366,6 +1397,7 @@ const AUTOMATION_PRESENTATION = {
 
 function renderAutomations(model: NormalizedProductShellModel): string {
   const automations = model.automations ?? [];
+  const migrationSelections = model.migrationSelections ?? [];
   const cards = automations.length === 0
     ? `<section class="product-card product-review-empty"><h2>还没有运行中的自动化</h2><p class="product-muted">你在处理中心启用的自动化会出现在这里。</p></section>`
     : automations.map(renderAutomationCard).join("");
@@ -1379,7 +1411,28 @@ function renderAutomations(model: NormalizedProductShellModel): string {
     : migration
       ? "已核验的迁移规则可以暂停；关闭会恢复原来的规则。"
     : "每一条都可以暂停或移除；它们从不改动你原有的规则。";
-  return `<header class="product-page-header"><div><p class="product-kicker">自动化</p><h1>它替你做的事</h1><p class="product-muted">${description}</p></div></header><div class="product-automation-list">${cards}</div>`;
+  const selectionNotice = model.migrationSelectionNotice === "unavailable"
+    ? `<p class="product-enable-notice" role="status" data-one-shot-notice>这条迁移建议暂时无法准备，源规则或当前检查需要恢复；稍后重新检查。</p>`
+    : "";
+  const selectionSection = migrationSelections.length === 0
+    ? ""
+    : `<section class="product-card product-migration-selection" aria-labelledby="migration-selection-heading"><div class="product-review-list-heading"><h2 id="migration-selection-heading">可迁移的规则</h2><p>先准备建议，再由你查看并批准</p></div><div class="product-migration-selection-list">${migrationSelections.map(renderMigrationSelection).join("")}</div></section>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">自动化</p><h1>它替你做的事</h1><p class="product-muted">${description}</p></div></header>${selectionNotice}${selectionSection}<div class="product-automation-list">${cards}</div>`;
+}
+
+function renderMigrationSelection(selection: ProductMigrationSelection): string {
+  if (!safeMigrationSelectionName(selection.name)) return "";
+  const name = escapeHtml(selection.name);
+  if (selection.status === "selectable" && safeMigrationSelectionToken(selection.selectionToken)) {
+    return `<article class="product-card product-migration-selection-card" data-migration-selection-state="selectable"><h3>${name}</h3><p class="product-muted">先准备一份迁移建议；接下来还要查看并批准，现在不会改动家里的规则。</p><form class="product-action-form" method="post" action="/automations/migration/prepare" data-migration-selection-form><input type="hidden" name="selectionToken" value="${escapeHtml(selection.selectionToken)}"><button class="product-primary-action" type="submit">准备迁移建议</button><span class="product-form-status" data-migration-selection-status role="status" aria-live="polite"></span></form></article>`;
+  }
+  if (selection.status === "prepared" && safeMigrationProposalId(selection.proposalId)) {
+    return `<article class="product-card product-migration-selection-card" data-migration-selection-state="prepared"><h3>${name}</h3><p class="product-muted">迁移建议已准备好；先查看并批准，现在不会改动家里的规则。</p><div class="product-card-actions"><a class="product-primary-action" href="/review-center?proposal=${encodedPathSegment(selection.proposalId)}">查看并批准</a></div></article>`;
+  }
+  const detail = selection.unavailableReason === "private_device_required"
+    ? "请在绑定给你的私人设备上准备这条规则。"
+    : "这条规则暂时无法准备；稍后重新检查。";
+  return `<article class="product-card product-migration-selection-card" data-migration-selection-state="unavailable"><h3>${name}</h3><p class="product-muted">${detail}</p></article>`;
 }
 
 function renderAutomationCard(automation: ProductAutomation): string {

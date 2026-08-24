@@ -100,6 +100,30 @@ class StubInbox extends Service {
   }
 }
 
+class MigrationSelectionInbox extends StubInbox {
+  readonly preparations: unknown[] = [];
+  prepareResult: unknown = { status: "prepared", proposalId: "proposal-opaque" };
+
+  getProductShellProjection() {
+    return {
+      connection: { state: "quiet" as const, lastContact: "刚刚" },
+      spaces: [],
+      controlSpaces: [],
+      activity: [],
+      migrationSelections: [
+        { name: "晚间灯光", status: "selectable", selectionToken: "a".repeat(32) },
+        { name: "起床灯", status: "prepared", proposalId: "proposal-ready" },
+        { name: "旧规则", status: "unavailable", ruleRef: "native-rule", sourceFingerprint: "sha256:secret" },
+      ],
+    };
+  }
+
+  async prepareMigrationSelection(input: unknown) {
+    this.preparations.push(input);
+    return this.prepareResult;
+  }
+}
+
 class MediaActionInbox extends StubInbox {
   readonly mediaStarts: unknown[] = [];
   readonly mediaCancels: string[] = [];
@@ -876,6 +900,152 @@ test("serves an authenticated localhost-only Inbox with restrictive response hea
 
   await fiber.dispose();
   assert.equal(ctx.homeInboxHttp, undefined);
+  await ctx.fiber.dispose();
+});
+
+test("serves safe migration selections and prepares only the server-bound token", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MigrationSelectionInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const headers = { authorization };
+
+  const page = await fetch(`${origin}/automations`, { headers });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /晚间灯光/);
+  assert.match(html, /准备迁移建议/);
+  assert.match(html, new RegExp(`name="selectionToken" value="${"a".repeat(32)}"`));
+  assert.match(html, /href="\/review-center\?proposal=proposal-ready"/);
+  assert.doesNotMatch(html, /native-rule|sourceFingerprint|sha256:secret|ruleRef|watermark/);
+  assert.equal((html.match(/a{32}/g) ?? []).length, 1);
+  const asset = await fetch(`${origin}/assets/product.js`, { headers });
+  assert.equal(asset.status, 200);
+  const script = await asset.text();
+  assert.match(script, /data-migration-selection-form[\s\S]*disabled = true/);
+  assert.match(script, /正在准备迁移建议/);
+  assert.doesNotMatch(script, /a{32}/);
+
+  const response = await fetch(`${origin}/automations/migration/prepare`, {
+    method: "POST",
+    headers: {
+      ...headers,
+      origin,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: `selectionToken=${"a".repeat(32)}`,
+    redirect: "manual",
+  });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/review-center?proposal=proposal-opaque");
+  assert.deepEqual((ctx.homeInbox as unknown as MigrationSelectionInbox).preparations, [{
+    selectionToken: "a".repeat(32),
+    actor: adminPrincipal,
+  }]);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("rejects migration selection fields beyond one token and every unsafe session", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MigrationSelectionInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const post = (body: string, extraHeaders: Record<string, string> = {}) => fetch(`${origin}/automations/migration/prepare`, {
+    method: "POST",
+    headers: {
+      authorization,
+      origin,
+      "content-type": "application/x-www-form-urlencoded",
+      ...extraHeaders,
+    },
+    body,
+    redirect: "manual",
+  });
+
+  const extra = await post(`selectionToken=${"a".repeat(32)}&actor=admin-1`);
+  assert.equal(extra.status, 400);
+  const ruleRef = await post(`selectionToken=${"a".repeat(32)}&ruleRef=native-rule`);
+  assert.equal(ruleRef.status, 400);
+  const migrationId = await post(`selectionToken=${"a".repeat(32)}&migrationId=migration-1`);
+  assert.equal(migrationId.status, 400);
+  const crossOrigin = await post(`selectionToken=${"a".repeat(32)}`, { origin: "https://attacker.invalid" });
+  assert.equal(crossOrigin.status, 403);
+  const json = await post(`selectionToken=${"a".repeat(32)}`, { "content-type": "application/json" });
+  assert.equal(json.status, 415);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+
+  const unsafeCtx = new Context();
+  const unsafeInboxFiber = await unsafeCtx.plugin(MigrationSelectionInbox);
+  const unsafeFiber = await unsafeCtx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: childSharedPrincipal,
+  });
+  const denied = await fetch(`${unsafeCtx.homeInboxHttp.origin}/automations/migration/prepare`, {
+    method: "POST",
+    headers: {
+      authorization,
+      origin: unsafeCtx.homeInboxHttp.origin,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: `selectionToken=${"a".repeat(32)}`,
+    redirect: "manual",
+  });
+  assert.equal(denied.status, 403);
+  assert.deepEqual((unsafeCtx.homeInbox as unknown as MigrationSelectionInbox).preparations, []);
+
+  await unsafeFiber.dispose();
+  await unsafeInboxFiber.dispose();
+  await unsafeCtx.fiber.dispose();
+});
+
+test("returns only a closed migration notice for expired or drifted selections", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MigrationSelectionInbox);
+  const inbox = ctx.homeInbox as unknown as MigrationSelectionInbox;
+  inbox.prepareResult = { status: "unavailable" };
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const response = await fetch(`${origin}/automations/migration/prepare`, {
+    method: "POST",
+    headers: {
+      authorization,
+      origin,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: `selectionToken=${"a".repeat(32)}`,
+    redirect: "manual",
+  });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/automations?notice=migration_selection_unavailable");
+  const noticePage = await fetch(`${origin}/automations?notice=migration_selection_unavailable`, { headers: { authorization } });
+  assert.equal(noticePage.status, 200);
+  const noticeHtml = await noticePage.text();
+  assert.match(noticeHtml, /暂时无法准备|稍后重新检查/);
+  const arbitraryNotice = await fetch(`${origin}/automations?notice=%3Cscript%3Ebad%3C%2Fscript%3E`, { headers: { authorization } });
+  assert.equal(arbitraryNotice.status, 200);
+  assert.doesNotMatch(await arbitraryNotice.text(), /<script>bad/);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
   await ctx.fiber.dispose();
 });
 

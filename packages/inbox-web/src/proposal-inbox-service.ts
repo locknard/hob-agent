@@ -32,6 +32,7 @@ import type {
   ProductEnergySummary,
   ProductConcern,
   ProductAutomation,
+  ProductMigrationSelection,
   ProductControlSpace,
   ProductControlFeedback,
   ProductActivityRecord,
@@ -62,6 +63,30 @@ export interface InboxPreparationRetryInput {
 export interface ProposalInboxPreparationPort {
   retry(input: InboxPreparationRetryInput): void | Promise<void>;
 }
+
+export type ProposalInboxMigrationSelectionStatus = "selectable" | "prepared" | "unavailable";
+
+/** Neutral, presentation-safe migration candidate returned by the Hub facade. */
+export interface ProposalInboxMigrationSelection {
+  readonly name: string;
+  readonly status: ProposalInboxMigrationSelectionStatus;
+  /** Opaque server-issued token; never a ruleRef, migrationId, or provider id. */
+  readonly token?: string;
+  /** Existing neutral Proposal id for an already prepared candidate. */
+  readonly proposalId?: string;
+}
+
+/** Structural seam for the Hub-owned migration assessment selector. */
+export interface ProposalInboxMigrationSelectionPort {
+  list(actor: InboxReviewActor): readonly ProposalInboxMigrationSelection[];
+  prepare?(input: { readonly selectionToken: string; readonly actor: InboxReviewActor }):
+    | ProposalInboxMigrationSelectionPrepareResult
+    | Promise<ProposalInboxMigrationSelectionPrepareResult>;
+}
+
+export type ProposalInboxMigrationSelectionPrepareResult =
+  | { readonly status: "prepared"; readonly proposalId: string }
+  | { readonly status: "unavailable" | "expired" | "invalidated" };
 
 interface ControlCenterArtifactSnapshot {
   readonly status: "ready" | "unavailable";
@@ -342,6 +367,7 @@ export interface InboxProductShellProjection {
   readonly energy?: ProductEnergySummary;
   readonly concern?: ProductConcern;
   readonly automations?: readonly ProductAutomation[];
+  readonly migrationSelections?: readonly ProductMigrationSelection[];
   readonly controlSpaces: readonly ProductControlSpace[];
   readonly activity: readonly ProductActivityRecord[];
   readonly safetyAlerts?: readonly ProductSafetyAlert[];
@@ -353,6 +379,7 @@ export interface InboxProductShellProjection {
 export interface ProposalInboxServiceOptions {
   readonly preparation?: ProposalInboxPreparationPort;
   readonly proposalGovernance?: ProposalInboxProposalGovernancePort;
+  readonly migrationSelection?: ProposalInboxMigrationSelectionPort;
   readonly now?: () => Date;
   /** Household timezone for day-window aggregation; defaults to the host timezone. */
   readonly timezone?: string;
@@ -399,6 +426,7 @@ export class ProposalInboxService extends Service {
   private readonly safety?: ProposalInboxSafetyPort;
   private readonly correction?: ProposalInboxCorrectionPort;
   private readonly proposalGovernance?: ProposalInboxProposalGovernancePort;
+  private readonly migrationSelection?: ProposalInboxMigrationSelectionPort;
   private readonly now: () => Date;
   private readonly timezone: string | undefined;
   private controlRequestSequence = 0;
@@ -453,6 +481,9 @@ export class ProposalInboxService extends Service {
     this.proposalGovernance = options.proposalGovernance
       ?? optionalGovernancePort(ctx.get("proposalGovernance") ?? ctx.get("proposal_governance"))
       ?? optionalGovernancePort(proposals);
+    this.migrationSelection = migrationSelectionPortFrom(
+      options.migrationSelection ?? ctx.get("homeAutomationMigrationSelection"),
+    );
     this.now = options.now ?? (() => new Date());
     this.timezone = options.timezone;
     this.preparation = options.preparation ?? preparationPortFrom(proposals);
@@ -568,17 +599,73 @@ export class ProposalInboxService extends Service {
     const energy = projectEnergyToday(world, this.world, now, this.timezone);
     const concern = this.projectConcern(now);
     const automations = this.projectAutomations();
+    const migrationSelections = this.projectMigrationSelections(actor);
     return {
       ...projection,
       ...(energy === undefined ? {} : { energy }),
       ...(concern === undefined ? {} : { concern }),
       ...(automations === undefined ? {} : { automations }),
+      ...(migrationSelections === undefined ? {} : { migrationSelections }),
       activity: projectRuntimeActivity(this.runtime?.activities?.() ?? [], now),
       ...(safetyAlerts === undefined ? {} : { safetyAlerts }),
       ...(completionNotification === undefined ? {} : { completionNotification }),
       ...(mediaActionCompletionNotification === undefined ? {} : { mediaActionCompletionNotification }),
       ...(batchControl === undefined ? {} : { batchControl }),
     };
+  }
+
+  /** Reads only a safe assessment projection; no selection is visible without a product actor. */
+  private projectMigrationSelections(actor?: InboxReviewActor): readonly ProductMigrationSelection[] | undefined {
+    const port = this.migrationSelection;
+    if (port === undefined) return undefined;
+    if (actor === undefined || !isPresentMigrationSelectionActor(actor)) return [];
+    const privateDevice = isPrivateMigrationSelectionActor(actor);
+    let rows: readonly ProposalInboxMigrationSelection[];
+    try {
+      rows = port.list(actor);
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(rows)) return [];
+    const seenTokens = new Set<string>();
+    const seenProposalIds = new Set<string>();
+    const selections: ProductMigrationSelection[] = [];
+    for (const row of rows.slice(0, 50)) {
+      for (const selection of projectMigrationSelection(row, privateDevice)) {
+        if (selection.status === "selectable" && selection.selectionToken !== undefined) {
+          if (seenTokens.has(selection.selectionToken)) continue;
+          seenTokens.add(selection.selectionToken);
+        }
+        if (selection.status === "prepared" && selection.proposalId !== undefined) {
+          if (seenProposalIds.has(selection.proposalId)) continue;
+          seenProposalIds.add(selection.proposalId);
+        }
+        selections.push(selection);
+      }
+    }
+    return selections;
+  }
+
+  /** Claims one server-issued selection token and never accepts client-owned rule identity. */
+  async prepareMigrationSelection(input: {
+    readonly selectionToken: string;
+    readonly actor: InboxReviewActor;
+  }): Promise<{ readonly status: "prepared"; readonly proposalId: string }> {
+    const port = this.migrationSelection;
+    if (port?.prepare === undefined || !isExactSelectionInput(input) || !isPrivateMigrationSelectionActor(input.actor)) {
+      throw Object.assign(new Error("migration_selection_unavailable"), { code: "migration_selection_unavailable" });
+    }
+    try {
+      const result = await port.prepare({ selectionToken: input.selectionToken, actor: input.actor });
+      if (!isRecord(result)
+        || result.status !== "prepared"
+        || !isSafeMigrationProposalId(result.proposalId)) {
+        throw new Error("migration_selection_unavailable");
+      }
+      return { status: "prepared", proposalId: result.proposalId };
+    } catch {
+      throw Object.assign(new Error("migration_selection_unavailable"), { code: "migration_selection_unavailable" });
+    }
   }
 
   private projectedAutomationLifecycle(proposalId: string): string | undefined {
@@ -1511,6 +1598,75 @@ function optionalGovernancePort(source: unknown): ProposalInboxProposalGovernanc
     || typeof port.proposalCapacity === "function"
     ? port
     : undefined;
+}
+
+function migrationSelectionPortFrom(source: unknown): ProposalInboxMigrationSelectionPort | undefined {
+  if (!isRecord(source) || typeof source.list !== "function") return undefined;
+  return source as unknown as ProposalInboxMigrationSelectionPort;
+}
+
+function isPrivateMigrationSelectionActor(value: unknown): value is InboxReviewActor {
+  if (!isRecord(value)
+    || typeof value.principalId !== "string"
+    || value.principalId.trim().length === 0
+    || typeof value.present !== "boolean"
+    || value.present !== true
+    || (value.role !== "admin" && value.role !== "adult_member" && value.role !== "member" && value.role !== "child" && value.role !== "guest")
+    || !isRecord(value.device)
+    || value.device.kind !== "private"
+    || typeof value.device.boundPrincipalId !== "string") return false;
+  return value.device.boundPrincipalId.trim() === value.principalId.trim();
+}
+
+function isPresentMigrationSelectionActor(value: unknown): value is InboxReviewActor {
+  return isRecord(value)
+    && typeof value.principalId === "string"
+    && value.principalId.trim().length > 0
+    && value.present === true;
+}
+
+function isSafeMigrationSelectionToken(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{32}$/u.test(value);
+}
+
+function isSafeMigrationProposalId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value);
+}
+
+function isExactSelectionInput(
+  value: unknown,
+): value is { readonly selectionToken: string; readonly actor: InboxReviewActor } {
+  return isRecord(value)
+    && Object.keys(value).length === 2
+    && Object.keys(value).every((key) => key === "selectionToken" || key === "actor")
+    && isSafeMigrationSelectionToken(value.selectionToken)
+    && isPrivateMigrationSelectionActor(value.actor);
+}
+
+function projectMigrationSelection(value: unknown, privateDevice: boolean): ProductMigrationSelection[] {
+  if (!isRecord(value)
+    || typeof value.name !== "string"
+    || value.name.length < 1
+    || value.name.length > 512
+    || /[\u0000-\u001F\u007F]/u.test(value.name)) return [];
+  if (value.status === "selectable" && isSafeMigrationSelectionToken(value.token)) {
+    return privateDevice
+      ? [{ name: value.name, status: "selectable", selectionToken: value.token }]
+      : [{ name: value.name, status: "unavailable", unavailableReason: "private_device_required" }];
+  }
+  if (value.status === "selectable" && !privateDevice && value.token === undefined) {
+    return [{ name: value.name, status: "unavailable", unavailableReason: "private_device_required" }];
+  }
+  if (value.status === "prepared" && isSafeMigrationProposalId(value.proposalId)) {
+    return [{ name: value.name, status: "prepared", proposalId: value.proposalId }];
+  }
+  if (value.status === "unavailable") {
+    return [{ name: value.name, status: "unavailable", unavailableReason: "assessment_unavailable" }];
+  }
+  return [];
 }
 
 function projectRuntimeConfirmation(
