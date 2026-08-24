@@ -3,6 +3,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import {
   HomeMediaActionIdempotencyConflictError,
   SqliteHomeMediaActionTurnStore,
+  type HomeMediaActionTurnCompletionNotification,
   type HomeMediaActionTurnEvent,
   type HomeMediaActionTurnFailureReason,
   type HomeMediaActionTurnRecord,
@@ -259,6 +260,28 @@ export class HomeMediaActionTurnService extends Service {
     } catch {
       this.failClosedUnavailable();
       return [];
+    }
+  }
+
+  /** Forwards the oldest durable clarification/failure signal as its minimal product payload. */
+  peekNextCompletionNotification(): HomeMediaActionTurnCompletionNotification | undefined {
+    if (this.closed || this.recoveryUnavailable) return undefined;
+    try {
+      return this.store.peekNextCompletionNotification();
+    } catch {
+      this.failClosedUnavailable();
+      return undefined;
+    }
+  }
+
+  /** Acknowledges one exact durable notification id by turn id. */
+  acknowledgeCompletionNotification(id: string): boolean {
+    if (this.closed || this.recoveryUnavailable || !isMediaActionTurnId(id)) return false;
+    try {
+      return this.store.acknowledgeCompletionNotification(id);
+    } catch {
+      this.failClosedUnavailable();
+      return false;
     }
   }
 

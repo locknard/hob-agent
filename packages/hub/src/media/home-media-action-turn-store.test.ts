@@ -290,6 +290,87 @@ test("rejects duplicate request identifiers and malformed external inputs", () =
   store.close();
 });
 
+test("durably queues only clarification and failed media turn completions with a minimal payload", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-media-action-turn-notifications-"));
+  const path = join(directory, "turns.sqlite");
+  const first = new SqliteHomeMediaActionTurnStore({
+    path,
+    idFactory: (() => {
+      const ids = ["turn-clarification-notification", "turn-ticket-notification", "turn-timeout-notification", "turn-cancelled-notification"];
+      return () => ids.shift()!;
+    })(),
+  });
+  const clarificationTurn = begin(first, "cccccccccccccccccccccccccccccccc", "2026-08-24T00:00:00.000Z");
+  const ticketTurn = begin(first, "dddddddddddddddddddddddddddddddd", "2026-08-24T00:00:00.000Z");
+  const timedOutTurn = begin(first, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "2026-08-24T00:00:00.000Z");
+  const cancelledTurn = begin(first, "ffffffffffffffffffffffffffffffff", "2026-08-24T00:00:00.000Z");
+
+  assert.equal(first.clarify({
+    id: clarificationTurn.id,
+    clarification: clarification(),
+    transitionedAt: "2026-08-24T00:00:01.000Z",
+  }), true);
+  assert.equal(first.ticket({
+    id: ticketTurn.id,
+    ticketId: "ticket-private",
+    transitionedAt: "2026-08-24T00:00:02.000Z",
+  }), true);
+  assert.equal(first.fail({
+    id: timedOutTurn.id,
+    reason: "timed_out",
+    transitionedAt: "2026-08-24T00:00:03.000Z",
+  }), true);
+  assert.equal(first.cancel({ id: cancelledTurn.id, transitionedAt: "2026-08-24T00:00:04.000Z" }), true);
+
+  const reopened = new SqliteHomeMediaActionTurnStore({ path });
+  assert.deepEqual(reopened.peekNextCompletionNotification(), {
+    turnId: clarificationTurn.id,
+    status: "clarification",
+    completedAt: "2026-08-24T00:00:01.000Z",
+  });
+  assert.deepEqual(reopened.peekNextCompletionNotification(), {
+    turnId: clarificationTurn.id,
+    status: "clarification",
+    completedAt: "2026-08-24T00:00:01.000Z",
+  });
+  assert.deepEqual(Object.keys(reopened.peekNextCompletionNotification() ?? {}).sort(), ["completedAt", "status", "turnId"]);
+  assert.equal(reopened.acknowledgeCompletionNotification(clarificationTurn.id), true);
+  assert.equal(reopened.acknowledgeCompletionNotification(clarificationTurn.id), false);
+  assert.equal(reopened.acknowledgeCompletionNotification(ticketTurn.id), false);
+  assert.equal(reopened.acknowledgeCompletionNotification(cancelledTurn.id), false);
+  assert.deepEqual(first.peekNextCompletionNotification(), {
+    turnId: timedOutTurn.id,
+    status: "failed",
+    completedAt: "2026-08-24T00:00:03.000Z",
+  });
+  assert.equal(reopened.acknowledgeCompletionNotification(timedOutTurn.id), true);
+  assert.equal(reopened.peekNextCompletionNotification(), undefined);
+  first.close();
+  reopened.close();
+});
+
+test("keeps terminal notification creation atomic and never duplicates a replayed terminal transition", () => {
+  const store = new SqliteHomeMediaActionTurnStore({ path: ":memory:", idFactory: () => "turn-notification-atomic" });
+  const turn = begin(store, "12121212121212121212121212121212");
+  const db = (store as unknown as { db: DatabaseSync }).db;
+  db.exec(`CREATE TRIGGER fail_completion_notification BEFORE UPDATE OF completion_notification_pending ON home_media_action_turns
+    WHEN NEW.status = 'clarification' BEGIN SELECT RAISE(ABORT, 'completion notification write failed'); END;`);
+
+  assert.throws(() => store.clarify({ id: turn.id, clarification: clarification(), transitionedAt }), /completion notification write failed/i);
+  assert.equal(store.get(turn.id)?.status, "running");
+  assert.equal(store.peekNextCompletionNotification(), undefined);
+  db.exec("DROP TRIGGER fail_completion_notification");
+  assert.equal(store.clarify({ id: turn.id, clarification: clarification(), transitionedAt }), true);
+  assert.equal(store.clarify({ id: turn.id, clarification: clarification(), transitionedAt: "2026-08-24T00:00:02.000Z" }), false);
+  assert.equal(store.replay({ idempotencyKey: "12121212121212121212121212121212", question: "播放晚间爵士" })?.status, "clarification");
+  assert.deepEqual(store.peekNextCompletionNotification(), {
+    turnId: turn.id,
+    status: "clarification",
+    completedAt: transitionedAt,
+  });
+  store.close();
+});
+
 function clarification() {
   return {
     status: "clarification" as const,

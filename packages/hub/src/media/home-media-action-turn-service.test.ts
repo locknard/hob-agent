@@ -115,6 +115,38 @@ async function settle(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+test("forwards durable media completion notifications without expanding their payload", async () => {
+  const fx = fixture();
+  const turn = fx.store.begin({
+    createdAt: NOW,
+    idempotencyKey: KEY_A,
+    question: "播放爵士",
+  }).turn;
+  fx.store.clarify({
+    id: turn.id,
+    clarification: { status: "clarification", slot: "query", reason: "missing", options: [] },
+    transitionedAt: "2026-08-24T01:00:01.000Z",
+  });
+  await fx.context.plugin(HomeMediaActionTurnService, {
+    store: fx.store,
+    agent: fx.agent,
+    conversation: fx.conversation,
+    reviewCenter: fx.reviewCenter,
+    clock: () => NOW,
+  });
+  try {
+    assert.deepEqual(fx.context.homeMediaActionTurns.peekNextCompletionNotification(), {
+      turnId: turn.id,
+      status: "clarification",
+      completedAt: "2026-08-24T01:00:01.000Z",
+    });
+    assert.equal(fx.context.homeMediaActionTurns.acknowledgeCompletionNotification(turn.id), true);
+    assert.equal(fx.context.homeMediaActionTurns.peekNextCompletionNotification(), undefined);
+  } finally {
+    await fx.context.fiber.dispose();
+  }
+});
+
 test("accepts an explicit media action immediately and persists only its durable turn state", async () => {
   const fx = fixture({ gate: new Deferred<void>() });
   await fx.context.plugin(HomeMediaActionTurnService, {

@@ -14,6 +14,15 @@ import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 
 export type HomeMediaActionTurnStatus = "running" | "clarification" | "ticket" | "failed" | "cancelled";
 
+/** Minimal local product signal for a completion that remains discoverable. */
+export type HomeMediaActionTurnCompletionNotificationStatus = "clarification" | "failed";
+
+export interface HomeMediaActionTurnCompletionNotification {
+  readonly turnId: string;
+  readonly status: HomeMediaActionTurnCompletionNotificationStatus;
+  readonly completedAt: string;
+}
+
 export type HomeMediaActionTurnFailureReason =
   | "interrupted_before_action"
   | "agent_unavailable"
@@ -91,6 +100,10 @@ export interface HomeMediaActionTurnStore {
   replay(input: { readonly idempotencyKey: string; readonly question: string }): HomeMediaActionTurnRecord | undefined;
   /** Running turns have no actor after a restart and need an explicit recovery decision. */
   recoverable(): readonly Extract<HomeMediaActionTurnRecord, { readonly status: "running" }>[];
+  /** Reads the oldest clarification or failed completion while its acknowledgement is pending. */
+  peekNextCompletionNotification(): HomeMediaActionTurnCompletionNotification | undefined;
+  /** Acknowledges one exact turn notification by turn id. */
+  acknowledgeCompletionNotification(id: string): boolean;
   events(id: string, afterSeq?: number): readonly HomeMediaActionTurnEvent[];
   close(): void;
 }
@@ -265,6 +278,26 @@ export class SqliteHomeMediaActionTurnStore implements HomeMediaActionTurnStore 
     });
   }
 
+  peekNextCompletionNotification(): HomeMediaActionTurnCompletionNotification | undefined {
+    this.assertOpen();
+    const row = this.db.prepare(`SELECT turn_id, status, transitioned_at, completion_notification_pending
+      FROM home_media_action_turns
+      WHERE completion_notification_pending = 1 AND status IN ('clarification', 'failed')
+      ORDER BY transitioned_at ASC, turn_id ASC LIMIT 1`).get() as Row | undefined;
+    return row === undefined ? undefined : completionNotificationFromRow(row);
+  }
+
+  acknowledgeCompletionNotification(id: string): boolean {
+    this.assertOpen();
+    const turnId = validateTurnId(id);
+    const result = this.db.prepare(`UPDATE home_media_action_turns
+      SET completion_notification_pending = 0
+      WHERE turn_id = ? AND completion_notification_pending = 1
+        AND status IN ('clarification', 'failed')`).run(turnId);
+    this.ensurePrivateFiles();
+    return Number(result.changes) === 1;
+  }
+
   events(id: string, afterSeq = 0): readonly HomeMediaActionTurnEvent[] {
     this.assertOpen();
     validateTurnId(id);
@@ -303,8 +336,14 @@ export class SqliteHomeMediaActionTurnStore implements HomeMediaActionTurnStore 
         throw new TypeError("Invalid media action turn transition time");
       }
       const result = this.db.prepare(`UPDATE home_media_action_turns
-        SET status = ?, detail_json = ?, transitioned_at = ?
-        WHERE turn_id = ? AND status = 'running'`).run(input.status, detailJson, input.transitionedAt, id);
+        SET status = ?, detail_json = ?, transitioned_at = ?, completion_notification_pending = ?
+        WHERE turn_id = ? AND status = 'running'`).run(
+        input.status,
+        detailJson,
+        input.transitionedAt,
+        input.status === "clarification" || input.status === "failed" ? 1 : 0,
+        id,
+      );
       if (Number(result.changes) !== 1) {
         this.db.exec("ROLLBACK");
         return false;
@@ -356,10 +395,23 @@ export class SqliteHomeMediaActionTurnStore implements HomeMediaActionTurnStore 
         detail_json TEXT,
         created_at TEXT NOT NULL,
         transitioned_at TEXT,
+        completion_notification_pending INTEGER NOT NULL DEFAULT 0
+          CHECK (completion_notification_pending IN (0, 1)),
         CHECK ((status = 'running' AND detail_json IS NULL AND transitioned_at IS NULL)
           OR (status IN ('clarification', 'ticket', 'failed', 'cancelled')
             AND detail_json IS NOT NULL AND transitioned_at IS NOT NULL))
       ) STRICT;
+    `);
+    const columns = new Set(
+      (this.db.prepare("PRAGMA table_info(home_media_action_turns)").all() as Row[])
+        .map((row) => row.name),
+    );
+    if (!columns.has("completion_notification_pending")) {
+      this.db.exec(`ALTER TABLE home_media_action_turns
+        ADD COLUMN completion_notification_pending INTEGER NOT NULL DEFAULT 0
+          CHECK (completion_notification_pending IN (0, 1))`);
+    }
+    this.db.exec(`
       CREATE INDEX IF NOT EXISTS home_media_action_turns_recoverable
         ON home_media_action_turns (status, created_at ASC, turn_id ASC);
       CREATE TABLE IF NOT EXISTS home_media_action_turn_events (
@@ -454,6 +506,16 @@ function fromEventRow(row: Row): HomeMediaActionTurnEvent {
     throw new Error("Stored media action turn event is corrupt");
   }
   return { seq: row.event_seq as number, type: row.lifecycle_kind, at: row.event_at };
+}
+
+function completionNotificationFromRow(row: Row): HomeMediaActionTurnCompletionNotification {
+  const turnId = row.turn_id;
+  const status = row.status;
+  const completedAt = row.transitioned_at;
+  if (!isTurnId(turnId) || !isCompletionNotificationStatus(status) || !isIsoTimestamp(completedAt)) {
+    throw new Error("Stored media action turn completion notification is corrupt");
+  }
+  return { turnId, status, completedAt };
 }
 
 function validateClarification(value: unknown): HomeMediaClarificationState {
@@ -578,6 +640,10 @@ function isTicketId(value: unknown): value is string {
 
 function isEventType(value: unknown): value is HomeMediaActionTurnEventType {
   return typeof value === "string" && (EVENT_TYPES as readonly string[]).includes(value);
+}
+
+function isCompletionNotificationStatus(value: unknown): value is HomeMediaActionTurnCompletionNotificationStatus {
+  return value === "clarification" || value === "failed";
 }
 
 function isStatus(value: unknown): value is HomeMediaActionTurnStatus {
