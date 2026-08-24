@@ -22,6 +22,9 @@ report containing only:
 - counts by closed capability semantic kind; and
 - available/unavailable neutral existing-rule catalog counts plus the aggregate
   number of visible rules; and
+- aggregate automation trace identity coverage with closed
+  `complete`/`partial`/`unavailable` status and counts of automation entities
+  with stable, missing, or ambiguous trace identity; and
 - aggregate counts of proposed device-identity links and capability bindings
   that still require governance review; and
 - aggregate logical ingest-journal bytes used, maximum bytes, remaining bytes,
@@ -33,6 +36,14 @@ Rule names, opaque references, epochs, and bridge identities are also omitted.
 Identity proposal IDs, participating Hub IDs, identity claims, evidence, and
 reasons are omitted as well; these counts indicate review work, not accepted
 equivalence or authority.
+The trace identity metric uses bounded bootstrap state `automation.*` entities
+as its denominator and joins each to exactly one registry row before counting
+an explicit, unique registry `unique_id`; registry-only orphans do not count.
+It is a prerequisite-coverage signal, not proof of trace permission, retention,
+or a retained live context; the trace pilot reports those outcomes separately.
+The Hub bounds and cancels the optional coverage read and rejects results after
+adapter, lifecycle, readiness, or watermark drift. Unavailable bridges do not
+count as zero-covered.
 Journal capacity contains no records or values. It is operational evidence:
 the Phase 0 journal has a hard quota and fails closed at that boundary. The
 report makes approaching exhaustion visible, but does not silently delete or

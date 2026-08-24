@@ -237,25 +237,60 @@ function respondToForeignRuleBootstrap(
   automationSubscriptionSuccess = true,
   automationUniqueId: string | null = "arrival_light",
   automationEntityId = "automation.arrival_light",
+  additionalAutomations: readonly { readonly entityId: string; readonly uniqueId: string | null }[] = [],
+  stateOnlyAutomationCount = 0,
+  registryOnlyAutomations: readonly { readonly entityId: string; readonly uniqueId: string | null }[] = [],
 ): void {
   socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
   socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
   const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  const automations = [
+    { entityId: automationEntityId, uniqueId: automationUniqueId, registryId: "automation-stable-1", name: "Arrival light" },
+    ...additionalAutomations.map((automation, index) => ({
+      entityId: automation.entityId,
+      uniqueId: automation.uniqueId,
+      registryId: `automation-stable-${index + 2}`,
+      name: `Automation ${index + 2}`,
+    })),
+  ];
+  const stateOnlyAutomations = Array.from({ length: stateOnlyAutomationCount }, (_, index) => ({
+    entityId: `automation.state_only_${index + 1}`,
+    uniqueId: null,
+    registryId: `state-only-not-registered-${index + 1}`,
+    name: `State-only automation ${index + 1}`,
+  }));
+  const registryOnly = registryOnlyAutomations.map((automation, index) => ({
+    entityId: automation.entityId,
+    uniqueId: automation.uniqueId,
+    registryId: `automation-orphan-${index + 1}`,
+    name: `Orphan automation ${index + 1}`,
+  }));
   for (const command of commands) {
     const result = command.type === "get_states"
       ? [
-          { entity_id: automationEntityId, state: "on", attributes: { friendly_name: "Arrival light" } },
+          ...[...automations, ...stateOnlyAutomations].map((automation) => ({
+            entity_id: automation.entityId,
+            state: "on",
+            attributes: { friendly_name: automation.name },
+          })),
           { entity_id: "light.kitchen", state: "off", attributes: { friendly_name: "Kitchen light" } },
         ]
         : command.type === "config/entity_registry/list"
           ? [
-              {
-                id: "automation-stable-1",
-                entity_id: automationEntityId,
+              ...automations.map((automation) => ({
+                id: automation.registryId,
+                entity_id: automation.entityId,
                 device_id: "device-automation",
-                name: "Arrival light",
-                ...(automationUniqueId === null ? {} : { unique_id: automationUniqueId }),
-              },
+                name: automation.name,
+                ...(automation.uniqueId === null ? {} : { unique_id: automation.uniqueId }),
+              })),
+              ...registryOnly.map((automation) => ({
+                id: automation.registryId,
+                entity_id: automation.entityId,
+                device_id: "device-automation",
+                name: automation.name,
+                ...(automation.uniqueId === null ? {} : { unique_id: automation.uniqueId }),
+              })),
               { id: "entity-light-1", entity_id: "light.kitchen", device_id: "device-light", name: "Kitchen light" },
             ]
           : command.type === "config/device_registry/list"
@@ -1874,6 +1909,112 @@ test("reads one exact automation trace for the causality state target", async ()
   assert.equal(JSON.stringify(result).includes("must-not-cross-contract"), false);
 
   await adapter.control.dispose();
+  controller.abort();
+});
+
+test("reports aggregate stable trace identity coverage without source metadata", async () => {
+  const fixture = await prepareAutomationTraceFixture();
+  const coverage = await fixture.traceHandle.coverage!({ signal: fixture.controller.signal });
+  assert.deepEqual(coverage, {
+    status: "complete",
+    totalAutomationEntities: 1,
+    stableTraceIdentityEntities: 1,
+    missingTraceIdentityEntities: 0,
+    ambiguousTraceIdentityEntities: 0,
+  });
+  const serialized = JSON.stringify(coverage);
+  for (const forbidden of ["arrival_light", "automation.", "Arrival light", "ruleRef", "epoch"]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("reports partial stable trace identity coverage when registry identity is absent", async () => {
+  const fixture = await prepareAutomationTraceFixture({}, null);
+  const coverage = await fixture.traceHandle.coverage!({ signal: fixture.controller.signal });
+  assert.deepEqual(coverage, {
+    status: "partial",
+    totalAutomationEntities: 1,
+    stableTraceIdentityEntities: 0,
+    missingTraceIdentityEntities: 1,
+    ambiguousTraceIdentityEntities: 0,
+  });
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("fails closed for duplicate stable trace identities", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket, true, "arrival_light", "automation.arrival_light", [
+    { entityId: "automation.other_rule", uniqueId: "arrival_light" },
+  ]);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("automationTrace@1") as AutomationTraceHandle;
+  assert.deepEqual(await handle.coverage!({ signal: controller.signal }), {
+    status: "partial",
+    totalAutomationEntities: 2,
+    stableTraceIdentityEntities: 0,
+    missingTraceIdentityEntities: 0,
+    ambiguousTraceIdentityEntities: 2,
+  });
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("reports the bounded state ratio and excludes registry orphans", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(
+    socket,
+    true,
+    "arrival_light",
+    "automation.arrival_light",
+    [],
+    14,
+    [{ entityId: "automation.registry_orphan", uniqueId: "orphan_trace" }],
+  );
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("automationTrace@1") as AutomationTraceHandle;
+  assert.deepEqual(await handle.coverage!({ signal: controller.signal }), {
+    status: "partial",
+    totalAutomationEntities: 15,
+    stableTraceIdentityEntities: 1,
+    missingTraceIdentityEntities: 14,
+    ambiguousTraceIdentityEntities: 0,
+  });
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("reports unavailable trace identity coverage before bootstrap and after dispose", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const handle = adapter.extension("automationTrace@1") as AutomationTraceHandle;
+  const unavailable = {
+    status: "unavailable" as const,
+    totalAutomationEntities: 0,
+    stableTraceIdentityEntities: 0,
+    missingTraceIdentityEntities: 0,
+    ambiguousTraceIdentityEntities: 0,
+  };
+  assert.deepEqual(await handle.coverage!({ signal: controller.signal }), unavailable);
+  await adapter.control.dispose();
+  assert.deepEqual(await handle.coverage!({ signal: controller.signal }), unavailable);
   controller.abort();
 });
 

@@ -30,6 +30,31 @@ readTrace(
 ): Promise<AutomationTraceResult>
 ```
 
+The same `automationTrace@1` handle may optionally expose a read-only
+`coverage({ signal })` method. This additive method preserves existing
+third-party `readTrace` handles; a handle without it is `unavailable` at the
+Hub validation surface. The Hub owns the abort signal and a bounded deadline,
+then rechecks adapter identity, lifecycle, readiness, and watermark before
+accepting the result. It returns only bounded aggregate counts:
+
+```ts
+type AutomationTraceCoverage = {
+  status: "complete" | "partial" | "unavailable";
+  totalAutomationEntities: number;
+  stableTraceIdentityEntities: number;
+  missingTraceIdentityEntities: number;
+  ambiguousTraceIdentityEntities: number;
+};
+```
+
+The denominator is the bounded bootstrap state set of `automation.*` entities;
+each state entity is joined to exactly one matching registry row before its
+explicit unique, non-conflicting stable identity is counted. Registry-only
+orphans do not inflate the denominator. The counts contain no entity, rule,
+name, epoch, or provider value. `complete`/`partial` describe identity
+prerequisites only; they do not prove trace permission, retention, or a
+retained live context.
+
 The request is strict. The Hub derives `ruleRef` and `target` from a current
 catalog and accepted live state; an agent does not invent either value.
 

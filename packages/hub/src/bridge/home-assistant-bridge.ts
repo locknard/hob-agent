@@ -83,6 +83,7 @@ import {
   CAUSALITY_EXTENSION_KEY,
   AUTOMATION_TRACE_EXTENSION,
   AUTOMATION_TRACE_EXTENSION_KEY,
+  automationTraceCoverageSchema,
   automationTraceRequestSchema,
   automationTraceResultSchema,
   HISTORY_EXTENSION,
@@ -90,6 +91,7 @@ import {
   MAX_HISTORY_RECORDS,
   HistoryRecordSchema,
   type AutomationTraceHandle,
+  type AutomationTraceCoverage,
   type AutomationTraceRequest,
   type AutomationTraceResult,
   type AutomationTraceTarget,
@@ -1044,6 +1046,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private foreignRuleCatalog: ForeignRuleCatalog | undefined;
   private foreignRuleConfigIdsByRef = new Map<string, string>();
   private foreignRuleTraceItemIdsByRef = new Map<string, string>();
+  private foreignRuleTraceIdentityCoverage: AutomationTraceCoverage = unavailableAutomationTraceCoverage();
   private foreignRuleTitlesByRef = new Map<string, string>();
   private foreignRuleRefsByAutomationEntityId = new Map<string, string>();
   private observedAutomationContexts = new Map<string, ObservedAutomationContext>();
@@ -1104,6 +1107,9 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     if (name === AUTOMATION_TRACE_EXTENSION_KEY) {
       const handle: AutomationTraceHandle = {
         readTrace: (request, options) => this.readAutomationTrace(request, options.signal),
+        coverage: async ({ signal }) => signal.aborted
+          ? unavailableAutomationTraceCoverage()
+          : { ...this.foreignRuleTraceIdentityCoverage },
       };
       return handle as ExtensionHandleRegistry[K];
     }
@@ -2267,6 +2273,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       this.healthByNativeId.clear();
       this.foreignRuleConfigIdsByRef.clear();
       this.foreignRuleTraceItemIdsByRef.clear();
+      this.foreignRuleTraceIdentityCoverage = unavailableAutomationTraceCoverage();
       this.foreignRuleTitlesByRef.clear();
       this.foreignRuleRefsByAutomationEntityId.clear();
       this.observedAutomationContexts.clear();
@@ -2288,6 +2295,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     const foreignRules = projectForeignRules(snapshot);
     this.foreignRuleConfigIdsByRef = new Map(foreignRules.configIdsByRuleRef);
     this.foreignRuleTraceItemIdsByRef = new Map(foreignRules.traceItemIdsByRuleRef);
+    this.foreignRuleTraceIdentityCoverage = foreignRules.traceIdentityCoverage;
     this.foreignRuleTitlesByRef = new Map(foreignRules.titlesByRuleRef);
     this.foreignRuleRefsByAutomationEntityId = new Map(foreignRules.ruleRefsByAutomationEntityId);
     this.automationTraceAbortController?.abort(new Error("Home Assistant automation trace epoch changed"));
@@ -2631,6 +2639,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     this.automationTraceGeneration += 1;
     this.activeAutomationTraceEpochId = undefined;
     this.foreignRuleTraceItemIdsByRef.clear();
+    this.foreignRuleTraceIdentityCoverage = unavailableAutomationTraceCoverage();
     this.observedAutomationContexts.clear();
     this.automationTraceAbortController?.abort(new Error("Home Assistant automation trace association is stale"));
   }
@@ -2641,16 +2650,57 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
   readonly rules: ForeignRuleSummary[];
   readonly configIdsByRuleRef: ReadonlyMap<string, string>;
   readonly traceItemIdsByRuleRef: ReadonlyMap<string, string>;
+  readonly traceIdentityCoverage: AutomationTraceCoverage;
   readonly titlesByRuleRef: ReadonlyMap<string, string>;
   readonly ruleRefsByAutomationEntityId: ReadonlyMap<string, string>;
 } {
   const states = new Map(snapshot.states.map((state) => [state.entity_id, state]));
+  const automationStateEntityIds = new Set(
+    [...states.keys()].filter((entityId) => typeof entityId === "string" && entityId.startsWith("automation.")),
+  );
   const rules: ForeignRuleSummary[] = [];
   const configIdsByRuleRef = new Map<string, string>();
   const traceItemIdsByRuleRef = new Map<string, string>();
+  const registryRowsByAutomationEntityId = new Map<string, unknown[]>();
+  const traceItemIdsByAutomationEntityId = new Map<string, string>();
+  const traceItemIdCounts = new Map<string, number>();
+  const missingTraceIdentityEntityIds = new Set<string>();
+  const ambiguousTraceIdentityEntityIds = new Set<string>();
   const titlesByRuleRef = new Map<string, string>();
   const ruleRefsByAutomationEntityId = new Map<string, string>();
+  let totalAutomationEntities = 0;
+  let coverageInputValid = true;
   let complete = true;
+  for (const raw of snapshot.entityRegistry) {
+    if (!isRecord(raw)) continue;
+    const entityId = nonEmptyString(raw.entity_id);
+    if (entityId === undefined || !entityId.startsWith("automation.")) continue;
+    const rows = registryRowsByAutomationEntityId.get(entityId) ?? [];
+    rows.push(raw);
+    registryRowsByAutomationEntityId.set(entityId, rows);
+  }
+  totalAutomationEntities = automationStateEntityIds.size;
+  for (const entityId of automationStateEntityIds) {
+    const rows = registryRowsByAutomationEntityId.get(entityId) ?? [];
+    if (rows.length === 0) {
+      missingTraceIdentityEntityIds.add(entityId);
+      continue;
+    }
+    if (rows.length !== 1) {
+      ambiguousTraceIdentityEntityIds.add(entityId);
+      continue;
+    }
+    const registryRow = rows[0];
+    const traceItemId = isRecord(registryRow) && isBoundedHomeAssistantTraceIdentifier(registryRow.unique_id)
+      ? registryRow.unique_id
+      : undefined;
+    if (traceItemId === undefined) {
+      missingTraceIdentityEntityIds.add(entityId);
+      continue;
+    }
+    traceItemIdsByAutomationEntityId.set(entityId, traceItemId);
+    traceItemIdCounts.set(traceItemId, (traceItemIdCounts.get(traceItemId) ?? 0) + 1);
+  }
   for (const raw of snapshot.entityRegistry) {
     if (!isRecord(raw)) continue;
     const entityId = nonEmptyString(raw.entity_id);
@@ -2665,7 +2715,10 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
     }
     const stableId = nonEmptyString(raw.id) ?? entityId;
     const nativeConfigId = entityId.slice("automation.".length);
-    if (!/^[a-z0-9][a-z0-9_-]{0,255}$/u.test(nativeConfigId)) continue;
+    if (!/^[a-z0-9][a-z0-9_-]{0,255}$/u.test(nativeConfigId)) {
+      if (automationStateEntityIds.has(entityId)) coverageInputValid = false;
+      continue;
+    }
     const stateName = state && isRecord(state.attributes)
       ? nonEmptyString(state.attributes.friendly_name)
       : undefined;
@@ -2674,10 +2727,6 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
     const updatedAt = state?.last_updated;
     const ruleRef = `ha-rule:${createHash("sha256").update(stableId).digest("hex")}`;
     configIdsByRuleRef.set(ruleRef, nativeConfigId);
-    const traceItemId = isBoundedHomeAssistantTraceIdentifier(raw.unique_id)
-      ? raw.unique_id
-      : undefined;
-    if (traceItemId !== undefined) traceItemIdsByRuleRef.set(ruleRef, traceItemId);
     ruleRefsByAutomationEntityId.set(entityId, ruleRef);
     if (name !== undefined) titlesByRuleRef.set(ruleRef, name.slice(0, 512));
     rules.push({
@@ -2687,13 +2736,57 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
       ...(typeof updatedAt === "string" && updatedAt.length > 0 ? { updatedAt } : {}),
     });
   }
+  for (const [entityId, traceItemId] of traceItemIdsByAutomationEntityId) {
+    const ruleRef = ruleRefsByAutomationEntityId.get(entityId);
+    if (ruleRef !== undefined) traceItemIdsByRuleRef.set(ruleRef, traceItemId);
+  }
+  for (const [traceItemId, count] of traceItemIdCounts) {
+    if (count <= 1) continue;
+    for (const [entityId, mappedTraceItemId] of traceItemIdsByAutomationEntityId) {
+      if (mappedTraceItemId === traceItemId) {
+        ambiguousTraceIdentityEntityIds.add(entityId);
+        traceItemIdsByAutomationEntityId.delete(entityId);
+        const ruleRef = ruleRefsByAutomationEntityId.get(entityId);
+        if (ruleRef !== undefined) traceItemIdsByRuleRef.delete(ruleRef);
+      }
+    }
+  }
+  const ambiguousTraceIdentityEntities = ambiguousTraceIdentityEntityIds.size;
+  const missingTraceIdentityEntities = missingTraceIdentityEntityIds.size;
+  const stableTraceIdentityEntities = traceItemIdsByAutomationEntityId.size;
+  const traceIdentityCoverageCandidate = {
+    status: !coverageInputValid || !complete
+      ? "unavailable"
+      : missingTraceIdentityEntities === 0 && ambiguousTraceIdentityEntities === 0
+        ? "complete"
+        : "partial",
+    totalAutomationEntities,
+    stableTraceIdentityEntities,
+    missingTraceIdentityEntities,
+    ambiguousTraceIdentityEntities,
+  } as const;
+  const parsedTraceIdentityCoverage = automationTraceCoverageSchema.safeParse(traceIdentityCoverageCandidate);
+  const traceIdentityCoverage = parsedTraceIdentityCoverage.success
+    ? parsedTraceIdentityCoverage.data
+    : unavailableAutomationTraceCoverage();
   return {
     complete,
     rules: rules.sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)),
     configIdsByRuleRef,
     traceItemIdsByRuleRef,
+    traceIdentityCoverage,
     titlesByRuleRef,
     ruleRefsByAutomationEntityId,
+  };
+}
+
+function unavailableAutomationTraceCoverage(): AutomationTraceCoverage {
+  return {
+    status: "unavailable",
+    totalAutomationEntities: 0,
+    stableTraceIdentityEntities: 0,
+    missingTraceIdentityEntities: 0,
+    ambiguousTraceIdentityEntities: 0,
   };
 }
 

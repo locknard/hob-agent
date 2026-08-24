@@ -62,6 +62,16 @@ test("queries a bounded foreign-rule catalog through the neutral optional extens
     lastSeq: 2,
     rules: [{ ruleRef: "opaque-rule-1", name: "Arrival light", enabled: true }],
   }]);
+  assert.deepEqual(await ctx.homeWorld.automationTraceIdentityCoverage(), {
+    status: "unavailable",
+    bridges: 1,
+    availableBridges: 0,
+    unavailableBridges: 1,
+    totalAutomationEntities: 0,
+    stableTraceIdentityEntities: 0,
+    missingTraceIdentityEntities: 0,
+    ambiguousTraceIdentityEntities: 0,
+  });
 
   adapter.extension = ((name: string) => name === "foreignRules@2"
     ? { catalog: async () => ({ epochId: "uncommitted-epoch", lastSeq: 2, complete: true, rules: [] }) }
@@ -91,5 +101,81 @@ test("queries a bounded foreign-rule catalog through the neutral optional extens
     rules: [],
   }]);
 
+  await fiber.dispose();
+});
+
+test("aggregates stable trace identity coverage without exposing source metadata", async () => {
+  const adapter: BridgeAdapter = {
+    info: {
+      bridgeId: "bridge-a",
+      coreVersion: "6.3.0",
+      ecosystem: "test",
+      heartbeatIntervalMs: 1_000,
+      extensions: [
+        { id: "foreignRules", version: "2.0.0" },
+        { id: "automationTrace", version: "1.0.0" },
+      ],
+    },
+    events: async function* (signal) {
+      yield {
+        epochId: "epoch-a",
+        seq: 1,
+        event: { kind: "sync-start", snapshotId: "snapshot-a", remoteInstanceId: "remote-a", reason: "initial" },
+      };
+      yield {
+        epochId: "epoch-a",
+        seq: 2,
+        event: { kind: "sync-complete", manifest: { snapshotId: "snapshot-a", deviceEnvelopeCount: 0, stateEnvelopeCount: 0 } },
+      };
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
+    control: { requestResync: async () => ({ status: "completed" }), dispose: async () => undefined },
+    extension: (name) => name === "foreignRules@2"
+      ? { catalog: async () => ({ epochId: "epoch-a", lastSeq: 2, complete: true, rules: [] }) } as never
+      : name === "automationTrace@1"
+        ? {
+            coverage: async () => ({
+              status: "partial",
+              totalAutomationEntities: 15,
+              stableTraceIdentityEntities: 1,
+              missingTraceIdentityEntities: 14,
+              ambiguousTraceIdentityEntities: 0,
+            }),
+          } as never
+        : undefined,
+  };
+  const catalog = new BridgeCatalog();
+  catalog.register({
+    adapterType: "test",
+    configSchema: z.object({}).strict(),
+    credentialRequirements: [],
+    capabilitySchemas: [],
+    factory: () => adapter,
+  });
+  const registry = new BridgeRegistry({ catalog, store: new MemoryBridgeRegistryStore() });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, {
+    catalog,
+    registry,
+    bridges: [{ bridgeId: "bridge-a", adapterType: "test", config: {} }],
+    monitorIntervalMs: 0,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const coverage = await ctx.homeWorld.automationTraceIdentityCoverage();
+  assert.deepEqual(coverage, {
+    status: "partial",
+    bridges: 1,
+    availableBridges: 1,
+    unavailableBridges: 0,
+    totalAutomationEntities: 15,
+    stableTraceIdentityEntities: 1,
+    missingTraceIdentityEntities: 14,
+    ambiguousTraceIdentityEntities: 0,
+  });
+  const serialized = JSON.stringify(coverage);
+  for (const forbidden of ["bridge-a", "epoch-a", "ruleRef", "unique_id", "native"]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
   await fiber.dispose();
 });

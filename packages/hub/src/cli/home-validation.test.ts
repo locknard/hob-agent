@@ -51,6 +51,16 @@ test("projects only aggregate neutral readiness without household identities or 
       { kind: "capability-binding", status: "proposed" },
       { kind: "identity-link", status: "approved" },
     ],
+    automationTraceIdentityCoverage: {
+      status: "partial",
+      bridges: 1,
+      availableBridges: 1,
+      unavailableBridges: 0,
+      totalAutomationEntities: 15,
+      stableTraceIdentityEntities: 1,
+      missingTraceIdentityEntities: 14,
+      ambiguousTraceIdentityEntities: 0,
+    },
   });
 
   assert.deepEqual(report, {
@@ -77,9 +87,57 @@ test("projects only aggregate neutral readiness without household identities or 
     },
     ruleCatalogs: { available: 1, unavailable: 0, totalRules: 1 },
     identityGovernance: { proposedIdentityLinks: 1, proposedCapabilityBindings: 1 },
+    automationTraceIdentityCoverage: {
+      status: "partial",
+      bridges: 1,
+      availableBridges: 1,
+      unavailableBridges: 0,
+      totalAutomationEntities: 15,
+      stableTraceIdentityEntities: 1,
+      missingTraceIdentityEntities: 14,
+      ambiguousTraceIdentityEntities: 0,
+    },
   });
   const serialized = JSON.stringify(report);
   for (const secret of ["secret", "Private", "private-value"]) {
+    assert.equal(serialized.includes(secret), false);
+  }
+});
+
+test("fails closed for unavailable trace identity coverage without leaking source metadata", () => {
+  const report = projectHomeValidation({
+    configuredBridgeCount: 1,
+    snapshot: {
+      bridges: { "secret-bridge-id": {} },
+      bridgeWatermarks: [],
+      diagnostics: [{ bridgeId: "secret-bridge-id", connectionState: "degraded" }],
+      spaces: [],
+      devices: [],
+    },
+    automationTraceIdentityCoverage: {
+      status: "unavailable",
+      bridges: 1,
+      availableBridges: 0,
+      unavailableBridges: 1,
+      totalAutomationEntities: 0,
+      stableTraceIdentityEntities: 0,
+      missingTraceIdentityEntities: 0,
+      ambiguousTraceIdentityEntities: 0,
+    },
+  });
+
+  assert.deepEqual(report.automationTraceIdentityCoverage, {
+    status: "unavailable",
+    bridges: 1,
+    availableBridges: 0,
+    unavailableBridges: 1,
+    totalAutomationEntities: 0,
+    stableTraceIdentityEntities: 0,
+    missingTraceIdentityEntities: 0,
+    ambiguousTraceIdentityEntities: 0,
+  });
+  const serialized = JSON.stringify(report);
+  for (const secret of ["secret-bridge-id", "entity_id", "unique_id", "Private automation"]) {
     assert.equal(serialized.includes(secret), false);
   }
 });

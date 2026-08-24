@@ -5,6 +5,7 @@ import { Context } from "@deepseek-ai/cordis";
 
 import {
   HomeWorldService,
+  type HomeWorldAutomationTraceIdentityCoverage,
   type HomeWorldForeignRuleCatalog,
 } from "../world/home-world-service.js";
 import {
@@ -75,12 +76,14 @@ export interface HomeValidationReport {
     readonly proposedIdentityLinks: number;
     readonly proposedCapabilityBindings: number;
   };
+  readonly automationTraceIdentityCoverage: HomeWorldAutomationTraceIdentityCoverage;
 }
 
 export function projectHomeValidation(input: {
   readonly configuredBridgeCount: number;
   readonly snapshot: ValidationSnapshot;
   readonly ruleCatalogs?: readonly HomeWorldForeignRuleCatalog[];
+  readonly automationTraceIdentityCoverage?: HomeWorldAutomationTraceIdentityCoverage;
   readonly identityProposals?: readonly {
     readonly kind: string;
     readonly status: string;
@@ -154,6 +157,7 @@ export function projectHomeValidation(input: {
       proposedCapabilityBindings: identityProposals.filter((proposal) =>
         proposal.kind === "capability-binding" && proposal.status === "proposed").length,
     },
+    automationTraceIdentityCoverage: input.automationTraceIdentityCoverage ?? unavailableTraceIdentityCoverage(),
   };
 }
 
@@ -194,11 +198,25 @@ export async function validateHomeEnvironment(
       configuredBridgeCount: config.bridges.length,
       snapshot: ctx.homeWorld.snapshot(),
       ruleCatalogs: await ctx.homeWorld.foreignRuleCatalog(),
+      automationTraceIdentityCoverage: await ctx.homeWorld.automationTraceIdentityCoverage(),
       identityProposals: ctx.homeWorld.identity.proposals(),
     });
   } finally {
     await ctx.fiber.dispose();
   }
+}
+
+function unavailableTraceIdentityCoverage(): HomeWorldAutomationTraceIdentityCoverage {
+  return {
+    status: "unavailable",
+    bridges: 0,
+    availableBridges: 0,
+    unavailableBridges: 0,
+    totalAutomationEntities: 0,
+    stableTraceIdentityEntities: 0,
+    missingTraceIdentityEntities: 0,
+    ambiguousTraceIdentityEntities: 0,
+  };
 }
 
 function countClosed(

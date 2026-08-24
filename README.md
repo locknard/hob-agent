@@ -156,7 +156,10 @@ The command mounts only HomeWorld and prints aggregate readiness and counts; it
 never prints household names, IDs, state values, URLs, credentials, or raw
 errors. Its counts include devices with and without an accepted neutral space
 binding so an incomplete household map stays visible, plus aggregate
-available/unavailable existing-rule coverage before a model call. See
+available/unavailable existing-rule coverage and stable automation-trace
+identity coverage before a model call. The latter is only a prerequisite
+signal; trace permission, retention, and live context association remain
+separate outcomes. See
 [`docs/home-validation.md`](docs/home-validation.md).
 
 After one explicit advice turn, export its safe durable acceptance manifest by

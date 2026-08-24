@@ -5,6 +5,7 @@ import {
   AUTOMATION_TRACE_EXTENSION,
   AUTOMATION_TRACE_EXTENSION_KEY,
   automationTraceReasonSchema,
+  automationTraceCoverageSchema,
   automationTraceRequestSchema,
   automationTraceResultSchema,
   automationTraceRunSchema,
@@ -49,6 +50,47 @@ test("defines automationTrace@1 and registers its read-only handle", async () =>
   assert.equal(typeof handle.readTrace, "function");
   const result = await handle.readTrace(request, { signal: new AbortController().signal });
   assert.equal(automationTraceResultSchema.safeParse(result).success, true);
+});
+
+test("accepts only bounded aggregate stable-trace identity coverage", async () => {
+  const coverage = {
+    status: "partial" as const,
+    totalAutomationEntities: 15,
+    stableTraceIdentityEntities: 1,
+    missingTraceIdentityEntities: 14,
+    ambiguousTraceIdentityEntities: 0,
+  };
+  const handle: AutomationTraceHandle = {
+    readTrace: async () => ({
+      status: "complete",
+      ruleRef: request.ruleRef,
+      target,
+      run: completeRun,
+    }),
+    coverage: async ({ signal }) => {
+      assert.equal(signal.aborted, false);
+      return coverage;
+    },
+  };
+
+  assert.equal(automationTraceCoverageSchema.safeParse(
+    await handle.coverage!({ signal: new AbortController().signal }),
+  ).success, true);
+  assert.equal(automationTraceCoverageSchema.safeParse({
+    ...coverage,
+    stableTraceIdentityEntities: 2,
+  }).success, false);
+  assert.equal(automationTraceCoverageSchema.safeParse({
+    ...coverage,
+    nativeId: "must-not-cross-contract",
+  }).success, false);
+  assert.equal(automationTraceCoverageSchema.safeParse({
+    status: "partial",
+    totalAutomationEntities: 15,
+    stableTraceIdentityEntities: 1,
+    missingTraceIdentityEntities: 13,
+    ambiguousTraceIdentityEntities: 0,
+  }).success, false);
 });
 
 test("accepts the four closed result states with their required fields", () => {

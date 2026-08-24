@@ -348,6 +348,166 @@ test("returns on the Hub deadline when an adapter ignores cancellation", async (
   await fiber.dispose();
 });
 
+test("returns unavailable when an optional coverage read ignores the Hub deadline", async () => {
+  const created = await createService({
+    cause: false,
+    automationTraceTimeoutMs: 5,
+    handle: {
+      async coverage() {
+        return new Promise<never>(() => undefined);
+      },
+    },
+  });
+  try {
+    const outcome = await Promise.race([
+      created.service.automationTraceIdentityCoverage(),
+      new Promise<"test_timeout">((resolve) => setTimeout(() => resolve("test_timeout"), 100)),
+    ]);
+    assert.notEqual(outcome, "test_timeout");
+    assert.deepEqual(outcome, {
+      status: "unavailable",
+      bridges: 1,
+      availableBridges: 0,
+      unavailableBridges: 1,
+      totalAutomationEntities: 0,
+      stableTraceIdentityEntities: 0,
+      missingTraceIdentityEntities: 0,
+      ambiguousTraceIdentityEntities: 0,
+    });
+  } finally {
+    await created.fiber.dispose();
+  }
+});
+
+test("cancels an in-flight optional coverage read at the World boundary", async () => {
+  let coverageStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { coverageStarted = resolve; });
+  const created = await createService({
+    cause: false,
+    handle: {
+      async coverage() {
+        coverageStarted?.();
+        return new Promise<never>(() => undefined);
+      },
+    },
+  });
+  const caller = new AbortController();
+  try {
+    const read = created.service.automationTraceIdentityCoverage(caller.signal);
+    await started;
+    caller.abort();
+    assert.deepEqual(await read, {
+      status: "unavailable",
+      bridges: 1,
+      availableBridges: 0,
+      unavailableBridges: 1,
+      totalAutomationEntities: 0,
+      stableTraceIdentityEntities: 0,
+      missingTraceIdentityEntities: 0,
+      ambiguousTraceIdentityEntities: 0,
+    });
+  } finally {
+    await created.fiber.dispose();
+  }
+});
+
+test("does not accept coverage after the World lifecycle fence changes", async () => {
+  let serviceRef: HomeWorldService | undefined;
+  let release: ((coverage: {
+    readonly status: "complete";
+    readonly totalAutomationEntities: 1;
+    readonly stableTraceIdentityEntities: 1;
+    readonly missingTraceIdentityEntities: 0;
+    readonly ambiguousTraceIdentityEntities: 0;
+  }) => void) | undefined;
+  let coverageStarted: (() => void) | undefined;
+  const coverageReady = new Promise<void>((resolve) => { coverageStarted = resolve; });
+  const pendingCoverage = new Promise<{
+    readonly status: "complete";
+    readonly totalAutomationEntities: 1;
+    readonly stableTraceIdentityEntities: 1;
+    readonly missingTraceIdentityEntities: 0;
+    readonly ambiguousTraceIdentityEntities: 0;
+  }>((resolve) => { release = resolve; });
+  const created = await createService({
+    cause: false,
+    handle: {
+      async coverage({ signal }) {
+        assert.equal(signal.aborted, false);
+        coverageStarted?.();
+        return pendingCoverage;
+      },
+    },
+  });
+  serviceRef = created.service;
+  try {
+    const read = created.service.automationTraceIdentityCoverage();
+    await coverageReady;
+    const runtimes = (serviceRef as unknown as {
+      runtimesById: Map<string, { lifecycleGeneration: number }>;
+    }).runtimesById;
+    const runtime = runtimes.get("bridge-trace");
+    assert.notEqual(runtime, undefined);
+    runtime!.lifecycleGeneration += 1;
+    release!({
+      status: "complete",
+      totalAutomationEntities: 1,
+      stableTraceIdentityEntities: 1,
+      missingTraceIdentityEntities: 0,
+      ambiguousTraceIdentityEntities: 0,
+    });
+    assert.deepEqual(await read, {
+      status: "unavailable",
+      bridges: 1,
+      availableBridges: 0,
+      unavailableBridges: 1,
+      totalAutomationEntities: 0,
+      stableTraceIdentityEntities: 0,
+      missingTraceIdentityEntities: 0,
+      ambiguousTraceIdentityEntities: 0,
+    });
+  } finally {
+    await created.fiber.dispose();
+  }
+});
+
+test("does not accept coverage after the bridge becomes not ready", async () => {
+  let serviceRef: HomeWorldService | undefined;
+  const created = await createService({
+    cause: false,
+    handle: {
+      async coverage() {
+        const runtimes = (serviceRef as unknown as {
+          runtimesById: Map<string, { ingest: { markDown(): void } }>;
+        }).runtimesById;
+        runtimes.get("bridge-trace")?.ingest.markDown();
+        return {
+          status: "complete" as const,
+          totalAutomationEntities: 1,
+          stableTraceIdentityEntities: 1,
+          missingTraceIdentityEntities: 0,
+          ambiguousTraceIdentityEntities: 0,
+        };
+      },
+    },
+  });
+  serviceRef = created.service;
+  try {
+    assert.deepEqual(await created.service.automationTraceIdentityCoverage(), {
+      status: "unavailable",
+      bridges: 1,
+      availableBridges: 0,
+      unavailableBridges: 1,
+      totalAutomationEntities: 0,
+      stableTraceIdentityEntities: 0,
+      missingTraceIdentityEntities: 0,
+      ambiguousTraceIdentityEntities: 0,
+    });
+  } finally {
+    await created.fiber.dispose();
+  }
+});
+
 test("does not report a complete run when the bridge disconnects during the read", async () => {
   let serviceRef: HomeWorldService | undefined;
   const created = await createService({

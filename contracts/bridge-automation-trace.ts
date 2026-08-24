@@ -17,12 +17,38 @@ const safeSequenceSchema = z.number()
   .refine(Number.isSafeInteger, "seq must be a safe integer");
 const isoOffsetTimestampSchema = z.iso.datetime({ offset: true });
 const automationLabelSchema = boundedNeutralReference(256, "automationLabel");
+export const MAX_AUTOMATION_TRACE_COVERAGE_ENTITIES = 4096;
+const automationTraceCoverageCountSchema = z.number()
+  .int()
+  .nonnegative()
+  .max(MAX_AUTOMATION_TRACE_COVERAGE_ENTITIES)
+  .refine(Number.isSafeInteger, "coverage counts must be safe integers");
 
 export const AUTOMATION_TRACE_EXTENSION = Object.freeze({
   id: "automationTrace",
   version: "1.0.0",
 }) satisfies ExtensionDeclaration;
 export const AUTOMATION_TRACE_EXTENSION_KEY = "automationTrace@1" as const;
+
+export const automationTraceCoverageSchema = z.object({
+  status: z.enum(["complete", "partial", "unavailable"]),
+  totalAutomationEntities: automationTraceCoverageCountSchema,
+  stableTraceIdentityEntities: automationTraceCoverageCountSchema,
+  missingTraceIdentityEntities: automationTraceCoverageCountSchema,
+  ambiguousTraceIdentityEntities: automationTraceCoverageCountSchema,
+}).strict().superRefine((coverage, context) => {
+  if (coverage.stableTraceIdentityEntities
+    + coverage.missingTraceIdentityEntities
+    + coverage.ambiguousTraceIdentityEntities !== coverage.totalAutomationEntities) {
+    context.addIssue({ code: "custom", message: "coverage counts must partition automation entities" });
+  }
+  if (coverage.status === "complete"
+    && (coverage.missingTraceIdentityEntities > 0 || coverage.ambiguousTraceIdentityEntities > 0)) {
+    context.addIssue({ code: "custom", message: "complete coverage cannot contain missing or ambiguous identities" });
+  }
+});
+export type AutomationTraceCoverage = z.infer<typeof automationTraceCoverageSchema>;
+export const AutomationTraceCoverageSchema = automationTraceCoverageSchema;
 
 export const automationTraceReasonSchema = z.enum([
   "permission_denied",
@@ -183,6 +209,8 @@ export interface AutomationTraceHandle {
     request: AutomationTraceRequest,
     options: { readonly signal: AbortSignal },
   ): Promise<AutomationTraceResult>;
+  /** Optional aggregate prerequisite coverage; it never returns provider identities. */
+  coverage?(options: { readonly signal: AbortSignal }): Promise<AutomationTraceCoverage>;
 }
 
 declare module "./bridge-contract.js" {

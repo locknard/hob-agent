@@ -156,7 +156,8 @@ The next M2 acceptance run keeps one ready epoch open until ordinary household
 activity produces a `foreign_rule` causality event for an automation with a
 stable ID. It then follows the exact evidence provenance through
 `get_home_causality` and `automationTrace@1`. The operator first reviews the
-read-only stable-ID coverage and adds IDs in Home Assistant through an explicit
+read-only stable-ID coverage in the aggregate `pnpm validate:home` report and
+adds IDs in Home Assistant through an explicit
 household maintenance decision when broader explanation coverage is desired.
 The pilot never triggers an automation merely to manufacture evidence.
 

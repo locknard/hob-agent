@@ -19,8 +19,10 @@ import {
 } from "@hob/bridge-contract";
 import {
   AUTOMATION_TRACE_EXTENSION_KEY,
+  automationTraceCoverageSchema,
   automationTraceResultSchema,
   type AutomationTraceHandle,
+  type AutomationTraceCoverage,
   type AutomationTraceReason,
   type AutomationTraceRun,
   HISTORY_EXTENSION_KEY,
@@ -243,6 +245,17 @@ export interface HomeWorldForeignRuleCatalog {
   readonly epochId?: string;
   readonly lastSeq?: number;
   readonly rules: readonly ForeignRuleSummary[];
+}
+
+export interface HomeWorldAutomationTraceIdentityCoverage {
+  readonly status: AutomationTraceCoverage["status"];
+  readonly bridges: number;
+  readonly availableBridges: number;
+  readonly unavailableBridges: number;
+  readonly totalAutomationEntities: number;
+  readonly stableTraceIdentityEntities: number;
+  readonly missingTraceIdentityEntities: number;
+  readonly ambiguousTraceIdentityEntities: number;
 }
 
 export interface HomeWorldForeignRuleMigrationInput {
@@ -847,6 +860,93 @@ export class HomeWorldService extends Service {
       }
     }
     return catalogs;
+  }
+
+  /**
+   * Reads only aggregate automation trace identity prerequisites. Provider
+   * identities remain inside the adapter and unavailable bridges never count
+   * as zero-covered.
+   */
+  async automationTraceIdentityCoverage(signal?: AbortSignal): Promise<HomeWorldAutomationTraceIdentityCoverage> {
+    const runtimes = [...this.runtimesById.values()].sort((left, right) => left.bridgeId.localeCompare(right.bridgeId));
+    let availableBridges = 0;
+    let unavailableBridges = 0;
+    let totalAutomationEntities = 0;
+    let stableTraceIdentityEntities = 0;
+    let missingTraceIdentityEntities = 0;
+    let ambiguousTraceIdentityEntities = 0;
+    for (let index = 0; index < runtimes.length; index += 1) {
+      const runtime = runtimes[index]!;
+      if (signal?.aborted) {
+        unavailableBridges += runtimes.length - index;
+        break;
+      }
+      if (runtime.extensionAvailability[AUTOMATION_TRACE_EXTENSION_KEY] !== "available"
+        || runtime.ingest.diagnostics().connectionState !== "ready"
+        || runtime.journal.consistentWatermark?.(runtime.bridgeId) === undefined) {
+        unavailableBridges += 1;
+        continue;
+      }
+      try {
+        const adapter = runtime.adapter;
+        const lifecycleGeneration = runtime.lifecycleGeneration;
+        const consistentBefore = runtime.journal.consistentWatermark?.(runtime.bridgeId);
+        const liveBefore = runtime.journal.watermark(runtime.bridgeId);
+        if (consistentBefore === undefined
+          || liveBefore === undefined
+          || liveBefore.epochId !== consistentBefore.epochId
+          || liveBefore.lastSeq < consistentBefore.lastSeq) throw new Error("coverage baseline unavailable");
+        const handle = adapter.extension(AUTOMATION_TRACE_EXTENSION_KEY) as AutomationTraceHandle | undefined;
+        if (handle === undefined || typeof handle.coverage !== "function") throw new Error("coverage unavailable");
+        const read = await fetchAutomationTraceCoverage(
+          handle,
+          signal,
+          this.options.automationTraceTimeoutMs ?? HOME_AUTOMATION_TRACE_FETCH_TIMEOUT_MS,
+        );
+        if (read.status !== "fulfilled") throw new Error("coverage unavailable");
+        const consistentAfter = runtime.journal.consistentWatermark?.(runtime.bridgeId);
+        const liveAfter = runtime.journal.watermark(runtime.bridgeId);
+        if (this.runtimesById.get(runtime.bridgeId) !== runtime
+          || runtime.adapter !== adapter
+          || runtime.lifecycleGeneration !== lifecycleGeneration
+          || runtime.resyncInFlight > 0
+          || signal?.aborted
+          || runtime.extensionAvailability[AUTOMATION_TRACE_EXTENSION_KEY] !== "available"
+          || runtime.ingest.diagnostics().connectionState !== "ready"
+          || consistentAfter === undefined
+          || liveAfter === undefined
+          || consistentAfter.epochId !== consistentBefore.epochId
+          || consistentAfter.lastSeq < consistentBefore.lastSeq
+          || liveAfter.epochId !== consistentBefore.epochId
+          || liveAfter.lastSeq < consistentBefore.lastSeq) {
+          throw new Error("coverage lifecycle changed");
+        }
+        const parsed = automationTraceCoverageSchema.safeParse(read.value);
+        if (!parsed.success || parsed.data.status === "unavailable") throw new Error("coverage unavailable");
+        availableBridges += 1;
+        totalAutomationEntities += parsed.data.totalAutomationEntities;
+        stableTraceIdentityEntities += parsed.data.stableTraceIdentityEntities;
+        missingTraceIdentityEntities += parsed.data.missingTraceIdentityEntities;
+        ambiguousTraceIdentityEntities += parsed.data.ambiguousTraceIdentityEntities;
+      } catch {
+        unavailableBridges += 1;
+      }
+    }
+    const status: HomeWorldAutomationTraceIdentityCoverage["status"] = runtimes.length === 0 || unavailableBridges > 0
+      ? "unavailable"
+      : missingTraceIdentityEntities === 0 && ambiguousTraceIdentityEntities === 0
+        ? "complete"
+        : "partial";
+    return {
+      status,
+      bridges: runtimes.length,
+      availableBridges,
+      unavailableBridges,
+      totalAutomationEntities,
+      stableTraceIdentityEntities,
+      missingTraceIdentityEntities,
+      ambiguousTraceIdentityEntities,
+    };
   }
 
   /**
@@ -3351,6 +3451,37 @@ type ImportedHistoryFetchResult =
 type AutomationTraceFetchResult =
   | { readonly status: "fulfilled"; readonly value: unknown }
   | { readonly status: "cancelled" | "timeout" | "rejected" };
+
+async function fetchAutomationTraceCoverage(
+  handle: AutomationTraceHandle,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<AutomationTraceFetchResult> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return { status: "rejected" };
+  if (signal?.aborted) return { status: "cancelled" };
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromCaller = (): void => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error("automation trace coverage read timed out"));
+  }, timeoutMs);
+  timer.unref?.();
+  try {
+    const outcome = await awaitMigrationRead(
+      () => handle.coverage!({ signal: controller.signal }),
+      controller.signal,
+    );
+    if (signal?.aborted) return { status: "cancelled" };
+    if (timedOut) return { status: "timeout" };
+    if (outcome.status === "fulfilled") return { status: "fulfilled", value: outcome.value };
+    return { status: "rejected" };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
 
 async function fetchAutomationTrace(
   handle: AutomationTraceHandle,
