@@ -146,6 +146,7 @@ export function createHomeHubProcessOptions(
       homeAuthorityCandidates: { path: config.authorityCandidatePath },
       homeObservationAudit: { path: config.observationAuditPath },
       homeAdvice: { path: config.advicePath },
+      homeAutomationMigrations: { path: join(config.dataDirectory, "home-automation-migrations.sqlite") },
       homeCorrections: {
         path: join(config.dataDirectory, "home-corrections.sqlite"),
         ...(config.householdDirectory === undefined ? {} : { householdDirectory: config.householdDirectory }),

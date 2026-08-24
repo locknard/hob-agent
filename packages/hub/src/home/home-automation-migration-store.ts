@@ -1,0 +1,668 @@
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
+import {
+  HOME_AUTOMATION_MIGRATION_LIMITS,
+  HomeAutomationMigrationIdempotencyConflictError,
+  type HomeAutomationMigrationAssessment,
+  type HomeAutomationMigrationAssessmentTransition,
+  type HomeAutomationMigrationCloseCommand,
+  type HomeAutomationMigrationDiscovery,
+  type HomeAutomationMigrationRuleAssessment,
+  type HomeAutomationMigrationStatus,
+} from "./home-automation-migration.js";
+
+export interface HomeAutomationMigrationStore {
+  discover(input: HomeAutomationMigrationDiscovery): HomeAutomationMigrationStoreBeginResult;
+  assess(input: HomeAutomationMigrationAssessmentTransition): boolean;
+  get(migrationId: string): HomeAutomationMigrationAssessment | undefined;
+  list(): readonly HomeAutomationMigrationAssessment[];
+  replay(input: { readonly idempotencyKey: string; readonly inputDigest: string }): HomeAutomationMigrationAssessment | undefined;
+  recover(): readonly HomeAutomationMigrationAssessment[];
+  closeAssessment(input: HomeAutomationMigrationCloseCommand): boolean;
+  close(): void;
+}
+
+export interface HomeAutomationMigrationStoreBeginResult {
+  readonly outcome: "created" | "existing";
+  readonly assessment: HomeAutomationMigrationAssessment;
+}
+
+/** Deterministic store for service and domain tests. */
+export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigrationStore {
+  private readonly records = new Map<string, HomeAutomationMigrationAssessment>();
+  private closed = false;
+
+  discover(input: HomeAutomationMigrationDiscovery): HomeAutomationMigrationStoreBeginResult {
+    this.assertOpen();
+    validateDiscovery(input);
+    const existing = this.findByIdempotencyKey(input.idempotencyKey);
+    if (existing !== undefined) {
+      if (existing.inputDigest !== input.inputDigest) throw new HomeAutomationMigrationIdempotencyConflictError();
+      return { outcome: "existing", assessment: cloneAssessment(existing) };
+    }
+    if (this.records.has(input.migrationId)) throw new Error("Migration id already exists");
+    const assessment: HomeAutomationMigrationAssessment = {
+      migrationId: input.migrationId,
+      idempotencyKey: input.idempotencyKey,
+      inputDigest: input.inputDigest,
+      sourceBridgeId: input.sourceBridgeId,
+      sourceEpochId: input.sourceEpochId,
+      sourceLastSeq: input.sourceLastSeq,
+      analysisMode: input.analysisMode,
+      rules: cloneRules(input.rules),
+      status: "discovered",
+      createdAt: input.createdAt,
+    };
+    this.records.set(assessment.migrationId, assessment);
+    return { outcome: "created", assessment: cloneAssessment(assessment) };
+  }
+
+  assess(input: HomeAutomationMigrationAssessmentTransition): boolean {
+    this.assertOpen();
+    validateTransition(input);
+    const current = this.records.get(input.migrationId);
+    if (current === undefined || (current.status !== "discovered" && current.status !== "needs_attention")) return false;
+    assertStableRuleMetadata(current.rules, input.rules);
+    if (Date.parse(input.assessedAt) < Date.parse(current.assessedAt ?? current.createdAt)) {
+      throw new TypeError("Migration assessment time precedes previous assessment");
+    }
+    this.records.set(current.migrationId, {
+      ...current,
+      rules: cloneRules(input.rules),
+      status: input.status,
+      assessedAt: input.assessedAt,
+    });
+    return true;
+  }
+
+  get(migrationId: string): HomeAutomationMigrationAssessment | undefined {
+    this.assertOpen();
+    validateId(migrationId, "migration id");
+    const record = this.records.get(migrationId);
+    return record === undefined ? undefined : cloneAssessment(record);
+  }
+
+  list(): readonly HomeAutomationMigrationAssessment[] {
+    this.assertOpen();
+    return [...this.records.values()]
+      .sort(compareAssessment)
+      .map(cloneAssessment);
+  }
+
+  replay(input: { readonly idempotencyKey: string; readonly inputDigest: string }): HomeAutomationMigrationAssessment | undefined {
+    this.assertOpen();
+    validateIdempotencyKey(input?.idempotencyKey);
+    validateDigest(input?.inputDigest);
+    const existing = this.findByIdempotencyKey(input.idempotencyKey);
+    if (existing === undefined) return undefined;
+    if (existing.inputDigest !== input.inputDigest) throw new HomeAutomationMigrationIdempotencyConflictError();
+    return cloneAssessment(existing);
+  }
+
+  recover(): readonly HomeAutomationMigrationAssessment[] {
+    this.assertOpen();
+    return [...this.records.values()]
+      .filter((record) => record.status === "discovered" || record.status === "needs_attention")
+      .sort(compareAssessment)
+      .map(cloneAssessment);
+  }
+
+  closeAssessment(input: HomeAutomationMigrationCloseCommand): boolean {
+    this.assertOpen();
+    validateClose(input);
+    const current = this.records.get(input.migrationId);
+    if (current === undefined || current.status === "closed") return false;
+    if (Date.parse(input.closedAt) < Date.parse(current.createdAt)) {
+      throw new TypeError("Migration close time precedes discovery");
+    }
+    this.records.set(current.migrationId, {
+      ...current,
+      status: "closed",
+      closedAt: input.closedAt,
+      closedFrom: current.status,
+      closeReason: input.reason,
+    });
+    return true;
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+  }
+
+  private findByIdempotencyKey(idempotencyKey: string): HomeAutomationMigrationAssessment | undefined {
+    return [...this.records.values()].find((record) => record.idempotencyKey === idempotencyKey);
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error("Home automation migration store is closed");
+  }
+}
+
+export interface SqliteHomeAutomationMigrationStoreOptions {
+  readonly path: string;
+}
+
+/** Private SQLite persistence for metadata-only migration assessments. */
+export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrationStore {
+  readonly path: string;
+  private readonly db: DatabaseSync;
+  private closed = false;
+
+  constructor(options: SqliteHomeAutomationMigrationStoreOptions | string) {
+    const path = typeof options === "string" ? options : options?.path;
+    if (typeof path !== "string" || path.length === 0) throw new TypeError("home automation migration store path is required");
+    this.path = path;
+    if (!isMemoryPath(path)) mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
+    this.ensureSchema();
+    this.ensurePrivateFiles();
+  }
+
+  discover(input: HomeAutomationMigrationDiscovery): HomeAutomationMigrationStoreBeginResult {
+    this.assertOpen();
+    validateDiscovery(input);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.findByIdempotencyKey(input.idempotencyKey);
+      if (existing !== undefined) {
+        if (existing.inputDigest !== input.inputDigest) throw new HomeAutomationMigrationIdempotencyConflictError();
+        this.db.exec("COMMIT");
+        return { outcome: "existing", assessment: existing };
+      }
+      const idCollision = this.db.prepare("SELECT migration_id FROM home_automation_migrations WHERE migration_id = ?")
+        .get(input.migrationId) as Row | undefined;
+      if (idCollision !== undefined) throw new Error("Migration id already exists");
+      const rulesJson = serializeRules(input.rules);
+      this.db.prepare(`INSERT INTO home_automation_migrations
+        (migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id, source_last_seq,
+         analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?, NULL, NULL, NULL, NULL)`)
+        .run(
+          input.migrationId,
+          input.idempotencyKey,
+          input.inputDigest,
+          input.sourceBridgeId,
+          input.sourceEpochId,
+          input.sourceLastSeq,
+          input.analysisMode,
+          rulesJson,
+          input.createdAt,
+        );
+      this.db.exec("COMMIT");
+      this.ensurePrivateFiles();
+      return { outcome: "created", assessment: {
+        migrationId: input.migrationId,
+        idempotencyKey: input.idempotencyKey,
+        inputDigest: input.inputDigest,
+        sourceBridgeId: input.sourceBridgeId,
+        sourceEpochId: input.sourceEpochId,
+        sourceLastSeq: input.sourceLastSeq,
+        analysisMode: input.analysisMode,
+        rules: cloneRules(input.rules),
+        status: "discovered",
+        createdAt: input.createdAt,
+      } };
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
+  }
+
+  assess(input: HomeAutomationMigrationAssessmentTransition): boolean {
+    this.assertOpen();
+    validateTransition(input);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+          source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+        FROM home_automation_migrations WHERE migration_id = ?`).get(input.migrationId) as Row | undefined;
+      if (row === undefined) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const current = fromRow(row);
+      if (current.status !== "discovered" && current.status !== "needs_attention") {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      assertStableRuleMetadata(current.rules, input.rules);
+      if (Date.parse(input.assessedAt) < Date.parse(current.assessedAt ?? current.createdAt)) throw new TypeError("Migration assessment time precedes previous assessment");
+      const result = this.db.prepare(`UPDATE home_automation_migrations
+        SET rules_json = ?, status = ?, assessed_at = ? WHERE migration_id = ? AND status = ?`)
+        .run(serializeRules(input.rules), input.status, input.assessedAt, input.migrationId, current.status);
+      if (Number(result.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.db.exec("COMMIT");
+      this.ensurePrivateFiles();
+      return true;
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
+  }
+
+  get(migrationId: string): HomeAutomationMigrationAssessment | undefined {
+    this.assertOpen();
+    validateId(migrationId, "migration id");
+    const row = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+        source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+      FROM home_automation_migrations WHERE migration_id = ?`).get(migrationId) as Row | undefined;
+    return row === undefined ? undefined : fromRow(row);
+  }
+
+  list(): readonly HomeAutomationMigrationAssessment[] {
+    this.assertOpen();
+    const rows = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+        source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+      FROM home_automation_migrations ORDER BY created_at ASC, migration_id ASC`).all() as Row[];
+    return rows.map(fromRow);
+  }
+
+  replay(input: { readonly idempotencyKey: string; readonly inputDigest: string }): HomeAutomationMigrationAssessment | undefined {
+    this.assertOpen();
+    validateIdempotencyKey(input?.idempotencyKey);
+    validateDigest(input?.inputDigest);
+    const existing = this.findByIdempotencyKey(input.idempotencyKey);
+    if (existing === undefined) return undefined;
+    if (existing.inputDigest !== input.inputDigest) throw new HomeAutomationMigrationIdempotencyConflictError();
+    return existing;
+  }
+
+  recover(): readonly HomeAutomationMigrationAssessment[] {
+    this.assertOpen();
+    const rows = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+        source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+      FROM home_automation_migrations WHERE status IN ('discovered', 'needs_attention') ORDER BY created_at ASC, migration_id ASC`).all() as Row[];
+    return rows.map(fromRow);
+  }
+
+  closeAssessment(input: HomeAutomationMigrationCloseCommand): boolean {
+    this.assertOpen();
+    validateClose(input);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+          source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+        FROM home_automation_migrations WHERE migration_id = ?`).get(input.migrationId) as Row | undefined;
+      if (row === undefined) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const current = fromRow(row);
+      if (current.status === "closed") {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      if (Date.parse(input.closedAt) < Date.parse(current.createdAt)) throw new TypeError("Migration close time precedes discovery");
+      const result = this.db.prepare(`UPDATE home_automation_migrations
+        SET status = 'closed', closed_at = ?, closed_from = ?, close_reason = ?
+        WHERE migration_id = ? AND status <> 'closed'`)
+        .run(input.closedAt, current.status, input.reason, input.migrationId);
+      if (Number(result.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.db.exec("COMMIT");
+      this.ensurePrivateFiles();
+      return true;
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.db.close();
+  }
+
+  private findByIdempotencyKey(idempotencyKey: string): HomeAutomationMigrationAssessment | undefined {
+    const row = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+        source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+      FROM home_automation_migrations WHERE idempotency_key = ?`).get(idempotencyKey) as Row | undefined;
+    return row === undefined ? undefined : fromRow(row);
+  }
+
+  private ensureSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS home_automation_migrations (
+        migration_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        input_digest TEXT NOT NULL,
+        source_bridge_id TEXT NOT NULL,
+        source_epoch_id TEXT NOT NULL,
+        source_last_seq INTEGER NOT NULL,
+        analysis_mode TEXT NOT NULL CHECK (analysis_mode IN ('metadata_only', 'trusted_neutral')),
+        rules_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('discovered', 'assessed', 'needs_attention', 'closed')),
+        created_at TEXT NOT NULL,
+        assessed_at TEXT,
+        closed_at TEXT,
+        closed_from TEXT,
+        close_reason TEXT,
+        CHECK ((status = 'discovered' AND assessed_at IS NULL AND closed_at IS NULL AND closed_from IS NULL AND close_reason IS NULL)
+          OR (status IN ('assessed', 'needs_attention')
+            AND assessed_at IS NOT NULL AND closed_at IS NULL AND closed_from IS NULL AND close_reason IS NULL)
+          OR (status = 'closed' AND closed_at IS NOT NULL AND closed_from IS NOT NULL AND close_reason IS NOT NULL))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS home_automation_migrations_status
+        ON home_automation_migrations (status, created_at ASC, migration_id ASC);
+    `);
+  }
+
+  private rollback(): void {
+    try { this.db.exec("ROLLBACK"); } catch { /* preserve the original failure */ }
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error("Home automation migration store is closed");
+  }
+
+  private ensurePrivateFiles(): void {
+    ensurePrivateSqliteFiles(this.path);
+  }
+}
+
+type Row = Record<string, unknown>;
+
+function fromRow(row: Row): HomeAutomationMigrationAssessment {
+  const migrationId = row.migration_id;
+  const idempotencyKey = row.idempotency_key;
+  const inputDigest = row.input_digest;
+  const sourceBridgeId = row.source_bridge_id;
+  const sourceEpochId = row.source_epoch_id;
+  const sourceLastSeq = row.source_last_seq;
+  const analysisMode = row.analysis_mode;
+  const status = row.status;
+  const createdAt = row.created_at;
+  if (!isMigrationId(migrationId) || !isIdempotencyKey(idempotencyKey) || !isDigest(inputDigest)
+    || !isBoundedText(sourceBridgeId, HOME_AUTOMATION_MIGRATION_LIMITS.maxBridgeIdLength)
+    || !isBoundedText(sourceEpochId, HOME_AUTOMATION_MIGRATION_LIMITS.maxEpochIdLength)
+    || !isPositiveSafeInteger(sourceLastSeq) || !isAnalysisMode(analysisMode)
+    || !isStatus(status) || !isIsoTimestamp(createdAt) || typeof row.rules_json !== "string") {
+    throw new Error("Stored home automation migration is corrupt");
+  }
+  let parsedRules: unknown;
+  try { parsedRules = JSON.parse(row.rules_json); } catch { throw new Error("Stored home automation migration is corrupt"); }
+  let rules: HomeAutomationMigrationRuleAssessment[];
+  try {
+    rules = validateRules(parsedRules);
+  } catch {
+    throw new Error("Stored home automation migration is corrupt");
+  }
+  if (Buffer.byteLength(row.rules_json, "utf8") > HOME_AUTOMATION_MIGRATION_LIMITS.maxInputBytes) {
+    throw new Error("Stored home automation migration is corrupt");
+  }
+  const assessedAt = row.assessed_at;
+  const closedAt = row.closed_at;
+  const closedFrom = row.closed_from;
+  const closeReason = row.close_reason;
+  if (status === "discovered") {
+    if (assessedAt !== null || closedAt !== null || closedFrom !== null || closeReason !== null) throw new Error("Stored home automation migration is corrupt");
+    return { migrationId, idempotencyKey, inputDigest, sourceBridgeId, sourceEpochId, sourceLastSeq, analysisMode, rules, status, createdAt };
+  }
+  if (status === "closed") {
+    if (!isIsoTimestamp(closedAt) || !isClosedFrom(closedFrom) || !isCloseReason(closeReason)
+      || Date.parse(closedAt) < Date.parse(createdAt) || assessedAt !== null && !isIsoTimestamp(assessedAt)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    if (closedFrom !== "discovered") assertStoredAggregateStatus(closedFrom, rules);
+    return {
+      migrationId, idempotencyKey, inputDigest, sourceBridgeId, sourceEpochId, sourceLastSeq, analysisMode, rules, status, createdAt,
+      ...(assessedAt === null ? {} : { assessedAt }), closedAt, closedFrom, closeReason,
+    };
+  }
+  if (!isIsoTimestamp(assessedAt) || Date.parse(assessedAt) < Date.parse(createdAt)
+    || closedAt !== null || closedFrom !== null || closeReason !== null) {
+    throw new Error("Stored home automation migration is corrupt");
+  }
+  assertStoredAggregateStatus(status, rules);
+  return { migrationId, idempotencyKey, inputDigest, sourceBridgeId, sourceEpochId, sourceLastSeq, analysisMode, rules, status, createdAt, assessedAt };
+}
+
+function assertStoredAggregateStatus(
+  status: Exclude<HomeAutomationMigrationStatus, "discovered" | "closed">,
+  rules: readonly HomeAutomationMigrationRuleAssessment[],
+): void {
+  const hasNeedsAttention = rules.length === 0 || rules.some((rule) => rule.disposition === "needs_attention");
+  if ((status === "needs_attention") !== hasNeedsAttention) throw new Error("Stored home automation migration is corrupt");
+}
+
+function validateDiscovery(input: HomeAutomationMigrationDiscovery): void {
+  if (!input || !isMigrationId(input.migrationId) || !isIdempotencyKey(input.idempotencyKey) || !isDigest(input.inputDigest)
+    || !isBoundedText(input.sourceBridgeId, HOME_AUTOMATION_MIGRATION_LIMITS.maxBridgeIdLength)
+    || !isBoundedText(input.sourceEpochId, HOME_AUTOMATION_MIGRATION_LIMITS.maxEpochIdLength)
+    || !isPositiveSafeInteger(input.sourceLastSeq) || !isAnalysisMode(input.analysisMode)
+    || !isIsoTimestamp(input.createdAt)) {
+    throw new TypeError("Home automation migration discovery is invalid");
+  }
+  validateRules(input.rules);
+}
+
+function validateTransition(input: HomeAutomationMigrationAssessmentTransition): void {
+  if (!input || !isMigrationId(input.migrationId) || !isTransitionStatus(input.status) || !isIsoTimestamp(input.assessedAt)) {
+    throw new TypeError("Home automation migration assessment transition is invalid");
+  }
+  validateRules(input.rules);
+  assertStoredAggregateStatus(input.status, input.rules);
+}
+
+function validateClose(input: HomeAutomationMigrationCloseCommand): void {
+  if (!input || !isMigrationId(input.migrationId) || !isIsoTimestamp(input.closedAt) || !isCloseReason(input.reason)) {
+    throw new TypeError("Home automation migration close command is invalid");
+  }
+}
+
+function validateRules(value: unknown): HomeAutomationMigrationRuleAssessment[] {
+  if (!Array.isArray(value) || value.length > HOME_AUTOMATION_MIGRATION_LIMITS.maxRules) {
+    throw new Error("Home automation migration rules exceed the bound");
+  }
+  const refs = new Set<string>();
+  const rules = value.map((item) => {
+    if (!isRecord(item) || !hasOnlyKeys(item, ["ruleRef", "name", "enabled", "updatedAt", "triggerClass", "conditionClass", "actionClass", "sourceFingerprint", "disposition", "reason"])
+      || !isBoundedText(item.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      || refs.has(item.ruleRef)
+      || !isRuleClass(item.triggerClass) || !isConditionClass(item.conditionClass) || !isRuleClass(item.actionClass)
+      || !isDisposition(item.disposition)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    refs.add(item.ruleRef);
+    if (item.name !== undefined && !isBoundedText(item.name, HOME_AUTOMATION_MIGRATION_LIMITS.maxNameLength)) throw new Error("Stored home automation migration is corrupt");
+    if (item.enabled !== undefined && typeof item.enabled !== "boolean") throw new Error("Stored home automation migration is corrupt");
+    if (item.updatedAt !== undefined && !isIsoTimestamp(item.updatedAt)) throw new Error("Stored home automation migration is corrupt");
+    if (item.sourceFingerprint !== undefined && !isSourceFingerprint(item.sourceFingerprint)) throw new Error("Stored home automation migration is corrupt");
+    if (item.reason !== undefined && !isRuleReason(item.reason)) throw new Error("Stored home automation migration is corrupt");
+    if (item.disposition === "eligible" && item.reason !== undefined) throw new Error("Stored home automation migration is corrupt");
+    if (item.disposition !== "eligible" && item.reason === undefined) throw new Error("Stored home automation migration is corrupt");
+    if (!isRuleAssessmentSemantics(item)) throw new Error("Stored home automation migration is corrupt");
+    return {
+      ruleRef: item.ruleRef,
+      ...(item.name === undefined ? {} : { name: item.name }),
+      ...(item.enabled === undefined ? {} : { enabled: item.enabled }),
+      ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
+      triggerClass: item.triggerClass,
+      conditionClass: item.conditionClass,
+      actionClass: item.actionClass,
+      ...(item.sourceFingerprint === undefined ? {} : { sourceFingerprint: item.sourceFingerprint }),
+      disposition: item.disposition,
+      ...(item.reason === undefined ? {} : { reason: item.reason }),
+    } satisfies HomeAutomationMigrationRuleAssessment;
+  });
+  return rules;
+}
+
+function serializeRules(rules: readonly HomeAutomationMigrationRuleAssessment[]): string {
+  const normalized = validateRules(rules);
+  const encoded = JSON.stringify(normalized);
+  if (Buffer.byteLength(encoded, "utf8") > HOME_AUTOMATION_MIGRATION_LIMITS.maxInputBytes) {
+    throw new TypeError("Home automation migration rules exceed the byte bound");
+  }
+  return encoded;
+}
+
+function assertStableRuleMetadata(
+  before: readonly HomeAutomationMigrationRuleAssessment[],
+  after: readonly HomeAutomationMigrationRuleAssessment[],
+): void {
+  if (before.length !== after.length) throw new TypeError("Migration assessment rule count changed");
+  for (let index = 0; index < before.length; index += 1) {
+    const left = before[index]!;
+    const right = after[index]!;
+    if (left.ruleRef !== right.ruleRef || left.name !== right.name || left.enabled !== right.enabled || left.updatedAt !== right.updatedAt) {
+      throw new TypeError("Migration assessment rule metadata changed");
+    }
+  }
+}
+
+function cloneAssessment(value: HomeAutomationMigrationAssessment): HomeAutomationMigrationAssessment {
+  return {
+    ...value,
+    rules: cloneRules(value.rules),
+  };
+}
+
+function cloneRules(rules: readonly HomeAutomationMigrationRuleAssessment[]): HomeAutomationMigrationRuleAssessment[] {
+  return rules.map((rule) => ({ ...rule }));
+}
+
+function compareAssessment(left: HomeAutomationMigrationAssessment, right: HomeAutomationMigrationAssessment): number {
+  const created = left.createdAt.localeCompare(right.createdAt);
+  return created !== 0 ? created : left.migrationId.localeCompare(right.migrationId);
+}
+
+function validateId(value: unknown, label: string): string {
+  if (!isMigrationId(value)) throw new TypeError(`Invalid home automation migration ${label}`);
+  return value;
+}
+
+function validateIdempotencyKey(value: unknown): string {
+  if (!isIdempotencyKey(value)) throw new TypeError("Invalid home automation migration idempotency key");
+  return value;
+}
+
+function validateDigest(value: unknown): string {
+  if (!isDigest(value)) throw new TypeError("Invalid home automation migration input digest");
+  return value;
+}
+
+function isMigrationId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
+}
+
+function isIdempotencyKey(value: unknown): value is string {
+  return isMigrationId(value);
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
+}
+
+function isAnalysisMode(value: unknown): value is "metadata_only" | "trusted_neutral" {
+  return value === "metadata_only" || value === "trusted_neutral";
+}
+
+function isStatus(value: unknown): value is HomeAutomationMigrationStatus {
+  return value === "discovered" || value === "assessed" || value === "needs_attention" || value === "closed";
+}
+
+function isTransitionStatus(value: unknown): value is Exclude<HomeAutomationMigrationStatus, "discovered" | "closed"> {
+  return value === "assessed" || value === "needs_attention";
+}
+
+function isClosedFrom(value: unknown): value is Exclude<HomeAutomationMigrationStatus, "closed"> {
+  return value === "discovered" || value === "assessed" || value === "needs_attention";
+}
+
+function isCloseReason(value: unknown): value is "household_closed" | "superseded" | "stale_source" {
+  return value === "household_closed" || value === "superseded" || value === "stale_source";
+}
+
+function isRuleClass(value: unknown): value is HomeAutomationMigrationRuleAssessment["triggerClass"] {
+  return value === "state" || value === "time" || value === "reversible" || value === "metadata_only" || value === "unsupported" || value === "unknown";
+}
+
+function isDisposition(value: unknown): value is HomeAutomationMigrationRuleAssessment["disposition"] {
+  return value === "eligible" || value === "metadata_only" || value === "unsupported" || value === "needs_attention";
+}
+
+function isRuleReason(value: unknown): value is NonNullable<HomeAutomationMigrationRuleAssessment["reason"]> {
+  return value === "translation_unavailable" || value === "unsupported_trigger" || value === "unsupported_condition"
+    || value === "unsupported_action" || value === "analysis_incomplete";
+}
+
+function isRuleAssessmentSemantics(value: Record<string, unknown>): boolean {
+  if (value.disposition === "eligible") {
+    return (value.triggerClass === "state" || value.triggerClass === "time")
+      && value.conditionClass === "flat_and" && value.actionClass === "reversible"
+      && isSourceFingerprint(value.sourceFingerprint);
+  }
+  if (value.disposition === "metadata_only") {
+    return value.triggerClass === "metadata_only" && value.conditionClass === "metadata_only"
+      && value.actionClass === "metadata_only" && value.sourceFingerprint === undefined
+      && value.reason === "translation_unavailable";
+  }
+  if (value.disposition === "unsupported") {
+    if (value.sourceFingerprint !== undefined) return false;
+    if (value.reason === "unsupported_trigger") {
+      return value.triggerClass === "unsupported"
+        && (value.conditionClass === "flat_and" || value.conditionClass === "unsupported")
+        && (value.actionClass === "reversible" || value.actionClass === "unsupported");
+    }
+    if (value.reason === "unsupported_condition") {
+      return (value.triggerClass === "state" || value.triggerClass === "time")
+        && value.conditionClass === "unsupported"
+        && (value.actionClass === "reversible" || value.actionClass === "unsupported");
+    }
+    return value.reason === "unsupported_action"
+      && (value.triggerClass === "state" || value.triggerClass === "time")
+      && value.conditionClass === "flat_and"
+      && value.actionClass === "unsupported";
+  }
+  return value.disposition === "needs_attention"
+    && value.reason === "analysis_incomplete"
+    && value.sourceFingerprint === undefined
+    && (value.triggerClass === "unknown" || value.conditionClass === "unknown" || value.actionClass === "unknown");
+}
+
+function isConditionClass(value: unknown): value is HomeAutomationMigrationRuleAssessment["conditionClass"] {
+  return value === "flat_and" || value === "metadata_only" || value === "unsupported" || value === "unknown";
+}
+
+function isSourceFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value);
+}
+
+function isBoundedText(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum
+    && value.trim() === value && !/[\u0000-\u001F\u007F]/u.test(value)
+    && Buffer.byteLength(value, "utf8") <= maximum;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 && value.trim() === value
+    && value.includes("T") && !/[\u0000-\u001F\u007F]/u.test(value) && Number.isFinite(Date.parse(value));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function isMemoryPath(path: string): boolean {
+  return path === ":memory:" || path.startsWith("file::memory:");
+}

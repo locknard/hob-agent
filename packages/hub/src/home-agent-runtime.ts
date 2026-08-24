@@ -91,6 +91,10 @@ import {
   SqliteProductViewRecipeDraftStore,
   type SqliteProductViewRecipeDraftStoreOptions,
 } from "./home/product-view-recipe-draft-store.js";
+import {
+  HomeAutomationMigrationRuntimeService,
+  type HomeAutomationMigrationRuntimeServiceOptions,
+} from "./home/home-automation-migration-runtime-service.js";
 
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
@@ -119,6 +123,8 @@ export interface HomeAgentRuntimeOptions {
   readonly inboxHttp?: ProposalInboxHttpOptions;
   /** Private Hub-owned persistence for layout authoring source drafts. */
   readonly homeViewRecipeDrafts?: SqliteProductViewRecipeDraftStoreOptions;
+  /** Private Hub-owned persistence for read-only foreign-rule migration assessments. */
+  readonly homeAutomationMigrations?: HomeAutomationMigrationRuntimeServiceOptions;
   readonly observation?: HomeObservationSchedulerOptions;
   readonly agent: DshHomeAgentCompositionOptions;
   readonly launchEnvironment: LaunchEnvironmentSnapshot;
@@ -169,6 +175,10 @@ class HomeAgentProductBundleRuntime {
         this.viewRecipeDraftStore = new SqliteProductViewRecipeDraftStore(this.options.homeViewRecipeDrafts);
       }
       await this.mount(HomeWorldService, this.options.homeWorld);
+      await this.mount(
+        HomeAutomationMigrationRuntimeService,
+        this.options.homeAutomationMigrations ?? { path: ":memory:" },
+      );
       await this.mount(HomeMediaPlayerService);
       await this.mount(
         HomeObservationAuditService,

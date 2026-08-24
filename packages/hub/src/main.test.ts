@@ -135,6 +135,7 @@ test("builds neutral HomeWorld process options from the allowlisted environment"
   assert.equal(options.runtime.homeAuthorityCandidates.path, "/tmp/hob-agent-main-test/authority-candidates.sqlite");
   assert.equal(options.runtime.homeObservationAudit.path, "/tmp/hob-agent-main-test/observation-audit.sqlite");
   assert.equal(options.runtime.homeAdvice.path, "/tmp/hob-agent-main-test/home-advice.sqlite");
+  assert.equal(options.runtime.homeAutomationMigrations?.path, "/tmp/hob-agent-main-test/home-automation-migrations.sqlite");
   assert.deepEqual(options.runtime.agent, {
     provider: "gpt",
     model: "gpt-5.4",

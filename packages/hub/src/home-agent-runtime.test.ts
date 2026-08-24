@@ -199,8 +199,9 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.start();
 
   assert.equal(runtime.status, "running");
-  assert.deepEqual(pluginOrder.slice(0, 9), [
+  assert.deepEqual(pluginOrder.slice(0, 10), [
     "HomeWorldService",
+    "HomeAutomationMigrationRuntimeService",
     "HomeMediaPlayerService",
     "HomeObservationAuditService",
     "HomeProposalService",
@@ -243,6 +244,32 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.homeInboxHttp, undefined);
   assert.equal(runtime.context.homeAgent, undefined);
   await runtime.stop();
+});
+
+test("mounts the read-only home automation migration service after HomeWorld and closes its SQLite store", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-runtime-home-automation-migrations-"));
+  const path = join(directory, "home-automation-migrations.sqlite");
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    homeAutomationMigrations: { path },
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "home-automation-migrations-runtime-test",
+    },
+  });
+
+  try {
+    await runtime.start();
+    assert.equal(runtime.context.homeAutomationMigrations.name, "homeAutomationMigrations");
+    assert.equal(runtime.context.homeAutomationMigrations.path, path);
+    assert.equal(existsSync(path), true);
+  } finally {
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+  assert.equal(runtime.context.homeAutomationMigrations, undefined);
 });
 
 test("wires the HomeWorld action descriptor source into the runtime review center", async () => {
