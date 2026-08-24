@@ -982,13 +982,15 @@ test("stages new OpenAI credential locators when blank fields retain the saved c
     assert.equal(oldRuntime.disposeCalls, 0);
 
     await oldLease.release();
-    await waitFor(async () => oldRuntime.disposeCalls === 1
-      && !vault.values.has(oldAsrRef)
-      && !vault.values.has(oldTtsRef));
+    await settings.drainMaintenance();
+    assert.equal(oldRuntime.disposeCalls, 1);
+    assert.equal(vault.values.has(oldAsrRef), false);
+    assert.equal(vault.values.has(oldTtsRef), false);
     assert.equal(vault.values.get(currentAsrRef ?? ""), "saved-asr-secret");
     assert.equal(vault.values.get(currentTtsRef ?? ""), "saved-tts-secret");
   } finally {
     await oldLease.release();
+    await settings.closeAndDrain();
     await gateway.dispose({ force: true });
     await rm(directory, { recursive: true, force: true });
   }
