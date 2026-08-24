@@ -14,6 +14,7 @@ import {
 } from "../bridge/home-assistant-bridge.js";
 import { BridgeCatalog } from "../bridge/bridge-catalog.js";
 import type { ArtifactRegistry } from "../artifact/artifact-registry.js";
+import { automationIdForProposal } from "./bridge-automation-deployment.js";
 import { createHomeAgentRuntime } from "../home-agent-runtime.js";
 import { SqliteIngestJournal } from "../world/ingest-journal.js";
 import type { HomeWorldSnapshot } from "../world/home-world-service.js";
@@ -215,7 +216,7 @@ async function waitForServiceCommand(
 
 async function createReadyMigrationFixture() {
   const directory = mkdtempSync(join(tmpdir(), "hob-home-agent-ha-runtime-"));
-  const socket = new FakeSocket();
+  let socket = new FakeSocket();
   const fetchFake = createFetchFake();
   const catalog = new BridgeCatalog();
   const now = { value: BASELINE_TIME };
@@ -245,7 +246,7 @@ async function createReadyMigrationFixture() {
   };
   catalog.register(registration);
 
-  const runtime = createHomeAgentRuntime({
+  const runtimeOptions = {
     homeWorld: {
       catalog,
       credentialSource: credentialSource(),
@@ -282,7 +283,10 @@ async function createReadyMigrationFixture() {
       source: "process",
       values: { DEEPSEEK_API_KEY: "integration-test-key" },
     }]),
-  });
+  };
+  const createRuntime = () => createHomeAgentRuntime(runtimeOptions);
+
+  let runtime = createRuntime();
 
   try {
     await runtime.start();
@@ -376,7 +380,34 @@ async function createReadyMigrationFixture() {
     const workflow = completedWorkflow?.rules.find((candidate) => candidate.ruleRef === rule.ruleRef)?.workflow;
     assert.equal(workflow?.status, "ready");
 
-    return { directory, socket, fetchFake, runtime, world, baseline, target, assessed, rule, prepared, review };
+    const restart = async (): Promise<typeof runtime> => {
+      await runtime.stop();
+      socket = new FakeSocket();
+      bootstrapScheduled = false;
+      runtime = createRuntime();
+      await runtime.start();
+      await waitFor(
+        () => runtime.context.homeWorld.snapshot(),
+        (snapshot) => snapshot.bridges[BRIDGE_ID]?.diagnostics.connectionState === "ready",
+        "restarted HomeWorld bridge readiness",
+      );
+      return runtime;
+    };
+
+    return {
+      directory,
+      fetchFake,
+      baseline,
+      target,
+      assessed,
+      rule,
+      prepared,
+      review,
+      restart,
+      get runtime() { return runtime; },
+      get socket() { return socket; },
+      get world() { return runtime.context.homeWorld; },
+    };
   } catch (error) {
     await runtime.stop();
     rmSync(directory, { recursive: true, force: true });
@@ -613,6 +644,109 @@ test("recovers a failed HA rollback with a fresh receipt and no blind replay", a
     )), true);
   } finally {
     await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("restarts a persisted HA migration cutover after an accepted sync-complete", async () => {
+  const fixture = await createReadyMigrationFixture();
+  const { directory, fetchFake, target, assessed, rule, prepared } = fixture;
+  try {
+    const runtime = fixture.runtime;
+    const proposalBeforeEnable = runtime.context.homeProposals.get(prepared.proposalId);
+    if (proposalBeforeEnable === undefined) assert.fail("Prepared migration proposal is unavailable");
+    const targetBinding = target.bindings.find((binding) => (
+      binding.bridgeId === BRIDGE_ID
+      && binding.nativeId === "device-light"
+      && binding.nativeInstanceId === "entity-light-1"
+    ));
+    if (targetBinding === undefined) assert.fail("HA target binding is unavailable");
+
+    // Simulate the two durable writes that a process crash can leave behind:
+    // approval has committed as `enabling`, and migration owns an active
+    // switching receipt before the first source command is acknowledged.
+    const enabling = runtime.context.homeProposals.decideProposal({
+      proposalId: prepared.proposalId,
+      expectedRevision: proposalBeforeEnable.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: {
+        deploymentId: automationIdForProposal(prepared.proposalId),
+        target: BRIDGE_ID,
+        targets: [{ hwCapabilityId: target.hwCapabilityId, binding: targetBinding }],
+      },
+    });
+    assert.equal(enabling.lifecycle, "enabling", JSON.stringify(enabling));
+    assert.equal(runtime.context.homeProposals.get(prepared.proposalId)?.lifecycle, "enabling");
+
+    const persistedOperationId = "c".repeat(32);
+    assert.equal(runtime.context.homeAutomationMigrations.startRuleSwitch({
+      migrationId: assessed.assessment.migrationId,
+      ruleRef: rule.ruleRef,
+      approvedProposalRevision: enabling.revision,
+      switchOperationId: persistedOperationId,
+      switchActor: "household-owner",
+    }) !== undefined, true);
+    const crashLeft = runtime.context.homeAutomationMigrations.findWorkflowForProposal(prepared.proposalId);
+    assert.equal(crashLeft.status, "governed");
+    if (crashLeft.status !== "governed") assert.fail("Crash-left switching workflow is unavailable");
+    assert.equal(crashLeft.workflowStatus, "switching");
+    assert.equal(crashLeft.switchOperationId, persistedOperationId);
+
+    const restarted = await fixture.restart();
+    const restartedWorld = restarted.context.homeWorld;
+    const restartedSnapshot = restartedWorld.snapshot();
+    const restartedReadiness = restartedSnapshot.diagnostics.find((item) => item.bridgeId === BRIDGE_ID);
+    assert.equal(restartedReadiness?.connectionState, "ready");
+    assert.ok(restartedReadiness?.currentProcessReadyAt, "restart must accept a fresh HA sync-complete");
+
+    const restartSocket = fixture.socket;
+    const pauseCommand = await waitFor(
+      () => [...restartSocket.sent].reverse().find((message) => (
+        message.type === "call_service"
+        && message.domain === "automation"
+        && message.service === "turn_off"
+      )),
+      (message): message is Record<string, unknown> => message !== undefined,
+      "Home Assistant migration recovery pause",
+      () => ({
+        proposal: restarted.context.homeProposals.get(prepared.proposalId),
+        workflow: restarted.context.homeAutomationMigrations.findWorkflowForProposal(prepared.proposalId),
+        sent: restartSocket.sent,
+      }),
+    );
+    if (typeof pauseCommand.id !== "number") assert.fail("Recovery source pause command id is unavailable");
+    fetchFake.setSourceState("off");
+    restartSocket.receive({ id: pauseCommand.id, type: "result", success: true, result: null });
+
+    const finalProposal = await waitFor(
+      () => restarted.context.homeProposals.get(prepared.proposalId),
+      (current) => current?.lifecycle === "active" || current?.lifecycle === "enable_failed",
+      "restart migration proposal convergence",
+    );
+    assert.equal(finalProposal?.lifecycle, "active", JSON.stringify(finalProposal));
+    assert.equal(finalProposal?.applicationStatus, "running");
+    const finalWorkflow = await waitFor(
+      () => restarted.context.homeAutomationMigrations.findWorkflowForProposal(prepared.proposalId),
+      (current) => current.status === "governed"
+        && (current.workflowStatus === "verified" || current.workflowStatus === "needs_attention"),
+      "restart migration workflow convergence",
+    );
+    assert.equal(finalWorkflow.status, "governed");
+    if (finalWorkflow.status !== "governed") assert.fail("Restart migration workflow is unavailable");
+    assert.equal(finalWorkflow.workflowStatus, "verified", JSON.stringify(finalWorkflow));
+    assert.notEqual(finalWorkflow.switchOperationId, persistedOperationId);
+    assert.match(finalWorkflow.switchOperationId ?? "", /^[0-9a-f]{32}$/u);
+    assert.equal(fetchFake.sourceState(), "off");
+    assert.equal(fetchFake.targetAutomations.size, 1);
+
+    const serviceCalls = restartSocket.sent.filter((message) => message.type === "call_service");
+    assert.equal(serviceCalls.length, 1, "the accepted ready wave must not repeat the source write");
+    assert.equal(serviceCalls[0]?.service, "turn_off");
+    assert.equal(fetchFake.requests.filter((request) => request.method === "POST").length, 1);
+    assert.equal(fetchFake.requests.filter((request) => request.method === "DELETE").length, 0);
+  } finally {
+    await fixture.runtime.stop();
     rmSync(directory, { recursive: true, force: true });
   }
 });
