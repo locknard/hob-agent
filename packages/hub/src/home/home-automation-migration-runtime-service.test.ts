@@ -234,6 +234,78 @@ test("detects exact same-bridge foreign catalog changes without interpreting rul
   }
 });
 
+test("ignores same-bridge foreign rule name and timestamp churn during reconciliation", async () => {
+  const { context, world, worldFiber, migrationFiber } = await setup(":memory:");
+  try {
+    world.translationByRuleRef["rule-2"] = { ...translatedRule, ruleRef: "rule-2" };
+    world.catalogs[0] = {
+      ...world.catalogs[0]!,
+      rules: [
+        ...world.catalogs[0]!.rules,
+        { ruleRef: "rule-2", name: "Other light", enabled: true },
+      ],
+    };
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessment.outcome, "created");
+    world.catalogs[0] = {
+      ...world.catalogs[0]!,
+      rules: [
+        ...world.catalogs[0]!.rules.map((rule) => rule.ruleRef === "rule-2"
+          ? {
+              ...rule,
+              name: "Renamed other light",
+              updatedAt: "2026-08-25T08:00:00.000Z",
+            }
+          : rule),
+      ],
+    };
+
+    const result = await context.homeAutomationMigrations.readForeignRuleCatalog({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+    });
+
+    assert.deepEqual(result, { status: "unchanged" });
+  } finally {
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
+test("treats same-bridge rule reference and enabled-set changes as migration drift", async () => {
+  const { context, world, worldFiber, migrationFiber } = await setup(":memory:");
+  try {
+    world.translationByRuleRef["rule-2"] = { ...translatedRule, ruleRef: "rule-2" };
+    world.catalogs[0] = {
+      ...world.catalogs[0]!,
+      rules: [
+        ...world.catalogs[0]!.rules,
+        { ruleRef: "rule-2", name: "Other light", enabled: true },
+      ],
+    };
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessment.outcome, "created");
+    const migrationId = assessment.assessment.migrationId;
+    const baseline = world.catalogs[0]!;
+
+    for (const rules of [
+      [...baseline.rules, { ruleRef: "rule-3", name: "New rule", enabled: true }],
+      baseline.rules.filter((rule) => rule.ruleRef !== "rule-2"),
+      baseline.rules.map((rule) => rule.ruleRef === "rule-2" ? { ...rule, enabled: false } : rule),
+    ]) {
+      world.catalogs[0] = { ...baseline, rules };
+      const result = await context.homeAutomationMigrations.readForeignRuleCatalog({
+        migrationId,
+        ruleRef: "rule-1",
+      });
+      assert.deepEqual(result, { status: "changed" });
+    }
+  } finally {
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
 test("creates a review-only Artifact candidate only after an exact eligible assessment", async () => {
   const { context, world, worldFiber, migrationFiber } = await setup(":memory:");
   try {

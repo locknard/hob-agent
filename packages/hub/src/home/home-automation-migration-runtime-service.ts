@@ -398,9 +398,9 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   }
 
   /**
-   * Compares the current same-bridge rule metadata with the assessment cut.
+   * Compares the current same-bridge rule behavior set with the assessment cut.
    * The migrated source is intentionally ignored because cutover pauses it;
-   * any other addition, removal, or metadata change is possible conflict drift.
+   * another rule's reference or enabled state is possible conflict drift.
    */
   async readForeignRuleCatalog(input: {
     readonly migrationId: string;
@@ -423,7 +423,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
       if (!isExactAvailableCatalog(catalog)
         || catalog.epochId !== assessment.sourceEpochId) return { status: "unavailable" };
       const currentRules = catalog.rules.filter((rule) => rule.ruleRef !== input.ruleRef);
-      return sameForeignRuleMetadata(sourceRules, currentRules)
+      return sameForeignRuleBehavior(sourceRules, currentRules)
         ? { status: "unchanged" }
         : { status: "changed" };
     } catch {
@@ -1128,31 +1128,23 @@ function isExactAvailableCatalog(value: unknown): value is HomeWorldForeignRuleC
     && Array.isArray(value.rules);
 }
 
-function sameForeignRuleMetadata(
+function sameForeignRuleBehavior(
   assessed: readonly {
     readonly ruleRef: string;
-    readonly name?: string;
     readonly enabled?: boolean;
-    readonly updatedAt?: string;
   }[],
   current: readonly {
     readonly ruleRef: string;
-    readonly name?: string;
     readonly enabled?: boolean;
-    readonly updatedAt?: string;
   }[],
 ): boolean {
   const normalize = (rules: readonly {
     readonly ruleRef: string;
-    readonly name?: string;
     readonly enabled?: boolean;
-    readonly updatedAt?: string;
   }[]) => JSON.stringify([...rules]
     .map((rule) => ({
       ruleRef: rule.ruleRef,
-      ...(rule.name === undefined ? {} : { name: rule.name }),
       ...(rule.enabled === undefined ? {} : { enabled: rule.enabled }),
-      ...(rule.updatedAt === undefined ? {} : { updatedAt: rule.updatedAt }),
     }))
     .sort((left, right) => left.ruleRef < right.ruleRef ? -1 : left.ruleRef > right.ruleRef ? 1 : 0));
   return normalize(assessed) === normalize(current);

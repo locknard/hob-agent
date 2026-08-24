@@ -22,7 +22,7 @@ export interface HomeAutomationMigrationSourceControlPort {
   foreignRuleControlFor(bridgeId: string): ForeignRuleControlHandle | undefined;
 }
 
-/** Exact metadata drift state for foreign rules other than the migrated source. */
+/** Exact behavior-set drift state for foreign rules other than the migrated source. */
 export type HomeAutomationMigrationForeignRuleCatalogState =
   | { readonly status: "unchanged" }
   | { readonly status: "changed" }
@@ -68,7 +68,7 @@ export interface HomeAutomationMigrationDeploymentRuntimePort {
   /**
    * Reads the current same-bridge catalog against the assessment cut. The
    * source rule is excluded because the cutover intentionally pauses it;
-   * every other metadata change is treated as possible conflict drift.
+   * only another rule's reference or enabled state can change this set.
    */
   readForeignRuleCatalog(input: {
     readonly migrationId: string;
