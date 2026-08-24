@@ -153,14 +153,20 @@ function deploymentFixture() {
 }
 
 test("preflights current semantics before pausing the source rule or opening a switch CAS", async () => {
-  const { events, base, wrapper } = deploymentFixture();
+  const { events, failCalls, base, wrapper } = deploymentFixture();
   base.preflight = () => ({ status: "blocked" as const, reason: "state_stale" });
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
   assert.equal(outcome.status, "failed");
   assert.match((outcome as { readonly reason: string }).reason, /当前设备状态|重新准备/);
-  assert.deepEqual(events, [], "a blocked preflight leaves both the source and target untouched");
+  assert.deepEqual(events, ["runtime.fail"], "a blocked preflight leaves both the source and target untouched");
+  assert.deepEqual(failCalls, [{
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    from: "ready",
+    reason: "source_stale",
+  }]);
 });
 
 test("preflights the foreign catalog once before reading or switching the source rule", async () => {
@@ -964,6 +970,40 @@ test("fails closed after a known target deployment failure without a durable tar
       expectedSwitchOperationId: SWITCH_OPERATION_ID,
     }], target.status);
   }
+});
+
+test("reads the target after a timed-out deployment before deciding the result", async () => {
+  const { events, failCalls, base, wrapper } = deploymentFixture();
+  base.deploy = async () => {
+    events.push("base.deploy");
+    throw new Error("target write timed out after acceptance");
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "unknown" } as const;
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移切换结果暂时无法确认，已停止后续写入。",
+  });
+  assert.deepEqual(events, [
+    "source.status",
+    "runtime.startSwitch",
+    "source.set:false",
+    "base.deploy",
+    "base.status",
+    "runtime.fail",
+  ]);
+  assert.deepEqual(failCalls.at(-1), {
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    from: "switching",
+    reason: "switch_unknown",
+    expectedSwitchOperationId: SWITCH_OPERATION_ID,
+  });
 });
 
 test("restores the source after a failed target is read back missing without deleting", async () => {

@@ -290,7 +290,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     }
 
     const semanticPreflight = await this.readSemanticPreflight(request);
-    if (semanticPreflight.status === "blocked") return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
+    if (semanticPreflight.status === "blocked") {
+      this.fail(lookup, "ready", "source_stale");
+      return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
+    }
 
     let foreignRuleCatalog: HomeAutomationMigrationForeignRuleCatalogState;
     try {
@@ -351,6 +354,18 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
         operationId: targetAutomationOperationId("deploy", switchOperationId),
       });
     } catch {
+      const targetAfterTimeout = await this.readTarget(request.intent.deploymentId, request.intent.target);
+      if (targetAfterTimeout.status !== "unknown") {
+        const recovered = await this.recoverKnownFailure(
+          request,
+          lookup,
+          control,
+          "verification_failed",
+          switchOperationId,
+          targetAfterTimeout,
+        );
+        return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : SWITCH_FAILURE_REASON);
+      }
       this.fail(lookup, "switching", "switch_unknown", switchOperationId);
       return failed(SWITCH_UNKNOWN_REASON);
     }
@@ -1219,9 +1234,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     control: ForeignRuleControlHandle,
     failure: "switch_failed" | "verification_failed",
     expectedSwitchOperationId: string,
+    initialTarget?: TargetReadback,
   ): Promise<"known" | "switch_unknown"> {
     const expectedFingerprint = lookup.status === "governed" ? lookup.deploymentConfigFingerprint : undefined;
-    const target = await this.readTarget(request.intent.deploymentId, request.intent.target);
+    const target = initialTarget ?? await this.readTarget(request.intent.deploymentId, request.intent.target);
     const targetCheck = switchTargetCheck(target, expectedFingerprint);
     if (targetCheck.status === "unsafe") {
       this.fail(lookup, "switching", targetCheck.failureReason, expectedSwitchOperationId);

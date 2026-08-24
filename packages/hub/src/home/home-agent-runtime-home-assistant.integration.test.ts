@@ -648,6 +648,59 @@ test("recovers a failed HA rollback with a fresh receipt and no blind replay", a
   }
 });
 
+test("fails closed on a Home Assistant bridge disconnect without migration writes", async () => {
+  const fixture = await createReadyMigrationFixture();
+  const { directory, fetchFake, runtime, socket, target, prepared } = fixture;
+  try {
+    const targetBinding = target.bindings.find((binding) => (
+      binding.bridgeId === BRIDGE_ID
+      && binding.nativeId === "device-light"
+      && binding.nativeInstanceId === "entity-light-1"
+    ));
+    if (targetBinding === undefined) assert.fail("HA target binding is unavailable");
+    const proposal = runtime.context.homeProposals.get(prepared.proposalId);
+    if (proposal === undefined) assert.fail("Prepared migration proposal is unavailable");
+    const enabling = runtime.context.homeProposals.decideProposal({
+      proposalId: prepared.proposalId,
+      expectedRevision: proposal.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: {
+        deploymentId: automationIdForProposal(prepared.proposalId),
+        target: BRIDGE_ID,
+        targets: [{ hwCapabilityId: target.hwCapabilityId, binding: targetBinding }],
+      },
+    });
+    assert.equal(enabling.lifecycle, "enabling", JSON.stringify(enabling));
+    const sentBeforeDisconnect = socket.sent.length;
+    const requestsBeforeDisconnect = fetchFake.requests.length;
+    socket.close();
+    await waitFor(
+      () => runtime.context.homeWorld.snapshot(),
+      (snapshot) => snapshot.bridges[BRIDGE_ID]?.diagnostics.connectionState === "down",
+      "Home Assistant bridge disconnect",
+    );
+
+    const failed = await runtime.context.homeProposals.retryEnable({
+      proposalId: prepared.proposalId,
+      expectedRevision: enabling.revision,
+      actor: "household-owner",
+    });
+    assert.equal(failed.lifecycle, "enable_failed", JSON.stringify(failed));
+    assert.equal(failed.applicationStatus, "failed");
+
+    const workflow = runtime.context.homeAutomationMigrations.findWorkflowForProposal(prepared.proposalId);
+    if (workflow.status !== "governed") assert.fail(`Disconnected migration workflow is unavailable: ${JSON.stringify(workflow)}`);
+    assert.equal(workflow.workflowStatus, "needs_attention");
+    assert.equal(workflow.failureReason, "source_stale");
+    assert.equal(socket.sent.slice(sentBeforeDisconnect).some((message) => message.type === "call_service"), false);
+    assert.equal(fetchFake.requests.slice(requestsBeforeDisconnect).some((request) => request.method !== "GET"), false);
+  } finally {
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("restarts a persisted HA migration cutover after an accepted sync-complete", async () => {
   const fixture = await createReadyMigrationFixture();
   const { directory, fetchFake, target, assessed, rule, prepared } = fixture;
