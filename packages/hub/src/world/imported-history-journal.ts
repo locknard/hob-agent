@@ -15,6 +15,7 @@ import {
   type HistoryCoverageReason,
   type HistoryLiveCut,
   type HistoryPage,
+  type HistoryRange,
   type StateEvent,
 } from "@hob/bridge-contract";
 import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
@@ -62,6 +63,8 @@ export interface ImportedHistoryEvidenceRecord {
   readonly bridgeId: string;
   readonly importId: string;
   readonly historySeq: number;
+  /** Exact normalized source range of the imported page, when available. */
+  readonly sourceRange?: HistoryRange;
   readonly receivedAt: string;
   readonly liveCut: ImportedHistoryLiveCut;
   readonly state: StateEvent;
@@ -133,44 +136,7 @@ export class ImportedHistoryJournal {
     this.clock = options.clock ?? (() => new Date().toISOString());
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS imported_history_events (
-        bridge_id TEXT NOT NULL,
-        import_id TEXT NOT NULL,
-        history_seq INTEGER NOT NULL,
-        live_epoch_id TEXT NOT NULL,
-        live_last_seq INTEGER NOT NULL,
-        received_at TEXT NOT NULL,
-        source_ts TEXT,
-        source_ts_quality TEXT NOT NULL,
-        native_id TEXT NOT NULL,
-        native_instance_id TEXT NOT NULL,
-        state_json TEXT NOT NULL,
-        canonical_key TEXT NOT NULL,
-        conflict_key TEXT NOT NULL,
-        bytes INTEGER NOT NULL,
-        PRIMARY KEY (bridge_id, import_id, history_seq)
-      ) STRICT;
-      CREATE UNIQUE INDEX IF NOT EXISTS imported_history_events_canonical_key
-        ON imported_history_events (bridge_id, canonical_key);
-      CREATE INDEX IF NOT EXISTS imported_history_events_query
-        ON imported_history_events (bridge_id, source_ts, native_id, native_instance_id);
-      CREATE TABLE IF NOT EXISTS imported_history_gaps (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        bridge_id TEXT NOT NULL,
-        import_id TEXT NOT NULL,
-        source_since TEXT NOT NULL,
-        source_until TEXT NOT NULL,
-        live_epoch_id TEXT NOT NULL,
-        live_last_seq INTEGER NOT NULL,
-        received_at TEXT NOT NULL,
-        reason TEXT NOT NULL,
-        bytes INTEGER NOT NULL,
-        UNIQUE (bridge_id, import_id, source_since, source_until, reason)
-      ) STRICT;
-      CREATE INDEX IF NOT EXISTS imported_history_gaps_query
-        ON imported_history_gaps (bridge_id, source_since, source_until);
-    `);
+    this.initializeSchema();
     this.usedBytes = this.readUsedBytes();
     this.ensurePrivateFile();
   }
@@ -268,14 +234,16 @@ export class ImportedHistoryJournal {
 
       for (const record of pending) {
         this.db.prepare(`INSERT INTO imported_history_events
-          (bridge_id, import_id, history_seq, live_epoch_id, live_last_seq,
-           received_at, source_ts, source_ts_quality, native_id, native_instance_id,
-           state_json, canonical_key, conflict_key, bytes)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          (bridge_id, import_id, history_seq, source_since, source_until,
+           live_epoch_id, live_last_seq, received_at, source_ts, source_ts_quality,
+           native_id, native_instance_id, state_json, canonical_key, conflict_key, bytes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(
             bridgeId,
             page.importId,
             record.historySeq,
+            page.sourceSince,
+            page.sourceUntil,
             page.liveCut.epochId,
             page.liveCut.lastSeq,
             receivedAt,
@@ -315,7 +283,7 @@ export class ImportedHistoryJournal {
     const bindingClauses = normalized.bindings.map(() => "(native_id = ? AND native_instance_id = ?)");
     const bindingParams = normalized.bindings.flatMap((binding) => [binding.nativeId, binding.nativeInstanceId]);
     const rows = this.db.prepare(`SELECT bridge_id, import_id, history_seq,
-        live_epoch_id, live_last_seq, received_at, state_json
+        source_since, source_until, live_epoch_id, live_last_seq, received_at, state_json
       FROM imported_history_events
       WHERE bridge_id = ? AND source_ts >= ? AND source_ts < ?
         AND (${bindingClauses.join(" OR ")})
@@ -357,6 +325,74 @@ export class ImportedHistoryJournal {
 
   close(): void {
     this.db.close();
+  }
+
+  private initializeSchema(): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(`
+      CREATE TABLE IF NOT EXISTS imported_history_events (
+        bridge_id TEXT NOT NULL,
+        import_id TEXT NOT NULL,
+        history_seq INTEGER NOT NULL,
+        source_since TEXT,
+        source_until TEXT,
+        live_epoch_id TEXT NOT NULL,
+        live_last_seq INTEGER NOT NULL,
+        received_at TEXT NOT NULL,
+        source_ts TEXT,
+        source_ts_quality TEXT NOT NULL,
+        native_id TEXT NOT NULL,
+        native_instance_id TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        canonical_key TEXT NOT NULL,
+        conflict_key TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        PRIMARY KEY (bridge_id, import_id, history_seq)
+      ) STRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS imported_history_events_canonical_key
+        ON imported_history_events (bridge_id, canonical_key);
+      CREATE INDEX IF NOT EXISTS imported_history_events_query
+        ON imported_history_events (bridge_id, source_ts, native_id, native_instance_id);
+      CREATE TABLE IF NOT EXISTS imported_history_gaps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bridge_id TEXT NOT NULL,
+        import_id TEXT NOT NULL,
+        source_since TEXT NOT NULL,
+        source_until TEXT NOT NULL,
+        live_epoch_id TEXT NOT NULL,
+        live_last_seq INTEGER NOT NULL,
+        received_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        UNIQUE (bridge_id, import_id, source_since, source_until, reason)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS imported_history_gaps_query
+        ON imported_history_gaps (bridge_id, source_since, source_until);
+      `);
+      const columns = this.db.prepare("PRAGMA table_info(imported_history_events)").all() as SqlRow[];
+      const columnNames = new Set(columns.map((column) => String(column.name)));
+      if (!columnNames.has("source_since")) {
+        this.db.exec("ALTER TABLE imported_history_events ADD COLUMN source_since TEXT");
+      }
+      if (!columnNames.has("source_until")) {
+        this.db.exec("ALTER TABLE imported_history_events ADD COLUMN source_until TEXT");
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS imported_history_events_query
+          ON imported_history_events (bridge_id, source_ts, native_id, native_instance_id);
+        CREATE INDEX IF NOT EXISTS imported_history_gaps_query
+          ON imported_history_gaps (bridge_id, source_since, source_until);
+      `);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original schema migration failure.
+      }
+      throw error;
+    }
   }
 
   private gapFor(
@@ -435,12 +471,14 @@ export class ImportedHistoryJournal {
     if (!Number.isSafeInteger(historySeq) || historySeq <= 0) {
       throw new Error("stored imported history sequence is invalid");
     }
+    const sourceRange = optionalStoredRange(row.source_since, row.source_until);
     const receivedAt = validateTimestamp(row.received_at, "stored imported history receivedAt");
     const liveCut = validateLiveCut({ epochId: row.live_epoch_id, lastSeq: row.live_last_seq });
     return {
       bridgeId,
       importId,
       historySeq,
+      ...(sourceRange === undefined ? {} : { sourceRange }),
       receivedAt,
       liveCut,
       state: state.data,
@@ -598,6 +636,14 @@ function validateRange(value: unknown, label: string): { readonly since: string;
     since: canonicalUtcTimestamp(parsed.data.since, `${label} since`),
     until: canonicalUtcTimestamp(parsed.data.until, `${label} until`),
   };
+}
+
+function optionalStoredRange(since: unknown, until: unknown): HistoryRange | undefined {
+  const hasSince = since !== null && since !== undefined;
+  const hasUntil = until !== null && until !== undefined;
+  if (!hasSince && !hasUntil) return undefined;
+  if (!hasSince || !hasUntil) throw new Error("stored imported history source range is incomplete");
+  return validateRange({ since, until }, "stored imported history source range");
 }
 
 function validateTimestamp(value: unknown, label: string): string {

@@ -39,14 +39,15 @@ function page(
   importId: string,
   records: readonly { readonly historySeq: number; readonly state: StateEvent }[],
   reasons: readonly HistoryCoverageReason[] = ["retention_floor_unknown"],
+  sourceRange: HistoryPage["sourceRange"] = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+  },
 ): HistoryPage {
   return {
     importId,
     source: "home-assistant-recorder",
-    sourceRange: {
-      since: "2026-08-20T00:00:00.000Z",
-      until: "2026-08-20T01:00:00.000Z",
-    },
+    sourceRange,
     liveCut: LIVE_CUT,
     coverage: "partial",
     reasons,
@@ -55,10 +56,21 @@ function page(
 }
 
 function query(journal: ImportedHistoryJournal, limit = 200) {
-  return journal.queryImportedEvidence({
-    bridgeId: BRIDGE_ID,
+  return queryRange(journal, {
     since: "2026-08-20T00:00:00.000Z",
     until: "2026-08-20T01:00:00.000Z",
+  }, limit);
+}
+
+function queryRange(
+  journal: ImportedHistoryJournal,
+  range: { readonly since: string; readonly until: string },
+  limit = 200,
+) {
+  return journal.queryImportedEvidence({
+    bridgeId: BRIDGE_ID,
+    since: range.since,
+    until: range.until,
     bindings: [{ nativeId: "device-1", nativeInstanceId: "device-1:main" }],
     limit,
   });
@@ -74,16 +86,20 @@ test("atomically stores bounded imported history and restores it without creatin
     { historySeq: 2, state: state("2026-08-20T00:00:20.000Z", "on") },
   ]), expectedLiveCut: LIVE_CUT });
 
+  const firstResult = query(first);
+  const sourceRange = firstResult.gaps[0]?.sourceRange;
+  assert.notEqual(sourceRange, undefined);
   assert.deepEqual(query(first).records.map((record) => ({
     importId: record.importId,
     historySeq: record.historySeq,
     receivedAt: record.receivedAt,
+    sourceRange: record.sourceRange,
     value: record.state.attrs.state,
   })), [
-    { importId: "import-1", historySeq: 1, receivedAt, value: "off" },
-    { importId: "import-1", historySeq: 2, receivedAt, value: "on" },
+    { importId: "import-1", historySeq: 1, receivedAt, sourceRange, value: "off" },
+    { importId: "import-1", historySeq: 2, receivedAt, sourceRange, value: "on" },
   ]);
-  assert.deepEqual(query(first).gaps.map((gap) => gap.reason), ["retention_floor_unknown"]);
+  assert.deepEqual(firstResult.gaps.map((gap) => gap.reason), ["retention_floor_unknown"]);
   first.close();
 
   assert.equal(statSync(path).mode & 0o777, 0o600);
@@ -96,7 +112,114 @@ test("atomically stores bounded imported history and restores it without creatin
 
   const reopened = new ImportedHistoryJournal(path, { clock: () => receivedAt });
   assert.equal(query(reopened).records.length, 2);
+  assert.deepEqual(query(reopened).records[0]?.sourceRange, sourceRange);
   assert.deepEqual(query(reopened).records[0]?.liveCut, LIVE_CUT);
+  reopened.close();
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("retains the exact source range for each distinct overlapping import", () => {
+  const journal = new ImportedHistoryJournal(":memory:", { clock: () => "2026-08-25T00:00:00.000Z" });
+  const firstRange = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+  } as const;
+  const secondRange = {
+    since: "2026-08-20T00:30:00.000Z",
+    until: "2026-08-20T01:30:00.000Z",
+  } as const;
+  journal.commitPage({
+    bridgeId: BRIDGE_ID,
+    page: page("import-a", [
+      { historySeq: 1, state: state("2026-08-20T00:10:00.000Z", "off") },
+    ], ["retention_floor_unknown"], firstRange),
+    expectedLiveCut: LIVE_CUT,
+  });
+  journal.commitPage({
+    bridgeId: BRIDGE_ID,
+    page: page("import-b", [
+      { historySeq: 1, state: state("2026-08-20T01:10:00.000Z", "on") },
+    ], ["retention_floor_unknown"], secondRange),
+    expectedLiveCut: LIVE_CUT,
+  });
+
+  const result = queryRange(journal, {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T02:00:00.000Z",
+  });
+  const rangesByImport = new Map(result.gaps.map((gap) => [gap.importId, gap.sourceRange]));
+  assert.deepEqual(result.records.map((record) => [record.importId, record.sourceRange]), [
+    ["import-a", rangesByImport.get("import-a")],
+    ["import-b", rangesByImport.get("import-b")],
+  ]);
+  journal.close();
+});
+
+test("migrates a legacy event table atomically and keeps missing source range unavailable across restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-imported-history-legacy-range-"));
+  const path = join(directory, "journal.sqlite");
+  const legacyState = state("2026-08-20T00:00:10.000Z", "on");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE imported_history_events (
+      bridge_id TEXT NOT NULL,
+      import_id TEXT NOT NULL,
+      history_seq INTEGER NOT NULL,
+      live_epoch_id TEXT NOT NULL,
+      live_last_seq INTEGER NOT NULL,
+      received_at TEXT NOT NULL,
+      source_ts TEXT,
+      source_ts_quality TEXT NOT NULL,
+      native_id TEXT NOT NULL,
+      native_instance_id TEXT NOT NULL,
+      state_json TEXT NOT NULL,
+      canonical_key TEXT NOT NULL,
+      conflict_key TEXT NOT NULL,
+      bytes INTEGER NOT NULL,
+      PRIMARY KEY (bridge_id, import_id, history_seq)
+    ) STRICT;
+    CREATE UNIQUE INDEX imported_history_events_canonical_key
+      ON imported_history_events (bridge_id, canonical_key);
+    CREATE INDEX imported_history_events_query
+      ON imported_history_events (bridge_id, source_ts, native_id, native_instance_id);
+  `);
+  legacy.prepare(`INSERT INTO imported_history_events
+    (bridge_id, import_id, history_seq, live_epoch_id, live_last_seq,
+     received_at, source_ts, source_ts_quality, native_id, native_instance_id,
+     state_json, canonical_key, conflict_key, bytes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    BRIDGE_ID,
+    "legacy-import",
+    1,
+    LIVE_CUT.epochId,
+    LIVE_CUT.lastSeq,
+    "2026-08-25T00:00:00.000Z",
+    legacyState.time.sourceTs,
+    legacyState.time.sourceTsQuality,
+    legacyState.nativeId,
+    legacyState.nativeInstanceId,
+    JSON.stringify(legacyState),
+    "legacy-canonical",
+    "legacy-conflict",
+    1,
+  );
+  legacy.close();
+
+  const first = new ImportedHistoryJournal(path, { clock: () => "2026-08-25T00:00:00.000Z" });
+  const firstResult = query(first);
+  assert.equal(firstResult.records.length, 1);
+  assert.equal(firstResult.records[0]?.sourceRange, undefined);
+  const inspected = new DatabaseSync(path);
+  const columns = inspected.prepare("PRAGMA table_info(imported_history_events)").all() as Array<{ name: string }>;
+  inspected.close();
+  assert.deepEqual(columns.filter((column) => column.name === "source_since" || column.name === "source_until").map((column) => column.name), [
+    "source_since",
+    "source_until",
+  ]);
+  first.close();
+
+  const reopened = new ImportedHistoryJournal(path, { clock: () => "2026-08-25T00:00:00.000Z" });
+  assert.equal(query(reopened).records[0]?.sourceRange, undefined);
   reopened.close();
   await rm(directory, { recursive: true, force: true });
 });
