@@ -63,7 +63,7 @@ evidence coverage 必须完整且未截断，事件必须来自同一 bridge/epo
 
 1. 触发器是固定时区的有界 `schedule`，或一个已注册 capability 的 `capability_changed`。
 2. 条件是最多八项的扁平 AND，每项比较一个 Hub capability value；比较值通过 capability schema 校验。
-3. 动作使用中立 `set_level`、`set_boolean` 或 `notify_local`。首个真实切换切入单个灯光或开关 capability；每个设备动作带有 `restore_previous_state` 回退和有界 postcondition。
+3. 动作使用中立 `set_level`、`set_boolean` 或 `notify_local`。首个真实切换通过精确的 `ha.boolean-actuator@1.0.0` 能力映射切入单个灯光或开关 capability；只有 `light`、`switch`、`fan` 和 `input_boolean` 的明确 `on/off` 状态进入该映射，门锁、cover 和安全敏感域保持关闭。每个设备动作带有 `restore_previous_state` 回退和有界 postcondition。
 4. 目标只引用 Hub-owned `hwCapabilityId`。编译时由 Hub 解析 HA binding，Artifact 只保存中立目标和行为意图；entity、service、native id、provider rule id、URL 与原生 payload 留在 Hub-owned binding 和审计边界内。
 5. HA 规则目录、事件水位和设备能力在同一个一致性窗口内可读，且现有规则冲突可以由 Hub 精确列出。
 

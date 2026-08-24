@@ -1,4 +1,4 @@
-# Capability semantics v6.4
+# Capability semantics v6.5
 
 ## Evidence and problem
 
@@ -117,12 +117,25 @@ the world-cut identity.
 | Exact schema/version | Read value and conditions/postconditions | Action compatibility | Neutral before/after |
 | --- | --- | --- | --- |
 | `ha.entity@1.0.0` | The primary value is projected `attrs.state`, a string. Only `equals` and `not_equals` with string operands are safe. Numeric-looking states remain strings; `greater_than` and `less_than` are rejected. | `set_boolean` and `set_level` are unsupported. The optional `brightness` attribute is auxiliary, not a normalized writable level contract. | A valid current `state` may be a string `before` value for read/diff evidence; no action `after` value is admitted. |
+| `ha.boolean-actuator@1.0.0` | The primary value is optional projected `attrs.value`, a boolean emitted only for exact `on`/`off` state. The original bounded string remains in `attrs.state` for availability and diagnostics. Conditions use boolean operands and equality operators only. | `set_boolean` is compatible only when the exact fresh state has a boolean `value` and the entity is not unavailable. The exact schema is itself the reviewed action mapping; `set_level` remains unsupported. | The current boolean `value` is `before`; the reviewed requested boolean is `after`. |
 | `miot.property@1.0.0`, scalar `value` | `string`, `boolean`, `null`, and finite `number` values can be retained as neutral scalars. Strings, booleans, and null support equality only; finite numbers support all four scalar comparison operators. Arrays and objects are unsupported for M3c scalar predicates/diffs. `format` and `unit` do not coerce or normalize the value. | An authorized writable Xiaomi transport may execute `set_boolean` only when `attrs.format` is exactly `"bool"`, `attrs.value` is a boolean, and `attrs.writable` is `true`; the action still requires HomeWorld authority and the household review path. The default product bundle provides no Xiaomi transport, so it offers no production Xiaomi execution. `set_level` is unsupported for every current MIoT property. | A valid scalar current value can be the neutral `before`; a requested boolean is the neutral `after` only for the reviewed boolean case. Writable metadata never grants authority. |
 
-The HA adapter's domain mapping remains a read hint (`light` to `light`,
-`switch` to `switch`, `cover` to `cover`, and the other closed domain mappings
-in its projection). It does not change the `ha.entity@1.0.0` row above. In
-particular, a `cover` hint is not a level mapping.
+The HA adapter selects `ha.boolean-actuator@1.0.0` only from the exact entity
+domains `light`, `switch`, `fan`, and `input_boolean`. It projects `on` to
+`true` and `off` to `false` in `value`; every other state omits `value` while
+retaining its bounded string `state`. The same exact
+domain gate normalizes HA migration state-condition operands from `on`/`off`
+to booleans and leaves all other condition operands as strings. This mapping
+aligns current state, journal evidence, Artifact predicates, compiler diffs,
+and HA's existing `turn_on`/`turn_off` automation mapping without carrying an
+entity id or service name across the bridge contract.
+
+`semanticKind` remains a read hint and never selects action semantics. Generic
+HA entities keep `ha.entity@1.0.0`; `lock`, `cover`, doors, alarms, and every
+unlisted domain remain outside the boolean actuator schema. In particular, a
+`cover` hint does not grant boolean or level authority. Authority assessment,
+policy, household approval, deployment read-back, and rollback remain separate
+required gates after schema compatibility.
 
 ### Cover and `set_level` fail-closed boundary
 
@@ -146,6 +159,13 @@ Before implementing or widening the resolver, add deterministic Hub tests for:
 
 - HA `on`/`open` states: string equality works; numeric predicates and both
   action kinds fail closed.
+- HA boolean actuator `on`/`off` states: the adapter projects exact boolean
+  values, state conditions use boolean operands, post-baseline evidence retains
+  booleans, and `set_boolean` produces exact boolean before/after only for the
+  reviewed exact schema.
+- HA boolean actuator unknown/unavailable states and every unlisted domain:
+  value or action compatibility remains unavailable; locks and covers never
+  enter this schema through a semantic hint.
 - HA `cover` with an omitted or unknown current position: no normalized level
   or writable inference is produced.
 - HA numeric-looking text such as `"21.5"`: it remains a string.

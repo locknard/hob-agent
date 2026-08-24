@@ -211,6 +211,7 @@ function state(
 function snapshot(
   options: {
     readonly targetState?: JsonValue;
+    readonly targetSchema?: string;
     readonly triggerState?: JsonValue;
     readonly triggerSchema?: string;
     readonly targetValidity?: HomeWorldDeviceSnapshot["validity"];
@@ -219,7 +220,8 @@ function snapshot(
     readonly historyGapCount?: number;
   } = {},
 ): HomeWorldSnapshot {
-  const target = capability("hwc-target", "native-target", "miot.property");
+  const targetSchema = options.targetSchema ?? "miot.property";
+  const target = capability("hwc-target", "native-target", targetSchema);
   const trigger = capability(
     "hwc-trigger",
     "native-trigger",
@@ -228,12 +230,14 @@ function snapshot(
     "sensor",
   );
   const states = [
-    ...(options.targetState === undefined ? [] : [state("native-target", {
-      value: options.targetState,
-      format: "bool",
-      unit: "none",
-      writable: true,
-    })]),
+    ...(options.targetState === undefined ? [] : [state("native-target", targetSchema === "ha.boolean-actuator"
+      ? { state: options.targetState === true ? "on" : "off", value: options.targetState }
+      : {
+          value: options.targetState,
+          format: "bool",
+          unit: "none",
+          writable: true,
+        })]),
     ...(options.triggerState === undefined ? [] : [state("native-trigger", { state: options.triggerState })]),
   ];
   const item = device([target, trigger], states, options.targetValidity);
@@ -534,6 +538,38 @@ test("keeps resolver compatibility independent from authority candidate availabi
   assert.deepEqual(emptyCut.devices.find((device) => device.hwCapabilityId === "hwc-target")?.actionCompatibility, expected);
   assert.equal(unavailableCut.cutIdentity, availableCut.cutIdentity);
   assert.equal(emptyCut.cutIdentity, availableCut.cutIdentity);
+});
+
+test("projects the exact HA boolean-actuator schema into a compatible neutral set_boolean action", () => {
+  const value = artifact();
+  const bound = assessments(value);
+  const booleanSnapshot = snapshot({
+    targetSchema: "ha.boolean-actuator",
+    targetState: true,
+    triggerState: "on",
+  });
+  const environment = makeEnvironment({
+    artifact: value,
+    bound,
+    snapshots: [booleanSnapshot, booleanSnapshot],
+  });
+
+  const cut = read(environment.source, value, bound);
+  const target = cut.devices.find((item) => item.hwCapabilityId === "hwc-target");
+  assert.equal(target?.schema, "ha.boolean-actuator");
+  assert.deepEqual(target?.read, { status: "available", value: true });
+  assert.deepEqual(target?.actionCompatibility, [{
+    order: 2,
+    kind: "set_boolean",
+    status: "compatible",
+    before: true,
+    after: false,
+  }]);
+  assert.deepEqual(target?.predicateCompatibility, [{
+    phase: "postcondition",
+    order: 1,
+    status: "compatible",
+  }]);
 });
 
 test("projects an exact HA cover snapshot into a compatible neutral set_level action", () => {

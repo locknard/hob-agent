@@ -614,6 +614,8 @@ export const HOME_ASSISTANT_ADAPTER_TYPE = "home-assistant";
 export const HOME_ASSISTANT_ACCESS_TOKEN_ALIAS = "access-token";
 export const HOME_ASSISTANT_ENTITY_SCHEMA = "ha.entity";
 export const HOME_ASSISTANT_ENTITY_SCHEMA_VERSION = "1.0.0";
+export const HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA = "ha.boolean-actuator";
+export const HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_VERSION = "1.0.0";
 export const HOME_ASSISTANT_COVER_SCHEMA = "ha.cover";
 export const HOME_ASSISTANT_COVER_SCHEMA_VERSION = "1.0.0";
 export const HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA = "ha.media-player";
@@ -689,6 +691,19 @@ export const HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH = `sha256:${createHash(
   .update(HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_FORM)
   .digest("hex")}`;
 
+const HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_CANONICAL_FORM = [
+  "schema=ha.boolean-actuator",
+  "majorVersion=1",
+  "state=string",
+  "value=boolean",
+  "available=boolean",
+  "unknownAttributeCount=number",
+].join("|");
+
+export const HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_CANONICAL_HASH = `sha256:${createHash("sha256")
+  .update(HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_CANONICAL_FORM)
+  .digest("hex")}`;
+
 const HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_FORM = [
   "schema=ha.cover",
   "majorVersion=1",
@@ -731,6 +746,15 @@ const homeAssistantEntityAttrsSchema = z
   })
   .strict();
 
+const homeAssistantBooleanActuatorAttrsSchema = z
+  .object({
+    state: z.string(),
+    value: z.boolean().optional(),
+    available: z.boolean().optional(),
+    unknownAttributeCount: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
 const homeAssistantCoverAttrsSchema = z
   .object({
     state: z.string(),
@@ -762,6 +786,11 @@ export const HOME_ASSISTANT_ADAPTER_REGISTRATION: ContractAdapterRegistration<Ho
     majorVersion: 1,
     attrsSchema: homeAssistantEntityAttrsSchema,
     canonicalHash: HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH,
+  }, {
+    schema: HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA,
+    majorVersion: 1,
+    attrsSchema: homeAssistantBooleanActuatorAttrsSchema,
+    canonicalHash: HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_CANONICAL_HASH,
   }, {
     schema: HOME_ASSISTANT_COVER_SCHEMA,
     majorVersion: 1,
@@ -1757,7 +1786,10 @@ function translateForeignConditions(
       const entityId = singleEntityId(condition.entity_id);
       const binding = entityId === undefined ? undefined : bindingForEntity(entityId);
       if (binding === undefined) return { status: "unsupported", reason: "unbound_target" };
-      conditions.push({ kind: "capability_value", source: binding, operator: "equals", value: condition.state });
+      const value = entityId === undefined
+        ? condition.state
+        : booleanActuatorStateValue(entityId, condition.state) ?? condition.state;
+      conditions.push({ kind: "capability_value", source: binding, operator: "equals", value });
       continue;
     }
     if (condition.condition === "time") {
@@ -1829,17 +1861,18 @@ function translateForeignActions(
       continue;
     }
 
+    const targetEntityId = migrationActionEntityId(action.target);
     const target = migrationActionTarget(action.target, bindingForEntity);
     if (target.status !== "ok") return target;
-    if (action.service === "homeassistant.turn_on" || action.service === "homeassistant.turn_off") {
-      if (!exactKeys(action, ["service", "target"]) && !exactKeys(action, ["service", "target", "data"])) {
-        return { status: "unsupported", reason: "unsupported_action" };
+    if (targetEntityId !== undefined && isBooleanActuatorService(action.service, targetEntityId)) {
+      const emptyData = exactKeys(action, ["service", "target"])
+        || (exactKeys(action, ["service", "target", "data"])
+          && isRecord(action.data)
+          && Object.keys(action.data).length === 0);
+      if (emptyData) {
+        actions.push({ kind: "set_boolean", target: target.value, value: action.service.endsWith("turn_on") });
+        continue;
       }
-      if (action.data !== undefined && (!isRecord(action.data) || Object.keys(action.data).length > 0)) {
-        return { status: "unsupported", reason: "unsupported_action" };
-      }
-      actions.push({ kind: "set_boolean", target: target.value, value: action.service.endsWith("turn_on") });
-      continue;
     }
 
     const data = action.data;
@@ -1867,6 +1900,25 @@ function migrationActionTarget(
   return binding === undefined
     ? { status: "unsupported", reason: "unbound_target" }
     : { status: "ok", value: binding };
+}
+
+function migrationActionEntityId(value: unknown): string | undefined {
+  if (!isRecord(value) || !exactKeys(value, ["entity_id"])) return undefined;
+  return singleEntityId(value.entity_id);
+}
+
+function isBooleanActuatorService(service: string, entityId: string): boolean {
+  if (!isHomeAssistantBooleanActuatorEntity(entityId)) return false;
+  const domain = entityId.slice(0, entityId.indexOf("."));
+  return service === "homeassistant.turn_on"
+    || service === "homeassistant.turn_off"
+    || service === `${domain}.turn_on`
+    || service === `${domain}.turn_off`;
+}
+
+function booleanActuatorStateValue(entityId: string, state: string): boolean | undefined {
+  if (!isHomeAssistantBooleanActuatorEntity(entityId)) return undefined;
+  return state === "on" ? true : state === "off" ? false : undefined;
 }
 
 function homeAssistantLevel(service: string, data: Record<string, unknown>): number | undefined {
@@ -2114,15 +2166,18 @@ function projectSnapshot(snapshot: HomeAssistantSnapshot): SnapshotProjection {
     bindings.sort((left, right) => left.nativeInstanceId.localeCompare(right.nativeInstanceId));
     const capabilities = bindings.map((binding) => {
       const semanticKind = homeAssistantSemanticKind(binding.entityId);
+      const booleanActuator = isHomeAssistantBooleanActuatorEntity(binding.entityId);
       const cover = isHomeAssistantCoverEntity(binding.entityId);
       const mediaPlayer = isHomeAssistantMediaPlayerEntity(binding.entityId);
       return {
         nativeInstanceId: binding.nativeInstanceId,
-        schema: cover
-          ? HOME_ASSISTANT_COVER_SCHEMA
+        schema: booleanActuator
+          ? HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA
+          : cover ? HOME_ASSISTANT_COVER_SCHEMA
           : mediaPlayer ? HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA : HOME_ASSISTANT_ENTITY_SCHEMA,
-        schemaVersion: cover
-          ? HOME_ASSISTANT_COVER_SCHEMA_VERSION
+        schemaVersion: booleanActuator
+          ? HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_VERSION
+          : cover ? HOME_ASSISTANT_COVER_SCHEMA_VERSION
           : mediaPlayer ? HOME_ASSISTANT_MEDIA_PLAYER_SCHEMA_VERSION : HOME_ASSISTANT_ENTITY_SCHEMA_VERSION,
         ...(semanticKind === undefined ? {} : { semanticKind }),
         ...(binding.nativeSpaceId === undefined
@@ -2190,6 +2245,12 @@ export function homeAssistantSemanticKind(entityId: string): CapabilitySemanticK
   return HOME_ASSISTANT_SEMANTIC_KINDS[entityId.slice(0, separator)];
 }
 
+function isHomeAssistantBooleanActuatorEntity(entityId: string): boolean {
+  const separator = entityId.indexOf(".");
+  if (separator <= 0) return false;
+  return ["light", "switch", "fan", "input_boolean"].includes(entityId.slice(0, separator));
+}
+
 function isHomeAssistantCoverEntity(entityId: string): boolean {
   const separator = entityId.indexOf(".");
   return separator > 0 && entityId.slice(0, separator) === "cover";
@@ -2248,11 +2309,14 @@ function boundedIdentityValue(value: unknown): string | undefined {
 
 function projectNativeState(nativeState: HomeAssistantNativeStateEvent, binding: EntityBinding): ContractStateEvent | undefined {
   if (nativeState.entityId !== binding.entityId || nativeState.state.trim() === "") return undefined;
-  const attrs = isHomeAssistantCoverEntity(binding.entityId)
-    ? projectCoverAttributes(nativeState.state, nativeState.attrs)
+  const attrs = isHomeAssistantBooleanActuatorEntity(binding.entityId)
+    ? projectBooleanActuatorAttributes(nativeState.state, nativeState.attrs)
+    : isHomeAssistantCoverEntity(binding.entityId)
+      ? projectCoverAttributes(nativeState.state, nativeState.attrs)
     : isHomeAssistantMediaPlayerEntity(binding.entityId)
       ? projectMediaPlayerAttributes(nativeState.state, nativeState.attrs)
       : projectKnownAttributes(nativeState.state, nativeState.attrs);
+  if (attrs === undefined) return undefined;
   return {
     nativeId: binding.nativeId,
     nativeInstanceId: binding.nativeInstanceId,
@@ -2262,6 +2326,22 @@ function projectNativeState(nativeState: HomeAssistantNativeStateEvent, binding:
       : { sourceTs: nativeState.ts, sourceTsQuality: "platform" },
     origin: "observed",
   };
+}
+
+function projectBooleanActuatorAttributes(
+  state: string,
+  attributes: Record<string, unknown>,
+): Record<string, string | number | boolean | null> {
+  const projected: Record<string, string | number | boolean | null> = { state };
+  if (state === "on") projected.value = true;
+  if (state === "off") projected.value = false;
+  if (typeof attributes.available === "boolean") projected.available = attributes.available;
+
+  const unknownAttributeCount = Object.keys(attributes)
+    .filter((key) => key !== "available")
+    .length;
+  if (unknownAttributeCount > 0) projected.unknownAttributeCount = unknownAttributeCount;
+  return projected;
 }
 
 function projectCoverAttributes(
@@ -2359,12 +2439,13 @@ function homeAssistantActionDescriptor(
 ): BridgeActionDescriptor | undefined {
   const domain = entityId.split(".", 1)[0];
   const state = typeof current.state === "string" ? current.state : undefined;
+  const value = typeof current.value === "boolean" ? current.value : undefined;
   if (domain === undefined || state === undefined || current.available === false
     || state === "unknown" || state === "unavailable") return undefined;
 
   if (["light", "switch", "fan", "input_boolean"].includes(domain)) {
-    if (state !== "on" && state !== "off") return undefined;
-    return { action: { kind: "set_boolean", value: state === "off" }, reversible: true };
+    if (value === undefined) return undefined;
+    return { action: { kind: "set_boolean", value: !value }, reversible: true };
   }
   if (domain === "lock") {
     if (state !== "locked" && state !== "unlocked") return undefined;

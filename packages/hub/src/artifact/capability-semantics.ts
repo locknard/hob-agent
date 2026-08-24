@@ -14,6 +14,7 @@ const numericOperators = Object.freeze(["equals", "not_equals", "greater_than", 
 export const CAPABILITY_SEMANTICS_ALLOWLIST = Object.freeze([
   "ha.entity@1.0.0",
   "ha.cover@1.0.0",
+  "ha.boolean-actuator@1.0.0",
   "miot.property@1.0.0",
 ] as const);
 
@@ -151,6 +152,9 @@ export function resolveCapabilityRead(input: CapabilitySemanticsInput): Capabili
   if (schemaKey === "ha.cover@1.0.0" && isHaCoverUnavailable(attrs)) {
     return frozen({ status: "unavailable", reason: "state_invalid" });
   }
+  if (schemaKey === "ha.boolean-actuator@1.0.0" && isHaBooleanActuatorUnavailable(attrs)) {
+    return frozen({ status: "unavailable", reason: "state_invalid" });
+  }
   const rawValue = schemaKey === "ha.entity@1.0.0"
     ? ownValue(attrs, "state")
     : schemaKey === "ha.cover@1.0.0"
@@ -161,7 +165,9 @@ export function resolveCapabilityRead(input: CapabilitySemanticsInput): Capabili
     ? readHaState(rawValue)
     : schemaKey === "ha.cover@1.0.0"
       ? readCoverLevel(rawValue)
-      : readScalar(rawValue);
+      : schemaKey === "ha.boolean-actuator@1.0.0"
+        ? readBoolean(rawValue)
+        : readScalar(rawValue);
   if (scalar.status !== "available") return frozen(scalar);
 
   const valueType = neutralValueType(scalar.value);
@@ -205,7 +211,10 @@ export function checkCapabilityAction(input: CapabilityActionInput): CapabilityA
     return frozen({ status: "incompatible", kind, reason: "schema_unsupported" });
   }
 
-  const availability = stateAvailability(input?.state, schemaKey === "ha.cover@1.0.0");
+  const availability = stateAvailability(
+    input?.state,
+    schemaKey === "ha.cover@1.0.0" || schemaKey === "ha.boolean-actuator@1.0.0",
+  );
   if (availability !== "ready") return frozen({ status: "unavailable", kind, reason: availability });
 
   if (kind === "set_level") {
@@ -238,6 +247,14 @@ export function checkCapabilityAction(input: CapabilityActionInput): CapabilityA
   const read = resolveCapabilityRead(input);
   if (read.status === "unavailable") return frozen({ status: "unavailable", kind, reason: read.reason });
   if (read.status === "unsupported") return frozen({ status: "incompatible", kind, reason: read.reason });
+
+  if (schemaKey === "ha.boolean-actuator@1.0.0") {
+    const requested = input.action.value;
+    if (typeof requested !== "boolean" || typeof read.value !== "boolean") {
+      return frozen({ status: "incompatible", kind, reason: "action_mapping_unreviewed" });
+    }
+    return frozen({ status: "compatible", kind, before: read.value, after: requested });
+  }
 
   if (schemaKey !== "miot.property@1.0.0" || read.valueType !== "boolean") {
     return frozen({ status: "incompatible", kind, reason: "action_mapping_unreviewed" });
@@ -314,7 +331,19 @@ function readCoverLevel(value: unknown): ReadScalarResult {
     : { status: "unsupported", reason: "value_invalid" };
 }
 
+function readBoolean(value: unknown): ReadScalarResult {
+  return typeof value === "boolean"
+    ? { status: "available", value }
+    : { status: "unsupported", reason: "value_invalid" };
+}
+
 function isHaCoverUnavailable(attrs: Readonly<Record<string, JsonValue>>): boolean {
+  const available = ownValue(attrs, "available");
+  const state = ownValue(attrs, "state");
+  return available === false || state === "unavailable" || state === "unknown";
+}
+
+function isHaBooleanActuatorUnavailable(attrs: Readonly<Record<string, JsonValue>>): boolean {
   const available = ownValue(attrs, "available");
   const state = ownValue(attrs, "state");
   return available === false || state === "unavailable" || state === "unknown";

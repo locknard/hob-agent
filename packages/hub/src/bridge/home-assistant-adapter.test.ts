@@ -15,6 +15,7 @@ import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js"
 import {
   HOME_ASSISTANT_ACCESS_TOKEN_ALIAS,
   HOME_ASSISTANT_ADAPTER_REGISTRATION,
+  HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_CANONICAL_HASH,
   HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH,
   HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH,
   MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES,
@@ -149,6 +150,84 @@ function respondToBootstrap(
   }
 }
 
+function respondToStateBootstrap(
+  socket: FakeSocket,
+  entityId: string,
+  state: string,
+  attributes: Record<string, unknown> = {},
+): void {
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  for (const command of commands) {
+    const result = command.type === "get_states"
+      ? [{ entity_id: entityId, state, attributes, last_updated: "2026-08-18T00:00:01.000Z" }]
+      : command.type === "config/entity_registry/list"
+        ? [{ id: "entity-stable-1", entity_id: entityId, device_id: "device-1", name: "Kitchen actuator" }]
+        : command.type === "config/device_registry/list"
+          ? [{ id: "device-1", name: "Kitchen" }]
+          : [];
+    socket.receive({ id: command.id, type: "result", success: true, result });
+  }
+}
+
+test("registers and projects the strict boolean-actuator schema for the four exact HA domains", async () => {
+  assert.equal(
+    HOME_ASSISTANT_BOOLEAN_ACTUATOR_SCHEMA_CANONICAL_HASH,
+    "sha256:a70336d95346998c133d5381a3bc4b88a0a519c9c4724db8933717e0104d1878",
+  );
+  const registrations = HOME_ASSISTANT_ADAPTER_REGISTRATION.capabilitySchemas;
+  assert.deepEqual(
+    registrations.map((registration) => [registration.schema, registration.majorVersion]),
+    [["ha.entity", 1], ["ha.boolean-actuator", 1], ["ha.cover", 1], ["ha.media-player", 1]],
+  );
+  const booleanRegistration = registrations.find((registration) => registration.schema === "ha.boolean-actuator");
+  assert.notEqual(booleanRegistration, undefined);
+  assert.equal(booleanRegistration!.attrsSchema.safeParse({}).success, false);
+  assert.equal(booleanRegistration!.attrsSchema.safeParse({ state: "on", value: true, available: false, unknownAttributeCount: 2 }).success, true);
+  assert.equal(booleanRegistration!.attrsSchema.safeParse({ state: true }).success, false);
+  assert.equal(booleanRegistration!.attrsSchema.safeParse({ state: "on", setBooleanSupported: true }).success, false);
+
+  for (const entityId of ["light.kitchen", "switch.socket", "fan.ceiling", "input_boolean.away"] as const) {
+    const socket = new FakeSocket();
+    const { adapter } = createAdapter(socket);
+    const events = await readSnapshot(adapter, socket, () => respondToStateBootstrap(socket, entityId, "on", {
+      available: true,
+      vendor_field: "must-not-cross-contract",
+    }));
+    const descriptor = (events[1]!.event as Extract<BridgeEvent, { kind: "device-upserted" }>).device;
+    assert.equal(descriptor.capabilities[0]?.schema, "ha.boolean-actuator");
+    assert.equal(descriptor.capabilities[0]?.schemaVersion, "1.0.0");
+    const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+    assert.deepEqual(state.attrs, { state: "on", value: true, available: true, unknownAttributeCount: 1 });
+    assert.equal(JSON.stringify(state).includes("vendor_field"), false);
+  }
+
+  const genericSocket = new FakeSocket();
+  const { adapter: genericAdapter } = createAdapter(genericSocket);
+  const genericEvents = await readSnapshot(genericAdapter, genericSocket, () => respondToStateBootstrap(genericSocket, "sensor.temperature", "on"));
+  const genericDescriptor = (genericEvents[1]!.event as Extract<BridgeEvent, { kind: "device-upserted" }>).device;
+  assert.equal(genericDescriptor.capabilities[0]?.schema, "ha.entity");
+
+  const unavailableSocket = new FakeSocket();
+  const { adapter: unavailableAdapter } = createAdapter(unavailableSocket);
+  const iterator = unavailableAdapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToStateBootstrap(unavailableSocket, "light.kitchen", "unknown", { available: true });
+  const unavailableEvents: Envelope[] = [(await first).value!];
+  while (unavailableEvents.at(-1)?.event.kind !== "sync-complete") {
+    unavailableEvents.push((await iterator.next()).value!);
+  }
+  const unavailableState = unavailableEvents.find((event) => event.event.kind === "state");
+  assert.notEqual(unavailableState, undefined);
+  if (unavailableState?.event.kind === "state") {
+    assert.equal(unavailableState.event.state.attrs.state, "unknown");
+    assert.equal("value" in unavailableState.event.state.attrs, false);
+  }
+  await unavailableAdapter.control.dispose();
+});
+
 function respondToForeignRuleBootstrap(socket: FakeSocket): void {
   socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
   socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
@@ -169,6 +248,28 @@ function respondToForeignRuleBootstrap(socket: FakeSocket): void {
             : command.type === "config/area_registry/list"
               ? []
               : [];
+    socket.receive({ id: command.id, type: "result", success: true, result });
+  }
+}
+
+function respondToForeignActuatorBootstrap(socket: FakeSocket, entityId: string): void {
+  socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
+  socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
+  const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
+  for (const command of commands) {
+    const result = command.type === "get_states"
+      ? [
+          { entity_id: "automation.arrival_actuator", state: "on", attributes: { friendly_name: "Arrival actuator" } },
+          { entity_id: entityId, state: "off", attributes: { friendly_name: "Actuator" } },
+        ]
+        : command.type === "config/entity_registry/list"
+          ? [
+              { id: "automation-stable-1", entity_id: "automation.arrival_actuator", device_id: "device-automation", name: "Arrival actuator" },
+              { id: "entity-actuator-1", entity_id: entityId, device_id: "device-actuator", name: "Actuator" },
+            ]
+          : command.type === "config/device_registry/list"
+            ? [{ id: "device-automation", name: "Automations" }, { id: "device-actuator", name: "Actuator" }]
+            : [];
     socket.receive({ id: command.id, type: "result", success: true, result });
   }
 }
@@ -234,7 +335,7 @@ test("registers a separate strict cover schema and projects an integer position"
   const registrations = HOME_ASSISTANT_ADAPTER_REGISTRATION.capabilitySchemas;
   assert.deepEqual(
     registrations.map((registration) => [registration.schema, registration.majorVersion]),
-    [["ha.entity", 1], ["ha.cover", 1], ["ha.media-player", 1]],
+    [["ha.entity", 1], ["ha.boolean-actuator", 1], ["ha.cover", 1], ["ha.media-player", 1]],
   );
   const coverRegistration = registrations.find((registration) => registration.schema === "ha.cover");
   assert.notEqual(coverRegistration, undefined);
@@ -377,7 +478,7 @@ test("omits invalid cover positions and feature masks instead of coercing them",
   }
 });
 
-test("keeps generic HA entities on ha.entity even when they expose cover-like attributes", async () => {
+test("keeps the boolean actuator schema for light entities even when they expose cover-like attributes", async () => {
   const socket = new FakeSocket();
   const { adapter } = createAdapter(socket);
   const events = await readSnapshot(adapter, socket, () => respondToCoverBootstrap(socket, {
@@ -385,8 +486,10 @@ test("keeps generic HA entities on ha.entity even when they expose cover-like at
     supported_features: 4,
   }, "light.curtain"));
   const descriptor = (events[1]!.event as Extract<BridgeEvent, { kind: "device-upserted" }>).device;
-  assert.equal(descriptor.capabilities[0]?.schema, "ha.entity");
+  assert.equal(descriptor.capabilities[0]?.schema, "ha.boolean-actuator");
   const state = (events[2]!.event as Extract<BridgeEvent, { kind: "state" }>).state;
+  assert.equal(state.attrs.state, "open");
+  assert.equal("value" in state.attrs, false);
   assert.equal(Object.prototype.hasOwnProperty.call(state.attrs, "level"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(state.attrs, "setLevelSupported"), false);
 });
@@ -609,7 +712,7 @@ test("describes the next boolean action from the adapter's current state", async
   while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
 
   const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
-  const descriptor = handle?.describe({
+  const descriptor = handle?.describe(({
     target: {
       hwCapabilityId: "cap-light",
       binding: {
@@ -618,8 +721,8 @@ test("describes the next boolean action from the adapter's current state", async
         nativeInstanceId: "entity-stable-1",
       },
     },
-    current: { state: "on", available: true },
-  }) as BridgeActionDescriptor | undefined;
+    current: { state: "on", value: true, available: true },
+  } as Parameters<ActionsExtension["describe"]>[0]));
   assert.deepEqual(descriptor?.action, { kind: "set_boolean", value: false });
   await adapter.control.dispose();
 });
@@ -746,7 +849,7 @@ test("events resolve the scoped token and emit a neutral snapshot in the frozen 
   assert.equal(descriptor.nativeId, "device-1");
   assert.deepEqual(descriptor.capabilities, [{
     nativeInstanceId: "entity-stable-1",
-    schema: "ha.entity",
+    schema: "ha.boolean-actuator",
     schemaVersion: "1.0.0",
     semanticKind: "light",
     space: { nativeSpaceId: "area-entity", name: "Counter" },
@@ -757,9 +860,8 @@ test("events resolve the scoped token and emit a neutral snapshot in the frozen 
   assert.equal(state.nativeInstanceId, "entity-stable-1");
   assert.deepEqual(state.attrs, {
     state: "on",
-    brightness: 200,
-    unit: "%",
-    unknownAttributeCount: 2,
+    value: true,
+    unknownAttributeCount: 4,
   });
   assert.equal(JSON.stringify(state).includes("must-not-cross-contract"), false);
 
@@ -945,7 +1047,7 @@ test("suppresses consecutive HA events whose neutral state did not change", asyn
   const subscription = socket.sent.find((message) => message.type === "subscribe_events");
   assert.notEqual(subscription, undefined);
   const next = iterator.next();
-  const receiveState = (brightness: number, unknownAttributes: Record<string, unknown>) => socket.receive({
+  const receiveState = (state: "on" | "off", brightness: number, unknownAttributes: Record<string, unknown>) => socket.receive({
     id: subscription!.id,
     type: "event",
     event: {
@@ -954,20 +1056,20 @@ test("suppresses consecutive HA events whose neutral state did not change", asyn
       data: {
         entity_id: "light.kitchen",
         new_state: {
-          state: "on",
+          state,
           attributes: { brightness, unit_of_measurement: "%", ...unknownAttributes },
         },
       },
     },
   });
-  receiveState(200, { changed_vendor_field: "different", another_unknown: true });
-  receiveState(201, { changed_vendor_field: "different", another_unknown: true });
+  receiveState("off", 200, { changed_vendor_field: "different", another_unknown: true });
+  receiveState("off", 201, { changed_vendor_field: "different", another_unknown: true });
 
   const envelope = await next;
   assert.equal(envelope.value?.seq, 6);
   assert.equal(
-    (envelope.value?.event as Extract<BridgeEvent, { kind: "state" }>).state.attrs.brightness,
-    201,
+    (envelope.value?.event as Extract<BridgeEvent, { kind: "state" }>).state.attrs.value,
+    false,
   );
 
   await adapter.control.dispose();
@@ -1618,7 +1720,7 @@ test("translates one opaque foreign rule through a read-only versioned migration
       kind: "capability_value",
       source: { bridgeId: "bridge-ha", nativeId: "device-light", nativeInstanceId: "entity-light-1" },
       operator: "equals",
-      value: "off",
+      value: false,
     }],
     actions: [{
       kind: "set_level",
@@ -1635,6 +1737,69 @@ test("translates one opaque foreign rule through a read-only versioned migration
   }]);
 
   await adapter.control.dispose();
+});
+
+test("translates exact boolean-actuator domain actions and rejects non-empty action data", async () => {
+  const cases = [
+    ...(["light", "switch", "fan", "input_boolean"] as const).map((domain) => ({
+      entityId: `${domain}.actuator`,
+      action: { service: `${domain}.turn_off`, target: { entity_id: `${domain}.actuator` }, data: {} },
+      respond: (socket: FakeSocket) => respondToForeignActuatorBootstrap(socket, `${domain}.actuator`),
+      expected: "translated" as const,
+    })),
+    {
+      entityId: "light.kitchen",
+      action: { service: "light.turn_off", target: { entity_id: "light.kitchen" }, data: { transition: 1 } },
+      respond: respondToForeignRuleBootstrap,
+      expected: "unsupported" as const,
+    },
+    {
+      entityId: "light.kitchen",
+      action: { service: "switch.turn_off", target: { entity_id: "light.kitchen" }, data: {} },
+      respond: respondToForeignRuleBootstrap,
+      expected: "unsupported" as const,
+    },
+  ];
+
+  for (const candidate of cases) {
+    const socket = new FakeSocket();
+    const fake = foreignRuleMigrationFetchFake({
+      alias: "执行器开关",
+      mode: "single",
+      trigger: [{ platform: "state", entity_id: candidate.entityId }],
+      condition: [{ condition: "state", entity_id: candidate.entityId, state: "on" }],
+      action: [candidate.action],
+    });
+    const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+    const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    candidate.respond(socket);
+    const events: Envelope[] = [(await first).value!];
+    while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+    const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+    const result = await (adapter.extension("foreignRuleMigration@1") as ForeignRuleMigrationHandle).translate(
+      { ruleRef },
+      { signal: new AbortController().signal },
+    );
+
+    if (candidate.expected === "translated") {
+      assert.equal(result.status, "translated");
+      if (result.status === "translated") {
+        assert.deepEqual(result.plan.conditions[0]?.value, true);
+        assert.deepEqual(result.plan.actions, [{
+          kind: "set_boolean",
+          target: candidate.entityId.endsWith(".actuator")
+            ? { bridgeId: "bridge-ha", nativeId: "device-actuator", nativeInstanceId: "entity-actuator-1" }
+            : { bridgeId: "bridge-ha", nativeId: "device-light", nativeInstanceId: "entity-light-1" },
+          value: false,
+        }]);
+      }
+    } else {
+      assert.deepEqual(result, { status: "unsupported", reason: "unsupported_action" });
+    }
+    await adapter.control.dispose();
+  }
 });
 
 test("keeps schedule weekday semantics and rejects non-zero seconds", async () => {

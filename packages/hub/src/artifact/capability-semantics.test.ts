@@ -19,6 +19,11 @@ const haCoverCapability = {
   schemaVersion: "1.0.0",
 } as const;
 
+const haBooleanActuatorCapability = {
+  schema: "ha.boolean-actuator",
+  schemaVersion: "1.0.0",
+} as const;
+
 const miotCapability = {
   schema: "miot.property",
   schemaVersion: "1.0.0",
@@ -55,6 +60,7 @@ test("exposes only the reviewed exact schema/version allowlist", () => {
   assert.deepEqual(CAPABILITY_SEMANTICS_ALLOWLIST, [
     "ha.entity@1.0.0",
     "ha.cover@1.0.0",
+    "ha.boolean-actuator@1.0.0",
     "miot.property@1.0.0",
   ]);
   assert.equal(Object.isFrozen(CAPABILITY_SEMANTICS_ALLOWLIST), true);
@@ -96,6 +102,122 @@ test("reads HA state as a string and permits equality predicates only", () => {
   }), {
     status: "incompatible",
     reason: "operator_unsupported",
+  });
+});
+
+test("reads reviewed HA boolean-actuator value as a boolean with equality predicates only", () => {
+  const read = resolveCapabilityRead({
+    capability: haBooleanActuatorCapability,
+    state: state({ value: true, state: "on" }),
+  });
+  assert.deepEqual(read, {
+    status: "available",
+    value: true,
+    valueType: "boolean",
+    operators: ["equals", "not_equals"],
+  });
+
+  assert.deepEqual(checkCapabilityPredicate({
+    capability: haBooleanActuatorCapability,
+    state: state({ value: true, state: "on" }),
+    operator: "equals",
+    value: true,
+  }), {
+    status: "compatible",
+    operator: "equals",
+    valueType: "boolean",
+  });
+  assert.deepEqual(checkCapabilityPredicate({
+    capability: haBooleanActuatorCapability,
+    state: state({ value: true, state: "on" }),
+    operator: "greater_than",
+    value: true,
+  }), {
+    status: "incompatible",
+    reason: "operator_unsupported",
+  });
+});
+
+test("accepts HA boolean-actuator set_boolean only with a fresh valid boolean state", () => {
+  assert.deepEqual(checkCapabilityAction({
+    capability: haBooleanActuatorCapability,
+    state: state({ value: true, state: "on" }),
+    action: booleanAction(false),
+  }), {
+    status: "compatible",
+    kind: "set_boolean",
+    before: true,
+    after: false,
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haBooleanActuatorCapability,
+    state: state({ value: "on", state: "on" }),
+    action: booleanAction(false),
+  }), {
+    status: "incompatible",
+    kind: "set_boolean",
+    reason: "value_invalid",
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haBooleanActuatorCapability,
+    state: {
+      attrs: { value: true, state: "on" },
+      validity: "valid",
+    },
+    action: booleanAction(false),
+  }), {
+    status: "unavailable",
+    kind: "set_boolean",
+    reason: "state_stale",
+  });
+  assert.deepEqual(checkCapabilityAction({
+    capability: haBooleanActuatorCapability,
+    state: state({ value: true, state: "on" }),
+    action: levelAction(),
+  }), {
+    status: "incompatible",
+    kind: "set_level",
+    reason: "set_level_unsupported",
+  });
+});
+
+test("fails closed for HA boolean-actuator unavailable states", () => {
+  for (const attrs of [
+    { value: true, state: "on", available: false },
+    { value: true, state: "unavailable" },
+    { value: true, state: "unknown" },
+  ]) {
+    assert.deepEqual(resolveCapabilityRead({
+      capability: haBooleanActuatorCapability,
+      state: state(attrs),
+    }), {
+      status: "unavailable",
+      reason: "state_invalid",
+    });
+    assert.deepEqual(checkCapabilityAction({
+      capability: haBooleanActuatorCapability,
+      state: state(attrs),
+      action: booleanAction(false),
+    }), {
+      status: "unavailable",
+      kind: "set_boolean",
+      reason: "state_invalid",
+    });
+  }
+
+  assert.deepEqual(resolveCapabilityRead({
+    capability: haBooleanActuatorCapability,
+    state: state({ state: "on" }),
+  }), {
+    status: "unavailable",
+    reason: "state_missing",
+  });
+  assert.deepEqual(resolveCapabilityRead({
+    capability: haBooleanActuatorCapability,
+    state: state({ value: "on", state: "on" }),
+  }), {
+    status: "unsupported",
+    reason: "value_invalid",
   });
 });
 

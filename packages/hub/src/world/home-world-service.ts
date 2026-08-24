@@ -786,13 +786,13 @@ export class HomeWorldService extends Service {
           for (const record of page.records) {
             if (record.envelope.event.kind !== "state") continue;
             const state = record.envelope.event.state;
-            const value = evidenceScalar(state.attrs.state);
-            if (value === undefined) continue;
             const capability = group.capabilitiesByBinding.get(evidenceBindingKey(
               state.nativeId,
               state.nativeInstanceId,
             ));
             if (capability === undefined) continue;
+            const value = evidenceScalarForCapability(capability, state.attrs);
+            if (value === undefined) continue;
             events.push({
               hwId: capability.hwId,
               hwCapabilityId: capability.hwCapabilityId,
@@ -2418,6 +2418,17 @@ function evidenceScalar(value: unknown): string | number | boolean | null | unde
     || (typeof value === "number" && Number.isFinite(value))
     ? value
     : undefined;
+}
+
+function evidenceScalarForCapability(
+  capability: Pick<HomeWorldCapabilitySnapshot, "schema" | "schemaVersion">,
+  attrs: Readonly<Record<string, unknown>>,
+): string | number | boolean | null | undefined {
+  if (capability.schema === "ha.boolean-actuator" && capability.schemaVersion === "1.0.0") {
+    return typeof attrs.value === "boolean" ? attrs.value : undefined;
+  }
+  if (capability.schema === "ha.boolean-actuator") return undefined;
+  return evidenceScalar(attrs.state);
 }
 
 function actionCurrentState(

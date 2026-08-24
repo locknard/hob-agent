@@ -791,6 +791,68 @@ test("returns only selected post-baseline live changes as bounded neutral eviden
   await fiber.dispose();
 });
 
+test("projects HA boolean-actuator evidence from its boolean value attribute", async () => {
+  const booleanActuatorSchema = {
+    schema: "ha.boolean-actuator",
+    majorVersion: 1,
+    attrsSchema: z.object({
+      state: z.string(),
+      value: z.boolean().optional(),
+    }).strict(),
+    canonicalHash: "ha-boolean-actuator-v1",
+  } as never;
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge(
+    "bridge-boolean-evidence",
+    "remote-boolean-evidence",
+    snapshotFor("bridge-boolean-evidence", "remote-boolean-evidence", "1.0.0", "ha.boolean-actuator"),
+  );
+  catalog.register(registration(() => bridge, [booleanActuatorSchema]));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  let currentTime = "2026-08-19T00:00:00.000Z";
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-boolean-evidence")],
+    new Map([["bridge-boolean-evidence", bridge]]),
+    { clock: () => currentTime },
+  ));
+  await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-boolean-evidence"]?.diagnostics.connectionState === "ready");
+  const capability = ctx.homeWorld.snapshot().devices[0]!.capabilities[0]!;
+  const appendState = (seq: number, attrs: Record<string, unknown>) => {
+    ctx.homeWorld.journal("bridge-boolean-evidence")!.appendAtomic({
+      bridgeId: "bridge-boolean-evidence",
+      receivedAt: "2026-08-19T03:00:00.000Z",
+      envelope: eventEnvelope("bridge-boolean-evidence-epoch", seq, {
+        kind: "state",
+        state: {
+          nativeId: "bridge-boolean-evidence-lamp",
+          nativeInstanceId: "bridge-boolean-evidence-lamp:main",
+          attrs,
+          time: { sourceTsQuality: "none" },
+          origin: "observed",
+        },
+      }),
+    });
+  };
+  appendState(5, { state: "off", value: true });
+  appendState(6, { state: "on", value: "on" });
+  appendState(7, { state: "on" });
+  currentTime = "2026-08-19T04:00:00.000Z";
+
+  const evidence = ctx.homeWorld.queryRecentEvidence({
+    hwCapabilityIds: [capability.hwCapabilityId],
+    lookbackHours: 2,
+    limit: 20,
+  });
+
+  assert.deepEqual(evidence.events.map((event) => ({ value: event.value, seq: event.provenance.seq })), [
+    { value: true, seq: 5 },
+  ]);
+  await fiber.dispose();
+});
+
 test("rejects unknown capability ids and unbounded evidence requests", async () => {
   const catalog = new BridgeCatalog();
   const bridge = syntheticBridge("bridge-evidence-bounds", "remote-evidence-bounds", snapshotFor("bridge-evidence-bounds", "remote-evidence-bounds"));

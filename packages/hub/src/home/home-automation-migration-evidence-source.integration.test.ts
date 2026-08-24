@@ -39,10 +39,10 @@ const CONDITION_BINDING = {
 const SOURCE_FINGERPRINT = `sha256:${"a".repeat(64)}`;
 
 const schema = {
-  schema: "synthetic.state",
+  schema: "ha.boolean-actuator",
   majorVersion: 1,
-  attrsSchema: z.object({ state: z.string() }).strict(),
-  canonicalHash: "synthetic-state-v1",
+  attrsSchema: z.object({ state: z.string(), value: z.boolean().optional() }).strict(),
+  canonicalHash: "synthetic-ha-boolean-actuator-v1",
 } as never;
 
 function envelope(seq: number, event: BridgeEvent): Envelope {
@@ -73,7 +73,7 @@ function translatedRule(): ForeignRuleMigrationResult {
         kind: "capability_value",
         source: CONDITION_BINDING,
         operator: "equals",
-        value: "off",
+        value: false,
       }],
       actions: [{ kind: "set_boolean", target: TRIGGER_BINDING, value: true }],
     },
@@ -107,7 +107,7 @@ function bridgeAdapter(): BridgeAdapter {
         name: "Living room",
         capabilities: [{
           nativeInstanceId: "light.living-room:main",
-          schema: "synthetic.state",
+          schema: "ha.boolean-actuator",
           schemaVersion: "1.0.0",
           semanticKind: "light",
         }],
@@ -120,7 +120,7 @@ function bridgeAdapter(): BridgeAdapter {
         name: "Living room sensor",
         capabilities: [{
           nativeInstanceId: "sensor.living-room:main",
-          schema: "synthetic.state",
+          schema: "ha.boolean-actuator",
           schemaVersion: "1.0.0",
           semanticKind: "sensor",
         }],
@@ -131,7 +131,7 @@ function bridgeAdapter(): BridgeAdapter {
       state: {
         nativeId: "light.living-room",
         nativeInstanceId: "light.living-room:main",
-        attrs: { state: "off" },
+        attrs: { state: "off", value: false },
         time: { sourceTsQuality: "none" },
         origin: "observed",
       },
@@ -266,7 +266,7 @@ test("reads a real HomeWorld post-baseline trigger and condition into neutral mi
       state: {
         nativeId: "sensor.living-room",
         nativeInstanceId: "sensor.living-room:main",
-        attrs: { state: "off" },
+        attrs: { state: "off", value: false },
         time: { sourceTsQuality: "none" },
         origin: "observed",
       },
@@ -276,7 +276,7 @@ test("reads a real HomeWorld post-baseline trigger and condition into neutral mi
       state: {
         nativeId: "light.living-room",
         nativeInstanceId: "light.living-room:main",
-        attrs: { state: "on" },
+        attrs: { state: "on", value: true },
         time: { sourceTsQuality: "none" },
         origin: "observed",
       },
@@ -301,8 +301,8 @@ test("reads a real HomeWorld post-baseline trigger and condition into neutral mi
       occurredAt: CLOCK,
       capabilityId: "hwc-trigger",
       values: [
-        { capabilityId: "hwc-trigger", value: "on" },
-        { capabilityId: "hwc-condition", value: "off" },
+        { capabilityId: "hwc-trigger", value: true },
+        { capabilityId: "hwc-condition", value: false },
       ],
     }]);
     assert.deepEqual(evidence.existingRuleSummaries, []);
