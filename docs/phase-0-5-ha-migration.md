@@ -70,6 +70,8 @@ verified → rolling_back → restored
 
 回退固定执行 `verified → rolling_back → restored`：Hub 先停止并撤下 Hob 自动化，确认其不再运行，再按切换前快照恢复原规则并读回。回退中的未知结果保留两个自动化的最后已知状态、操作幂等键、actor、精确 Proposal/Artifact revision、source fingerprint 和 bridge watermark，并进入可恢复的 `needs_attention`。
 
+迁移在一次决定之后发生的切换或回退失败，向 Proposal 产品面投影为 `recovery_required`，不会投影为“运行中”或“已关闭”。家庭成员选择“继续恢复”时沿用已经批准的 Artifact 与部署意图，Hub 先读取原规则和 Hob 自动化的当前状态，再为恢复动作签发新的操作幂等键；该动作不是第二次批准。只有源规则恢复且 Hob 自动化已经撤下时，Proposal 才进入 `closed`；任何一侧状态未知时保持 `recovery_required`，不盲目重放写命令。
+
 ## Phase 1 原生适配器进入门槛
 
 原生 Matter、Zigbee、BLE、ESPHome 或其他协议适配器在 Phase 0.5 的迁移证据达到以下门槛后进入评审：
