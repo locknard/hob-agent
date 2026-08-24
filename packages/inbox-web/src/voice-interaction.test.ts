@@ -134,12 +134,17 @@ class FakeAudio {
 }
 class FakeWindow {
   readonly listeners = new Map<string, Handler>();
+  readonly location = { href: "http://localhost/voice" };
   addEventListener(name: string, handler: Handler): void {
     this.listeners.set(name, handler);
   }
   dispatch(name: string): void {
     this.listeners.get(name)?.({});
   }
+}
+class HarnessUrl extends globalThis.URL {
+  static createObjectURL(): string { return "blob:test"; }
+  static revokeObjectURL(): void {}
 }
 class FakeSessionStorage {
   readonly values = new Map<string, string>();
@@ -153,6 +158,7 @@ interface Harness {
   start: Button;
   stop: Button;
   cancel: Button;
+  background: Button;
   restart: Button;
   speechStop: Button;
   transcript: Element;
@@ -163,6 +169,7 @@ interface Harness {
   calls: Array<{ url: string; init: any }>;
   streams: FakeStream[];
   timers: Array<Handler>;
+  clearedTimers: unknown[];
   storage: FakeSessionStorage;
   pagehide(): void;
 }
@@ -178,7 +185,7 @@ function createHarness(
     leaseRequest?: (init: any) => Promise<any> | any;
     now?: () => number;
     sessionStorage?: unknown;
-    setTimeout?: (handler: Handler) => unknown;
+    setTimeout?: (handler: Handler, delay?: number) => unknown;
   } = {},
 ): Harness {
   FakeRecorder.instances = [];
@@ -211,21 +218,26 @@ function createHarness(
   const start = new Button();
   const stop = new Button();
   const cancel = new Button();
+  const background = new Button();
+  background.hidden = true;
   const restart = new Button();
   const speechStop = new Button();
   root.nodes.set("[data-voice-start]", start);
   root.nodes.set("[data-voice-stop]", stop);
   root.nodes.set("[data-voice-cancel]", cancel);
+  root.nodes.set("[data-voice-background]", background);
   root.nodes.set("[data-voice-restart]", restart);
   root.nodes.set("[data-voice-speech-stop]", speechStop);
   const recovery = new Anchor();
   root.nodes.set("[data-voice-recovery]", recovery);
   const conversation = new Anchor();
+  conversation.hidden = true;
   root.nodes.set("[data-voice-conversation]", conversation);
   const streams: FakeStream[] = [];
   const calls: Array<{ url: string; init: any }> = [];
   let adviceId = "";
   const timers: Handler[] = [];
+  const clearedTimers: unknown[] = [];
   const storage = new FakeSessionStorage();
   const window = new FakeWindow();
   const result = options.response ?? {
@@ -306,23 +318,26 @@ function createHarness(
     Uint8Array,
     DataView,
     AbortController,
-    URL: { createObjectURL: () => "blob:test", revokeObjectURL: () => {} },
+    URL: HarnessUrl,
     window,
     sessionStorage: options.sessionStorage ?? storage,
     Date: { now: options.now ?? (() => 0) },
-    setTimeout: (handler: Handler) => options.setTimeout !== undefined
-      ? options.setTimeout(handler)
+    setTimeout: (handler: Handler, delay?: number) => options.setTimeout !== undefined
+      ? options.setTimeout(handler, delay)
       : (() => {
           timers.push(handler);
           return timers.length;
         })(),
-    clearTimeout: () => {},
+    clearTimeout: (handle: unknown) => {
+      clearedTimers.push(handle);
+    },
   });
   return {
     root,
     start,
     stop,
     cancel,
+    background,
     restart,
     speechStop,
     transcript: root.nodes.get("[data-voice-transcript]")!,
@@ -333,6 +348,7 @@ function createHarness(
     calls,
     streams,
     timers,
+    clearedTimers,
     storage,
     pagehide: () => window.dispatch("pagehide"),
   };
@@ -352,6 +368,7 @@ test("pauses private voice for ten minutes after three consecutive no-input turn
     assert.equal(h.root.dataset.voiceState, "no_input");
   };
   await noInput();
+  assert.equal(h.recovery.hidden, false);
   assert.equal(h.detail.textContent, "没有听清。再说一次就好。");
   h.restart.click();
   await flush();
@@ -809,10 +826,15 @@ test("confirms a committed turn cancellation with the service before showing can
   assert.equal(request.init.method, "POST");
   assert.equal(request.init.headers["Content-Type"], "application/x-www-form-urlencoded");
   assert.equal(request.init.body, "");
-  assert.equal(request.init.redirect, "manual");
+  assert.equal(request.init.redirect, "follow");
   assert.equal(h.root.dataset.voiceState, "thinking");
 
-  stopped.resolve({ status: 303, ok: false });
+  stopped.resolve({
+    status: 200,
+    ok: true,
+    redirected: true,
+    url: "http://localhost/conversation/turn_stop",
+  });
   await flush();
   assert.equal(h.root.dataset.voiceState, "cancelled");
   assert.match(
@@ -829,7 +851,14 @@ test("keeps a committed turn visibly running when its cancellation cannot be con
           ok: true,
           json: async () => ({ status: "active", adviceId: "turn_background" }),
         };
-      if (url === "/conversation/turn_background/stop") return { status: 500, ok: false };
+      if (url === "/conversation/turn_background/stop") {
+        return {
+          status: 200,
+          ok: true,
+          redirected: true,
+          url: "http://localhost/login",
+        };
+      }
       return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
     },
   });
@@ -844,6 +873,291 @@ test("keeps a committed turn visibly running when its cancellation cannot be con
   assert.equal(h.root.dataset.voiceState, "thinking");
   assert.match(h.detail.textContent, /这次请求仍在继续处理/);
   assert.equal(h.recovery.href, "/conversation/turn_background");
+});
+
+test("reveals background continuation and cancellation together after a ten-second wait", async () => {
+  const scheduled: Array<{ handler: Handler; delay?: number }> = [];
+  const h = createHarness({
+    sessionStorage: {
+      getItem() { throw new Error("storage unavailable"); },
+      setItem() { throw new Error("storage unavailable"); },
+      removeItem() { throw new Error("storage unavailable"); },
+    },
+    setTimeout(handler, delay) {
+      scheduled.push({ handler, delay });
+      return scheduled.length;
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+
+  assert.equal(h.root.dataset.voiceState, "thinking");
+  assert.equal(h.background.hidden, true);
+  const waitTimer = scheduled.find((entry) => entry.delay === 10_000);
+  assert.ok(waitTimer, "thinking should schedule a ten-second wait timer");
+
+  waitTimer!.handler();
+  await flush();
+  assert.equal(h.background.hidden, false);
+  assert.equal(h.cancel.hidden, false);
+  assert.equal(h.recovery.hidden, true);
+  assert.equal(h.conversation.hidden, false);
+  assert.match(h.detail.textContent, /稍后处理/);
+});
+
+test("continues one advice in the background, closes voice events, and releases its lease", async () => {
+  const scheduled: Array<{ handler: Handler; delay?: number }> = [];
+  const h = createHarness({
+    fetch: (url) => {
+      if (url === "/test/transcribe") {
+        return {
+          ok: true,
+          json: async () => ({
+            status: "accepted",
+            adviceId: "turn_background_continue",
+            transcript: "客厅现在怎么样",
+          }),
+        };
+      }
+      if (url === "/conversation/turn_background_continue/background")
+        return { status: 200, ok: true, redirected: true, url: "http://localhost/home" };
+      return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
+    },
+    setTimeout(handler, delay) {
+      scheduled.push({ handler, delay });
+      return scheduled.length;
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+  const waitTimer = scheduled.find((entry) => entry.delay === 10_000);
+  assert.ok(waitTimer);
+  waitTimer!.handler();
+  await flush();
+
+  h.background.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "thinking");
+  assert.match(h.detail.textContent, /已转到后台/);
+  assert.equal(h.recovery.href, "/conversation/turn_background_continue");
+  assert.equal(h.conversation.href, "/conversation/turn_background_continue");
+  const backgroundRequest = h.calls.find(
+    (call) => call.url === "/conversation/turn_background_continue/background",
+  )!;
+  assert.equal(backgroundRequest.init.method, "POST");
+  assert.equal(backgroundRequest.init.headers["Content-Type"], "application/x-www-form-urlencoded");
+  assert.equal(backgroundRequest.init.body, "");
+  assert.equal(backgroundRequest.init.redirect, "follow");
+  assert.equal(FakeEvents.instances[0]?.closed, true);
+  assert.equal(h.calls.filter((call) => call.url.endsWith("/transcribe")).length, 1);
+  assert.equal(h.calls.filter((call) => call.url.endsWith("/release")).length, 1);
+  assert.equal(
+    h.calls.filter((call) => call.url === "/conversation/turn_background_continue/background").length,
+    1,
+  );
+  assert.equal(h.background.hidden, true);
+  assert.equal(h.cancel.hidden, true);
+  assert.equal(h.recovery.hidden, true);
+  assert.equal(h.conversation.hidden, false);
+});
+
+test("keeps both long-wait exits when background continuation is not confirmed", async () => {
+  const scheduled: Array<{ handler: Handler; delay?: number }> = [];
+  const h = createHarness({
+    fetch: (url) => {
+      if (url === "/test/transcribe")
+        return {
+          ok: true,
+          json: async () => ({ status: "accepted", adviceId: "turn_background_retry", transcript: "查看客厅" }),
+        };
+      if (url === "/conversation/turn_background_retry/background")
+        return {
+          status: 200,
+          ok: true,
+          redirected: true,
+          url: "http://localhost/conversation/turn_background_retry",
+        };
+      return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
+    },
+    setTimeout(handler, delay) {
+      scheduled.push({ handler, delay });
+      return scheduled.length;
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+  scheduled.find((entry) => entry.delay === 10_000)!.handler();
+  await flush();
+  h.background.click();
+  await flush();
+
+  assert.equal(h.root.dataset.voiceState, "thinking");
+  assert.match(h.detail.textContent, /暂时无法转到后台/);
+  assert.equal(h.background.hidden, false);
+  assert.equal(h.cancel.hidden, false);
+  assert.equal(h.recovery.hidden, true);
+  assert.equal(h.conversation.hidden, false);
+  assert.equal(h.conversation.href, "/conversation/turn_background_retry");
+});
+
+test("ignores a stale long-wait timer after a newer voice turn starts", async () => {
+  const scheduled: Array<{ handler: Handler; delay?: number }> = [];
+  let turn = 0;
+  const h = createHarness({
+    fetch: (url) => {
+      if (url === "/test/transcribe") {
+        turn += 1;
+        const adviceId = turn === 1 ? "turn_old_wait" : "turn_new_wait";
+        return {
+          ok: true,
+          json: async () => ({ status: "accepted", adviceId, transcript: adviceId }),
+        };
+      }
+      return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
+    },
+    setTimeout(handler, delay) {
+      scheduled.push({ handler, delay });
+      return scheduled.length;
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+  const oldTimer = scheduled.find((entry) => entry.delay === 10_000)!;
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[1]!.emit();
+  h.stop.click();
+  await flush();
+
+  oldTimer.handler();
+  await flush();
+  assert.equal(h.background.hidden, true);
+  const newTimer = scheduled.filter((entry) => entry.delay === 10_000).at(-1)!;
+  newTimer.handler();
+  await flush();
+  assert.equal(h.background.hidden, false);
+});
+
+test("ignores a late background response after a newer voice turn starts", async () => {
+  const scheduled: Array<{ handler: Handler; delay?: number }> = [];
+  const background = deferred<any>();
+  let turn = 0;
+  const h = createHarness({
+    fetch: (url) => {
+      if (url === "/test/transcribe") {
+        turn += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            status: "accepted",
+            adviceId: turn === 1 ? "turn_old_request" : "turn_new_request",
+            transcript: "查看客厅",
+          }),
+        };
+      }
+      if (url === "/conversation/turn_old_request/background") return background.promise;
+      return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
+    },
+    setTimeout(handler, delay) {
+      scheduled.push({ handler, delay });
+      return scheduled.length;
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+  scheduled.find((entry) => entry.delay === 10_000)!.handler();
+  await flush();
+  h.background.click();
+  await flush();
+
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[1]!.emit();
+  h.stop.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "thinking");
+  assert.equal(h.background.hidden, true);
+
+  background.resolve({ status: 200, ok: true, redirected: true });
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "thinking");
+  assert.equal(h.background.hidden, true);
+  assert.equal(FakeEvents.instances[1]?.closed, false);
+});
+
+test("keeps the exact advice link when a long-wait cancellation is not confirmed", async () => {
+  const scheduled: Array<{ handler: Handler; delay?: number }> = [];
+  const h = createHarness({
+    fetch: (url) => {
+      if (url === "/test/transcribe")
+        return {
+          ok: true,
+          json: async () => ({ status: "accepted", adviceId: "turn_long_cancel", transcript: "查看客厅" }),
+        };
+      if (url === "/conversation/turn_long_cancel/stop") return { status: 500, ok: false };
+      return { ok: true, blob: async () => new Blob([new Uint8Array([1])]) };
+    },
+    setTimeout(handler, delay) {
+      scheduled.push({ handler, delay });
+      return scheduled.length;
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+  scheduled.find((entry) => entry.delay === 10_000)!.handler();
+  await flush();
+
+  h.cancel.click();
+  await flush();
+  assert.equal(h.root.dataset.voiceState, "thinking");
+  assert.match(h.detail.textContent, /仍在继续处理/);
+  assert.equal(h.recovery.hidden, true);
+  assert.equal(h.conversation.hidden, false);
+  assert.equal(h.conversation.href, "/conversation/turn_long_cancel");
+  assert.equal(h.calls.filter((call) => call.url.endsWith("/release")).length, 1);
+});
+
+test("clears the ten-second wait timer when the voice surface is destroyed", async () => {
+  const scheduled: Array<{ handler: Handler; delay?: number }> = [];
+  const h = createHarness({
+    setTimeout(handler, delay) {
+      scheduled.push({ handler, delay });
+      return scheduled.length;
+    },
+  });
+  h.start.click();
+  await flush();
+  FakeRecorder.instances[0]!.emit();
+  h.stop.click();
+  await flush();
+  const waitTimer = scheduled.find((entry) => entry.delay === 10_000);
+  assert.ok(waitTimer);
+  const waitHandle = scheduled.indexOf(waitTimer!) + 1;
+
+  h.pagehide();
+  await flush();
+  assert.equal(h.clearedTimers.includes(waitHandle), true);
+  waitTimer!.handler();
+  await flush();
+  assert.equal(h.background.hidden, true);
 });
 
 test("stopping speech aborts synthesis before any delayed audio can start", async () => {
@@ -883,6 +1197,7 @@ test("keeps permission, cancellation, timeout, and unavailable recovery local an
   denied.start.click();
   await flush();
   assert.equal(denied.root.dataset.voiceState, "permission_denied");
+  assert.equal(denied.recovery.hidden, false);
   const cancelled = createHarness();
   cancelled.start.click();
   await flush();

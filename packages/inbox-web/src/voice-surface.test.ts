@@ -289,6 +289,8 @@ test("renders a private push-to-talk seam only when the configured voice pair is
   assert.match(html, /data-voice-start/);
   assert.match(html, /data-voice-stop/);
   assert.match(html, /data-voice-transcript/);
+  assert.match(html, /data-voice-background/);
+  assert.match(html, /稍后处理/);
   assert.match(html, /data-private-voice-status="active"/);
   assert.doesNotMatch(html, /data-private-voice-capture-mode/);
   assert.match(html, /data-voice-cancel/);

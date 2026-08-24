@@ -194,6 +194,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const startButton = voiceRoot.querySelector("[data-voice-start]");
   const stopButton = voiceRoot.querySelector("[data-voice-stop]");
   const cancelButton = voiceRoot.querySelector("[data-voice-cancel]");
+  const backgroundButton = voiceRoot.querySelector("[data-voice-background]");
   const restartButton = voiceRoot.querySelector("[data-voice-restart]");
   const speechStopButton = voiceRoot.querySelector("[data-voice-speech-stop]");
   const recoveryNode = voiceRoot.querySelector("[data-voice-recovery]");
@@ -202,6 +203,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const conversationNode = voiceRoot.querySelector("[data-voice-conversation]");
   const availability = voiceRoot.getAttribute("data-private-voice-status");
   const maxTurnMs = 15000;
+  const longWaitMs = 10000;
   const maxPcmBytes = 5 * 1024 * 1024;
   let state = voiceRoot.getAttribute("data-voice-state") || "idle";
   let stream;
@@ -227,6 +229,10 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   let captureMode;
   let activeAdviceId;
   let answerText = "";
+  let longWaitTimer;
+  let longWait = false;
+  let backgroundPending = false;
+  let backgrounded = false;
   const noInputBackoffStorageKey = "hob.private-voice.no-input.v1";
   const noInputBackoffMs = 10 * 60 * 1000;
   let noInputBackoffTimer;
@@ -385,6 +391,10 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
         next === "text_mode"
           ? "product-primary-action"
           : "product-secondary-action";
+      recoveryNode.hidden =
+        next === "thinking" &&
+        conversationNode instanceof HTMLAnchorElement &&
+        !conversationNode.hidden;
     }
     if (textExitNode instanceof HTMLElement)
       textExitNode.hidden = next === "text_mode" || next === "model_unavailable";
@@ -412,7 +422,11 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       stopButton.textContent =
         next === "requesting_permission" ? "取消" : "停止并转写";
     if (cancelButton instanceof HTMLButtonElement)
-      cancelButton.hidden = next !== "transcribing" && next !== "thinking";
+      cancelButton.hidden =
+        (next !== "transcribing" && next !== "thinking") || backgrounded;
+    if (backgroundButton instanceof HTMLButtonElement)
+      backgroundButton.hidden =
+        next !== "thinking" || !longWait || backgroundPending || backgrounded;
     if (restartButton instanceof HTMLButtonElement)
       restartButton.hidden = next !== "no_input" && next !== "failed" && next !== "playback_failed";
     if (restartButton instanceof HTMLButtonElement)
@@ -470,6 +484,40 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     } catch {}
     if (eventStream === target) eventStream = undefined;
   };
+  const clearLongWait = () => {
+    if (longWaitTimer !== undefined) {
+      try { clearTimeout(longWaitTimer); } catch {}
+      longWaitTimer = undefined;
+    }
+    longWait = false;
+    backgroundPending = false;
+    backgrounded = false;
+  };
+  const scheduleLongWait = (turnGeneration) => {
+    if (longWaitTimer !== undefined) {
+      try { clearTimeout(longWaitTimer); } catch {}
+      longWaitTimer = undefined;
+    }
+    try {
+      const scheduledTimer = setTimeout(() => {
+        longWaitTimer = undefined;
+        if (
+          generation !== turnGeneration ||
+          state !== "thinking" ||
+          typeof activeAdviceId !== "string" ||
+          backgroundPending ||
+          backgrounded
+        ) return;
+        longWait = true;
+        setState("thinking", "仍在处理。你可以稍后处理，也可以取消等待。", {
+          href: "/conversation/" + encodeURIComponent(activeAdviceId),
+          label: "打开文字对话",
+        });
+      }, longWaitMs);
+      if (scheduledTimer !== undefined && scheduledTimer !== null)
+        longWaitTimer = scheduledTimer;
+    } catch {}
+  };
   const releaseLease = (leaseId = activeLeaseId, leaseOwnerGeneration = activeLeaseGeneration) => {
     if (typeof leaseId !== "string") return;
     if (activeLeaseId === leaseId && activeLeaseGeneration === leaseOwnerGeneration) {
@@ -514,6 +562,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const resetTurn = () => {
     const previousGeneration = generation;
     generation += 1;
+    clearLongWait();
     cancelLeaseAcquisition(previousGeneration);
     activeAdviceId = undefined;
     showAnswer("");
@@ -527,6 +576,65 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     releaseLease();
     return generation;
   };
+  const backgroundTurn = async () => {
+    const adviceId = activeAdviceId;
+    if (
+      !longWait ||
+      backgroundPending ||
+      backgrounded ||
+      typeof adviceId !== "string"
+    ) return;
+    const backgroundGeneration = generation;
+    backgroundPending = true;
+    setState("thinking", "正在把这次请求转到后台。", {
+      href: "/conversation/" + encodeURIComponent(adviceId),
+      label: "打开文字对话",
+    });
+    try {
+      const response = await fetch(
+        "/conversation/" + encodeURIComponent(adviceId) + "/background",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: "",
+          redirect: "follow",
+        },
+      );
+      if (
+        generation !== backgroundGeneration ||
+        activeAdviceId !== adviceId
+      ) return;
+      if (
+        !response.ok ||
+        response.redirected !== true ||
+        redirectedPath(response) !== "/home"
+      )
+        throw new Error("background_unconfirmed");
+      clearLongWait();
+      backgrounded = true;
+      closeEvents();
+      requestController?.abort();
+      requestController = undefined;
+      stopPlayback();
+      releaseLease();
+      setState("thinking", "已转到后台。完成后会在文字对话中通知。", {
+        href: "/conversation/" + encodeURIComponent(adviceId),
+        label: "打开文字对话",
+      });
+    } catch {
+      if (
+        generation === backgroundGeneration &&
+        activeAdviceId === adviceId
+      ) {
+        backgroundPending = false;
+        longWait = true;
+        setState("thinking", "暂时无法转到后台。你可以继续等待、取消等待，或打开文字对话。", {
+          href: "/conversation/" + encodeURIComponent(adviceId),
+          label: "打开文字对话",
+        });
+      }
+    }
+  };
   const cancelTurn = async () => {
     const adviceId = activeAdviceId;
     const cancelledGeneration = resetTurn();
@@ -534,6 +642,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       setState("cancelled");
       return;
     }
+    showConversation(adviceId);
     setState("thinking", "正在向家庭服务确认这次请求已经停止。", {
       href: "/conversation/" + encodeURIComponent(adviceId),
       label: "打开文字对话",
@@ -545,11 +654,15 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: "",
-          redirect: "manual",
+          redirect: "follow",
         },
       );
       if (generation !== cancelledGeneration) return;
-      if (response.status === 303) {
+      if (
+        response.ok &&
+        response.redirected === true &&
+        redirectedPath(response) === "/conversation/" + encodeURIComponent(adviceId)
+      ) {
         setState("cancelled");
         return;
       }
@@ -566,6 +679,18 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       return value && typeof value === "object" ? value : undefined;
     } catch {
       return undefined;
+    }
+  };
+  const redirectedPath = (response) => {
+    if (typeof response?.url !== "string") return "";
+    try {
+      const base =
+        typeof window !== "undefined" && typeof window.location?.href === "string"
+          ? window.location.href
+          : "/voice";
+      return new URL(response.url, base).pathname;
+    } catch {
+      return "";
     }
   };
   const speak = async (adviceId, turnGeneration) => {
@@ -628,7 +753,11 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     }
     activeAdviceId = adviceId;
     showConversation(adviceId);
+    longWait = false;
+    backgroundPending = false;
+    backgrounded = false;
     setState("thinking");
+    scheduleLongWait(turnGeneration);
     const nextEventStream = new EventSource(
       "/conversation/" + encodeURIComponent(adviceId) + "/events",
     );
@@ -668,17 +797,20 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     });
     nextEventStream.addEventListener("completed", () => {
       if (generation !== turnGeneration || eventStream !== nextEventStream) return;
+      clearLongWait();
       closeEvents(nextEventStream);
       void speak(adviceId, turnGeneration);
     });
     nextEventStream.addEventListener("failed", () => {
       if (generation !== turnGeneration || eventStream !== nextEventStream) return;
+      clearLongWait();
       closeEvents(nextEventStream);
       releaseLease();
       setState("failed", "这次处理没有完成。可以再试一次或改用文字。");
     });
     nextEventStream.addEventListener("cancelled", () => {
       if (generation !== turnGeneration || eventStream !== nextEventStream) return;
+      clearLongWait();
       closeEvents(nextEventStream);
       releaseLease();
       setState("cancelled");
@@ -961,6 +1093,9 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   cancelButton?.addEventListener("click", () => {
     void cancelTurn();
   });
+  backgroundButton?.addEventListener("click", () => {
+    void backgroundTurn();
+  });
   speechStopButton?.addEventListener("click", () => {
     generation += 1;
     activeAdviceId = undefined;
@@ -1040,7 +1175,7 @@ export function renderVoiceSurface(
     : options.notice === "unavailable"
       ? '<p class="product-notice" data-one-shot-notice role="status">私人语音仍在恢复中。文字对话现在就能继续。</p>'
       : "";
-  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${recovery}${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。当前语音只用于家庭问答，不会直接发起设备或媒体动作；如需动作，请在文字对话中明确选择相应入口。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
+  return `<section class="product-voice" data-voice-surface data-voice-state="${renderedState}" data-private-voice-status="${privateVoice.status}" aria-labelledby="voice-heading"><header class="product-page-header product-voice-header"><div><p class="product-kicker" data-voice-eyebrow>${copy.eyebrow}</p><h1 id="voice-heading" data-voice-heading>${copy.heading}</h1></div><a class="product-view-switcher" data-voice-text-exit href="/conversation"${textExitHidden}>改用文字</a></header>${notice}<section class="product-card product-voice-stage" aria-describedby="voice-detail"><span class="product-voice-indicator" data-voice-indicator aria-hidden="true"></span><p class="product-voice-status" data-voice-status role="status" aria-live="polite">${copy.status}</p><p class="product-muted" id="voice-detail" data-voice-detail>${copy.detail}</p>${recovery}${transcriptMarkup}<article class="product-voice-answer" data-voice-answer aria-live="polite" aria-atomic="false" hidden></article><a class="product-secondary-action" data-voice-conversation href="/conversation" hidden>打开完整文字对话</a><div class="product-card-actions"><button class="product-primary-action" type="button" data-voice-start${voiceStartHidden}>开始聆听</button><button class="product-secondary-action" type="button" data-voice-stop hidden>停止并转写</button><button class="product-secondary-action" type="button" data-voice-cancel hidden>取消等待</button><button class="product-secondary-action" type="button" data-voice-background hidden>稍后处理</button><button class="product-secondary-action" type="button" data-voice-speech-stop hidden>停止播报</button><button class="product-secondary-action" type="button" data-voice-restart hidden>再试一次</button>${retry}<a class="${recoveryClass}" data-voice-recovery href="${copy.recovery.href}">${copy.recovery.label}</a></div>${fallbackMarkup}<p class="product-voice-privacy">原始录音不写入磁盘，只用于本次转写，请求结束后从内存丢弃。回答播报音频只在本机内存中保留最多 30 秒，便于当前对话重播。当前语音只用于家庭问答，不会直接发起设备或媒体动作；如需动作，请在文字对话中明确选择相应入口。</p></section>${intentMarkup}<noscript><p class="product-card product-voice-fallback">浏览器未启用脚本，无法使用语音。请改用文字。</p><a class="product-primary-action" href="/conversation">改用文字</a></noscript></section>`;
 }
 function renderVoiceIntent(
   transcript: string,
