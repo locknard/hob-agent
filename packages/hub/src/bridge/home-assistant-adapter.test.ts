@@ -1380,6 +1380,26 @@ const automationTarget = {
   binding: { bridgeId: "bridge-ha", nativeId: "device-1", nativeInstanceId: "entity-stable-1" },
 };
 
+const hubAutomationSpec = (automationId: string) => ({
+  automationId,
+  title: "睡前自动关掉多媒体室电源",
+  trigger: { kind: "schedule" as const, timezone: "Asia/Shanghai", daysOfWeek: [1, 2, 3, 4, 5], at: "23:30" },
+  conditions: [{ kind: "capability_value" as const, source: automationTarget, operator: "equals" as const, value: false }],
+  actions: [{ kind: "set_boolean" as const, target: automationTarget, value: false }],
+});
+
+async function readyAutomationAdapter(fake: ReturnType<typeof automationFetchFake>) {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+  return { adapter, handle: adapter.extension("automations@1") as AutomationsExtension };
+}
+
 test("deploys a hub automation through the config API and verifies by read-back", async () => {
   const socket = new FakeSocket();
   const fake = automationFetchFake();
@@ -1420,7 +1440,141 @@ test("deploys a hub automation through the config API and verifies by read-back"
     action: [{ service: "homeassistant.turn_off", target: { entity_id: "light.kitchen" } }],
     mode: "single",
   });
-  assert.equal(fake.requests.filter((request) => request.method === "GET" && !request.url.endsWith("/api/config")).length, 1);
+  assert.equal(fake.requests.filter((request) => request.method === "GET" && !request.url.endsWith("/api/config")).length, 2);
+  await adapter.control.dispose();
+});
+
+test("does not overwrite an external automation that reuses the Hub id", async () => {
+  const fake = automationFetchFake();
+  fake.stored.set("hob_external", {
+    alias: "hob_external",
+    description: "A household rule",
+    trigger: [],
+    condition: [],
+    action: [{ service: "light.turn_on" }],
+    mode: "single",
+  });
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.deploy(hubAutomationSpec("hob_external"), { signal: new AbortController().signal });
+
+  assert.equal(result.status, "rejected");
+  assert.equal(fake.requests.some((request) => request.method === "POST"), false);
+  await adapter.control.dispose();
+});
+
+test("treats an owned unchanged automation as an idempotent deployment", async () => {
+  const fake = automationFetchFake();
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+  const spec = hubAutomationSpec("hob_idempotent");
+
+  const first = await handle.deploy(spec, { signal: new AbortController().signal });
+  const second = await handle.deploy(spec, { signal: new AbortController().signal });
+
+  assert.equal(first.status, "deployed");
+  assert.equal(second.status, "deployed");
+  assert.equal(fake.requests.filter((request) => request.method === "POST").length, 1);
+  await adapter.control.dispose();
+});
+
+test("rejects a Hub-owned automation whose compiled behavior drifted without posting", async () => {
+  const fake = automationFetchFake();
+  fake.stored.set("hob_drifted", {
+    id: "hob_drifted",
+    alias: "hob_drifted",
+    description: "hob:previous title",
+    trigger: [{ platform: "time", at: "22:30:00" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_off", target: { entity_id: "light.kitchen" } }],
+    mode: "single",
+  });
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.deploy(hubAutomationSpec("hob_drifted"), { signal: new AbortController().signal });
+
+  assert.equal(result.status, "rejected");
+  assert.equal(fake.requests.some((request) => request.method === "POST"), false);
+  await adapter.control.dispose();
+});
+
+test("reports unknown when an automation config disappears after a successful state read", async () => {
+  const base = automationFetchFake();
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/states/automation.hob_status_404")) {
+      return new Response(JSON.stringify({ state: "on" }), { status: 200 });
+    }
+    if (url.endsWith("/api/config/automation/config/hob_status_404")) {
+      return new Response("{}", { status: 404 });
+    }
+    return base.fetchImpl(input, init);
+  };
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("automations@1") as AutomationsExtension;
+  assert.deepEqual(await handle.status(
+    { nativeAutomationId: "hob_status_404" },
+    { signal: new AbortController().signal },
+  ), { status: "unknown" });
+  await adapter.control.dispose();
+});
+
+test("reports unknown when an automation config read times out after a successful state read", async () => {
+  const base = automationFetchFake();
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/states/automation.hob_status_timeout")) {
+      return new Response(JSON.stringify({ state: "off" }), { status: 200 });
+    }
+    if (url.endsWith("/api/config/automation/config/hob_status_timeout")) {
+      throw new Error("configuration request timed out");
+    }
+    return base.fetchImpl(input, init);
+  };
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+
+  const handle = adapter.extension("automations@1") as AutomationsExtension;
+  assert.deepEqual(await handle.status(
+    { nativeAutomationId: "hob_status_timeout" },
+    { signal: new AbortController().signal },
+  ), { status: "unknown" });
+  await adapter.control.dispose();
+});
+
+test("withdrawal refuses an automation without the Hub ownership marker", async () => {
+  const fake = automationFetchFake();
+  fake.stored.set("hob_foreign_withdraw", {
+    id: "hob_foreign_withdraw",
+    alias: "hob_foreign_withdraw",
+    description: "manual rule",
+    trigger: [],
+    condition: [],
+    action: [],
+    mode: "single",
+  });
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.withdraw(
+    { nativeAutomationId: "hob_foreign_withdraw" },
+    { signal: new AbortController().signal },
+  );
+
+  assert.equal(result.status, "rejected");
+  assert.equal(fake.requests.some((request) => request.method === "DELETE"), false);
   await adapter.control.dispose();
 });
 
@@ -1453,6 +1607,7 @@ test("rejects unbound targets and reports withdrawal of a missing automation as 
 
   const withdrawn = await handle!.withdraw({ nativeAutomationId: "hob_gone" }, { signal: new AbortController().signal });
   assert.deepEqual(withdrawn, { status: "acknowledged" });
+  assert.equal(fake.requests.some((request) => request.method === "DELETE"), false);
 
   const toggle = handle!.setEnabled({ nativeAutomationId: "hob_media_power", enabled: false }, { signal: new AbortController().signal });
   await new Promise<void>((resolve) => setImmediate(resolve));

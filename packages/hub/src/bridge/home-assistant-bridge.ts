@@ -1193,13 +1193,32 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
           return { status: "rejected", reason: "unsupported", detail: `Home Assistant runs in ${instanceTimezone}, not ${spec.trigger.timezone}` };
         }
       }
+
+      // A deterministic id is an ownership boundary.  Only a confirmed
+      // missing config may proceed to POST; an existing config is immutable
+      // unless it carries our marker and the compiled behavior is unchanged.
+      const existing = await this.automationConfigRequest("GET", spec.automationId, signal);
+      if (existing.statusCode !== 404) {
+        if (!existing.ok) {
+          return { status: "rejected", reason: "unavailable", detail: "Home Assistant automation config is unavailable" };
+        }
+        if (!isRecord(existing.body) || !storedAutomationMatches(config.value, existing.body)) {
+          return { status: "rejected", reason: "failed", detail: "Home Assistant automation is not an unchanged Hub-owned config" };
+        }
+        return {
+          status: "deployed",
+          nativeAutomationId: spec.automationId,
+          configFingerprint: automationConfigFingerprint(existing.body),
+        };
+      }
+
       const written = await this.automationConfigRequest("POST", spec.automationId, signal, config.value);
       if (!written.ok) {
         return { status: "rejected", reason: "failed", detail: `Home Assistant rejected the automation (${written.statusCode})` };
       }
       const readBack = await this.automationConfigRequest("GET", spec.automationId, signal);
-      // Verified means the stored behavior equals the compiled behavior, not
-      // merely that an automation with our alias exists.
+      // A successful write still requires ownership and exact behavioral
+      // read-back before the deployment becomes observable as deployed.
       if (!readBack.ok || !isRecord(readBack.body) || !storedAutomationMatches(config.value, readBack.body)) {
         return { status: "rejected", reason: "failed", detail: "Home Assistant did not store the compiled automation" };
       }
@@ -1260,6 +1279,14 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       return { status: "rejected", reason: "not_found", detail: "Unknown automation id" };
     }
     try {
+      const existing = await this.automationConfigRequest("GET", request.nativeAutomationId, signal);
+      if (existing.statusCode === 404) return { status: "acknowledged" };
+      if (!existing.ok) {
+        return { status: "rejected", reason: "unavailable", detail: "Home Assistant automation config is unavailable" };
+      }
+      if (!isRecord(existing.body) || !hasHomeAssistantAutomationOwnershipMarker(request.nativeAutomationId, existing.body)) {
+        return { status: "rejected", reason: "failed", detail: "Home Assistant automation is not Hub-owned" };
+      }
       const deleted = await this.automationConfigRequest("DELETE", request.nativeAutomationId, signal);
       if (deleted.ok || deleted.statusCode === 404) return { status: "acknowledged" };
       return { status: "rejected", reason: "failed", detail: `Home Assistant rejected the removal (${deleted.statusCode})` };
@@ -1289,11 +1316,11 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       if (state === undefined) return { status: "unknown" };
       try {
         const config = await this.automationConfigRequest("GET", request.nativeAutomationId, signal);
-        return config.ok && isRecord(config.body)
+        return config.ok && isRecord(config.body) && isStoredAutomationConfig(config.body, request.nativeAutomationId)
           ? { status: state, configFingerprint: automationConfigFingerprint(config.body) }
-          : { status: state };
+          : { status: "unknown" };
       } catch {
-        return { status: state };
+        return { status: "unknown" };
       }
     } catch {
       return { status: "unknown" };
@@ -2615,11 +2642,28 @@ function sourceAutomationFingerprint(value: unknown): string | undefined {
 
 /** Deep equality on the behavioral fields; storage may add bookkeeping keys. */
 function storedAutomationMatches(sent: Record<string, unknown>, stored: Record<string, unknown>): boolean {
-  return stored.alias === sent.alias
-    && stableJson(stored.trigger) === stableJson(sent.trigger)
-    && stableJson(stored.condition) === stableJson(sent.condition)
-    && stableJson(stored.action) === stableJson(sent.action)
-    && stored.mode === sent.mode;
+  return typeof sent.alias === "string"
+    && hasHomeAssistantAutomationOwnershipMarker(sent.alias, stored)
+    && automationConfigFingerprint(sent) === automationConfigFingerprint(stored);
+}
+
+/** The adapter owns only configs carrying both deterministic identity markers. */
+function hasHomeAssistantAutomationOwnershipMarker(
+  automationId: string,
+  stored: Record<string, unknown>,
+): boolean {
+  return stored.alias === automationId
+    && typeof stored.description === "string"
+    && stored.description.startsWith("hob:");
+}
+
+/** A status read needs enough native structure to produce a trustworthy fingerprint. */
+function isStoredAutomationConfig(stored: Record<string, unknown>, automationId: string): boolean {
+  return hasHomeAssistantAutomationOwnershipMarker(automationId, stored)
+    && Array.isArray(stored.trigger)
+    && Array.isArray(stored.condition)
+    && Array.isArray(stored.action)
+    && typeof stored.mode === "string";
 }
 
 function stableJson(value: unknown): string {
