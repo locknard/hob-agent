@@ -9,3 +9,4 @@ export * from "./bridge-foreign-rule-control.js";
 export * from "./bridge-org-hints.js";
 export * from "./bridge-causality.js";
 export * from "./bridge-history.js";
+export * from "./bridge-automation-trace.js";

@@ -81,10 +81,18 @@ import {
 import {
   CAUSALITY_EXTENSION,
   CAUSALITY_EXTENSION_KEY,
+  AUTOMATION_TRACE_EXTENSION,
+  AUTOMATION_TRACE_EXTENSION_KEY,
+  automationTraceRequestSchema,
+  automationTraceResultSchema,
   HISTORY_EXTENSION,
   MAX_HISTORY_RECORD_BYTES,
   MAX_HISTORY_RECORDS,
   HistoryRecordSchema,
+  type AutomationTraceHandle,
+  type AutomationTraceRequest,
+  type AutomationTraceResult,
+  type AutomationTraceTarget,
   historyPageSchema,
   historyRequestSchema,
   type HistoryCoverageReason,
@@ -114,9 +122,15 @@ const MAX_HOME_ASSISTANT_IDENTITY_CANDIDATES = 64;
 const MAX_HOME_ASSISTANT_IDENTITY_VALUE_LENGTH = 256;
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES = 256 * 1024;
 const MAX_HOME_ASSISTANT_AUTOMATION_CONTEXTS = 256;
+const MAX_HOME_ASSISTANT_AUTOMATION_TARGETS_PER_CONTEXT = 32;
 const HOME_ASSISTANT_AUTOMATION_CONTEXT_TTL_MS = 60_000;
 const MAX_HOME_ASSISTANT_CONTEXT_ID_LENGTH = 36;
 const MAX_HOME_ASSISTANT_ENTITY_ID_LENGTH = 255;
+const MAX_HOME_ASSISTANT_TRACE_CONTEXTS = 256;
+const MAX_HOME_ASSISTANT_TRACE_ID_LENGTH = 256;
+const MAX_HOME_ASSISTANT_TRACE_TIMESTAMP_LENGTH = 64;
+const MAX_HOME_ASSISTANT_TRACE_RESPONSE_BYTES = 256 * 1024;
+const HOME_ASSISTANT_AUTOMATION_TRACE_TIMEOUT_MS = 5_000;
 const HOME_ASSISTANT_HISTORY_TIMEOUT_MS = 5_000;
 /** Foreign-rule toggle operation entries retained for this adapter instance. */
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS = 128;
@@ -170,6 +184,15 @@ export interface HomeAssistantNativeAutomationTriggeredEvent {
   contextId: string;
 }
 
+interface ObservedAutomationContext {
+  readonly contextId: string;
+  readonly ruleRef: string;
+  readonly traceItemId?: string;
+  readonly observedAtMs: number;
+  readonly generation: number;
+  readonly targets: Map<string, AutomationTraceTarget>;
+}
+
 export const DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS = 5_000;
 
 export interface HomeAssistantEndpointProbeOptions {
@@ -213,7 +236,29 @@ interface ResultMessage {
   type: "result";
   success: boolean;
   result?: unknown;
-  error?: { message?: string };
+  error?: { code?: string; message?: string };
+}
+
+class HomeAssistantCommandError extends Error {
+  readonly category: "permission_denied" | "not_found" | "other";
+
+  constructor(code: unknown, message: unknown) {
+    super("Home Assistant command failed");
+    this.name = "HomeAssistantCommandError";
+    const normalizedCode = typeof code === "string" ? code.toLowerCase() : "";
+    const normalizedMessage = typeof message === "string" ? message.toLowerCase() : "";
+    this.category = normalizedCode.includes("unauthor")
+      || normalizedCode.includes("forbidden")
+      || normalizedMessage.includes("unauthor")
+      || normalizedMessage.includes("forbidden")
+      ? "permission_denied"
+      : normalizedCode.includes("not_found")
+        || normalizedCode.includes("not found")
+        || normalizedMessage.includes("trace could not be found")
+        || normalizedMessage.includes("not found")
+        ? "not_found"
+        : "other";
+  }
 }
 
 interface PendingCommand {
@@ -578,6 +623,30 @@ export class HomeAssistantBridge {
     return this.loadSnapshot(false);
   }
 
+  /** Reads the exact HA trace context index for one already-bound automation. */
+  async readAutomationTraceContexts(itemId: string, signal: AbortSignal): Promise<unknown> {
+    if (!isBoundedHomeAssistantTraceIdentifier(itemId)) {
+      throw new TypeError("Home Assistant automation trace item is invalid");
+    }
+    return this.command("trace/contexts", {
+      domain: "automation",
+      item_id: itemId,
+    }, signal);
+  }
+
+  /** Reads one HA trace selected by the adapter-owned run identifier. */
+  async readAutomationTraceRun(itemId: string, runId: string, signal: AbortSignal): Promise<unknown> {
+    if (!isBoundedHomeAssistantTraceIdentifier(itemId)
+      || !isBoundedHomeAssistantTraceIdentifier(runId)) {
+      throw new TypeError("Home Assistant automation trace identity is invalid");
+    }
+    return this.command("trace/get", {
+      domain: "automation",
+      item_id: itemId,
+      run_id: runId,
+    }, signal);
+  }
+
   private async loadSnapshot(subscribeEvents: boolean): Promise<HomeAssistantSnapshot> {
     const commands: Array<Promise<unknown>> = [
       this.command("get_states"),
@@ -662,7 +731,7 @@ export class HomeAssistantBridge {
     if (!command) return;
     this.pending.delete(message.id);
     if (message.success) command.resolve(message.result);
-    else command.reject(new Error(message.error?.message ?? "Home Assistant command failed"));
+    else command.reject(new HomeAssistantCommandError(message.error?.code, message.error?.message));
   }
 
   private forwardStateEvent(message: Record<string, unknown>): void {
@@ -754,6 +823,8 @@ export interface HomeAssistantBridgeAdapterDependencies {
   readonly historyImportIdFactory?: () => string;
   /** Test-only deadline seam; production keeps the profile's five-second deadline. */
   readonly historyTimeoutMs?: number;
+  /** Test-only deadline seam; production keeps automationTrace@1's five-second deadline. */
+  readonly automationTraceTimeoutMs?: number;
 }
 
 const homeAssistantConfigSchema = z
@@ -972,15 +1043,20 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private healthByNativeId = new Map<string, "reachable" | "unreachable" | "unknown">();
   private foreignRuleCatalog: ForeignRuleCatalog | undefined;
   private foreignRuleConfigIdsByRef = new Map<string, string>();
+  private foreignRuleTraceItemIdsByRef = new Map<string, string>();
   private foreignRuleTitlesByRef = new Map<string, string>();
   private foreignRuleRefsByAutomationEntityId = new Map<string, string>();
-  private observedAutomationContexts = new Map<string, { readonly ruleRef: string; readonly observedAtMs: number }>();
+  private observedAutomationContexts = new Map<string, ObservedAutomationContext>();
   private foreignRuleControlOperations = new Map<string, ForeignRuleControlOperationEntry>();
   private automationOperations = new Map<string, HomeAssistantAutomationOperationEntry>();
   private historyInFlight = false;
   private historyAbortController: AbortController | undefined;
   private historyGeneration = 0;
   private resyncInFlight = false;
+  private automationTraceGeneration = 0;
+  private activeAutomationTraceEpochId: string | undefined;
+  private automationTraceInFlight = false;
+  private automationTraceAbortController: AbortController | undefined;
 
   constructor(
     private readonly context: ContractAdapterFactoryContext<HomeAssistantAdapterConfig>,
@@ -996,6 +1072,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         FOREIGN_RULE_MIGRATION_EXTENSION,
         FOREIGN_RULE_CONTROL_EXTENSION,
         CAUSALITY_EXTENSION,
+        AUTOMATION_TRACE_EXTENSION,
         ORG_HINTS_EXTENSION,
         ACTIONS_EXTENSION,
         AUTOMATIONS_EXTENSION,
@@ -1021,6 +1098,12 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     if (name === "history@1") {
       const handle: HistoryHandle = {
         fetchHistory: (request, options) => this.fetchHistory(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
+    if (name === AUTOMATION_TRACE_EXTENSION_KEY) {
+      const handle: AutomationTraceHandle = {
+        readTrace: (request, options) => this.readAutomationTrace(request, options.signal),
       };
       return handle as ExtensionHandleRegistry[K];
     }
@@ -2099,7 +2182,10 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         maxBootstrapItems: this.dependencies.maxBootstrapItems,
         onNativeStateEvent: (event) => queue.pushState(event),
         onNativeAutomationTriggeredEvent: (event) => queue.pushAutomationTriggered(event),
-        onDisconnect: (error) => queue.fail(mapHomeAssistantStreamError(error)),
+        onDisconnect: (error) => {
+          this.invalidateAutomationTraceState();
+          queue.fail(mapHomeAssistantStreamError(error));
+        },
       });
       this.bridge = bridge;
 
@@ -2137,13 +2223,17 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         if (sameScalarRecord(this.stateAttrsByNativeInstanceId.get(state.nativeInstanceId), state.attrs)) continue;
         this.stateAttrsByNativeInstanceId.set(state.nativeInstanceId, { ...state.attrs });
         const stateEnvelope = current.envelope({ kind: "state", state });
-        yield stateEnvelope;
         const principalRef = item.event.userId === undefined
           ? undefined
           : deriveHomeAssistantPrincipalRef(this.context.bridgeId, item.event.userId);
-        const foreignRuleRef = item.event.contextId === undefined
+        const observedAutomation = item.event.contextId === undefined
           ? undefined
-          : this.foreignRuleForAutomationContext(item.event.contextId);
+          : this.observedAutomationForContext(item.event.contextId);
+        const foreignRuleRef = observedAutomation?.ruleRef;
+        if (observedAutomation !== undefined) {
+          this.associateAutomationTraceTarget(observedAutomation, current.epochId, stateEnvelope.seq);
+        }
+        yield stateEnvelope;
         yield current.envelope({
           kind: "ext",
           ext: CAUSALITY_EXTENSION_KEY,
@@ -2169,12 +2259,14 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         : mapHomeAssistantStreamError(error);
     } finally {
       queue.close();
+      this.invalidateAutomationTraceState();
       this.bridge?.close();
       this.bridge = undefined;
       this.queue = undefined;
       this.stateAttrsByNativeInstanceId.clear();
       this.healthByNativeId.clear();
       this.foreignRuleConfigIdsByRef.clear();
+      this.foreignRuleTraceItemIdsByRef.clear();
       this.foreignRuleTitlesByRef.clear();
       this.foreignRuleRefsByAutomationEntityId.clear();
       this.observedAutomationContexts.clear();
@@ -2195,8 +2287,12 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     const epochId = `${this.context.bridgeId}:${snapshotId}:${++homeAssistantEpochCounter}`;
     const foreignRules = projectForeignRules(snapshot);
     this.foreignRuleConfigIdsByRef = new Map(foreignRules.configIdsByRuleRef);
+    this.foreignRuleTraceItemIdsByRef = new Map(foreignRules.traceItemIdsByRuleRef);
     this.foreignRuleTitlesByRef = new Map(foreignRules.titlesByRuleRef);
     this.foreignRuleRefsByAutomationEntityId = new Map(foreignRules.ruleRefsByAutomationEntityId);
+    this.automationTraceAbortController?.abort(new Error("Home Assistant automation trace epoch changed"));
+    this.automationTraceGeneration += 1;
+    this.activeAutomationTraceEpochId = epochId;
     this.observedAutomationContexts.clear();
     this.foreignRuleCatalog = undefined;
     const remoteInstanceId = deriveHomeAssistantRemoteInstanceId(
@@ -2225,10 +2321,18 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     if (this.resyncInFlight) return;
     const ruleRef = this.foreignRuleRefsByAutomationEntityId.get(event.entityId);
     if (ruleRef === undefined) return;
+    const traceItemId = this.foreignRuleTraceItemIdsByRef.get(ruleRef);
     const nowMs = this.automationContextNowMs();
     this.pruneAutomationContexts(nowMs);
     this.observedAutomationContexts.delete(event.contextId);
-    this.observedAutomationContexts.set(event.contextId, { ruleRef, observedAtMs: nowMs });
+    this.observedAutomationContexts.set(event.contextId, {
+      contextId: event.contextId,
+      ruleRef,
+      ...(traceItemId === undefined ? {} : { traceItemId }),
+      observedAtMs: nowMs,
+      generation: this.automationTraceGeneration,
+      targets: new Map(),
+    });
     while (this.observedAutomationContexts.size > MAX_HOME_ASSISTANT_AUTOMATION_CONTEXTS) {
       const oldest = this.observedAutomationContexts.keys().next().value;
       if (typeof oldest !== "string") break;
@@ -2236,9 +2340,27 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     }
   }
 
-  private foreignRuleForAutomationContext(contextId: string): string | undefined {
+  private observedAutomationForContext(contextId: string): ObservedAutomationContext | undefined {
     this.pruneAutomationContexts(this.automationContextNowMs());
-    return this.observedAutomationContexts.get(contextId)?.ruleRef;
+    return this.observedAutomationContexts.get(contextId);
+  }
+
+  private associateAutomationTraceTarget(
+    observed: ObservedAutomationContext,
+    epochId: string,
+    seq: number,
+  ): void {
+    if (observed.generation !== this.automationTraceGeneration
+      || this.activeAutomationTraceEpochId !== epochId) return;
+    const target: AutomationTraceTarget = { epochId, seq };
+    const key = automationTraceTargetKey(target);
+    observed.targets.delete(key);
+    observed.targets.set(key, target);
+    while (observed.targets.size > MAX_HOME_ASSISTANT_AUTOMATION_TARGETS_PER_CONTEXT) {
+      const oldest = observed.targets.keys().next().value;
+      if (typeof oldest !== "string") break;
+      observed.targets.delete(oldest);
+    }
   }
 
   private pruneAutomationContexts(nowMs: number): void {
@@ -2256,6 +2378,196 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       if (Number.isFinite(parsed)) return parsed;
     }
     return Date.now();
+  }
+
+  private async readAutomationTrace(
+    requestValue: AutomationTraceRequest,
+    signal: AbortSignal,
+  ): Promise<AutomationTraceResult> {
+    const parsed = automationTraceRequestSchema.safeParse(requestValue);
+    if (!parsed.success) throw new TypeError("Home Assistant automation trace request is invalid");
+    const request = parsed.data;
+    const target = request.target;
+    if (signal.aborted) return automationTraceResult({
+      status: "unavailable",
+      ruleRef: request.ruleRef,
+      target,
+      reasons: ["cancelled"],
+    });
+    if (this.lifecycle !== "running" || this.bridge === undefined) return automationTraceResult({
+      status: "unavailable",
+      ruleRef: request.ruleRef,
+      target,
+      reasons: ["bridge_not_ready"],
+    });
+    if (this.resyncInFlight || this.activeAutomationTraceEpochId !== target.epochId) {
+      return automationTraceResult({
+        status: "unknown",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["resync_stale"],
+      });
+    }
+    if (!this.foreignRuleTraceItemIdsByRef.has(request.ruleRef)) return automationTraceResult({
+      status: "unknown",
+      ruleRef: request.ruleRef,
+      target,
+      reasons: ["rule_not_found"],
+    });
+    const observed = this.findAutomationTraceAssociation(request);
+    if (observed === undefined) return automationTraceResult({
+      status: "unknown",
+      ruleRef: request.ruleRef,
+      target,
+      reasons: ["association_missing"],
+    });
+    if (this.automationTraceInFlight) return automationTraceResult({
+      status: "unavailable",
+      ruleRef: request.ruleRef,
+      target,
+      reasons: ["busy"],
+    });
+
+    const bridge = this.bridge;
+    const generation = this.automationTraceGeneration;
+    const timeoutController = new AbortController();
+    const onAbort = (): void => timeoutController.abort(signal.reason ?? new Error("Home Assistant automation trace cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const timeout = setTimeout(
+      () => timeoutController.abort(new Error("Home Assistant automation trace timed out")),
+      this.dependencies.automationTraceTimeoutMs ?? HOME_ASSISTANT_AUTOMATION_TRACE_TIMEOUT_MS,
+    );
+    this.automationTraceInFlight = true;
+    this.automationTraceAbortController = timeoutController;
+    try {
+      const traceItemId = observed.traceItemId;
+      if (traceItemId === undefined) return automationTraceResult({
+        status: "unknown",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["rule_not_found"],
+      });
+      const contexts = await bridge.readAutomationTraceContexts(traceItemId, timeoutController.signal);
+      if (signal.aborted) return automationTraceResult({
+        status: "unavailable",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["cancelled"],
+      });
+      if (!this.automationTraceReadIsCurrent(bridge, generation, observed, request)) {
+        return automationTraceResult({ status: "unknown", ruleRef: request.ruleRef, target, reasons: ["resync_stale"] });
+      }
+      const contextLookup = automationTraceRunIdForContext(contexts, observed.contextId, traceItemId);
+      if (contextLookup.status === "invalid") return automationTraceResult({
+        status: "unknown",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["invalid_response"],
+      });
+      if (contextLookup.status === "missing") return automationTraceResult({
+        status: "unknown",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["trace_not_retained"],
+      });
+      const runId = contextLookup.runId;
+      const rawTrace = await bridge.readAutomationTraceRun(traceItemId, runId, timeoutController.signal);
+      if (signal.aborted) return automationTraceResult({
+        status: "unavailable",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["cancelled"],
+      });
+      if (!this.automationTraceReadIsCurrent(bridge, generation, observed, request)) {
+        return automationTraceResult({ status: "unknown", ruleRef: request.ruleRef, target, reasons: ["resync_stale"] });
+      }
+      const projected = projectHomeAssistantAutomationTrace(
+        rawTrace,
+        traceItemId,
+        runId,
+        this.foreignRuleTitlesByRef.get(request.ruleRef),
+      );
+      if (projected === undefined) return automationTraceResult({
+        status: "unknown",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["invalid_response"],
+      });
+      return automationTraceResult({
+        status: projected.status,
+        ruleRef: request.ruleRef,
+        target,
+        run: projected.run,
+        ...(projected.reasons === undefined ? {} : { reasons: projected.reasons }),
+      });
+    } catch (error) {
+      if (signal.aborted) return automationTraceResult({
+        status: "unavailable",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["cancelled"],
+      });
+      if (!this.automationTraceReadIsCurrent(bridge, generation, observed, request)) {
+        return automationTraceResult({ status: "unknown", ruleRef: request.ruleRef, target, reasons: ["resync_stale"] });
+      }
+      if (timeoutController.signal.aborted) return automationTraceResult({
+        status: "unavailable",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["timeout"],
+      });
+      if (error instanceof HomeAssistantCommandError) {
+        if (error.category === "permission_denied") return automationTraceResult({
+          status: "unavailable",
+          ruleRef: request.ruleRef,
+          target,
+          reasons: ["permission_denied"],
+        });
+        if (error.category === "not_found") return automationTraceResult({
+          status: "unknown",
+          ruleRef: request.ruleRef,
+          target,
+          reasons: ["trace_not_retained"],
+        });
+      }
+      return automationTraceResult({
+        status: "unknown",
+        ruleRef: request.ruleRef,
+        target,
+        reasons: ["invalid_response"],
+      });
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      if (this.automationTraceAbortController === timeoutController) {
+        this.automationTraceAbortController = undefined;
+      }
+      this.automationTraceInFlight = false;
+    }
+  }
+
+  private findAutomationTraceAssociation(request: AutomationTraceRequest): ObservedAutomationContext | undefined {
+    this.pruneAutomationContexts(this.automationContextNowMs());
+    const key = automationTraceTargetKey(request.target);
+    for (const observed of this.observedAutomationContexts.values()) {
+      if (observed.generation !== this.automationTraceGeneration || observed.ruleRef !== request.ruleRef) continue;
+      if (observed.targets.has(key)) return observed;
+    }
+    return undefined;
+  }
+
+  private automationTraceReadIsCurrent(
+    bridge: HomeAssistantBridge,
+    generation: number,
+    observed: ObservedAutomationContext,
+    request: AutomationTraceRequest,
+  ): boolean {
+    return this.lifecycle === "running"
+      && !this.resyncInFlight
+      && this.bridge === bridge
+      && this.automationTraceGeneration === generation
+      && observed.generation === generation
+      && this.findAutomationTraceAssociation(request) === observed;
   }
 
   private async resolveAccessToken(): Promise<string> {
@@ -2296,7 +2608,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     this.resyncInFlight = true;
     this.historyGeneration += 1;
     this.historyAbortController?.abort(new Error("history invalidated by resync"));
-    this.observedAutomationContexts.clear();
+    this.invalidateAutomationTraceState();
     void bridge.refreshSnapshot(signal).then(
       (snapshot) => queue.pushResync(snapshot),
       (error: unknown) => queue.fail(mapHomeAssistantStreamError(error)),
@@ -2310,8 +2622,17 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     if (this.lifecycle === "disposed") return;
     this.lifecycle = "disposed";
     this.historyAbortController?.abort();
+    this.invalidateAutomationTraceState();
     this.queue?.close();
     this.bridge?.close();
+  }
+
+  private invalidateAutomationTraceState(): void {
+    this.automationTraceGeneration += 1;
+    this.activeAutomationTraceEpochId = undefined;
+    this.foreignRuleTraceItemIdsByRef.clear();
+    this.observedAutomationContexts.clear();
+    this.automationTraceAbortController?.abort(new Error("Home Assistant automation trace association is stale"));
   }
 }
 
@@ -2319,12 +2640,14 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
   readonly complete: boolean;
   readonly rules: ForeignRuleSummary[];
   readonly configIdsByRuleRef: ReadonlyMap<string, string>;
+  readonly traceItemIdsByRuleRef: ReadonlyMap<string, string>;
   readonly titlesByRuleRef: ReadonlyMap<string, string>;
   readonly ruleRefsByAutomationEntityId: ReadonlyMap<string, string>;
 } {
   const states = new Map(snapshot.states.map((state) => [state.entity_id, state]));
   const rules: ForeignRuleSummary[] = [];
   const configIdsByRuleRef = new Map<string, string>();
+  const traceItemIdsByRuleRef = new Map<string, string>();
   const titlesByRuleRef = new Map<string, string>();
   const ruleRefsByAutomationEntityId = new Map<string, string>();
   let complete = true;
@@ -2351,6 +2674,10 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
     const updatedAt = state?.last_updated;
     const ruleRef = `ha-rule:${createHash("sha256").update(stableId).digest("hex")}`;
     configIdsByRuleRef.set(ruleRef, nativeConfigId);
+    const traceItemId = isBoundedHomeAssistantTraceIdentifier(raw.unique_id)
+      ? raw.unique_id
+      : undefined;
+    if (traceItemId !== undefined) traceItemIdsByRuleRef.set(ruleRef, traceItemId);
     ruleRefsByAutomationEntityId.set(entityId, ruleRef);
     if (name !== undefined) titlesByRuleRef.set(ruleRef, name.slice(0, 512));
     rules.push({
@@ -2364,6 +2691,7 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
     complete,
     rules: rules.sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)),
     configIdsByRuleRef,
+    traceItemIdsByRuleRef,
     titlesByRuleRef,
     ruleRefsByAutomationEntityId,
   };
@@ -3683,6 +4011,163 @@ function normalizeBootstrapItemBudget(value: number | undefined): number {
     throw new RangeError("Home Assistant bootstrap item budget must be a positive safe integer");
   }
   return budget;
+}
+
+function automationTraceTargetKey(target: AutomationTraceTarget): string {
+  return `${target.epochId}\u0000${target.seq}`;
+}
+
+function isBoundedHomeAssistantTraceIdentifier(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim() === value
+    && value.length > 0
+    && value.length <= MAX_HOME_ASSISTANT_TRACE_ID_LENGTH
+    && !/[\u0000-\u001f\u007f\s]/u.test(value);
+}
+
+type AutomationTraceContextLookup =
+  | { readonly status: "found"; readonly runId: string }
+  | { readonly status: "missing" }
+  | { readonly status: "invalid" };
+
+function automationTraceRunIdForContext(
+  value: unknown,
+  contextId: string,
+  itemId: string,
+): AutomationTraceContextLookup {
+  if (!withinHomeAssistantTraceResponseBudget(value)) return { status: "invalid" };
+  const contexts = recordValue(value);
+  if (contexts === undefined || Object.keys(contexts).length > MAX_HOME_ASSISTANT_TRACE_CONTEXTS) {
+    return { status: "invalid" };
+  }
+  const candidate = contexts[contextId];
+  if (candidate === undefined) return { status: "missing" };
+  const context = recordValue(candidate);
+  if (context === undefined || !exactKeys(context, ["run_id", "domain", "item_id"])) {
+    return { status: "invalid" };
+  }
+  if (context.domain !== "automation" || context.item_id !== itemId) return { status: "invalid" };
+  return isBoundedHomeAssistantTraceIdentifier(context.run_id)
+    ? { status: "found", runId: context.run_id }
+    : { status: "invalid" };
+}
+
+interface ProjectedHomeAssistantAutomationTrace {
+  readonly status: "complete" | "partial";
+  readonly run: {
+    readonly automationLabel?: string;
+    readonly state: "running" | "completed" | "failed" | "unknown";
+    readonly outcome: "completed" | "condition_not_met" | "failed" | "cancelled" | "unknown";
+    readonly startedAt?: string;
+    readonly finishedAt?: string;
+    readonly steps: readonly [];
+    readonly truncated: false;
+  };
+  readonly reasons?: readonly ["unsupported_trace"];
+}
+
+function projectHomeAssistantAutomationTrace(
+  value: unknown,
+  itemId: string,
+  runId: string,
+  automationLabel: string | undefined,
+): ProjectedHomeAssistantAutomationTrace | undefined {
+  if (!withinHomeAssistantTraceResponseBudget(value)) return undefined;
+  const trace = recordValue(value);
+  if (trace === undefined
+    || trace.domain !== "automation"
+    || trace.item_id !== itemId
+    || trace.run_id !== runId) return undefined;
+  const timestamp = recordValue(trace.timestamp);
+  if (timestamp === undefined) return undefined;
+  const startedAt = projectHomeAssistantTraceTimestamp(timestamp.start);
+  const finishedAt = projectHomeAssistantTraceTimestamp(timestamp.finish);
+  if (timestamp.start !== undefined && timestamp.start !== null && startedAt === undefined) return undefined;
+  if (timestamp.finish !== undefined && timestamp.finish !== null && finishedAt === undefined) return undefined;
+  const label = projectHomeAssistantAutomationLabel(automationLabel);
+  const common = {
+    ...(label === undefined ? {} : { automationLabel: label }),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(finishedAt === undefined ? {} : { finishedAt }),
+    steps: [] as const,
+    truncated: false as const,
+  };
+  if (trace.state === "running") {
+    return {
+      status: "partial",
+      run: { ...common, state: "running", outcome: "unknown" },
+      reasons: ["unsupported_trace"],
+    };
+  }
+  if (trace.state !== "stopped" || finishedAt === undefined) {
+    return {
+      status: "partial",
+      run: { ...common, state: "unknown", outcome: "unknown" },
+      reasons: ["unsupported_trace"],
+    };
+  }
+  if (trace.script_execution === "finished") {
+    return {
+      status: "complete",
+      run: { ...common, state: "completed", outcome: "completed" },
+    };
+  }
+  if (trace.script_execution === "failed_conditions" || trace.script_execution === "condition_not_met") {
+    return {
+      status: "complete",
+      run: { ...common, state: "completed", outcome: "condition_not_met" },
+    };
+  }
+  if (trace.script_execution === "cancelled" || trace.script_execution === "aborted") {
+    return {
+      status: "complete",
+      run: { ...common, state: "failed", outcome: "cancelled" },
+    };
+  }
+  if (trace.script_execution === "error" || trace.script_execution === "failed" || trace.script_execution === "timeout") {
+    return {
+      status: "complete",
+      run: { ...common, state: "failed", outcome: "failed" },
+    };
+  }
+  return {
+    status: "partial",
+    run: { ...common, state: "unknown", outcome: "unknown" },
+    reasons: ["unsupported_trace"],
+  };
+}
+
+function projectHomeAssistantTraceTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string"
+    || value.length > MAX_HOME_ASSISTANT_TRACE_TIMESTAMP_LENGTH
+    || !/(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
+    || !Number.isFinite(Date.parse(value))) return undefined;
+  return value;
+}
+
+function projectHomeAssistantAutomationLabel(value: string | undefined): string | undefined {
+  if (value === undefined
+    || value.trim() !== value
+    || value.length === 0
+    || value.length > 256
+    || /[\u0000-\u001f\u007f]/u.test(value)) return undefined;
+  return value;
+}
+
+function withinHomeAssistantTraceResponseBudget(value: unknown): boolean {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized !== undefined
+      && Buffer.byteLength(serialized, "utf8") <= MAX_HOME_ASSISTANT_TRACE_RESPONSE_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function automationTraceResult(value: unknown): AutomationTraceResult {
+  const parsed = automationTraceResultSchema.safeParse(value);
+  if (!parsed.success) throw new Error("Home Assistant automation trace result is invalid");
+  return parsed.data;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

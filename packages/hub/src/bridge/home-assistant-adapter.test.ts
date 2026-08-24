@@ -11,6 +11,7 @@ import type { ActionsExtension, AutomationsExtension, AutomationsExtensionV2, Br
 import type { ForeignRuleMigrationHandle, ForeignRulesHandle } from "@hob/bridge-contract";
 import type { ForeignRuleControlHandle } from "@hob/bridge-contract";
 import { HISTORY_EXTENSION, type HistoryHandle } from "@hob/bridge-contract";
+import type { AutomationTraceHandle } from "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
 import {
@@ -231,19 +232,30 @@ test("registers and projects the strict boolean-actuator schema for the four exa
   await unavailableAdapter.control.dispose();
 });
 
-function respondToForeignRuleBootstrap(socket: FakeSocket, automationSubscriptionSuccess = true): void {
+function respondToForeignRuleBootstrap(
+  socket: FakeSocket,
+  automationSubscriptionSuccess = true,
+  automationUniqueId: string | null = "arrival_light",
+  automationEntityId = "automation.arrival_light",
+): void {
   socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
   socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
   const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
   for (const command of commands) {
     const result = command.type === "get_states"
       ? [
-          { entity_id: "automation.arrival_light", state: "on", attributes: { friendly_name: "Arrival light" } },
+          { entity_id: automationEntityId, state: "on", attributes: { friendly_name: "Arrival light" } },
           { entity_id: "light.kitchen", state: "off", attributes: { friendly_name: "Kitchen light" } },
         ]
         : command.type === "config/entity_registry/list"
           ? [
-              { id: "automation-stable-1", entity_id: "automation.arrival_light", device_id: "device-automation", name: "Arrival light" },
+              {
+                id: "automation-stable-1",
+                entity_id: automationEntityId,
+                device_id: "device-automation",
+                name: "Arrival light",
+                ...(automationUniqueId === null ? {} : { unique_id: automationUniqueId }),
+              },
               { id: "entity-light-1", entity_id: "light.kitchen", device_id: "device-light", name: "Kitchen light" },
             ]
           : command.type === "config/device_registry/list"
@@ -569,6 +581,7 @@ test("factory construction is synchronous and does not resolve credentials or to
       { id: "foreignRuleMigration", version: "1.0.0" },
       { id: "foreignRuleControl", version: "1.0.0" },
       { id: "causality", version: "1.0.0" },
+      { id: "automationTrace", version: "1.0.0" },
       { id: "orgHints", version: "1.0.0" },
       { id: "actions", version: "1.0.0" },
       { id: "automations", version: "1.0.0" },
@@ -1466,6 +1479,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
       { key: "foreignRuleMigration@1", available: true },
       { key: "foreignRuleControl@1", available: true },
       { key: "causality@1", available: false },
+      { key: "automationTrace@1", available: true },
       { key: "orgHints@1", available: false },
       { key: "actions@1", available: true },
       { key: "automations@1", available: true },
@@ -1726,6 +1740,462 @@ test("attributes an observed automation action to the existing opaque foreign ru
 
   await adapter.control.dispose();
   controller.abort();
+});
+
+test("reads one exact automation trace for the causality state target", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+
+  const stateSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "state_changed"
+  ));
+  const automationSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "automation_triggered"
+  ));
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+  const ruleRef = ((await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())?.rules[0])?.ruleRef;
+  assert.match(ruleRef ?? "", /^ha-rule:/);
+
+  const stateNext = iterator.next();
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { id: "automation-context-id" },
+      data: { entity_id: "automation.arrival_light" },
+    },
+  });
+  socket.receive({
+    id: stateSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-25T10:00:01.000Z",
+      context: { id: "automation-context-id" },
+      data: {
+        entity_id: "light.kitchen",
+        new_state: { state: "on", attributes: {} },
+      },
+    },
+  });
+  const stateEnvelope = await stateNext;
+  assert.equal(stateEnvelope.value?.event.kind, "state");
+  const causalityEnvelope = await iterator.next();
+  assert.equal(causalityEnvelope.value?.event.kind, "ext");
+
+  const target = { epochId: stateEnvelope.value!.epochId, seq: stateEnvelope.value!.seq };
+  const traceHandle = adapter.extension("automationTrace@1") as AutomationTraceHandle;
+  assert.notEqual(traceHandle, undefined);
+  const read = traceHandle.readTrace({ ruleRef: ruleRef!, target }, { signal: controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const contextsCommand = socket.sent.at(-1);
+  assert.deepEqual(contextsCommand && {
+    type: contextsCommand.type,
+    domain: contextsCommand.domain,
+    item_id: contextsCommand.item_id,
+  }, {
+    type: "trace/contexts",
+    domain: "automation",
+    item_id: "arrival_light",
+  });
+  socket.receive({
+    id: contextsCommand!.id,
+    type: "result",
+    success: true,
+    result: {
+      "automation-context-id": {
+        run_id: "native-run-id",
+        domain: "automation",
+        item_id: "arrival_light",
+      },
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const getCommand = socket.sent.at(-1);
+  assert.deepEqual(getCommand && {
+    type: getCommand.type,
+    domain: getCommand.domain,
+    item_id: getCommand.item_id,
+    run_id: getCommand.run_id,
+  }, {
+    type: "trace/get",
+    domain: "automation",
+    item_id: "arrival_light",
+    run_id: "native-run-id",
+  });
+  socket.receive({
+    id: getCommand!.id,
+    type: "result",
+    success: true,
+    result: {
+      last_step: "action/0",
+      run_id: "native-run-id",
+      state: "stopped",
+      script_execution: "finished",
+      timestamp: {
+        start: "2026-08-25T10:00:00.000+00:00",
+        finish: "2026-08-25T10:00:01.250+00:00",
+      },
+      domain: "automation",
+      item_id: "arrival_light",
+      config: { secret: "must-not-cross-contract" },
+      context: { id: "automation-context-id", user_id: "native-user-id" },
+      trace: [{ changed_variables: { secret: "must-not-cross-contract" } }],
+    },
+  });
+  const result = await read;
+  assert.deepEqual(result, {
+    status: "complete",
+    ruleRef,
+    target,
+    run: {
+      automationLabel: "Arrival light",
+      state: "completed",
+      outcome: "completed",
+      startedAt: "2026-08-25T10:00:00.000+00:00",
+      finishedAt: "2026-08-25T10:00:01.250+00:00",
+      steps: [],
+      truncated: false,
+    },
+  });
+  assert.equal(JSON.stringify(result).includes("native-run-id"), false);
+  assert.equal(JSON.stringify(result).includes("automation-context-id"), false);
+  assert.equal(JSON.stringify(result).includes("must-not-cross-contract"), false);
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+async function prepareAutomationTraceFixture(
+  dependencyOverride: Record<string, unknown> = {},
+  automationUniqueId: string | null = "arrival_light",
+  automationEntityId = "automation.arrival_light",
+): Promise<{
+  readonly adapter: HomeAssistantBridgeAdapter;
+  readonly socket: FakeSocket;
+  readonly controller: AbortController;
+  readonly iterator: AsyncIterator<Envelope>;
+  readonly stateSubscription: Record<string, unknown>;
+  readonly automationSubscription: Record<string, unknown>;
+  readonly ruleRef: string;
+  readonly target: { readonly epochId: string; readonly seq: number };
+  readonly causality: Envelope;
+  readonly traceHandle: AutomationTraceHandle;
+}> {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket, {}, dependencyOverride);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket, true, automationUniqueId, automationEntityId);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+  const stateSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "state_changed"
+  ));
+  const automationSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "automation_triggered"
+  ));
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+  const ruleRef = ((await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())?.rules[0])?.ruleRef;
+  assert.match(ruleRef ?? "", /^ha-rule:/);
+  const stateNext = iterator.next();
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { id: "automation-context-id" },
+      data: { entity_id: automationEntityId },
+    },
+  });
+  socket.receive({
+    id: stateSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-25T10:00:01.000Z",
+      context: { id: "automation-context-id" },
+      data: {
+        entity_id: "light.kitchen",
+        new_state: { state: "on", attributes: {} },
+      },
+    },
+  });
+  const stateEnvelope = await stateNext;
+  assert.equal(stateEnvelope.value?.event.kind, "state");
+  const causality = (await iterator.next()).value!;
+  assert.equal(causality.event.kind, "ext");
+  return {
+    adapter,
+    socket,
+    controller,
+    iterator,
+    stateSubscription: stateSubscription!,
+    automationSubscription: automationSubscription!,
+    ruleRef: ruleRef!,
+    target: { epochId: stateEnvelope.value!.epochId, seq: stateEnvelope.value!.seq },
+    causality,
+    traceHandle: adapter.extension("automationTrace@1") as AutomationTraceHandle,
+  };
+}
+
+test("keeps foreign-rule causality but refuses trace lookup without a unique_id", async () => {
+  const fixture = await prepareAutomationTraceFixture({}, null);
+  assert.equal(fixture.causality.event.kind, "ext");
+  if (fixture.causality.event.kind === "ext") {
+    assert.deepEqual(fixture.causality.event.payload.cause, {
+      kind: "foreign_rule",
+      ruleRef: fixture.ruleRef,
+    });
+  }
+  const commandCount = fixture.socket.sent.length;
+  const result = await fixture.traceHandle.readTrace({ ruleRef: fixture.ruleRef, target: fixture.target }, { signal: fixture.controller.signal });
+  assert.deepEqual(result.status, "unknown");
+  assert.deepEqual(result.status === "unknown" ? result.reasons : [], ["rule_not_found"]);
+  assert.equal(fixture.socket.sent.length, commandCount);
+  assert.equal(fixture.socket.sent.some((command) => command.type === "trace/contexts"), false);
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("uses a stable unique_id as the trace item across an automation entity rename", async () => {
+  const fixture = await prepareAutomationTraceFixture({}, "arrival_light", "automation.renamed_arrival_light");
+  const read = fixture.traceHandle.readTrace({ ruleRef: fixture.ruleRef, target: fixture.target }, { signal: fixture.controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const contextsCommand = fixture.socket.sent.at(-1)!;
+  assert.deepEqual({
+    type: contextsCommand.type,
+    domain: contextsCommand.domain,
+    item_id: contextsCommand.item_id,
+  }, {
+    type: "trace/contexts",
+    domain: "automation",
+    item_id: "arrival_light",
+  });
+  fixture.socket.receive({ id: contextsCommand.id, type: "result", success: true, result: {} });
+  const result = await read;
+  assert.deepEqual(result.status, "unknown");
+  assert.deepEqual(result.status === "unknown" ? result.reasons : [], ["trace_not_retained"]);
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("returns unavailable cancellation without issuing an automation trace command", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  controller.abort();
+  const result = await (adapter.extension("automationTrace@1") as AutomationTraceHandle).readTrace({
+    ruleRef: "ha-rule:known",
+    target: { epochId: "epoch-known", seq: 1 },
+  }, { signal: controller.signal });
+  assert.deepEqual(result, {
+    status: "unavailable",
+    ruleRef: "ha-rule:known",
+    target: { epochId: "epoch-known", seq: 1 },
+    reasons: ["cancelled"],
+  });
+  assert.deepEqual(socket.sent, []);
+});
+
+test("keeps a running automation trace partial and never reports completed", async () => {
+  const fixture = await prepareAutomationTraceFixture();
+  const read = fixture.traceHandle.readTrace({ ruleRef: fixture.ruleRef, target: fixture.target }, { signal: fixture.controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const contextsCommand = fixture.socket.sent.at(-1)!;
+  fixture.socket.receive({
+    id: contextsCommand.id,
+    type: "result",
+    success: true,
+    result: {
+      "automation-context-id": { run_id: "native-run-id", domain: "automation", item_id: "arrival_light" },
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const getCommand = fixture.socket.sent.at(-1)!;
+  fixture.socket.receive({
+    id: getCommand.id,
+    type: "result",
+    success: true,
+    result: {
+      run_id: "native-run-id",
+      state: "running",
+      script_execution: "running",
+      timestamp: { start: "2026-08-25T10:00:00.000+00:00", finish: null },
+      domain: "automation",
+      item_id: "arrival_light",
+    },
+  });
+  const result = await read;
+  assert.equal(result.status, "partial");
+  if (result.status === "partial") {
+    assert.equal(result.run.state, "running");
+    assert.notEqual(result.run.state, "completed");
+    assert.equal(result.run.outcome, "unknown");
+  }
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("maps trace permission denial without exposing provider error text", async () => {
+  const fixture = await prepareAutomationTraceFixture();
+  const read = fixture.traceHandle.readTrace({ ruleRef: fixture.ruleRef, target: fixture.target }, { signal: fixture.controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const contextsCommand = fixture.socket.sent.at(-1)!;
+  fixture.socket.receive({
+    id: contextsCommand.id,
+    type: "result",
+    success: false,
+    error: { code: "unauthorized", message: "secret provider denial" },
+  });
+  const result = await read;
+  assert.deepEqual(result, {
+    status: "unavailable",
+    ruleRef: fixture.ruleRef,
+    target: fixture.target,
+    reasons: ["permission_denied"],
+  });
+  assert.equal(JSON.stringify(result).includes("secret provider denial"), false);
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("maps an automation trace deadline to unavailable timeout", async () => {
+  const fixture = await prepareAutomationTraceFixture({ automationTraceTimeoutMs: 1 });
+  const read = fixture.traceHandle.readTrace({ ruleRef: fixture.ruleRef, target: fixture.target }, { signal: fixture.controller.signal });
+  const result = await read;
+  assert.deepEqual(result, {
+    status: "unavailable",
+    ruleRef: fixture.ruleRef,
+    target: fixture.target,
+    reasons: ["timeout"],
+  });
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("reports an absent exact trace context as not retained", async () => {
+  const fixture = await prepareAutomationTraceFixture();
+  const read = fixture.traceHandle.readTrace({ ruleRef: fixture.ruleRef, target: fixture.target }, { signal: fixture.controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const contextsCommand = fixture.socket.sent.at(-1)!;
+  fixture.socket.receive({ id: contextsCommand.id, type: "result", success: true, result: {} });
+  const result = await read;
+  assert.deepEqual(result, {
+    status: "unknown",
+    ruleRef: fixture.ruleRef,
+    target: fixture.target,
+    reasons: ["trace_not_retained"],
+  });
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("invalidates an in-flight automation trace when resync starts", async () => {
+  const fixture = await prepareAutomationTraceFixture();
+  const read = fixture.traceHandle.readTrace({ ruleRef: fixture.ruleRef, target: fixture.target }, { signal: fixture.controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const previousCommandCount = fixture.socket.sent.length;
+  const resync = fixture.adapter.control.requestResync(new AbortController().signal);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const result = await read;
+  assert.deepEqual(result, {
+    status: "unknown",
+    ruleRef: fixture.ruleRef,
+    target: fixture.target,
+    reasons: ["resync_stale"],
+  });
+  const resyncCommands = fixture.socket.sent.slice(previousCommandCount);
+  assert.deepEqual(resyncCommands.map((command) => command.type), [
+    "get_states",
+    "config/entity_registry/list",
+    "config/device_registry/list",
+    "config/area_registry/list",
+  ]);
+  for (const command of resyncCommands) {
+    const response = command.type === "get_states"
+      ? [
+          { entity_id: "automation.arrival_light", state: "on", attributes: { friendly_name: "Arrival light" } },
+          { entity_id: "light.kitchen", state: "off", attributes: { friendly_name: "Kitchen light" } },
+        ]
+      : command.type === "config/entity_registry/list"
+        ? [
+            { id: "automation-stable-1", entity_id: "automation.arrival_light", device_id: "device-automation", name: "Arrival light" },
+            { id: "entity-light-1", entity_id: "light.kitchen", device_id: "device-light", name: "Kitchen light" },
+          ]
+        : command.type === "config/device_registry/list"
+          ? [{ id: "device-automation", name: "Automations" }, { id: "device-light", name: "Kitchen" }]
+          : [];
+    fixture.socket.receive({ id: command.id, type: "result", success: true, result: response });
+  }
+  assert.deepEqual(await resync, { status: "completed" });
+  await fixture.adapter.control.dispose();
+  fixture.controller.abort();
+});
+
+test("rejects oversized automation trace contexts and raw trace payloads", async () => {
+  const contextsFixture = await prepareAutomationTraceFixture();
+  const contextsRead = contextsFixture.traceHandle.readTrace({ ruleRef: contextsFixture.ruleRef, target: contextsFixture.target }, { signal: contextsFixture.controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const contextsCommand = contextsFixture.socket.sent.at(-1)!;
+  const oversizedContexts: Record<string, unknown> = {};
+  for (let index = 0; index < 257; index += 1) {
+    oversizedContexts[`context-${index}`] = { run_id: `run-${index}`, domain: "automation", item_id: "arrival_light" };
+  }
+  contextsFixture.socket.receive({ id: contextsCommand.id, type: "result", success: true, result: oversizedContexts });
+  const contextsResult = await contextsRead;
+  assert.deepEqual(contextsResult.status, "unknown");
+  assert.deepEqual(contextsResult.status === "unknown" ? contextsResult.reasons : [], ["invalid_response"]);
+  await contextsFixture.adapter.control.dispose();
+  contextsFixture.controller.abort();
+
+  const traceFixture = await prepareAutomationTraceFixture();
+  const traceRead = traceFixture.traceHandle.readTrace({ ruleRef: traceFixture.ruleRef, target: traceFixture.target }, { signal: traceFixture.controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const traceContextsCommand = traceFixture.socket.sent.at(-1)!;
+  traceFixture.socket.receive({
+    id: traceContextsCommand.id,
+    type: "result",
+    success: true,
+    result: {
+      "automation-context-id": { run_id: "native-run-id", domain: "automation", item_id: "arrival_light" },
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const traceGetCommand = traceFixture.socket.sent.at(-1)!;
+  traceFixture.socket.receive({
+    id: traceGetCommand.id,
+    type: "result",
+    success: true,
+    result: {
+      run_id: "native-run-id",
+      state: "stopped",
+      script_execution: "finished",
+      timestamp: { start: "2026-08-25T10:00:00.000+00:00", finish: "2026-08-25T10:00:01.000+00:00" },
+      domain: "automation",
+      item_id: "arrival_light",
+      trace: { oversized: "x".repeat(300_000) },
+    },
+  });
+  const traceResult = await traceRead;
+  assert.deepEqual(traceResult.status, "unknown");
+  assert.deepEqual(traceResult.status === "unknown" ? traceResult.reasons : [], ["invalid_response"]);
+  await traceFixture.adapter.control.dispose();
+  traceFixture.controller.abort();
 });
 
 test("keeps the required state stream when automation event subscription is rejected", async () => {

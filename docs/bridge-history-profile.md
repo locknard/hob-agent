@@ -269,10 +269,12 @@ never infers one from temporal proximity, rule names, device names, or state
 values.
 
 Live Home Assistant WebSocket events may carry a sanitized user causality
-extension. Automation trace retrieval is a separate, permissioned profile
-with its own retention and run identity. A future trace profile may associate a
-trace with an imported state only when the adapter has an explicit, validated
-association. Until then, the public explanation remains `cause_unknown`.
+extension. The separate, permissioned [`automationTrace@1` profile](./automation-trace-profile.md)
+reads only an exact live context association and keeps raw trace data private.
+It does not associate a trace with an imported recorder state: timestamp,
+device, or state-value overlap remains `cause_unknown`. A bridge restart or
+resync invalidates the trace read, and the handle never writes the imported
+partition, live watermark, or world model.
 
 ## Focused acceptance tests
 

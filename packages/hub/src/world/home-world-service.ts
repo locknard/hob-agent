@@ -18,6 +18,11 @@ import {
   type ForeignRulesHandle,
 } from "@hob/bridge-contract";
 import {
+  AUTOMATION_TRACE_EXTENSION_KEY,
+  automationTraceResultSchema,
+  type AutomationTraceHandle,
+  type AutomationTraceReason,
+  type AutomationTraceRun,
   HISTORY_EXTENSION_KEY,
   historyPageSchema,
   type HistoryHandle,
@@ -155,6 +160,8 @@ export interface HomeWorldServiceOptions {
   readonly maxRestarts?: number;
   readonly heartbeatIntervalMs?: number;
   readonly syncTimeoutMs?: number;
+  /** Hub-owned deadline for one read-only automation trace request. */
+  readonly automationTraceTimeoutMs?: number;
   readonly diagnosticSampleLimit?: number;
   /** Hub-side structural budget applied before canonical event admission. */
   readonly resourceBudget?: Partial<ResourceBudget>;
@@ -437,6 +444,35 @@ export interface HomeWorldCausalityResult {
   readonly reasons: readonly HomeWorldCausalityReason[];
 }
 
+export type HomeWorldAutomationTraceReason =
+  | AutomationTraceReason
+  | "capability_unavailable"
+  | "trace_unavailable"
+  | "causality_unavailable"
+  | "journal_unavailable"
+  | "missing_consistent_baseline"
+  | "target_stale"
+  | "state_not_retained"
+  | "cause_not_retained"
+  | "not_foreign_rule";
+
+export interface HomeWorldAutomationTraceQuery {
+  readonly hwCapabilityId: string;
+  readonly provenance: HomeWorldCausalityQuery["provenance"];
+}
+
+export interface HomeWorldAutomationTraceResult {
+  readonly status: "complete" | "partial" | "unknown" | "unavailable";
+  readonly coverage: "exact_run" | "rule_only" | "not_retained" | "not_available";
+  readonly hwCapabilityId: string;
+  readonly provenance: HomeWorldAutomationTraceQuery["provenance"];
+  readonly automationLabel?: string;
+  readonly run?: Omit<AutomationTraceRun, "automationLabel" | "steps" | "truncated">;
+  readonly steps?: AutomationTraceRun["steps"];
+  readonly reasons: readonly HomeWorldAutomationTraceReason[];
+  readonly truncated: boolean;
+}
+
 /** Closed read-side result used by deployment preflight; no provider data crosses it. */
 export type HomeWorldArtifactPlanPreflightReason =
   | "invalid_plan"
@@ -580,6 +616,7 @@ export interface HomeWorldSnapshot {
 }
 
 const HOME_HISTORY_FETCH_TIMEOUT_MS = 5_000;
+const HOME_AUTOMATION_TRACE_FETCH_TIMEOUT_MS = 5_000;
 
 const defaultScheduler: HomeWorldScheduler = {
   wait(delayMs, signal) {
@@ -986,6 +1023,137 @@ export class HomeWorldService extends Service {
       attribution,
       value,
       reasons: qualityReasons,
+    };
+  }
+
+  /**
+   * Reads one provider automation run only after the live journal proves that
+   * the exact state provenance was attributed to a foreign rule. Native rule,
+   * context, and run references remain inside the adapter boundary.
+   */
+  async queryAutomationTrace(
+    input: HomeWorldAutomationTraceQuery,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<HomeWorldAutomationTraceResult> {
+    validateCausalityQuery(input);
+    const provenance = { ...input.provenance };
+    const base = {
+      hwCapabilityId: input.hwCapabilityId,
+      provenance,
+      truncated: false,
+    } as const;
+    const closed = (
+      status: "unknown" | "unavailable",
+      coverage: HomeWorldAutomationTraceResult["coverage"],
+      reason: HomeWorldAutomationTraceReason,
+    ): HomeWorldAutomationTraceResult => ({ ...base, status, coverage, reasons: [reason] });
+
+    if (signal.aborted) return closed("unavailable", "not_available", "cancelled");
+    const capability = this.snapshot().devices
+      .flatMap((device) => device.capabilities)
+      .find((candidate) => candidate.hwCapabilityId === input.hwCapabilityId);
+    if (capability === undefined) return closed("unavailable", "not_available", "capability_unavailable");
+    const binding = capability.bindings.find((candidate) => candidate.bridgeId === provenance.bridgeId);
+    if (binding === undefined) return closed("unavailable", "not_available", "capability_unavailable");
+    const runtime = this.runtimesById.get(provenance.bridgeId);
+    if (runtime === undefined) return closed("unavailable", "not_available", "capability_unavailable");
+    if (runtime.extensionAvailability[causalityExtensionKey()] !== "available") {
+      return closed("unavailable", "not_available", "causality_unavailable");
+    }
+    if (runtime.extensionAvailability[AUTOMATION_TRACE_EXTENSION_KEY] !== "available") {
+      return closed("unavailable", "not_available", "trace_unavailable");
+    }
+    if (runtime.journal.queryCausalityRecords === undefined) {
+      return closed("unavailable", "not_available", "journal_unavailable");
+    }
+    const consistent = runtime.journal.consistentWatermark?.(provenance.bridgeId);
+    if (consistent === undefined) return closed("unknown", "not_available", "missing_consistent_baseline");
+    if (consistent.epochId !== provenance.epochId || provenance.seq <= consistent.lastSeq) {
+      return closed("unknown", "not_available", "target_stale");
+    }
+
+    let page: ReturnType<NonNullable<IngestJournal["queryCausalityRecords"]>>;
+    try {
+      page = runtime.journal.queryCausalityRecords({
+        bridgeId: provenance.bridgeId,
+        epochId: provenance.epochId,
+        refSeq: provenance.seq,
+      });
+    } catch {
+      return closed("unavailable", "not_available", "journal_unavailable");
+    }
+    const stateEvent = page.state?.envelope.event;
+    if (stateEvent?.kind !== "state"
+      || stateEvent.state.nativeId !== binding.nativeId
+      || stateEvent.state.nativeInstanceId !== binding.nativeInstanceId) {
+      return closed("unavailable", "not_available", "state_not_retained");
+    }
+    const causalityEvent = page.causality?.envelope.event;
+    if (causalityEvent?.kind !== "ext") return closed("unknown", "not_available", "cause_not_retained");
+    const causality = causalityPayloadSchema.safeParse(causalityEvent.payload);
+    if (!causality.success) return closed("unknown", "not_available", "cause_not_retained");
+    if (causality.data.cause.kind !== "foreign_rule") {
+      return closed("unknown", "not_available", "not_foreign_rule");
+    }
+    if (runtime.ingest.diagnostics().connectionState !== "ready" || runtime.resyncInFlight > 0) {
+      return closed("unavailable", "rule_only", "bridge_not_ready");
+    }
+
+    const adapter = runtime.adapter;
+    const lifecycleGeneration = runtime.lifecycleGeneration;
+    const handle = adapter.extension(AUTOMATION_TRACE_EXTENSION_KEY) as AutomationTraceHandle | undefined;
+    if (handle === undefined) return closed("unavailable", "rule_only", "trace_unavailable");
+    const read = await fetchAutomationTrace(
+      handle,
+      {
+        ruleRef: causality.data.cause.ruleRef,
+        target: { epochId: provenance.epochId, seq: provenance.seq },
+      },
+      signal,
+      this.options.automationTraceTimeoutMs ?? HOME_AUTOMATION_TRACE_FETCH_TIMEOUT_MS,
+    );
+    if (read.status === "cancelled") return closed("unavailable", "rule_only", "cancelled");
+    if (read.status === "timeout") return closed("unavailable", "rule_only", "timeout");
+    if (read.status === "rejected") return closed("unavailable", "rule_only", "trace_unavailable");
+    if (read.status !== "fulfilled") return closed("unavailable", "rule_only", "trace_unavailable");
+    if (runtime.adapter !== adapter
+      || runtime.lifecycleGeneration !== lifecycleGeneration
+      || runtime.resyncInFlight > 0) {
+      return closed("unknown", "rule_only", "resync_stale");
+    }
+    if (runtime.ingest.diagnostics().connectionState !== "ready") {
+      return closed("unavailable", "rule_only", "bridge_not_ready");
+    }
+    const consistentAfter = runtime.journal.consistentWatermark?.(provenance.bridgeId);
+    if (consistentAfter === undefined || consistentAfter.epochId !== provenance.epochId) {
+      return closed("unknown", "rule_only", "resync_stale");
+    }
+
+    const parsed = automationTraceResultSchema.safeParse(read.value);
+    if (!parsed.success
+      || parsed.data.ruleRef !== causality.data.cause.ruleRef
+      || parsed.data.target.epochId !== provenance.epochId
+      || parsed.data.target.seq !== provenance.seq) {
+      return closed("unavailable", "not_available", "invalid_response");
+    }
+    const result = parsed.data;
+    if (result.status === "unknown" || result.status === "unavailable") {
+      const coverage = result.reasons.includes("trace_not_retained")
+        ? "not_retained"
+        : result.status === "unknown" ? "rule_only" : "not_available";
+      return { ...base, status: result.status, coverage, reasons: [...result.reasons] };
+    }
+    const { automationLabel, steps, truncated, ...run } = result.run;
+    return {
+      hwCapabilityId: input.hwCapabilityId,
+      provenance,
+      status: result.status,
+      coverage: "exact_run",
+      ...(automationLabel === undefined ? {} : { automationLabel }),
+      run,
+      steps: steps.map((step) => ({ ...step })),
+      reasons: result.status === "partial" ? [...result.reasons] : [],
+      truncated,
     };
   }
 
@@ -3179,6 +3347,42 @@ function importedHistoryCommitFailureReason(
 type ImportedHistoryFetchResult =
   | { readonly status: "fulfilled"; readonly value: unknown }
   | { readonly status: "cancelled" | "timeout" | "rejected" };
+
+type AutomationTraceFetchResult =
+  | { readonly status: "fulfilled"; readonly value: unknown }
+  | { readonly status: "cancelled" | "timeout" | "rejected" };
+
+async function fetchAutomationTrace(
+  handle: AutomationTraceHandle,
+  request: Parameters<AutomationTraceHandle["readTrace"]>[0],
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<AutomationTraceFetchResult> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return { status: "rejected" };
+  if (signal.aborted) return { status: "cancelled" };
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromCaller = (): void => controller.abort(signal.reason);
+  signal.addEventListener("abort", abortFromCaller, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error("automation trace read timed out"));
+  }, timeoutMs);
+  timer.unref?.();
+  try {
+    const outcome = await awaitMigrationRead(
+      () => handle.readTrace(request, { signal: controller.signal }),
+      controller.signal,
+    );
+    if (signal.aborted) return { status: "cancelled" };
+    if (timedOut) return { status: "timeout" };
+    if (outcome.status === "fulfilled") return { status: "fulfilled", value: outcome.value };
+    return { status: "rejected" };
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abortFromCaller);
+  }
+}
 
 async function fetchImportedHistory(
   handle: HistoryHandle,

@@ -350,6 +350,7 @@ test("contributes tenant SKILL.md through the official registry without adding t
       "get_home_evidence",
       "get_home_history",
       "get_home_causality",
+      "get_home_automation_trace",
       "get_home_inventory",
       "get_home_rules",
       "get_home_snapshot",

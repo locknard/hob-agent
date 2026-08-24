@@ -35,6 +35,7 @@ import { HomeInventoryCoverageService } from "./home-inventory-tool.js";
 import * as HomeEvidenceTool from "./home-evidence-tool.js";
 import * as HomeHistoryTool from "./home-history-tool.js";
 import * as HomeCausalityTool from "./home-causality-tool.js";
+import * as HomeAutomationTraceTool from "./home-automation-trace-tool.js";
 import * as HomeRulesTool from "./home-rules-tool.js";
 import { HomeRulesCoverageService } from "./home-rules-tool.js";
 import * as HomeProposalTool from "./home-proposal-tool.js";
@@ -510,6 +511,7 @@ export class DshHomeAgentService extends Service {
     await this.ctx.plugin(HomeEvidenceTool);
     await this.ctx.plugin(HomeHistoryTool);
     await this.ctx.plugin(HomeCausalityTool);
+    await this.ctx.plugin(HomeAutomationTraceTool);
     await this.ctx.plugin(HomeRulesCoverageService);
     await this.ctx.plugin(HomeRulesTool);
     await this.ctx.plugin(HomeProposalTool);

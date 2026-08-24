@@ -62,6 +62,11 @@ frozen core surfaces:
   accepts only bounded UTC ranges and Hub-owned binding pairs, returns imported
   `StateEvent` records with explicit partial coverage, and echoes the exact
   caller-provided live cut.
+- `bridge-automation-trace.ts` defines the optional, read-only
+  `automationTrace@1` companion for the platform ForeignRules profile. It reads
+  one exact live rule/context association and returns only bounded neutral run
+  status; provider run, context, configuration, and error data stay private to
+  the adapter.
 - Closed identity-claim provenance (`device_reported`,
   `independent_registry`, `platform_registry`, or `inferred`) and bridge-scoped
   credential materials (`secret_text`, `oauth`, and `certificate`). The

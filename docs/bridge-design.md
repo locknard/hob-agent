@@ -262,6 +262,7 @@ ExtensionDeclaration 是开放数组项，不在 core 中枚举扩展名字；�
 实现 transport；历史读取不得推进 live watermark、不得进入 snapshot manifest，
 也不得由 recorder 时间线推断 cause。
 ### 4.3 foreignRules:清单/启发式警告/证据/防重复提案/低保真迁移;不承诺确定性干涉模拟;steps 上限 64KB;IR 未来工作(双驱动:迁移保真 + 干涉模拟);归属以制品登记簿裁决。
+#### 4.3.1 automationTrace companion:`automationTrace@1` 是 ForeignRules profile 的独立只读 companion handle；只接受精确 live context 关联,不接受 recorder 时间匹配,不暴露 raw trace,不写 journal/watermark/world。请求、降级 reason、epoch/resync 规则冻结于 [`docs/automation-trace-profile.md`](./automation-trace-profile.md)。
 ### 4.4 artifactHost:随写路径里程碑;登记簿彼时实现,唯一真相源;平台标签仅 hint。
 
 ## 5. 参考实现与测试

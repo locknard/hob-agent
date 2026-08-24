@@ -485,6 +485,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "get_home_evidence",
     "get_home_history",
     "get_home_causality",
+    "get_home_automation_trace",
     "get_home_rules",
     "list_home_proposals",
     "create_home_proposal",
