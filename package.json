@@ -8,6 +8,8 @@
     "validate:home": "tsx packages/hub/src/cli/home-validation.ts",
     "assess:home-migration": "tsx packages/hub/src/cli/home-migration-assess.ts",
     "preview:home-migration": "tsx packages/hub/src/cli/home-migration-candidate-preview.ts",
+    "status:home-migration": "tsx packages/hub/src/cli/home-migration-status.ts",
+    "dev:migration-fixture": "tsx scripts/product-migration-fixture.ts",
     "observe:home": "tsx packages/hub/src/cli/home-observe-once.ts",
     "retain:home": "tsx packages/hub/src/cli/home-retention-operation.ts",
     "credentials:model": "tsx packages/hub/src/cli/model-credential-setup.ts",

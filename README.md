@@ -188,6 +188,25 @@ reason counts, and `remoteWritesPerformed: false`. It creates no Proposal or
 Artifact and does not prepare, refresh, deploy, pause, resume, close, or call
 bridge/device action surfaces; a source drift returns fixed `source_unstable`.
 
+To inspect one durable migration after assessment or a later workflow step, pass
+the same explicit opaque id to the read-only status command:
+
+```sh
+pnpm status:home-migration -- --assessment-id <assessment-id>
+```
+
+It reads existing migration and, when a workflow links one, Proposal SQLite
+rows without opening either store for writes or running schema setup. The JSON
+contains only fixed assessment disposition/workflow/failure counts, selection
+status counts, and linked Proposal review/lifecycle/application/deployment
+counts. It always states `readMode: "durable_only"`,
+`remoteWritesPerformed: false`, and `localWritesPerformed: false`; rule names,
+`ruleRef`, principals, token digests, source cuts/fingerprints, Proposal or
+Artifact identities, native ids, and provider payloads never appear. A missing,
+non-regular, malformed, oversized, or cross-store-inconsistent input returns a
+fixed `needs_attention` reason. An assessment with no linked workflow reports
+zero Proposal aggregates and does not require a Proposal database.
+
 To preview canonical-journal retention without connecting a bridge, loading a
 model, deleting evidence, or writing a retention audit, reuse `HOB_DATA_DIR`
 and `HOB_BRIDGES` and select one configured bridge:
