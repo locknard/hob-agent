@@ -281,6 +281,93 @@ test("renders the bounded activity projection without inert filter controls", ()
   assert.doesNotMatch(html, /HA 外部规则/);
 });
 
+test("renders the household observation summary as a calm activity card", () => {
+  const html = renderProductShell({
+    ...model(),
+    route: "activity",
+    observations: {
+      totalAttempts: 3,
+      completedAttempts: 3,
+      interruptedAttempts: 0,
+      runningAttempts: 0,
+      measuredAttempts: 2,
+      durationMs: 65_000,
+      inputTokens: 240,
+      outputTokens: 36,
+      reasoningTokens: 14,
+      toolCalls: 12,
+      failedToolCalls: 1,
+      noProposalWithoutDisposition: 0,
+      dispositionStatus: "complete",
+    },
+  } as ProductShellModel);
+
+  assert.match(html, /data-observation-summary="available"/);
+  assert.match(html, /家庭观察汇总/);
+  assert.match(html, /只显示整体统计，不含问题、回答、设备\/房间或观察 ID/);
+  assert.match(html, /观察次数[\s\S]*?>3</);
+  assert.match(html, /已完成[\s\S]*?>3</);
+  assert.match(html, /中断[\s\S]*?>0</);
+  assert.match(html, /运行中[\s\S]*?>0</);
+  assert.match(html, /有完整运行数据[\s\S]*?>2</);
+  assert.match(html, /累计耗时[\s\S]*?>1 分钟 5 秒</);
+  assert.match(html, /工具失败 \/ 总调用[\s\S]*?>1 \/ 12</);
+  assert.match(html, /结果说明完整/);
+  assert.match(html, /<details[^>]+data-observation-tokens/);
+  assert.match(html, /输入 token[\s\S]*?>240</);
+  assert.match(html, /输出 token[\s\S]*?>36</);
+  assert.match(html, /推理 token[\s\S]*?>14</);
+  const summaryCard = html.match(/<section class="product-card product-observation-summary"[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.doesNotMatch(summaryCard, /观察-[a-z0-9]|问题内容|回答内容|客厅|卧室/iu);
+  assert.equal((summaryCard.match(/<details/g) ?? []).length, 1, "token metrics stay one disclosure deep");
+});
+
+test("keeps honest observation copy for incomplete and empty summaries", () => {
+  const incomplete = renderProductShell({
+    ...model(),
+    route: "activity",
+    observations: {
+      totalAttempts: 2,
+      completedAttempts: 2,
+      interruptedAttempts: 0,
+      runningAttempts: 0,
+      measuredAttempts: 1,
+      durationMs: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      toolCalls: 0,
+      failedToolCalls: 0,
+      noProposalWithoutDisposition: 1,
+      dispositionStatus: "incomplete",
+    },
+  } as ProductShellModel);
+  assert.match(incomplete, /有 1 次没有说明为什么未形成建议/);
+  assert.doesNotMatch(incomplete, /结果说明完整/);
+
+  const empty = renderProductShell({
+    ...model(),
+    route: "activity",
+    observations: {
+      totalAttempts: 0,
+      completedAttempts: 0,
+      interruptedAttempts: 0,
+      runningAttempts: 0,
+      measuredAttempts: 0,
+      durationMs: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      toolCalls: 0,
+      failedToolCalls: 0,
+      noProposalWithoutDisposition: 0,
+      dispositionStatus: "complete",
+    },
+  } as ProductShellModel);
+  assert.match(empty, /data-observation-summary="empty"/);
+  assert.match(empty, /还没有家庭观察/);
+});
+
 test("renders streaming stop/background states and only offers a ten-second undo for verified work", () => {
   const overview = renderProductShell(model({
     activeTurn: {

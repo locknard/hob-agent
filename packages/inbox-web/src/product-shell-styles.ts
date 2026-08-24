@@ -249,6 +249,19 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-activity-filters { display: flex; flex-wrap: wrap; gap: .45rem; margin-block-end: 1rem; }
 .product-activity-filters button { min-height: 2.35rem; padding: .4rem .8rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-surface); color: var(--shell-muted); font-size: .84rem; font-weight: 650; }
 .product-activity-filters button[aria-pressed="true"] { border-color: var(--shell-blue); background: var(--shell-blue-soft); color: var(--shell-blue); }
+.product-observation-summary { display: grid; gap: .9rem; margin-block-end: 1rem; }
+.product-observation-summary-header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.product-observation-summary-header h2 { margin: .2rem 0 .35rem; font-size: 1.22rem; }
+.product-observation-empty { margin: 0; color: var(--shell-muted); font-weight: 650; }
+.product-observation-grid, .product-observation-token-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: .55rem; margin: 0; }
+.product-observation-metric, .product-observation-token-grid > div { display: grid; gap: .12rem; min-width: 0; padding: .65rem .7rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-sm); background: var(--shell-bg); }
+.product-observation-metric dt, .product-observation-token-grid dt { color: var(--shell-muted); font-size: .78rem; }
+.product-observation-metric dd, .product-observation-token-grid dd { margin: 0; font-size: 1.08rem; font-weight: 760; font-variant-numeric: tabular-nums; }
+.product-observation-disposition { margin: 0; color: var(--shell-green); font-size: .88rem; font-weight: 650; }
+.product-observation-disposition--attention { color: var(--shell-amber); }
+.product-observation-details { border-block-start: 1px solid var(--shell-rule); padding-block-start: .65rem; }
+.product-observation-details summary { color: var(--shell-blue); cursor: pointer; font-size: .86rem; font-weight: 700; }
+.product-observation-token-grid { margin-block-start: .65rem; }
 .product-quick-phrases { display: flex; flex-wrap: wrap; gap: .45rem; margin-block-end: .6rem; }
 .product-quick-phrases button { min-height: 2.4rem; padding: .45rem .85rem; border: 1px solid var(--shell-rule); border-radius: 999px; background: var(--shell-surface); color: var(--shell-ink); font-size: .85rem; }
 .product-quick-phrases button:hover { border-color: var(--shell-blue); color: var(--shell-blue); }

@@ -169,6 +169,23 @@ export interface ProductEnergySummary {
   readonly note?: string;
 }
 
+/** Read-only aggregate quality of autonomous household observations. */
+export interface ProductObservationSummary {
+  readonly totalAttempts: number;
+  readonly completedAttempts: number;
+  readonly interruptedAttempts: number;
+  readonly runningAttempts: number;
+  readonly measuredAttempts: number;
+  readonly durationMs: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningTokens: number;
+  readonly toolCalls: number;
+  readonly failedToolCalls: number;
+  readonly noProposalWithoutDisposition: number;
+  readonly dispositionStatus: "complete" | "incomplete";
+}
+
 export type ProductTurnStatus =
   | "idle"
   | "unknown"
@@ -575,6 +592,7 @@ export interface ProductShellModel {
   readonly expiredSummary?: string;
   readonly spaces?: readonly ProductSpace[];
   readonly energy?: ProductEnergySummary;
+  readonly observations?: ProductObservationSummary;
   readonly concern?: ProductConcern;
   readonly agentNote?: string;
   readonly activeTurn?: ProductTurn;
@@ -1509,7 +1527,36 @@ function renderActivity(model: NormalizedProductShellModel): string {
     { key: "physical", label: "物理" },
   ];
   const filterStrip = `<div class="product-activity-filters" data-activity-filters role="group" aria-label="按来源筛选">${filters.map((filter, index) => `<button type="button" data-activity-filter="${filter.key}"${index === 0 ? ` aria-pressed="true"` : ` aria-pressed="false"`}>${escapeHtml(filter.label)}</button>`).join("")}</div>`;
-  return `<header class="product-page-header"><div><p class="product-kicker">活动</p><h1>家里发生了什么</h1><p class="product-muted">查看家里的变化，了解原因和结果。</p></div></header>${filterStrip}<div class="product-activity"><div class="product-activity-main">${grouped || `<section class="product-card product-review-empty">今天暂时安静，新的家庭活动会显示在这里。</section>`}</div><aside class="product-cause-aside">${side}</aside></div>`;
+  const observations = model.observations === undefined ? "" : renderObservationSummary(model.observations);
+  return `<header class="product-page-header"><div><p class="product-kicker">活动</p><h1>家里发生了什么</h1><p class="product-muted">查看家里的变化，了解原因和结果。</p></div></header>${observations}${filterStrip}<div class="product-activity"><div class="product-activity-main">${grouped || `<section class="product-card product-review-empty">今天暂时安静，新的家庭活动会显示在这里。</section>`}</div><aside class="product-cause-aside">${side}</aside></div>`;
+}
+
+function renderObservationSummary(summary: ProductObservationSummary): string {
+  const empty = summary.totalAttempts === 0;
+  const dispositionCopy = summary.noProposalWithoutDisposition > 0
+    ? `有 ${summary.noProposalWithoutDisposition} 次没有说明为什么未形成建议。`
+    : "结果说明完整：每次未形成建议都有说明。";
+  const metrics = [
+    ["观察次数", summary.totalAttempts],
+    ["已完成", summary.completedAttempts],
+    ["中断", summary.interruptedAttempts],
+    ["运行中", summary.runningAttempts],
+    ["有完整运行数据", summary.measuredAttempts],
+    ["累计耗时", formatObservationDuration(summary.durationMs)],
+    ["工具失败 / 总调用", `${summary.failedToolCalls} / ${summary.toolCalls}`],
+  ] as const;
+  return `<section class="product-card product-observation-summary" data-observation-summary="${empty ? "empty" : "available"}" aria-labelledby="observation-summary-heading"><header class="product-observation-summary-header"><div><p class="product-kicker">家庭观察</p><h2 id="observation-summary-heading">家庭观察汇总</h2><p class="product-muted">只显示整体统计，不含问题、回答、设备/房间或观察 ID。</p></div><span class="product-tag product-tag--neutral">只读汇总</span></header>${empty ? `<p class="product-observation-empty">还没有家庭观察。</p>` : ""}<dl class="product-observation-grid">${metrics.map(([label, value]) => `<div class="product-observation-metric"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join("")}</dl><p class="product-observation-disposition${summary.dispositionStatus === "incomplete" ? " product-observation-disposition--attention" : ""}">${escapeHtml(dispositionCopy)}</p><details class="product-observation-details" data-observation-tokens><summary>查看运行数据</summary><dl class="product-observation-token-grid"><div><dt>输入 token</dt><dd>${summary.inputTokens}</dd></div><div><dt>输出 token</dt><dd>${summary.outputTokens}</dd></div><div><dt>推理 token</dt><dd>${summary.reasoningTokens}</dd></div></dl></details></section>`;
+}
+
+function formatObservationDuration(durationMs: number): string {
+  const totalSeconds = Math.floor(durationMs / 1_000);
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds === 0 ? `${minutes} 分钟` : `${minutes} 分钟 ${seconds} 秒`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes === 0 ? `${hours} 小时` : `${hours} 小时 ${remainingMinutes} 分钟`;
 }
 
 function attributionLabel(record: Pick<ProductActivityRecord, "attribution" | "actor">, agentName: string, memberName: string | undefined): string {

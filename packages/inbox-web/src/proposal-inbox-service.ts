@@ -30,6 +30,7 @@ import type {
   ProductShellConnection,
   ProductSpace,
   ProductEnergySummary,
+  ProductObservationSummary,
   ProductConcern,
   ProductAutomation,
   ProductMigrationSelection,
@@ -365,6 +366,7 @@ export interface InboxProductShellProjection {
   readonly connection: ProductShellConnection;
   readonly spaces: readonly ProductSpace[];
   readonly energy?: ProductEnergySummary;
+  readonly observations?: ProductObservationSummary;
   readonly concern?: ProductConcern;
   readonly automations?: readonly ProductAutomation[];
   readonly migrationSelections?: readonly ProductMigrationSelection[];
@@ -601,6 +603,7 @@ export class ProposalInboxService extends Service {
     const projection = projectProductWorld(world, now, actionDescriptorFor);
     const batchControl = this.batchControlProjection(projection, batchRequestId);
     const energy = projectEnergyToday(world, this.world, now, this.timezone);
+    const observations = projectObservationSummary(this.observationAudit);
     const concern = this.projectConcern(now);
     const automations = this.projectAutomations();
     const migrationSelections = includeMigrationSelections
@@ -609,6 +612,7 @@ export class ProposalInboxService extends Service {
     return {
       ...projection,
       ...(energy === undefined ? {} : { energy }),
+      ...(observations === undefined ? {} : { observations }),
       ...(concern === undefined ? {} : { concern }),
       ...(automations === undefined ? {} : { automations }),
       ...(migrationSelections === undefined ? {} : { migrationSelections }),
@@ -2063,6 +2067,104 @@ function projectRuntimeActivity(
       cause: item.cause.slice(0, 8),
       ...(item.verification === undefined ? {} : { verification: item.verification }),
     }));
+}
+
+const OBSERVATION_OUTCOME_KEYS = [
+  "proposal_created",
+  "no_proposal",
+  "world_not_ready",
+  "proposal_pending",
+  "agent_busy",
+  "failed",
+] as const;
+
+const OBSERVATION_DISPOSITION_KEYS = [
+  "no_material_value",
+  "insufficient_evidence",
+  "existing_rule_overlap",
+  "mapping_uncertain",
+  "other_uncertainty",
+] as const;
+
+function projectObservationSummary(
+  source: { summary(): unknown } | undefined,
+): ProductObservationSummary | undefined {
+  if (source === undefined) return undefined;
+  let value: unknown;
+  try {
+    value = source.summary();
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  const totalAttempts = nonNegativeSafeInteger(value.totalAttempts);
+  const completedAttempts = nonNegativeSafeInteger(value.completedAttempts);
+  const interruptedAttempts = nonNegativeSafeInteger(value.interruptedAttempts);
+  const runningAttempts = nonNegativeSafeInteger(value.runningAttempts);
+  const measuredAttempts = nonNegativeSafeInteger(value.measuredAttempts);
+  const noProposalWithoutDisposition = nonNegativeSafeInteger(value.noProposalWithoutDisposition);
+  const outcomes = observationCountRecord(value.outcomes, OBSERVATION_OUTCOME_KEYS);
+  const dispositions = observationCountRecord(value.dispositions, OBSERVATION_DISPOSITION_KEYS);
+  const metrics = isRecord(value.metrics)
+    ? {
+        durationMs: nonNegativeSafeInteger(value.metrics.durationMs),
+        inputTokens: nonNegativeSafeInteger(value.metrics.inputTokens),
+        outputTokens: nonNegativeSafeInteger(value.metrics.outputTokens),
+        reasoningTokens: nonNegativeSafeInteger(value.metrics.reasoningTokens),
+        toolCalls: nonNegativeSafeInteger(value.metrics.toolCalls),
+        failedToolCalls: nonNegativeSafeInteger(value.metrics.failedToolCalls),
+      }
+    : undefined;
+  if (totalAttempts === undefined || completedAttempts === undefined || interruptedAttempts === undefined
+    || runningAttempts === undefined || measuredAttempts === undefined || noProposalWithoutDisposition === undefined
+    || outcomes === undefined || dispositions === undefined || metrics === undefined
+    || Object.values(metrics).some((item) => item === undefined)) return undefined;
+  const lifecycleTotal = completedAttempts + interruptedAttempts + runningAttempts;
+  const outcomeTotal = Object.values(outcomes).reduce((sum, count) => sum + count, 0);
+  const dispositionTotal = Object.values(dispositions).reduce((sum, count) => sum + count, 0);
+  if (!Number.isSafeInteger(lifecycleTotal) || !Number.isSafeInteger(outcomeTotal) || !Number.isSafeInteger(dispositionTotal)
+    || totalAttempts !== lifecycleTotal
+    || outcomeTotal !== completedAttempts
+    || dispositionTotal + noProposalWithoutDisposition !== outcomes.no_proposal
+    || !Number.isSafeInteger(dispositionTotal + noProposalWithoutDisposition)
+    || measuredAttempts > completedAttempts
+    || metrics.failedToolCalls! > metrics.toolCalls!) return undefined;
+  return {
+    totalAttempts,
+    completedAttempts,
+    interruptedAttempts,
+    runningAttempts,
+    measuredAttempts,
+    durationMs: metrics.durationMs!,
+    inputTokens: metrics.inputTokens!,
+    outputTokens: metrics.outputTokens!,
+    reasoningTokens: metrics.reasoningTokens!,
+    toolCalls: metrics.toolCalls!,
+    failedToolCalls: metrics.failedToolCalls!,
+    noProposalWithoutDisposition,
+    dispositionStatus: noProposalWithoutDisposition === 0 ? "complete" : "incomplete",
+  };
+}
+
+function observationCountRecord<const K extends readonly string[]>(
+  value: unknown,
+  keys: K,
+): Record<K[number], number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const ownKeys = Object.keys(value);
+  if (ownKeys.length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return undefined;
+  const result = {} as Record<K[number], number>;
+  for (const key of keys) {
+    const typedKey = key as K[number];
+    const count = nonNegativeSafeInteger(value[typedKey]);
+    if (count === undefined) return undefined;
+    result[typedKey] = count;
+  }
+  return result;
+}
+
+function nonNegativeSafeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function productActivityDateGroup(at: string, now: Date): "today" | "yesterday" | string {

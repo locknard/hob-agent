@@ -1147,6 +1147,108 @@ test("renders bounded persisted observation history without DSH trace content", 
   await ctx.fiber.dispose();
 });
 
+test("projects a safe observation summary while keeping ordinary activity visible", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubRuntimeReviewCenter);
+  await ctx.plugin(StubObservationAudit);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const projection = ctx.homeInbox.getProductShellProjection();
+  assert.deepEqual((projection as unknown as { readonly observations?: unknown }).observations, {
+    totalAttempts: 3,
+    completedAttempts: 3,
+    interruptedAttempts: 0,
+    runningAttempts: 0,
+    measuredAttempts: 2,
+    durationMs: 5_000,
+    inputTokens: 240,
+    outputTokens: 36,
+    reasoningTokens: 14,
+    toolCalls: 12,
+    failedToolCalls: 1,
+    noProposalWithoutDisposition: 0,
+    dispositionStatus: "complete",
+  });
+  assert.equal(projection.activity[0]?.id, "activity-expired-1");
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+for (const scenario of [
+  {
+    name: "a lifecycle total mismatch",
+    mutate: (summary: ReturnType<StubObservationAudit["summary"]>) => ({
+      ...summary,
+      totalAttempts: summary.totalAttempts - 1,
+    }),
+  },
+  {
+    name: "a measured count above completed runs",
+    mutate: (summary: ReturnType<StubObservationAudit["summary"]>) => ({
+      ...summary,
+      measuredAttempts: summary.completedAttempts + 1,
+    }),
+  },
+  {
+    name: "failed tool calls above total calls",
+    mutate: (summary: ReturnType<StubObservationAudit["summary"]>) => ({
+      ...summary,
+      metrics: { ...summary.metrics, failedToolCalls: summary.metrics.toolCalls + 1 },
+    }),
+  },
+  {
+    name: "a missing no-proposal disposition",
+    mutate: (summary: ReturnType<StubObservationAudit["summary"]>) => ({
+      ...summary,
+      noProposalWithoutDisposition: summary.outcomes.no_proposal + 1,
+    }),
+  },
+  {
+    name: "a non-integer lifecycle count",
+    mutate: (summary: ReturnType<StubObservationAudit["summary"]>) => ({
+      ...summary,
+      completedAttempts: 1.5,
+    }),
+  },
+]) {
+  test(`omits the observation card for ${scenario.name}`, async () => {
+    const ctx = new Context();
+    await ctx.plugin(StubProposals);
+    await ctx.plugin(StubRuntimeReviewCenter);
+    await ctx.plugin(StubObservationAudit);
+    const audit = ctx.get("homeObservationAudit") as unknown as { summary(): ReturnType<StubObservationAudit["summary"]> };
+    const summary = audit.summary();
+    audit.summary = () => scenario.mutate(summary);
+    const fiber = await ctx.plugin(ProposalInboxService);
+
+    const projection = ctx.homeInbox.getProductShellProjection();
+    assert.equal((projection as unknown as { readonly observations?: unknown }).observations, undefined);
+    assert.equal(projection.activity[0]?.id, "activity-expired-1");
+
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  });
+}
+
+test("omits the observation card when the durable summary throws", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubProposals);
+  await ctx.plugin(StubRuntimeReviewCenter);
+  await ctx.plugin(StubObservationAudit);
+  const audit = ctx.get("homeObservationAudit") as unknown as { summary(): unknown };
+  audit.summary = () => { throw new Error("corrupt summary"); };
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const projection = ctx.homeInbox.getProductShellProjection();
+  assert.equal((projection as unknown as { readonly observations?: unknown }).observations, undefined);
+  assert.equal(projection.activity[0]?.id, "activity-expired-1");
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
 test("exposes bounded household advice without turning the Inbox into a chat runtime", async () => {
   const ctx = new Context();
   await ctx.plugin(StubProposals);
