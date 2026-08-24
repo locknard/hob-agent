@@ -35,6 +35,14 @@ Artifact id/revision/content hash、compile result 和 dry-run result；Store �
 `simulated` 以及进入 `ready` 时都重新校验这些绑定。进入 `ready` 前，runtime 再次通过
 受信 HomeWorld 翻译路径复查候选和来源指纹。任何 source cut 漂移、证据缺失、制品版本
 变化或 receipt 不一致都会停在固定的 needs-attention 状态，且不会执行远端写入。
+
+生产组合根在 HomeWorld 挂载后自动提供这一只读证据端口。端口只读取同一 source cut 下
+完整的规则目录、逐条中立翻译和最近七天的 Hub journal evidence；目录前后必须完全稳定，
+evidence coverage 必须完整且未截断，事件必须来自同一 bridge/epoch 并位于 catalog baseline
+之后。至少出现一次候选 trigger 才能形成双跑 receipt。首期 journal 不记录 schedule 的实际
+触发历史，因此 schedule candidate 固定保持 simulation unavailable；系统不会根据当前时间
+合成触发样本。这个限制在 Hub 拥有可审计的 scheduler occurrence source 后才能解除。
+
 - `rolling_back`：家庭成员或 Hub 按明确回退条件请求恢复；Hub 先停止 HobAgent 创建的自动化，再恢复原配置并等待读回。
 - `restored`：回退后的 HA 状态与切换前快照一致，Hub 写入完成审计；回退失败继续进入 `needs_attention`。
 

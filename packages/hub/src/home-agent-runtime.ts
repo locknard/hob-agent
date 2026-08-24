@@ -10,6 +10,7 @@ import {
 } from "./world/home-world-service.js";
 import { BridgeAutomationDeployment } from "./home/bridge-automation-deployment.js";
 import { HomeAutomationMigrationDeployment } from "./home/home-automation-migration-deployment.js";
+import { HomeAutomationMigrationSimulationEvidenceSource } from "./home/home-automation-migration-evidence-source.js";
 import { HomeProposalService } from "./home/home-proposal-service.js";
 import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {
@@ -272,9 +273,16 @@ class HomeAgentProductBundleRuntime {
         this.viewRecipeDraftStore = new SqliteProductViewRecipeDraftStore(this.options.homeViewRecipeDrafts);
       }
       await this.mount(HomeWorldService, this.options.homeWorld);
+      const homeAutomationMigrations = this.options.homeAutomationMigrations ?? { path: ":memory:" };
       await this.mount(
         HomeAutomationMigrationRuntimeService,
-        this.options.homeAutomationMigrations ?? { path: ":memory:" },
+        {
+          ...homeAutomationMigrations,
+          simulationEvidence: homeAutomationMigrations.simulationEvidence
+            ?? new HomeAutomationMigrationSimulationEvidenceSource(
+              this.service<HomeWorldService>("homeWorld"),
+            ),
+        },
       );
       await this.mount(HomeMediaPlayerService);
       await this.mount(

@@ -322,6 +322,13 @@ test("mounts the read-only home automation migration service after HomeWorld and
     assert.equal(runtime.context.homeAutomationMigrations.path, path);
     assert.equal(typeof runtime.context.homeAutomationMigrations.prepareRuleReview, "function");
     assert.equal(typeof runtime.context.homeAutomationMigrations.refreshRuleWorkflow, "function");
+    assert.equal(
+      typeof (runtime.context.homeAutomationMigrations as unknown as {
+        simulationEvidence?: { read?: unknown };
+      }).simulationEvidence?.read,
+      "function",
+      "production composition supplies the HomeWorld-owned simulation evidence reader",
+    );
     assert.equal(existsSync(path), true);
   } finally {
     await runtime.stop();
