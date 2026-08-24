@@ -36,6 +36,8 @@ export type {
 const boundedId = z.string().trim().min(1).max(200);
 const boundedText = z.string().trim().min(1).max(1_000);
 const isoTimestamp = z.iso.datetime({ offset: true });
+const proposalReviewLaneSchema = z.enum(["standard", "migration"]);
+const HOME_AUTOMATION_MIGRATION_PRODUCER = "home-automation-migration";
 
 const provenanceSchema = z.object({
   producer: boundedId,
@@ -182,7 +184,7 @@ const createProposalInputSchema = z.object({
   /** Stable identity of the behavior being discussed, independent of one producer attempt. */
   dedupKey: boundedId.optional(),
   idempotencyKey: boundedId,
-  /** Optional migration/import override; new proposals default to fourteen days. */
+  /** Optional expiry override; new proposals default to fourteen days. */
   expiresAt: isoTimestamp.optional(),
   provenance: provenanceSchema,
   evidence: evidenceSchema,
@@ -206,6 +208,8 @@ const admittedProposalInputSchema = createProposalInputSchema.superRefine((propo
 });
 
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
+export type ProposalReviewLane = z.infer<typeof proposalReviewLaneSchema>;
+type PersistedProposalInput = CreateProposalInput & { readonly reviewLane: ProposalReviewLane };
 export type ProposalStatus = "pending_review" | "approved" | "rejected" | "expired";
 export type ProposalApplicationStatus = "not_available" | "deploying" | "running" | "failed" | "withdrawn";
 export type ProposalDecision = Exclude<ProposalStatus, "pending_review">;
@@ -346,6 +350,7 @@ export interface ProposalGovernanceDecisionRecord {
 }
 
 export interface ProposalEnvelope extends CreateProposalInput {
+  readonly reviewLane: ProposalReviewLane;
   readonly schemaVersion: "1";
   readonly id: string;
   readonly revision: number;
@@ -415,6 +420,7 @@ const proposalGovernanceDecisionSchema = z.object({
 }).strict();
 
 const proposalEnvelopeSchema = createProposalInputSchema.extend({
+  reviewLane: proposalReviewLaneSchema.optional(),
   schemaVersion: z.literal("1"),
   id: boundedId,
   revision: z.number().int().positive(),
@@ -608,6 +614,7 @@ export type ProposalStoreErrorCode =
   | "revision_conflict"
   | "terminal_status"
   | "capacity_full"
+  | "review_lane_mismatch"
   | "dedup_latched"
   | "dedup_latch_not_found"
   | "snooze_limit_reached"
@@ -796,16 +803,47 @@ export class SqliteProposalStore {
   }
 
   /**
-   * Creates a proposal, merges evidence into an unresolved behavior card, or
-   * returns a durable suppression result. The producer idempotency key is an
-   * operation replay key; `dedupKey` is the stable behavior identity.
+   * Creates a standard-lane proposal, merges evidence into an unresolved
+   * behavior card, or returns a durable suppression result. The producer
+   * idempotency key is an operation replay key; `dedupKey` is the stable
+   * behavior identity.
    */
   createGoverned(candidate: CreateProposalInput): ProposalCreationResult {
+    return this.createGovernedInLane(candidate, "standard");
+  }
+
+  /**
+   * Narrow Hub-owned ingress for an explicitly selected HA migration rule.
+   * Callers cannot provide a lane field; this method injects the persisted lane
+   * after the generic envelope has been validated.
+   */
+  createMigrationGoverned(candidate: CreateProposalInput): ProposalCreationResult {
+    if (candidate !== null
+      && typeof candidate === "object"
+      && Object.prototype.hasOwnProperty.call(candidate, "reviewLane")) {
+      throw new ProposalStoreError("invalid_proposal", "Migration review lane is selected by the Hub-owned ingress");
+    }
+    return this.createGovernedInLane(candidate, "migration");
+  }
+
+  private createGovernedInLane(
+    candidate: CreateProposalInput,
+    reviewLane: ProposalReviewLane,
+  ): ProposalCreationResult {
     const parsed = admittedProposalInputSchema.safeParse(candidate);
     if (!parsed.success) {
       throw new ProposalStoreError("invalid_proposal", "Proposal does not match the bounded v1 envelope");
     }
-    const input = parsed.data;
+    const input: PersistedProposalInput = { ...parsed.data, reviewLane };
+    if (reviewLane === "standard" && input.provenance.producer === HOME_AUTOMATION_MIGRATION_PRODUCER) {
+      throw new ProposalStoreError("invalid_proposal", "Migration proposals require the Hub-owned migration ingress");
+    }
+    if (reviewLane === "migration"
+      && (input.kind !== "automation-draft"
+        || input.artifactCandidate === undefined
+        || input.provenance.producer !== HOME_AUTOMATION_MIGRATION_PRODUCER)) {
+      throw new ProposalStoreError("invalid_proposal", "The migration review lane requires one Hub-owned automation draft");
+    }
     if (input.provenance.producer === "dsh-home-agent" && input.rationale === undefined) {
       throw new ProposalStoreError("invalid_proposal", "Agent-created proposals require a bounded household rationale");
     }
@@ -829,6 +867,10 @@ export class SqliteProposalStore {
         return { kind: "replayed", proposal: concurrent };
       }
       const dedupKey = input.dedupKey ?? input.idempotencyKey;
+      const existingByIdentity = this.findByDedupKey(dedupKey);
+      if (existingByIdentity !== undefined && existingByIdentity.reviewLane !== input.reviewLane) {
+        throw new ProposalStoreError("review_lane_mismatch", "A behavior identity cannot cross review lanes");
+      }
       const latch = this.findDedupLatch(dedupKey);
       if (latch !== undefined) {
         this.db.exec("COMMIT");
@@ -836,6 +878,9 @@ export class SqliteProposalStore {
       }
       const unresolved = this.findUnresolvedByDedupKey(dedupKey);
       if (unresolved !== undefined) {
+        if (unresolved.reviewLane !== input.reviewLane) {
+          throw new ProposalStoreError("review_lane_mismatch", "A behavior identity cannot cross review lanes");
+        }
         const merged = mergeProposalEvidence(unresolved, input, at, this.id);
         this.updateProposal(merged.proposal, unresolved.revision);
         this.enqueuePreparationJob(merged.proposal, at);
@@ -871,7 +916,7 @@ export class SqliteProposalStore {
   }
 
   private insertProposalInTransaction(
-    input: CreateProposalInput,
+    input: PersistedProposalInput,
     dedupKey: string,
     at: string,
     expiresAt: string,
@@ -1027,7 +1072,8 @@ export class SqliteProposalStore {
           throw new ProposalStoreError("lifecycle_invalid", "Preparation refs are missing for this plan revision");
         }
       }
-      if (this.readyCountInTransaction() >= MAX_PROPOSAL_CAPACITY) {
+      if (current.reviewLane !== "migration"
+        && this.readyCountInTransaction() >= MAX_PROPOSAL_CAPACITY) {
         throw new ProposalStoreError("capacity_full", "Household review capacity is full");
       }
       const { openQuestion: _open, ...base } = current;
@@ -1351,10 +1397,14 @@ export class SqliteProposalStore {
     // ready + snoozed together bound how much unresolved business the Agent
     // may hold open with the household; sleeping hides a card, it does not
     // hand the Agent a fresh slot.
-    return this.countPendingByLifecycle((value) => value === "ready");
+    return this.countPendingByLifecycle((value, payload) =>
+      value === "ready" && payload.reviewLane !== "migration");
   }
 
-  private countPendingByLifecycle(match: (lifecycle: unknown, payload: { snoozedUntil?: unknown }) => boolean): number {
+  private countPendingByLifecycle(match: (
+    lifecycle: unknown,
+    payload: { snoozedUntil?: unknown; reviewLane?: unknown },
+  ) => boolean): number {
     const rows = this.db.prepare(
       "SELECT payload_json FROM proposals WHERE status = 'pending_review'",
     ).all() as Array<{ payload_json?: unknown }>;
@@ -1362,7 +1412,11 @@ export class SqliteProposalStore {
     for (const row of rows) {
       if (typeof row.payload_json !== "string") continue;
       try {
-        const payload = JSON.parse(row.payload_json) as { lifecycle?: unknown; snoozedUntil?: unknown };
+        const payload = JSON.parse(row.payload_json) as {
+          lifecycle?: unknown;
+          snoozedUntil?: unknown;
+          reviewLane?: unknown;
+        };
         if (match(payload.lifecycle, payload)) matched += 1;
       } catch {
         throw new ProposalStoreError("corrupt_store", "Proposal review capacity is unavailable");
@@ -2104,6 +2158,15 @@ export class SqliteProposalStore {
     return rows.map(fromRow).find((proposal) => proposal.dedupKey === dedupKey);
   }
 
+  private findByDedupKey(dedupKey: string): ProposalEnvelope | undefined {
+    const rows = this.db.prepare(`SELECT
+        proposal_id, producer, idempotency_key, status, revision,
+        created_at, updated_at, payload_json
+      FROM proposals
+      ORDER BY updated_at DESC, proposal_id DESC`).all() as ProposalRow[];
+    return rows.map(fromRow).find((proposal) => proposal.dedupKey === dedupKey);
+  }
+
   private findDedupLatch(dedupKey: string): ProposalDedupLatch | undefined {
     const row = this.db.prepare(`SELECT latch_id, dedup_key, proposal_id, created_at
       FROM proposal_dedup_latches WHERE dedup_key = ?`).get(dedupKey) as ProposalDedupLatchRow | undefined;
@@ -2165,9 +2228,9 @@ export class SqliteProposalStore {
       FROM proposals WHERE status = 'pending_review'`).all() as ProposalRow[];
     let available = MAX_PROPOSAL_CAPACITY - this.readyCountInTransaction();
     for (const row of rows) {
-      if (available <= 0) return;
       const current = fromRow(row);
       if (current.lifecycle !== "preparing") continue;
+      if (current.reviewLane !== "migration" && available <= 0) continue;
       const job = this.db.prepare(`SELECT status FROM approved_proposal_preparation_jobs
         WHERE proposal_id = ? AND proposal_revision = ?`).get(current.id, current.revision) as { status?: unknown } | undefined;
       if (job?.status !== "succeeded") continue;
@@ -2187,7 +2250,7 @@ export class SqliteProposalStore {
         audit: [...current.audit, this.auditEvent(at, "prepared", "system", revision)],
       };
       this.updateProposal(promoted, current.revision);
-      available -= 1;
+      if (current.reviewLane !== "migration") available -= 1;
     }
   }
 
@@ -2326,7 +2389,7 @@ export class SqliteProposalStore {
 
 function mergeProposalEvidence(
   current: ProposalEnvelope,
-  input: CreateProposalInput,
+  input: PersistedProposalInput,
   at: string,
   id: () => string,
 ): { readonly proposal: ProposalEnvelope; readonly mergedEvidenceCount: number } {
@@ -2835,10 +2898,12 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
     const expiresAt = raw.expiresAt ?? new Date(Date.parse(raw.createdAt) + PROPOSAL_EXPIRY_MS).toISOString();
     const lifecycle = raw.lifecycle
       ?? (raw.status === "approved" ? "enabling" as const : "preparing" as const);
+    const reviewLane = raw.reviewLane ?? "standard";
     const proposal: ProposalEnvelope = {
       ...raw,
       dedupKey,
       expiresAt,
+      reviewLane,
       snoozeCount: raw.snoozeCount ?? 0,
       newEvidence: raw.newEvidence ?? false,
       lifecycle,
@@ -2872,6 +2937,16 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
       || (proposal.snoozedUntil !== undefined
         && (proposal.status !== "pending_review" || Date.parse(proposal.snoozedUntil) <= Date.parse(proposal.updatedAt)))) {
       throw new Error("invalid governance metadata");
+    }
+    if (proposal.reviewLane === "migration"
+      && (proposal.kind !== "automation-draft"
+        || proposal.artifactCandidate === undefined
+        || proposal.provenance.producer !== HOME_AUTOMATION_MIGRATION_PRODUCER)) {
+      throw new Error("migration review lane is not Hub-owned");
+    }
+    if (proposal.reviewLane === "standard"
+      && proposal.provenance.producer === HOME_AUTOMATION_MIGRATION_PRODUCER) {
+      throw new Error("migration producer is outside its review lane");
     }
     if (DEPLOYED_LIFECYCLES.includes(proposal.lifecycle) && proposal.status !== "approved") {
       throw new Error("a deployed automation requires an approved decision");

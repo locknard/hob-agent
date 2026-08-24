@@ -58,6 +58,8 @@ verified → rolling_back → restored
 
 后台准备在 `ready` 之前完成证据、冲突、权限、编译和无写入模拟。家庭成员在 `ready` 状态对精确 Artifact revision 作出一次启用决定；该决定直接触发 Hub-owned 部署和验证。
 
+迁移使用显式、Hub-owned 的 migration review lane。它复用同一套 Proposal、Artifact、证据、编译、dry-run、一次决定和审计边界，但不占普通主动建议的五条注意力名额。迁移 lane 自己保持有界并只接纳家庭成员明确选择的规则；producer 名称、文案或任意请求字段都不能隐式获得该 lane。
+
 部署成功只在 HA 读回匹配目标、配置指纹和运行状态后显示为 `verified`。读回出现未知、超时或漂移时，Hub 显示 `needs_attention` 并保留切换前快照。暂停、关闭和回退都由 Hub 发送带幂等键的明确命令，并分别记录 actor、revision、bridge watermark 和结果。
 
 ## Phase 1 原生适配器进入门槛

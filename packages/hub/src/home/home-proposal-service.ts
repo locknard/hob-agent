@@ -138,6 +138,26 @@ export class HomeProposalService extends Service {
   }
 
   async createDraftGoverned(input: CreateHomeProposalDraftInput): Promise<ProposalCreationResult> {
+    return this.createDraftGovernedInLane(input, "standard");
+  }
+
+  /**
+   * The only migration proposal ingress. Its public input has no producer or
+   * lane selector; both are owned by this Hub service.
+   */
+  async createMigrationDraftGoverned(input: CreateHomeMigrationDraftInput): Promise<ProposalCreationResult> {
+    if (!isRecord(input)
+      || Object.prototype.hasOwnProperty.call(input, "reviewLane")
+      || Object.prototype.hasOwnProperty.call(input, "provenance")) {
+      throw new TypeError("Migration review lane is selected by the Hub-owned ingress");
+    }
+    return this.createDraftGovernedInLane(input as unknown as CreateHomeProposalDraftInput, "migration");
+  }
+
+  private async createDraftGovernedInLane(
+    input: CreateHomeProposalDraftInput,
+    reviewLane: "standard" | "migration",
+  ): Promise<ProposalCreationResult> {
     const artifactCandidate = validateDraftInput(input);
     const world = this.ctx.get("homeWorld") as HomeWorldService | undefined;
     if (world === undefined) {
@@ -301,7 +321,7 @@ export class HomeProposalService extends Service {
       };
     });
 
-    const governed = this.store.createGoverned({
+    const governedInput: CreateProposalInput = {
       kind: input.kind,
       title: input.title,
       summary: input.summary,
@@ -309,7 +329,9 @@ export class HomeProposalService extends Service {
       ...(confirmationDeviceNames.size === 0 ? {} : { confirmationDeviceNames: [...confirmationDeviceNames].sort().slice(0, 8) }),
       ...(input.dedupKey === undefined ? {} : { dedupKey: input.dedupKey }),
       idempotencyKey: input.idempotencyKey,
-      provenance: input.provenance,
+      provenance: reviewLane === "migration"
+        ? { producer: "home-automation-migration" }
+        : input.provenance,
       evidence: {
         references,
         watermarks,
@@ -341,7 +363,10 @@ export class HomeProposalService extends Service {
         devicesWithoutSpace: selectedDeviceSpaceCounts.filter((count) => count === 0).length,
         devicesWithMultipleSpaces: selectedDeviceSpaceCounts.filter((count) => count > 1).length,
       },
-    });
+    };
+    const governed = reviewLane === "migration"
+      ? this.store.createMigrationGoverned(governedInput)
+      : this.store.createGoverned(governedInput);
     // Admission wakes the preparation worker on the governed path — the only
     // production ingress — so a new or revised plan starts preparing at once.
     if (governed.kind === "created" || governed.kind === "merged") this.wakePreparation(governed.proposal);
@@ -780,6 +805,12 @@ export interface CreateHomeProposalDraftInput {
   readonly rationale: NonNullable<CreateProposalInput["rationale"]>;
 }
 
+/** Migration ingress input: the Hub owns both producer and review-lane fields. */
+export type CreateHomeMigrationDraftInput = Omit<CreateHomeProposalDraftInput, "provenance"> & {
+  readonly provenance?: never;
+  readonly reviewLane?: never;
+};
+
 function validateDraftInput(
   input: CreateHomeProposalDraftInput,
 ): NonNullable<CreateProposalInput["artifactCandidate"]> | undefined {
@@ -847,6 +878,10 @@ function artifactCapabilityIds(content: ArtifactContent): readonly string[] {
 
 function boundedRationaleText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= 1_000;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function latestObservedAt(values: readonly (string | undefined)[], fallback: string): string {

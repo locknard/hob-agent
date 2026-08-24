@@ -202,6 +202,166 @@ test("returns capacity_full without persisting or later admitting a sixth propos
   }
 });
 
+test("a selected migration plan reaches ready without spending ordinary proposal attention", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      store.create(input({
+        dedupKey: `ordinary-attention:${index}`,
+        idempotencyKey: `ordinary-attention:${index}`,
+      }));
+    }
+    assert.equal(store.proposalCapacity().used, 5);
+
+    const migration = store.createMigrationGoverned(input({
+      artifactCandidate,
+      dedupKey: "ha-migration:rule-1:fingerprint-1",
+      idempotencyKey: "ha-migration:rule-1:fingerprint-1",
+      provenance: { producer: "home-automation-migration" },
+    }));
+    assert.equal(migration.kind, "created");
+    if (migration.kind !== "created") throw new Error("expected migration proposal");
+    const ready = prepareToReady(store, migration.proposal.id);
+
+    assert.equal(ready.lifecycle, "ready");
+    assert.equal(ready.reviewLane, "migration");
+    assert.equal(store.proposalCapacity().used, 5);
+    assert.deepEqual(store.createGoverned(input({
+      dedupKey: "ordinary-attention:overflow",
+      idempotencyKey: "ordinary-attention:overflow",
+    })), { kind: "capacity_full" });
+  } finally {
+    store.close();
+  }
+});
+
+test("generic proposal admission cannot select the migration lane or masquerade as its producer", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    assert.throws(
+      () => store.create(input({ reviewLane: "migration" } as never)),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+    assert.throws(
+      () => store.create(input({
+        provenance: { producer: "home-automation-migration" },
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("a dedup identity cannot cross review lanes, including after reopening", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-lane-"));
+  const path = join(directory, "proposals.sqlite");
+  const firstStore = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const migration = firstStore.createMigrationGoverned(input({
+      artifactCandidate,
+      dedupKey: "lane-bound-identity",
+      idempotencyKey: "lane-bound-identity:migration",
+      provenance: { producer: "home-automation-migration" },
+    }));
+    assert.equal(migration.kind, "created");
+    assert.equal(migration.proposal.reviewLane, "migration");
+    assert.throws(
+      () => firstStore.create(input({
+        dedupKey: "lane-bound-identity",
+        idempotencyKey: "lane-bound-identity:standard",
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "review_lane_mismatch",
+    );
+  } finally {
+    firstStore.close();
+  }
+
+  const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const persisted = reopened.list({ status: "pending_review" });
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0]?.reviewLane, "migration");
+    assert.throws(
+      () => reopened.create(input({
+        dedupKey: "lane-bound-identity",
+        idempotencyKey: "lane-bound-identity:standard-after-restart",
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "review_lane_mismatch",
+    );
+  } finally {
+    reopened.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when a persisted migration lane is malformed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposal-lane-corrupt-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  const migration = store.createMigrationGoverned(input({
+    artifactCandidate,
+    dedupKey: "lane-corruption",
+    idempotencyKey: "lane-corruption:v1",
+    provenance: { producer: "home-automation-migration" },
+  }));
+  assert.equal(migration.kind, "created");
+  if (migration.kind !== "created") throw new Error("expected migration proposal");
+  store.close();
+
+  const raw = new DatabaseSync(path);
+  const row = raw.prepare("SELECT payload_json FROM proposals WHERE proposal_id = ?")
+    .get(migration.proposal.id) as { payload_json?: unknown } | undefined;
+  assert.equal(typeof row?.payload_json, "string");
+  const payload = JSON.parse(row!.payload_json as string) as Record<string, unknown>;
+  payload.reviewLane = "not-a-lane";
+  raw.prepare("UPDATE proposals SET payload_json = ? WHERE proposal_id = ?")
+    .run(JSON.stringify(payload), migration.proposal.id);
+  raw.close();
+
+  const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    assert.throws(
+      () => reopened.get(migration.proposal.id),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "corrupt_store",
+    );
+  } finally {
+    reopened.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("lane mismatch remains closed after the existing proposal is terminal", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const migration = store.createMigrationGoverned(input({
+      artifactCandidate,
+      dedupKey: "terminal-lane-bound-identity",
+      idempotencyKey: "terminal-lane-bound-identity:migration",
+      provenance: { producer: "home-automation-migration" },
+    }));
+    assert.equal(migration.kind, "created");
+    if (migration.kind !== "created") throw new Error("expected migration proposal");
+    const ready = prepareToReady(store, migration.proposal.id);
+    store.review({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "rejected",
+      reviewer: "household-owner",
+      feedbackCode: "not_useful",
+    });
+    assert.throws(
+      () => store.create(input({
+        dedupKey: "terminal-lane-bound-identity",
+        idempotencyKey: "terminal-lane-bound-identity:standard",
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "review_lane_mismatch",
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("merges new evidence into an existing behavior identity while capacity is full", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {

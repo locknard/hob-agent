@@ -426,6 +426,97 @@ test("requires a Hub-verifiable artifact candidate for new automation drafts", a
   await ctx.fiber.dispose();
 });
 
+test("generic drafts cannot choose the migration lane or masquerade as its producer", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const base = {
+    kind: "household-insight" as const,
+    title: "Review one household observation",
+    summary: "A bounded review-only observation.",
+    idempotencyKey: "generic-lane-choice:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: [],
+    rationale,
+    risk: { level: "low" as const, reasons: [] },
+    intent: {
+      type: "household-insight",
+      description: "Review one household observation.",
+      rollback: "Reject the proposal.",
+    },
+  };
+  try {
+    const ordinary = await ctx.homeProposals.createDraft({
+      ...base,
+      reviewLane: "migration",
+    } as never);
+    assert.equal(ordinary.reviewLane, "standard");
+    await assert.rejects(
+      () => ctx.homeProposals.createDraft({
+        ...base,
+        idempotencyKey: "generic-migration-producer:v1",
+        provenance: { producer: "home-automation-migration" },
+      }),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("the Hub-owned migration draft API injects its lane into the normal preparation lifecycle", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const base = {
+    kind: "automation-draft" as const,
+    title: "Review one imported light behavior",
+    summary: "A closed migration candidate for household review.",
+    idempotencyKey: "migration-lane:v1",
+    selectedHwIds: ["hw-1"],
+    artifactCandidate: automationCandidate,
+    rationale,
+    risk: { level: "medium" as const, reasons: ["Imported behavior needs review."] },
+    intent: {
+      type: "home-automation-migration",
+      description: "Review one imported light behavior.",
+      rollback: "Reject the imported behavior.",
+    },
+  };
+  try {
+    const result = await ctx.homeProposals.createMigrationDraftGoverned(base);
+    assert.equal(result.kind, "created");
+    if (result.kind !== "created") throw new Error("expected migration proposal");
+    assert.equal(result.proposal.reviewLane, "migration");
+    assert.equal(result.proposal.lifecycle, "preparing");
+    completePreparation(serviceStore(ctx.homeProposals), result.proposal.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: result.proposal.id });
+    assert.equal(ready.reviewLane, "migration");
+    assert.equal(ready.lifecycle, "ready");
+    assert.equal(serviceStore(ctx.homeProposals).proposalCapacity().used, 0);
+    await assert.rejects(
+      () => ctx.homeProposals.createMigrationDraftGoverned({
+        ...base,
+        idempotencyKey: "migration-lane:spoofed-producer",
+        provenance: { producer: "dsh-home-agent" },
+      } as never),
+      /Hub-owned ingress/i,
+    );
+    await assert.rejects(
+      () => ctx.homeProposals.createMigrationDraftGoverned({
+        ...base,
+        idempotencyKey: "migration-lane:caller-lane",
+        reviewLane: "standard",
+      } as never),
+      /review lane/i,
+    );
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
 test("uses explicit action policy for proposal safety and fails closed without it", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);
