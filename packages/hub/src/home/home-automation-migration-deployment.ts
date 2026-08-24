@@ -10,6 +10,7 @@ import type {
   ProposalDeploymentPort,
   ProposalDeploymentReconciliationDisposition,
 } from "./home-proposal-service.js";
+import type { HomeAutomationMigrationFailRuleWorkflowInput } from "./home-automation-migration-service.js";
 import type {
   HomeAutomationMigrationRuleWorkflowFailureReason,
   HomeAutomationMigrationRuleWorkflowStatus,
@@ -67,6 +68,7 @@ export interface HomeAutomationMigrationDeploymentRuntimePort {
   verifyRuleSwitch(input: {
     readonly migrationId: string;
     readonly ruleRef: string;
+    readonly expectedSwitchOperationId: string;
     readonly deploymentId: string;
     readonly deploymentTarget: string;
     readonly deploymentConfigFingerprint: string;
@@ -97,19 +99,20 @@ export interface HomeAutomationMigrationDeploymentRuntimePort {
     readonly rollbackOperationId: string;
     readonly rollbackActor: string;
   }): boolean;
-  restoreRule(input: { readonly migrationId: string; readonly ruleRef: string }): boolean;
-  failRuleWorkflow(input: {
+  restoreRule(input: {
     readonly migrationId: string;
     readonly ruleRef: string;
-    readonly from: "ready" | "switching" | "verified" | "rolling_back";
-    readonly reason: HomeAutomationMigrationRuleWorkflowFailureReason;
+    readonly from: "rolling_back";
+    readonly expectedRollbackOperationId: string;
   }): boolean;
+  failRuleWorkflow(input: HomeAutomationMigrationFailRuleWorkflowInput): boolean;
 }
 
 const SWITCH_FAILURE_REASON = "迁移切换没有完成，原有规则保持可恢复状态。";
 const SWITCH_UNKNOWN_REASON = "迁移切换结果暂时无法确认，已停止后续写入。";
 const ROLLBACK_FAILURE_REASON = "迁移回退没有完成，原有规则状态需要处理。";
 const ROLLBACK_UNKNOWN_REASON = "迁移回退结果暂时无法确认，已停止后续写入。";
+const ROLLBACK_TARGET_FINGERPRINT_FAILURE_REASON = "迁移回退的目标指纹无法验证，需要人工确认后恢复。";
 const SEMANTIC_PREFLIGHT_FAILURE_REASON = "方案里的设备当前状态或能力语义已经变化，需要重新准备后再启用；家里的设置保持原样。";
 
 /**
@@ -206,7 +209,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     const stopped = await this.setSource(control, lookup, false, switchOperationId);
     if (stopped.status !== "paused" || stopped.sourceFingerprint !== lookup.sourceFingerprint) {
       const reason = stopped.status === "unknown" ? "switch_unknown" : "switch_failed";
-      this.fail(lookup, "switching", reason);
+      this.fail(lookup, "switching", reason, switchOperationId);
       return failed(reason === "switch_unknown" ? SWITCH_UNKNOWN_REASON : SWITCH_FAILURE_REASON);
     }
 
@@ -214,46 +217,47 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     try {
       outcome = await this.base.deploy(request);
     } catch {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", switchOperationId);
       return failed(SWITCH_UNKNOWN_REASON);
     }
     if (outcome.status !== "verified") {
-      const recovered = await this.recoverKnownFailure(request, lookup, control, "switch_failed");
+      const recovered = await this.recoverKnownFailure(request, lookup, control, "switch_failed", switchOperationId);
       return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : SWITCH_FAILURE_REASON);
     }
     if (outcome.deploymentId === undefined || outcome.target === undefined || outcome.configFingerprint === undefined
       || outcome.deploymentId !== request.intent.deploymentId || outcome.target !== request.intent.target) {
-      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed");
+      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed", switchOperationId);
       return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : "迁移自动化的部署身份无法验证，已停止后续写入。");
     }
 
     const target = await this.readTarget(outcome.deploymentId, outcome.target);
     if (target.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", switchOperationId);
       return failed(SWITCH_UNKNOWN_REASON);
     }
     if (target.status !== "running" || target.configFingerprint !== outcome.configFingerprint) {
-      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed");
+      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed", switchOperationId);
       return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : "迁移自动化的运行状态无法验证，已停止后续写入。");
     }
 
     const after = await this.readSource(control, lookup.ruleRef);
     if (after.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", switchOperationId);
       return failed(SWITCH_UNKNOWN_REASON);
     }
     if (after.status !== "paused" || after.sourceFingerprint !== lookup.sourceFingerprint) {
-      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed");
+      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed", switchOperationId);
       return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : "原有规则的暂停状态无法验证，已停止后续写入。");
     }
     if (!this.runtime.verifyRuleSwitch({
       migrationId: lookup.migrationId,
       ruleRef: lookup.ruleRef,
+      expectedSwitchOperationId: switchOperationId,
       deploymentId: outcome.deploymentId,
       deploymentTarget: outcome.target,
       deploymentConfigFingerprint: outcome.configFingerprint,
     })) {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", switchOperationId);
       return failed(SWITCH_UNKNOWN_REASON);
     }
     return outcome;
@@ -339,7 +343,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       let withdrawn: { readonly restored: boolean };
       try {
         if (this.base.withdraw === undefined) {
-          this.fail(request.lookup, "switching", failureReason);
+          this.fail(request.lookup, "switching", failureReason, switchOperationId);
           return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
         }
         withdrawn = await this.base.withdraw({
@@ -349,20 +353,20 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
           actor: request.actor,
         });
       } catch {
-        this.fail(request.lookup, "switching", "switch_unknown");
+        this.fail(request.lookup, "switching", "switch_unknown", switchOperationId);
         return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
       }
       if (!withdrawn.restored) {
-        this.fail(request.lookup, "switching", failureReason);
+        this.fail(request.lookup, "switching", failureReason, switchOperationId);
         return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
       }
       const afterWithdraw = await this.readTarget(request.deploymentId, request.target);
       if (afterWithdraw.status === "unknown") {
-        this.fail(request.lookup, "switching", "switch_unknown");
+        this.fail(request.lookup, "switching", "switch_unknown", switchOperationId);
         return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
       }
       if (afterWithdraw.status !== "missing") {
-        this.fail(request.lookup, "switching", failureReason);
+        this.fail(request.lookup, "switching", failureReason, switchOperationId);
         return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
       }
     }
@@ -370,11 +374,11 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     if (source.status === "paused") {
       const restored = await this.setSource(control, request.lookup, true, switchOperationId);
       if (restored.status === "unknown") {
-        this.fail(request.lookup, "switching", "switch_unknown");
+        this.fail(request.lookup, "switching", "switch_unknown", switchOperationId);
         return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
       }
       if (restored.status !== "running" || restored.sourceFingerprint !== request.lookup.sourceFingerprint) {
-        this.fail(request.lookup, "switching", failureReason);
+        this.fail(request.lookup, "switching", failureReason, switchOperationId);
         return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
       }
     }
@@ -382,15 +386,15 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     const finalSource = await this.readSource(control, request.lookup.ruleRef);
     const finalTarget = await this.readTarget(request.deploymentId, request.target);
     if (finalSource.status === "unknown" || finalTarget.status === "unknown") {
-      this.fail(request.lookup, "switching", "switch_unknown");
+      this.fail(request.lookup, "switching", "switch_unknown", switchOperationId);
       return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
     }
     if (finalSource.status !== "running" || finalSource.sourceFingerprint !== request.lookup.sourceFingerprint
       || finalTarget.status !== "missing") {
-      this.fail(request.lookup, "switching", failureReason);
+      this.fail(request.lookup, "switching", failureReason, switchOperationId);
       return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
     }
-    this.fail(request.lookup, "switching", failureReason);
+    this.fail(request.lookup, "switching", failureReason, switchOperationId);
     return this.restoreFailedSwitchAfterReadback(request, failureReason);
   }
 
@@ -452,6 +456,9 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     }
 
     const switchOperationId = operationId("switch", request.proposalId, `recovery:${request.revision}`, lookup);
+    const failSwitch = (reason: "switch_failed" | "switch_unknown" | "verification_failed"): void => {
+      this.fail(lookup, "switching", reason, switchOperationId);
+    };
     // A crash can leave the durable workflow in switching. Close that active
     // receipt with a strict CAS before opening a fresh recovery receipt.
     if (lookup.workflowStatus === "switching") this.fail(lookup, "switching", "switch_unknown");
@@ -466,7 +473,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       let withdrawn: { readonly restored: boolean };
       try {
         if (this.base.withdraw === undefined) {
-          this.fail(lookup, "switching", "switch_failed");
+          failSwitch("switch_failed");
           return failed(SWITCH_FAILURE_REASON);
         }
         withdrawn = await this.base.withdraw({
@@ -476,58 +483,58 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
           actor: request.actor,
         });
       } catch {
-        this.fail(lookup, "switching", "switch_unknown");
+        failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
       }
       if (!withdrawn.restored) {
-        this.fail(lookup, "switching", "switch_failed");
+        failSwitch("switch_failed");
         return failed(SWITCH_FAILURE_REASON);
       }
       const afterWithdraw = await this.readTarget(request.intent.deploymentId, request.intent.target);
       if (afterWithdraw.status === "unknown") {
-        this.fail(lookup, "switching", "switch_unknown");
+        failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
       }
       if (afterWithdraw.status !== "missing") {
-        this.fail(lookup, "switching", "switch_failed");
+        failSwitch("switch_failed");
         return failed(SWITCH_FAILURE_REASON);
       }
       if (source.status === "paused") {
         const restored = await this.setSource(control, lookup, true, switchOperationId);
         if (restored.status === "unknown") {
-          this.fail(lookup, "switching", "switch_unknown");
+          failSwitch("switch_unknown");
           return failed(SWITCH_UNKNOWN_REASON);
         }
         if (restored.status !== "running" || restored.sourceFingerprint !== lookup.sourceFingerprint) {
-          this.fail(lookup, "switching", "switch_failed");
+          failSwitch("switch_failed");
           return failed(SWITCH_FAILURE_REASON);
         }
       }
       const finalSource = await this.readSource(control, lookup.ruleRef);
       if (finalSource.status === "unknown") {
-        this.fail(lookup, "switching", "switch_unknown");
+        failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
       }
-      this.fail(lookup, "switching", "switch_failed");
+      failSwitch("switch_failed");
       return failed(SWITCH_FAILURE_REASON);
     }
 
     if (target.status === "missing" && source.status === "paused") {
       const restored = await this.setSource(control, lookup, true, switchOperationId);
       if (restored.status === "unknown") {
-        this.fail(lookup, "switching", "switch_unknown");
+        failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
       }
       if (restored.status !== "running" || restored.sourceFingerprint !== lookup.sourceFingerprint) {
-        this.fail(lookup, "switching", "switch_failed");
+        failSwitch("switch_failed");
         return failed(SWITCH_FAILURE_REASON);
       }
       const finalSource = await this.readSource(control, lookup.ruleRef);
       if (finalSource.status === "unknown") {
-        this.fail(lookup, "switching", "switch_unknown");
+        failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
       }
-      this.fail(lookup, "switching", finalSource.status === "running" && finalSource.sourceFingerprint === lookup.sourceFingerprint
+      failSwitch(finalSource.status === "running" && finalSource.sourceFingerprint === lookup.sourceFingerprint
         ? "switch_failed"
         : "switch_unknown");
       return failed(finalSource.status === "running" && finalSource.sourceFingerprint === lookup.sourceFingerprint
@@ -539,33 +546,34 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       if (source.status === "running") {
         const stopped = await this.setSource(control, lookup, false, switchOperationId);
         if (stopped.status === "unknown") {
-          this.fail(lookup, "switching", "switch_unknown");
+          failSwitch("switch_unknown");
           return failed(SWITCH_UNKNOWN_REASON);
         }
         if (stopped.status !== "paused" || stopped.sourceFingerprint !== lookup.sourceFingerprint) {
-          this.fail(lookup, "switching", "switch_failed");
+          failSwitch("switch_failed");
           return failed(SWITCH_FAILURE_REASON);
         }
       }
       const finalTarget = await this.readTarget(request.intent.deploymentId, request.intent.target);
       const finalSource = await this.readSource(control, lookup.ruleRef);
       if (finalTarget.status === "unknown" || finalSource.status === "unknown") {
-        this.fail(lookup, "switching", "switch_unknown");
+        failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
       }
       if (finalTarget.status !== "running" || finalTarget.configFingerprint !== expectedFingerprint
         || finalSource.status !== "paused" || finalSource.sourceFingerprint !== lookup.sourceFingerprint) {
-        const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed");
+        const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed", switchOperationId);
         return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : "迁移自动化的运行状态无法验证，已停止后续写入。");
       }
       if (!this.runtime.verifyRuleSwitch({
         migrationId: lookup.migrationId,
         ruleRef: lookup.ruleRef,
+        expectedSwitchOperationId: switchOperationId,
         deploymentId: request.intent.deploymentId,
         deploymentTarget: request.intent.target,
         deploymentConfigFingerprint: expectedFingerprint!,
-      })) {
-        this.fail(lookup, "switching", "switch_unknown");
+    })) {
+        failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
       }
       return {
@@ -580,47 +588,48 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     // after a fresh recovery CAS and an explicit source pause readback.
     const stopped = await this.setSource(control, lookup, false, switchOperationId);
     if (stopped.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown");
+      failSwitch("switch_unknown");
       return failed(SWITCH_UNKNOWN_REASON);
     }
     if (stopped.status !== "paused" || stopped.sourceFingerprint !== lookup.sourceFingerprint) {
-      this.fail(lookup, "switching", "switch_failed");
+      failSwitch("switch_failed");
       return failed(SWITCH_FAILURE_REASON);
     }
     let outcome: Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>;
     try {
       outcome = await this.base.deploy(request);
     } catch {
-      this.fail(lookup, "switching", "switch_unknown");
+      failSwitch("switch_unknown");
       return failed(SWITCH_UNKNOWN_REASON);
     }
     if (outcome.status !== "verified") {
-      const recovered = await this.recoverKnownFailure(request, lookup, control, "switch_failed");
+      const recovered = await this.recoverKnownFailure(request, lookup, control, "switch_failed", switchOperationId);
       return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : SWITCH_FAILURE_REASON);
     }
     if (outcome.deploymentId !== request.intent.deploymentId || outcome.target !== request.intent.target || outcome.configFingerprint === undefined) {
-      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed");
+      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed", switchOperationId);
       return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : "迁移自动化的部署身份无法验证，已停止后续写入。");
     }
     const finalTarget = await this.readTarget(request.intent.deploymentId, request.intent.target);
     const finalSource = await this.readSource(control, lookup.ruleRef);
     if (finalTarget.status === "unknown" || finalSource.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown");
+      failSwitch("switch_unknown");
       return failed(SWITCH_UNKNOWN_REASON);
     }
     if (finalTarget.status !== "running" || finalTarget.configFingerprint !== outcome.configFingerprint
       || finalSource.status !== "paused" || finalSource.sourceFingerprint !== lookup.sourceFingerprint) {
-      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed");
+      const recovered = await this.recoverKnownFailure(request, lookup, control, "verification_failed", switchOperationId);
       return failed(recovered === "switch_unknown" ? SWITCH_UNKNOWN_REASON : "迁移自动化的运行状态无法验证，已停止后续写入。");
     }
     if (!this.runtime.verifyRuleSwitch({
       migrationId: lookup.migrationId,
       ruleRef: lookup.ruleRef,
+      expectedSwitchOperationId: switchOperationId,
       deploymentId: request.intent.deploymentId,
       deploymentTarget: request.intent.target,
       deploymentConfigFingerprint: outcome.configFingerprint,
     })) {
-      this.fail(lookup, "switching", "switch_unknown");
+      failSwitch("switch_unknown");
       return failed(SWITCH_UNKNOWN_REASON);
     }
     return outcome;
@@ -717,13 +726,21 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     if (control === undefined) return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
     const source = await this.readSource(control, lookup.ruleRef);
     const target = await this.readTarget(request.intent.deploymentId, request.intent.target);
-    if (source.status === "unknown" || target.status === "unknown") {
+    if (source.status === "unknown") {
       return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
     }
     if (source.status === "missing" || source.sourceFingerprint !== lookup.sourceFingerprint) {
       return { restored: false, recoveryRequired: true, reason: "原有规则的来源已经变化，需要人工确认后恢复。" };
     }
+    const targetBeforeRollback = rollbackTargetCheck(target, lookup.deploymentConfigFingerprint);
+    if (targetBeforeRollback.status === "unsafe") {
+      if (lookup.workflowStatus === "rolling_back") this.fail(lookup, "rolling_back", targetBeforeRollback.failureReason);
+      return { restored: false, recoveryRequired: true, reason: targetBeforeRollback.reason };
+    }
     const rollbackOperationId = operationId("rollback", request.proposalId, `recovery:${request.revision}`, lookup);
+    const failRollback = (reason: "rollback_failed" | "rollback_unknown"): void => {
+      this.fail(lookup, "rolling_back", reason, rollbackOperationId);
+    };
     // Convert a crash-left active receipt to an explicit unknown before using
     // a fresh rollback receipt. This keeps recovery CAS-based and restart-safe.
     if (lookup.workflowStatus === "rolling_back") this.fail(lookup, "rolling_back", "rollback_unknown");
@@ -736,7 +753,13 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
     }
 
-    if (target.status !== "missing") {
+    const targetBeforeDelete = await this.readTarget(request.intent.deploymentId, request.intent.target);
+    const targetBeforeDeleteCheck = rollbackTargetCheck(targetBeforeDelete, lookup.deploymentConfigFingerprint);
+    if (targetBeforeDeleteCheck.status === "unsafe") {
+      failRollback(targetBeforeDeleteCheck.failureReason);
+      return { restored: false, recoveryRequired: true, reason: targetBeforeDeleteCheck.reason };
+    }
+    if (targetBeforeDeleteCheck.status !== "missing") {
       let withdrawn: { readonly restored: boolean };
       try {
         withdrawn = await this.base.withdraw?.({
@@ -746,46 +769,51 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
           actor: request.actor,
         }) ?? { restored: false };
       } catch {
-        this.fail(lookup, "rolling_back", "rollback_unknown");
+        failRollback("rollback_unknown");
         return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
       }
       if (!withdrawn.restored) {
-        this.fail(lookup, "rolling_back", "rollback_failed");
+        failRollback("rollback_failed");
         return { restored: false, recoveryRequired: true, reason: "迁移回退没有完成，原有规则状态需要处理。" };
       }
       const afterWithdraw = await this.readTarget(request.intent.deploymentId, request.intent.target);
       if (afterWithdraw.status === "unknown") {
-        this.fail(lookup, "rolling_back", "rollback_unknown");
+        failRollback("rollback_unknown");
         return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
       }
       if (afterWithdraw.status !== "missing") {
-        this.fail(lookup, "rolling_back", "rollback_failed");
+        failRollback("rollback_failed");
         return { restored: false, recoveryRequired: true, reason: "迁移回退没有完成，目标自动化仍然存在。" };
       }
     }
     if (source.status !== "running") {
       const restored = await this.setSource(control, lookup, true, rollbackOperationId);
       if (restored.status === "unknown") {
-        this.fail(lookup, "rolling_back", "rollback_unknown");
+        failRollback("rollback_unknown");
         return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
       }
       if (restored.status !== "running" || restored.sourceFingerprint !== lookup.sourceFingerprint) {
-        this.fail(lookup, "rolling_back", "rollback_failed");
+        failRollback("rollback_failed");
         return { restored: false, recoveryRequired: true, reason: "迁移回退没有完成，原有规则仍未恢复。" };
       }
     }
     const finalSource = await this.readSource(control, lookup.ruleRef);
     const finalTarget = await this.readTarget(request.intent.deploymentId, request.intent.target);
     if (finalSource.status === "unknown" || finalTarget.status === "unknown") {
-      this.fail(lookup, "rolling_back", "rollback_unknown");
+      failRollback("rollback_unknown");
       return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
     }
     if (finalSource.status !== "running" || finalSource.sourceFingerprint !== lookup.sourceFingerprint || finalTarget.status !== "missing") {
-      this.fail(lookup, "rolling_back", "rollback_failed");
+      failRollback("rollback_failed");
       return { restored: false, recoveryRequired: true, reason: "迁移回退的最终状态无法验证。" };
     }
-    if (!this.runtime.restoreRule({ migrationId: lookup.migrationId, ruleRef: lookup.ruleRef })) {
-      this.fail(lookup, "rolling_back", "rollback_unknown");
+    if (!this.runtime.restoreRule({
+      migrationId: lookup.migrationId,
+      ruleRef: lookup.ruleRef,
+      from: "rolling_back",
+      expectedRollbackOperationId: rollbackOperationId,
+    })) {
+      failRollback("rollback_unknown");
       return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
     }
     return { restored: true };
@@ -866,12 +894,15 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       this.fail(lookup, "verified", "verification_failed");
       return { restored: false, recoveryRequired: true, reason: "原有规则的来源已经变化，需要人工确认后恢复。" };
     }
-    if (targetBefore.status !== "missing"
-      && targetBefore.configFingerprint !== lookup.deploymentConfigFingerprint) {
+    const targetBeforeRollback = rollbackTargetCheck(targetBefore, lookup.deploymentConfigFingerprint);
+    if (targetBeforeRollback.status === "unsafe") {
       this.fail(lookup, "verified", "verification_failed");
-      return { restored: false, recoveryRequired: true, reason: "迁移回退的目标指纹无法验证，需要人工确认后恢复。" };
+      return { restored: false, recoveryRequired: true, reason: targetBeforeRollback.reason };
     }
     const rollbackOperationId = operationId("rollback", request.proposalId, request.deploymentId, lookup);
+    const failRollback = (reason: "rollback_failed" | "rollback_unknown"): void => {
+      this.fail(lookup, "rolling_back", reason, rollbackOperationId);
+    };
     if (!this.runtime.startRuleRollback({
       migrationId: lookup.migrationId,
       ruleRef: lookup.ruleRef,
@@ -881,56 +912,67 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       this.fail(lookup, "verified", "verification_failed");
       return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
     }
-    if (targetBefore.status !== "missing") {
+    const targetBeforeDelete = await this.readTarget(request.deploymentId, request.target);
+    const targetBeforeDeleteCheck = rollbackTargetCheck(targetBeforeDelete, lookup.deploymentConfigFingerprint);
+    if (targetBeforeDeleteCheck.status === "unsafe") {
+      failRollback(targetBeforeDeleteCheck.failureReason);
+      return { restored: false, recoveryRequired: true, reason: targetBeforeDeleteCheck.reason };
+    }
+    if (targetBeforeDeleteCheck.status !== "missing") {
       let withdrawn: { readonly restored: boolean };
       try {
         if (this.base.withdraw === undefined) {
-          this.fail(lookup, "rolling_back", "rollback_failed");
+          failRollback("rollback_failed");
           return { restored: false, recoveryRequired: true, reason: ROLLBACK_FAILURE_REASON };
         }
         withdrawn = await this.base.withdraw(request);
       } catch {
-        this.fail(lookup, "rolling_back", "rollback_unknown");
+        failRollback("rollback_unknown");
         return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
       }
       if (!withdrawn.restored) {
-        this.fail(lookup, "rolling_back", "rollback_failed");
+        failRollback("rollback_failed");
         return { restored: false, recoveryRequired: true, reason: ROLLBACK_FAILURE_REASON };
       }
       const afterWithdraw = await this.readTarget(request.deploymentId, request.target);
       if (afterWithdraw.status === "unknown") {
-        this.fail(lookup, "rolling_back", "rollback_unknown");
+        failRollback("rollback_unknown");
         return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
       }
       if (afterWithdraw.status !== "missing") {
-        this.fail(lookup, "rolling_back", "rollback_failed");
+        failRollback("rollback_failed");
         return { restored: false, recoveryRequired: true, reason: "迁移回退没有完成，目标自动化仍然存在。" };
       }
     }
     if (sourceBefore.status === "paused") {
       const restored = await this.setSource(control, lookup, true, rollbackOperationId);
       if (restored.status === "unknown") {
-        this.fail(lookup, "rolling_back", "rollback_unknown");
+        failRollback("rollback_unknown");
         return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
       }
       if (restored.status !== "running" || restored.sourceFingerprint !== lookup.sourceFingerprint) {
-        this.fail(lookup, "rolling_back", "rollback_failed");
+        failRollback("rollback_failed");
         return { restored: false, recoveryRequired: true, reason: ROLLBACK_FAILURE_REASON };
       }
     }
     const finalSource = await this.readSource(control, lookup.ruleRef);
     const finalTarget = await this.readTarget(request.deploymentId, request.target);
     if (finalSource.status === "unknown" || finalTarget.status === "unknown") {
-      this.fail(lookup, "rolling_back", "rollback_unknown");
+      failRollback("rollback_unknown");
       return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
     }
     if (finalSource.status !== "running" || finalSource.sourceFingerprint !== lookup.sourceFingerprint
       || finalTarget.status !== "missing") {
-      this.fail(lookup, "rolling_back", "rollback_failed");
+      failRollback("rollback_failed");
       return { restored: false, recoveryRequired: true, reason: ROLLBACK_FAILURE_REASON };
     }
-    if (!this.runtime.restoreRule({ migrationId: lookup.migrationId, ruleRef: lookup.ruleRef })) {
-      this.fail(lookup, "rolling_back", "rollback_unknown");
+    if (!this.runtime.restoreRule({
+      migrationId: lookup.migrationId,
+      ruleRef: lookup.ruleRef,
+      from: "rolling_back",
+      expectedRollbackOperationId: rollbackOperationId,
+    })) {
+      failRollback("rollback_unknown");
       return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
     }
     return { restored: true };
@@ -973,9 +1015,36 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     lookup: Exclude<HomeAutomationMigrationDeploymentLookup, { readonly status: "not_migration" | "ambiguous" }>,
     from: "ready" | "switching" | "verified" | "rolling_back",
     reason: HomeAutomationMigrationRuleWorkflowFailureReason,
+    expectedOperationId?: string,
   ): void {
     try {
-      this.runtime.failRuleWorkflow({ migrationId: lookup.migrationId, ruleRef: lookup.ruleRef, from, reason });
+      const base = { migrationId: lookup.migrationId, ruleRef: lookup.ruleRef };
+      if (from === "ready") {
+        if (reason !== "source_stale" && reason !== "switch_unknown") return;
+        this.runtime.failRuleWorkflow({ ...base, from, reason });
+        return;
+      }
+      if (from === "verified") {
+        if (reason !== "verification_failed") return;
+        const expectedSwitchOperationId = expectedOperationId
+          ?? (lookup.status === "governed" ? lookup.switchOperationId : undefined);
+        if (!hasNonEmptyString(expectedSwitchOperationId)) return;
+        this.runtime.failRuleWorkflow({ ...base, from, reason, expectedSwitchOperationId });
+        return;
+      }
+      if (from === "switching") {
+        if (reason !== "switch_failed" && reason !== "switch_unknown" && reason !== "verification_failed") return;
+        const expectedSwitchOperationId = expectedOperationId
+          ?? (lookup.status === "governed" ? lookup.switchOperationId : undefined);
+        if (!hasNonEmptyString(expectedSwitchOperationId)) return;
+        this.runtime.failRuleWorkflow({ ...base, from, reason, expectedSwitchOperationId });
+        return;
+      }
+      if (reason !== "rollback_failed" && reason !== "rollback_unknown") return;
+      const expectedRollbackOperationId = expectedOperationId
+        ?? (lookup.status === "governed" ? lookup.rollbackOperationId : undefined);
+      if (!hasNonEmptyString(expectedRollbackOperationId)) return;
+      this.runtime.failRuleWorkflow({ ...base, from, reason, expectedRollbackOperationId });
     } catch {
       // The durable CAS remains the source of truth if a concurrent writer wins.
     }
@@ -986,11 +1055,12 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "ready" | "governed" }>,
     control: ForeignRuleControlHandle,
     failure: "switch_failed" | "verification_failed",
+    expectedSwitchOperationId: string,
   ): Promise<"known" | "switch_unknown"> {
     let withdrawn: { readonly restored: boolean };
     try {
       if (this.base.withdraw === undefined) {
-        this.fail(lookup, "switching", failure);
+        this.fail(lookup, "switching", failure, expectedSwitchOperationId);
         return "known";
       }
       withdrawn = await this.base.withdraw({
@@ -1000,43 +1070,43 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
         actor: request.actor,
       });
     } catch {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
       return "switch_unknown";
     }
     if (!withdrawn.restored) {
-      this.fail(lookup, "switching", failure);
+      this.fail(lookup, "switching", failure, expectedSwitchOperationId);
       return "known";
     }
     const afterWithdraw = await this.readTarget(request.intent.deploymentId, request.intent.target);
     if (afterWithdraw.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
       return "switch_unknown";
     }
     if (afterWithdraw.status !== "missing") {
-      this.fail(lookup, "switching", failure);
+      this.fail(lookup, "switching", failure, expectedSwitchOperationId);
       return "known";
     }
     const restored = await this.setSource(control, lookup, true, operationId("restore", request.proposalId, request.revision, lookup));
     if (restored.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
       return "switch_unknown";
     }
     if (restored.status !== "running" || restored.sourceFingerprint !== lookup.sourceFingerprint) {
-      this.fail(lookup, "switching", failure);
+      this.fail(lookup, "switching", failure, expectedSwitchOperationId);
       return "known";
     }
     const finalSource = await this.readSource(control, lookup.ruleRef);
     const finalTarget = await this.readTarget(request.intent.deploymentId, request.intent.target);
     if (finalSource.status === "unknown" || finalTarget.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown");
+      this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
       return "switch_unknown";
     }
     if (finalSource.status !== "running" || finalSource.sourceFingerprint !== lookup.sourceFingerprint
       || finalTarget.status !== "missing") {
-      this.fail(lookup, "switching", failure);
+      this.fail(lookup, "switching", failure, expectedSwitchOperationId);
       return "known";
     }
-    this.fail(lookup, "switching", failure);
+    this.fail(lookup, "switching", failure, expectedSwitchOperationId);
     if (failure !== "verification_failed") {
       this.restoreFailedSwitchAfterReadback({
         proposalId: request.proposalId,
@@ -1079,7 +1149,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     }
   }
 
-  private async readTarget(deploymentId: string, target: string): Promise<{ readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string }> {
+  private async readTarget(deploymentId: string, target: string): Promise<TargetReadback> {
     try {
       return await this.base.status?.({ deploymentId, target }) ?? { status: "unknown" };
     } catch {
@@ -1095,6 +1165,30 @@ type FailedSwitchRecoveryRequest = {
   readonly actor: string;
   readonly lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "ready" | "governed" }>;
 };
+
+type TargetReadback = {
+  readonly status: "running" | "paused" | "missing" | "unknown";
+  readonly configFingerprint?: string;
+};
+
+type RollbackTargetCheck =
+  | { readonly status: "missing" | "matched" }
+  | { readonly status: "unsafe"; readonly reason: string; readonly failureReason: "rollback_failed" | "rollback_unknown" };
+
+function rollbackTargetCheck(target: TargetReadback, expectedFingerprint: string | undefined): RollbackTargetCheck {
+  if (target.status === "missing") return { status: "missing" };
+  if (target.status === "unknown") {
+    return { status: "unsafe", reason: ROLLBACK_UNKNOWN_REASON, failureReason: "rollback_unknown" };
+  }
+  if (!hasNonEmptyString(expectedFingerprint) || target.configFingerprint !== expectedFingerprint) {
+    return {
+      status: "unsafe",
+      reason: ROLLBACK_TARGET_FINGERPRINT_FAILURE_REASON,
+      failureReason: "rollback_failed",
+    };
+  }
+  return { status: "matched" };
+}
 
 type FailedSwitchRecoveryResult =
   | { readonly restored: true }
