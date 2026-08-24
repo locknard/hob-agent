@@ -1553,12 +1553,12 @@ export class SqliteProposalStore {
         throw new ProposalStoreError("lifecycle_invalid", "Only a migration requiring recovery can start an attempt");
       }
       const previous = current.recoveryAttempts ?? [];
-      if (previous.length >= 50) throw new ProposalStoreError("lifecycle_invalid", "Recovery attempt limit reached");
       const actor = input.actor.trim();
       return {
         ...current,
         revision,
-        recoveryAttempts: [...previous, {
+        // Keep the latest attempt identity while the persisted history rolls.
+        recoveryAttempts: [...previous.slice(-49), {
           id: `recovery-${this.id()}`,
           actor,
           revision,

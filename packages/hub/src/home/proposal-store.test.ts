@@ -968,6 +968,140 @@ test("projects a migration withdrawal failure into recovery_required and records
   }
 });
 
+test("rolls recovery attempts while preserving the newest active attempt across memory and reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposals-recovery-rollover-"));
+  try {
+    for (const path of [":memory:", join(directory, "proposals.sqlite")]) {
+      const firstStore = new SqliteProposalStore({ path, now: () => createdAt });
+      let store = firstStore;
+      try {
+        const created = store.createMigrationGoverned(input({
+          artifactCandidate,
+          dedupKey: `recovery-rollover:${path}`,
+          idempotencyKey: `recovery-rollover:${path}:v1`,
+          provenance: { producer: "home-automation-migration" },
+        }));
+        assert.equal(created.kind, "created");
+        if (created.kind !== "created") throw new Error("expected migration proposal");
+        const ready = prepareToReady(store, created.proposal.id);
+        const enabling = store.decideProposal({
+          proposalId: ready.id,
+          expectedRevision: ready.revision,
+          decision: "approve",
+          reviewer: "household-owner",
+          deploymentIntent: {
+            deploymentId: "hob_recovery_rollover",
+            target: "ha-main",
+            targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }],
+          },
+        });
+        const active = store.recordProposalDeployment({
+          proposalId: enabling.id,
+          expectedRevision: enabling.revision,
+          outcome: {
+            status: "verified",
+            deploymentId: "hob_recovery_rollover",
+            target: "ha-main",
+            configFingerprint: `sha256:${"c".repeat(64)}`,
+          },
+        });
+        let current = store.markRecoveryRequired({
+          proposalId: active.id,
+          expectedRevision: active.revision,
+          actor: "system",
+          reason: "原有规则的恢复结果暂时无法确认。",
+        });
+
+        // Seed the bounded edge directly so the fixture remains valid under
+        // the proposal audit's own 100-event bound.
+        const seededRevision = current.revision + 50;
+        const seededAttempts = Array.from({ length: 50 }, (_, index) => ({
+          id: `recovery-seed-${index}`,
+          actor: `member:recovery-${index}`,
+          revision: current.revision + index + 1,
+          startedAt: createdAt,
+          reason: `恢复尝试 ${index} 未完成。`,
+        }));
+        const seeded = {
+          ...current,
+          revision: seededRevision,
+          updatedAt: createdAt,
+          recoveryAttempts: seededAttempts,
+          audit: [...current.audit, {
+            id: "audit-seeded-recovery-limit",
+            at: createdAt,
+            action: "recovery_failed" as const,
+            actor: "member:recovery-49",
+            revision: seededRevision,
+            note: "恢复尝试 49 未完成。",
+          }],
+        };
+        const raw = (store as unknown as { db: DatabaseSync }).db;
+        raw.prepare("UPDATE proposals SET revision = ?, updated_at = ?, payload_json = ? WHERE proposal_id = ?")
+          .run(seededRevision, createdAt, JSON.stringify(seeded), current.id);
+        current = store.get(current.id)!;
+
+        const started = store.beginRecoveryAttempt({
+          proposalId: current.id,
+          expectedRevision: current.revision,
+          actor: "member:recovery-latest",
+        });
+        assert.equal(started.recoveryAttempts?.length, 50);
+        assert.deepEqual(started.recoveryAttempts?.map((attempt) => attempt.actor), [
+          ...Array.from({ length: 49 }, (_, index) => `member:recovery-${index + 1}`),
+          "member:recovery-latest",
+        ]);
+        assert.equal(started.recoveryAttempts?.at(-1)?.revision, started.revision);
+        assert.equal(started.recoveryAttempts?.at(-1)?.reason, undefined);
+        const latestAudit = started.audit.at(-1);
+        assert.equal(latestAudit?.action, "recovery_started");
+        assert.equal(latestAudit?.actor, "member:recovery-latest");
+        assert.equal(latestAudit?.revision, started.revision);
+        assert.throws(() => store.beginRecoveryAttempt({
+          proposalId: started.id,
+          expectedRevision: current.revision,
+          actor: "member:recovery-race",
+        }), (error: unknown) => error instanceof ProposalStoreError && error.code === "revision_conflict");
+
+        if (path !== ":memory:") {
+          store.close();
+          store = new SqliteProposalStore({ path, now: () => createdAt });
+          const reopened = store.get(started.id);
+          assert.ok(reopened);
+          assert.equal(reopened.recoveryAttempts?.length, 50);
+          assert.equal(reopened.recoveryAttempts?.[0]?.actor, "member:recovery-1");
+          assert.equal(reopened.recoveryAttempts?.at(-1)?.id, started.recoveryAttempts?.at(-1)?.id);
+          assert.equal(reopened.audit.at(-1)?.id, latestAudit?.id);
+        }
+
+        const failed = store.recordRecoveryFailure({
+          proposalId: started.id,
+          expectedRevision: started.revision,
+          actor: "member:recovery-latest",
+          reason: "最新恢复尝试仍未完成。",
+        });
+        assert.equal(failed.recoveryAttempts?.length, 50);
+        assert.equal(failed.recoveryAttempts?.at(-1)?.id, started.recoveryAttempts?.at(-1)?.id);
+        assert.equal(failed.recoveryAttempts?.at(-1)?.reason, "最新恢复尝试仍未完成。");
+        assert.equal(failed.audit.at(-1)?.action, "recovery_failed");
+        assert.equal(failed.audit.at(-1)?.revision, failed.revision);
+
+        const closed = store.completeRecovery({
+          proposalId: failed.id,
+          expectedRevision: failed.revision,
+          actor: "member:recovery-latest",
+        });
+        assert.equal(closed.lifecycle, "closed");
+        assert.equal(closed.recoveryAttempts, undefined);
+      } finally {
+        store.close();
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects a persisted recovery_required row without approved recovery evidence", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-proposals-recovery-corrupt-"));
   const path = join(directory, "proposals.sqlite");
