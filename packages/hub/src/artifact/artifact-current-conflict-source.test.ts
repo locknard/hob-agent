@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ArtifactRegistryEntry } from "./artifact-registry.js";
 import {
   createArtifactEvidenceAttestation,
+  computeConflictInputIdentity,
   type ArtifactEvidenceAttestation,
 } from "./artifact-assessments.js";
 import type {
@@ -528,7 +529,7 @@ test("captures notify-only artifacts for every evidence bridge even with an empt
     evidence,
     snapshots: [before, after],
     catalogs: [
-      availableCatalog("bridge-a", "epoch-a", [{ ruleRef: "ha-notify-a", name: "kitchen light notice" }], 3),
+      availableCatalog("bridge-a", "epoch-a", [{ ruleRef: "ha-notify-a", name: "window reminder" }], 3),
       availableCatalog("bridge-b", "epoch-b", [{ ruleRef: "vendor-notify-b", name: "house note" }], 5),
     ],
     existing: new StubExistingConflict(baseResult(), []),
@@ -541,6 +542,7 @@ test("captures notify-only artifacts for every evidence bridge even with an empt
   assert.ok(cut);
   assert.deepEqual(cut.foreignRuleChecks.map((check) => check.bridgeId), ["bridge-a", "bridge-b"]);
   assert.deepEqual(cut.foreignRuleChecks.map((check) => check.watermark.lastSeq), [3, 5]);
+  assert.deepEqual(cut.foreignRuleChecks.map((check) => check.findings.length), [0, 1]);
   assert.equal(cut.currentConflict.result.findings.every((finding) => finding.kind === "foreign_rule"), true);
   assert.deepEqual(environment.existing instanceof StubExistingConflict ? environment.existing.calls[0]!.findings : [], []);
 });
@@ -766,7 +768,9 @@ test("binds evidence attestation and input identities into the composed source i
 });
 
 test("covers the complete bounded foreign-rule catalog without truncating its identity", async () => {
-  const rules = Array.from({ length: 256 }, (_, index) => ({ ruleRef: `rule-${index}` }));
+  const rules = Array.from({ length: 256 }, (_, index) => index === 0
+    ? { ruleRef: `rule-${index}`, name: "Turn on kitchen light" }
+    : { ruleRef: `rule-${index}` });
   const environment = makeSource({ catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", rules)] });
   const port = await captureEnvironment(environment);
   const result = port.assess(expectedQuery(environment.value));
@@ -792,7 +796,7 @@ test("covers the complete bounded foreign-rule catalog without truncating its id
   );
 });
 
-test("treats every non-empty opaque catalog as a possible overlap instead of none", async () => {
+test("does not flag an opaque catalog without text overlap", async () => {
   const environment = makeSource({
     catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", [{ ruleRef: "opaque-rule-without-structure" }])],
   });
@@ -800,23 +804,19 @@ test("treats every non-empty opaque catalog as a possible overlap instead of non
   const result = port.assess(expectedQuery(environment.value));
   const cut = port.compileCut();
 
-  assert.equal(result.status, "possible_overlap");
-  assert.equal(result.findings.length, 1);
-  assert.deepEqual(result.findings[0], {
-    kind: "foreign_rule",
-    severity: "warning",
-    reason: "possible_overlap",
-    reference: result.findings[0]!.reference,
-  });
-  assert.match(result.findings[0]!.reference!, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(result.status, "none");
+  assert.deepEqual(result.findings, []);
   assert.ok(cut);
-  assert.equal(cut.foreignRuleChecks[0]!.findings.length, 1);
+  assert.equal(cut.foreignRuleChecks[0]!.findings.length, 0);
   const encoded = JSON.stringify(result);
   assert.equal(encoded.includes("opaque-rule-without-structure"), false);
 });
 
-test("uses one catalog-level opaque finding beyond the finding budget", async () => {
-  const rules = Array.from({ length: 21 }, (_, index) => ({ ruleRef: `opaque-budget-rule-${index}` }));
+test("uses one catalog-level overlap finding beyond the finding budget", async () => {
+  const rules = Array.from({ length: 21 }, (_, index) => ({
+    ruleRef: `opaque-budget-rule-${index}`,
+    name: "Turn on kitchen light",
+  }));
   const environment = makeSource({ catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", rules)] });
   const port = await captureEnvironment(environment);
   const result = port.assess(expectedQuery(environment.value));
@@ -856,6 +856,98 @@ test("adds deterministic opaque overlap findings without returning rule metadata
   assert.equal(encoded.includes("provider"), false);
   assert.equal(encoded.includes("native"), false);
   assert.equal(encoded.includes("http"), false);
+});
+
+test("excludes the exact migration source rule from current conflict and its existing finding", async () => {
+  const sourceRuleRef = "ha-source-rule";
+  const existingFinding: ArtifactRiskConflictFinding = {
+    kind: "foreign_rule",
+    severity: "warning",
+    reason: "possible_overlap",
+    reference: computeConflictInputIdentity({ kind: "foreign-rule-reference", ruleRef: sourceRuleRef }),
+  };
+  const environment = makeSource({
+    catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", [{
+      ruleRef: sourceRuleRef,
+      name: "Turn on kitchen light",
+    }])],
+    existing: new StubExistingConflict(baseResult([existingFinding])),
+  });
+  const source = new ArtifactCurrentConflictSource({
+    proposals: new StubProposalSource(proposal(environment.value)),
+    registry: new StubRegistry(environment.value),
+    homeWorld: environment.homeWorld,
+    existing: environment.existing,
+    migration: {
+      getMigrationExpectedSourceRuleRef: () => ({ status: "expected", ruleRef: sourceRuleRef }),
+    },
+  } as never);
+
+  const port = await captureEnvironment({ ...environment, source });
+  const result = port.assess(expectedQuery(environment.value));
+  const cut = port.compileCut();
+
+  assert.equal(result.status, "none");
+  assert.deepEqual(result.findings, []);
+  assert.ok(cut);
+  assert.deepEqual(cut.foreignRuleChecks[0]!.findings, []);
+  assert.equal(JSON.stringify(cut).includes(sourceRuleRef), false);
+});
+
+test("keeps other text-overlapping rules as warnings after migration-source exclusion", async () => {
+  const sourceRuleRef = "ha-source-rule";
+  const environment = makeSource({
+    catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", [
+      { ruleRef: sourceRuleRef, name: "Turn on kitchen light" },
+      { ruleRef: "ha-other-rule", name: "Turn on kitchen fan" },
+    ])],
+  });
+  const source = new ArtifactCurrentConflictSource({
+    proposals: new StubProposalSource(proposal(environment.value)),
+    registry: new StubRegistry(environment.value),
+    homeWorld: environment.homeWorld,
+    existing: environment.existing,
+    migration: {
+      getMigrationExpectedSourceRuleRef: () => ({ status: "expected", ruleRef: sourceRuleRef }),
+    },
+  } as never);
+
+  const result = (await captureEnvironment({ ...environment, source })).assess(expectedQuery(environment.value));
+  assert.equal(result.status, "possible_overlap");
+  assert.equal(result.findings.filter((finding) => finding.kind === "foreign_rule").length, 1);
+});
+
+test("fails closed when the migration source lookup or source catalog is unavailable", async () => {
+  const unavailableEnvironment = makeSource();
+  const unavailableSource = new ArtifactCurrentConflictSource({
+    proposals: new StubProposalSource(proposal(unavailableEnvironment.value)),
+    registry: new StubRegistry(unavailableEnvironment.value),
+    homeWorld: unavailableEnvironment.homeWorld,
+    existing: unavailableEnvironment.existing,
+    migration: {
+      getMigrationExpectedSourceRuleRef: () => ({ status: "unavailable" }),
+    },
+  } as never);
+  const unavailable = await captureEnvironment({ ...unavailableEnvironment, source: unavailableSource });
+  assert.equal(unavailable.assess(expectedQuery(unavailableEnvironment.value)).status, "unavailable");
+
+  const duplicated = makeSource({
+    catalogs: [availableCatalog("bridge-relevant", "epoch-relevant", [
+      { ruleRef: "ha-source-rule", name: "Turn on kitchen light" },
+      { ruleRef: "ha-source-rule", name: "Turn on kitchen light again" },
+    ])],
+  });
+  const duplicatedSource = new ArtifactCurrentConflictSource({
+    proposals: new StubProposalSource(proposal(duplicated.value)),
+    registry: new StubRegistry(duplicated.value),
+    homeWorld: duplicated.homeWorld,
+    existing: duplicated.existing,
+    migration: {
+      getMigrationExpectedSourceRuleRef: () => ({ status: "expected", ruleRef: "ha-source-rule" }),
+    },
+  } as never);
+  const ambiguous = await captureEnvironment({ ...duplicated, source: duplicatedSource });
+  assert.equal(ambiguous.assess(expectedQuery(duplicated.value)).status, "unavailable");
 });
 
 test("preserves blocking findings from the injected source while composing current overlap", async () => {

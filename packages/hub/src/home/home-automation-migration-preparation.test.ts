@@ -150,6 +150,7 @@ test("creates a migration-lane review draft from one exact eligible migration ca
   const input = proposals.inputs[0] as Record<string, unknown>;
   assert.equal(input.kind, "automation-draft");
   assert.equal(input.title, candidate.title);
+  assert.equal(input.sourceRuleRef, "rule-1");
   assert.deepEqual(input.selectedHwIds, ["hw-device-living-room"]);
   assert.deepEqual(input.artifactCandidate, { schemaVersion: "1", content: CONTENT });
   assert.equal(Object.hasOwn(input, "provenance"), false);

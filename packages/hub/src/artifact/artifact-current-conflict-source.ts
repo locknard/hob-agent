@@ -58,6 +58,20 @@ export interface ArtifactCurrentConflictHomeWorldPort {
   readonly foreignRuleCatalog: () => Promise<readonly HomeWorldForeignRuleCatalog[]>;
 }
 
+/** Root-private migration identity result; this never crosses the Artifact contract. */
+export type ArtifactCurrentConflictMigrationSourceResult =
+  | { readonly status: "expected"; readonly ruleRef: string }
+  | { readonly status: "not_migration" }
+  | { readonly status: "unavailable" };
+
+/** Optional store seam used only to bind the exact migration source rule. */
+export interface ArtifactCurrentConflictMigrationProposalPort {
+  readonly getMigrationExpectedSourceRuleRef: (
+    proposalId: string,
+    revision: number,
+  ) => ArtifactCurrentConflictMigrationSourceResult;
+}
+
 /** The exact approved Proposal source used to read title, summary, and intent. */
 export interface ArtifactCurrentConflictCapturePort {
   readonly capture: (input: {
@@ -92,6 +106,8 @@ export interface ArtifactCurrentConflictSourceOptions {
   readonly homeWorld: ArtifactCurrentConflictHomeWorldPort;
   /** Existing Hub-owned source-bound conflict result provider. */
   readonly existing: ArtifactRiskConflictPort;
+  /** Optional root-private migration source lookup; standard proposals omit it. */
+  readonly migration?: ArtifactCurrentConflictMigrationProposalPort;
 }
 
 export type ArtifactCurrentConflictSourceErrorCode = "invalid_input";
@@ -162,10 +178,11 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
   private readonly registry: ArtifactCurrentConflictArtifactRegistry;
   private readonly homeWorld: ArtifactCurrentConflictHomeWorldPort;
   private readonly existing: ArtifactRiskConflictPort;
+  private readonly migration: ArtifactCurrentConflictMigrationProposalPort | undefined;
 
   constructor(options: ArtifactCurrentConflictSourceOptions) {
     if (!isPlainObject(options)
-      || !hasExactKeys(options, ["proposals", "registry", "homeWorld", "existing"])
+      || !hasOnlyKeys(options, ["proposals", "registry", "homeWorld", "existing", "migration"])
       || !options.proposals
       || typeof options.proposals.withApprovedProposalAtRevision !== "function") {
       throw new ArtifactCurrentConflictSourceError("invalid_input", "Approved Proposal source is required");
@@ -184,10 +201,17 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
       || typeof existing.assess !== "function") {
       throw new ArtifactCurrentConflictSourceError("invalid_input", "Existing conflict source is required");
     }
+    const migration = options.migration;
+    if (migration !== undefined
+      && ((typeof migration !== "object" && typeof migration !== "function")
+        || typeof migration.getMigrationExpectedSourceRuleRef !== "function")) {
+      throw new ArtifactCurrentConflictSourceError("invalid_input", "Migration source lookup is invalid");
+    }
     this.proposals = options.proposals;
     this.registry = options.registry;
     this.homeWorld = options.homeWorld;
     this.existing = existing;
+    this.migration = migration;
   }
 
   /** Capture one exact ArtifactRef/evidence pair and return its immutable synchronous port. */
@@ -242,14 +266,24 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
     const catalogs = normalizeCurrentCatalogs(rawCatalogs, before);
     if (catalogs === undefined) return unavailablePort(requestedRef, capabilityIds);
 
+    const migrationSource = this.readMigrationSource(draft);
+    if (migrationSource.status === "unavailable") return unavailablePort(requestedRef, capabilityIds);
+    const filteredCatalogs = migrationSource.status === "expected"
+      ? filterMigrationSourceRule(catalogs, migrationSource.ruleRef)
+      : catalogs;
+    if (filteredCatalogs === undefined) return unavailablePort(requestedRef, capabilityIds);
+
     const existing = this.readExisting(requestedRef, capabilityIds);
     if (existing === undefined) return unavailablePort(requestedRef, capabilityIds);
+    const filteredExisting = migrationSource.status === "expected"
+      ? removeMigrationSourceFinding(existing, migrationSource.ruleRef)
+      : existing;
 
     let currentFindingsByBridge: readonly { readonly bridgeId: string; readonly findings: readonly ArtifactRiskConflictFinding[] }[];
     try {
-      currentFindingsByBridge = catalogs.map((catalog) => ({
+      currentFindingsByBridge = filteredCatalogs.map((catalog) => ({
         bridgeId: catalog.bridgeId,
-        findings: catalog.rules.length === 0 ? [] : [{
+        findings: catalog.rules.some((rule) => hasTextOverlap(rule.name, approved)) ? [{
           kind: "foreign_rule" as const,
           severity: "warning" as const,
           reason: "possible_overlap" as const,
@@ -258,20 +292,20 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
             bridgeId: catalog.bridgeId,
             catalogIdentity: catalog.identity,
           }),
-        }],
+        }] : [],
       }));
     } catch {
       return unavailablePort(requestedRef, capabilityIds);
     }
     const currentFindings = currentFindingsByBridge.flatMap(({ findings }) => findings);
 
-    const findings = deduplicateFindings([...existing.findings, ...currentFindings]);
+    const findings = deduplicateFindings([...filteredExisting.findings, ...currentFindings]);
     if (findings.length > MAX_FINDINGS) return unavailablePort(requestedRef, capabilityIds);
 
     let foreignRuleChecks: readonly NeutralConflictInput[];
     let foreignCatalogIdentity: string;
     try {
-      foreignRuleChecks = catalogs.map((catalog) => {
+      foreignRuleChecks = filteredCatalogs.map((catalog) => {
         const bridge = before.bridges.find((item) => item.bridgeId === catalog.bridgeId);
         const bridgeFindings = currentFindingsByBridge.find((item) => item.bridgeId === catalog.bridgeId);
         if (bridge === undefined || bridgeFindings === undefined) throw new Error("Current bridge cut is missing");
@@ -296,7 +330,7 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
         hwCapabilityIds: capabilityIds,
         evidenceAttestationId: evidence.attestationId,
         evidenceInputIdentity: evidence.inputIdentity,
-        existingResult: existing.result,
+        existingResult: filteredExisting.result,
         approvedText: {
           title: approved.title,
           summary: approved.summary,
@@ -309,7 +343,7 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
           freshness: bridge.freshness,
           gapCount: bridge.gapCount,
         })),
-        catalogs: catalogs.map((catalog) => ({
+        catalogs: filteredCatalogs.map((catalog) => ({
           bridgeId: catalog.bridgeId,
           epochId: catalog.epochId,
           // Every bounded metadata row is hashed before aggregation. The
@@ -323,7 +357,7 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
       return unavailablePort(requestedRef, capabilityIds);
     }
 
-    const result = composeResult(existing.result, findings, sourceIdentity);
+    const result = composeResult(filteredExisting.result, findings, sourceIdentity);
     let compileCut: ArtifactCurrentConflictCompileCut;
     try {
       compileCut = makeCompileCut(result, sourceIdentity, foreignRuleChecks, foreignCatalogIdentity);
@@ -369,6 +403,33 @@ export class ArtifactCurrentConflictSource implements ArtifactCurrentConflictCap
       return value;
     } catch {
       return undefined;
+    }
+  }
+
+  private readMigrationSource(
+    artifact: ArtifactRevision,
+  ): ArtifactCurrentConflictMigrationSourceResult {
+    if (this.migration === undefined) return { status: "not_migration" };
+    try {
+      const result = this.migration.getMigrationExpectedSourceRuleRef(
+        artifact.sourceProposal.proposalId,
+        artifact.sourceProposal.proposalRevision,
+      );
+      if (isPromiseLike(result) || !isPlainObject(result)) return { status: "unavailable" };
+      if (result.status === "not_migration") {
+        return hasExactKeys(result, ["status"]) ? { status: "not_migration" } : { status: "unavailable" };
+      }
+      if (result.status === "unavailable") {
+        return hasExactKeys(result, ["status"]) ? { status: "unavailable" } : { status: "unavailable" };
+      }
+      if (result.status !== "expected"
+        || !hasExactKeys(result, ["status", "ruleRef"])
+        || !boundedNeutralId(result.ruleRef)) {
+        return { status: "unavailable" };
+      }
+      return { status: "expected", ruleRef: result.ruleRef };
+    } catch {
+      return { status: "unavailable" };
     }
   }
 
@@ -596,6 +657,53 @@ function normalizeCurrentCatalogs(
   return [...relevant.values()].sort((left, right) => compareCodePoints(left.bridgeId, right.bridgeId));
 }
 
+function filterMigrationSourceRule(
+  catalogs: readonly CurrentCatalog[],
+  sourceRuleRef: string,
+): readonly CurrentCatalog[] | undefined {
+  const matches = catalogs.flatMap((catalog) => catalog.rules.filter((rule) => rule.ruleRef === sourceRuleRef));
+  if (matches.length !== 1) return undefined;
+  return catalogs.map((catalog) => {
+    const rules = catalog.rules.filter((rule) => rule.ruleRef !== sourceRuleRef);
+    return catalogWithRules(catalog, rules);
+  });
+}
+
+function catalogWithRules(catalog: CurrentCatalog, rules: readonly CatalogRule[]): CurrentCatalog {
+  const sortedRules = [...rules].sort(compareCatalogRules);
+  return {
+    bridgeId: catalog.bridgeId,
+    epochId: catalog.epochId,
+    lastSeq: catalog.lastSeq,
+    rules: Object.freeze(sortedRules.map((rule) => Object.freeze({ ...rule }))),
+    identity: computeConflictInputIdentity({
+      bridgeId: catalog.bridgeId,
+      epochId: catalog.epochId,
+      lastSeq: catalog.lastSeq,
+      ruleMetadataChunks: hashRuleMetadata(catalog.bridgeId, sortedRules),
+    }),
+  };
+}
+
+function removeMigrationSourceFinding(
+  existing: ExistingConflict,
+  sourceRuleRef: string,
+): ExistingConflict {
+  const sourceReference = computeConflictInputIdentity({ kind: "foreign-rule-reference", ruleRef: sourceRuleRef });
+  const findings = existing.findings.filter((finding) =>
+    !(finding.kind === "foreign_rule"
+      && finding.reason === "possible_overlap"
+      && finding.reference === sourceReference));
+  return {
+    findings,
+    result: freezeResult({
+      status: statusForFindings(findings),
+      findings,
+      sourceIdentity: existing.result.sourceIdentity,
+    }),
+  };
+}
+
 function normalizeCurrentCatalog(
   value: Record<string, unknown>,
   expectedEpochId: string,
@@ -705,6 +813,13 @@ function composeResult(
     ? "duplicate"
     : existing.status === "possible_overlap" || findings.length > 0 ? "possible_overlap" : "none";
   return freezeResult({ status, findings, sourceIdentity });
+}
+
+function statusForFindings(
+  findings: readonly ArtifactRiskConflictFinding[],
+): "none" | "duplicate" | "possible_overlap" {
+  if (findings.length === 0) return "none";
+  return findings.some((finding) => finding.reason === "duplicate") ? "duplicate" : "possible_overlap";
 }
 
 function semanticWatermark(bridge: WorldBridgeCut): NeutralWatermark {

@@ -34,6 +34,7 @@ function deploymentFixture() {
   let workflow: "ready" | "verified" = "ready";
   const base: ProposalDeploymentPort = {
     resolveIntent: () => BASE_REQUEST.intent,
+    preflight: () => ({ status: "compatible" as const }),
     deploy: async () => {
       events.push("base.deploy");
       return {
@@ -137,6 +138,17 @@ function deploymentFixture() {
   };
   return { events, failCalls, withdrawRequests, runtime, base, control, sourcePort, wrapper };
 }
+
+test("preflights current semantics before pausing the source rule or opening a switch CAS", async () => {
+  const { events, base, wrapper } = deploymentFixture();
+  base.preflight = () => ({ status: "blocked" as const, reason: "state_stale" });
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.equal(outcome.status, "failed");
+  assert.match((outcome as { readonly reason: string }).reason, /当前设备状态|重新准备/);
+  assert.deepEqual(events, [], "a blocked preflight leaves both the source and target untouched");
+});
 
 function governedLookup(
   workflowStatus: "switching" | "needs_attention" | "rolling_back",

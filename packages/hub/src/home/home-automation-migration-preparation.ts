@@ -225,6 +225,7 @@ function createDraftInput(
     kind: "automation-draft",
     title: candidate.title,
     summary: "请在启用前查看这条迁移的自动化。",
+    sourceRuleRef: input.ruleRef,
     dedupKey: `home-automation-migration:${identity}`,
     idempotencyKey: `home-automation-migration-attempt:${identity}`,
     selectedHwIds,

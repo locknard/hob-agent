@@ -179,6 +179,7 @@ class StubHomeWorld extends Service {
       bridgeId: "bridge-a",
       status: "available" as const,
       epochId: "epoch-a",
+      lastSeq: 8,
       rules: [{ ruleRef: "rule-1", name: "Arrival light", enabled: true }],
     }, ...(this.includeUnavailableBridge ? [{
       bridgeId: "bridge-b",
@@ -459,6 +460,67 @@ test("generic drafts cannot choose the migration lane or masquerade as its produ
       }),
       (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
     );
+    await assert.rejects(
+      () => ctx.homeProposals.createDraft({
+        ...base,
+        idempotencyKey: "generic-migration-source:v1",
+        sourceRuleRef: "rule-1",
+      } as never),
+      /source rule/i,
+    );
+  } finally {
+    await fiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("migration admission fails closed when the exact source rule is missing or ambiguous", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const base = {
+    kind: "automation-draft" as const,
+    title: "Review one imported light behavior",
+    summary: "A closed migration candidate for household review.",
+    selectedHwIds: ["hw-1"],
+    artifactCandidate: automationCandidate,
+    rationale,
+    risk: { level: "medium" as const, reasons: ["Imported behavior needs review."] },
+    intent: {
+      type: "home-automation-migration",
+      description: "Review one imported light behavior",
+      rollback: "Reject the imported behavior.",
+    },
+  };
+  try {
+    await assert.rejects(
+      () => ctx.homeProposals.createMigrationDraftGoverned({
+        ...base,
+        idempotencyKey: "migration-source:missing",
+        sourceRuleRef: "not-in-catalog",
+      }),
+      /missing or ambiguous/i,
+    );
+
+    world.foreignRuleCatalog = async () => [{
+      bridgeId: "bridge-a",
+      status: "available" as const,
+      epochId: "epoch-a",
+      lastSeq: 8,
+      rules: [
+        { ruleRef: "rule-1", name: "Arrival light", enabled: true },
+        { ruleRef: "rule-1", name: "Arrival light duplicate", enabled: true },
+      ],
+    }];
+    await assert.rejects(
+      () => ctx.homeProposals.createMigrationDraftGoverned({
+        ...base,
+        idempotencyKey: "migration-source:ambiguous",
+        sourceRuleRef: "rule-1",
+      }),
+      /missing or ambiguous/i,
+    );
   } finally {
     await fiber.dispose();
     await ctx.fiber.dispose();
@@ -474,6 +536,7 @@ test("the Hub-owned migration draft API injects its lane into the normal prepara
     title: "Review one imported light behavior",
     summary: "A closed migration candidate for household review.",
     idempotencyKey: "migration-lane:v1",
+    sourceRuleRef: "rule-1",
     selectedHwIds: ["hw-1"],
     artifactCandidate: automationCandidate,
     rationale,
@@ -489,6 +552,10 @@ test("the Hub-owned migration draft API injects its lane into the normal prepara
     assert.equal(result.kind, "created");
     if (result.kind !== "created") throw new Error("expected migration proposal");
     assert.equal(result.proposal.reviewLane, "migration");
+    assert.deepEqual(result.proposal.conflictCheck.matches, [{
+      identity: "rule-1",
+      relation: "possible_overlap",
+    }]);
     assert.equal(result.proposal.lifecycle, "preparing");
     completePreparation(serviceStore(ctx.homeProposals), result.proposal.id);
     const ready = ctx.homeProposals.markProposalReady({ proposalId: result.proposal.id });

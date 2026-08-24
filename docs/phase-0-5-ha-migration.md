@@ -36,6 +36,13 @@ Artifact id/revision/content hash、compile result 和 dry-run result；Store �
 受信 HomeWorld 翻译路径复查候选和来源指纹。任何 source cut 漂移、证据缺失、制品版本
 变化或 receipt 不一致都会停在固定的 needs-attention 状态，且不会执行远端写入。
 
+制品准备 job 只有在 compile、dry-run 结果完成耐久提交并尝试 Proposal promotion 后，才向
+迁移 runtime 发送一次 root-private 完成通知。通知只带 job 与 Proposal 的中立 identity；
+迁移 runtime 按唯一 Proposal link 重新读取耐久结果并推进 `translated → simulated → ready`。
+进程重启时，组合根先恢复已提交但尚未关联的 migration selection，再有界扫描最多 100 条
+已成功准备的 job 重放这一通知。扫描不领取 queued job、不创建 Proposal，并隔离损坏记录，
+所以崩溃窗口不会制造新的家庭意图或阻塞其他可恢复工作流。
+
 生产组合根在 HomeWorld 挂载后自动提供这一只读证据端口。端口只读取同一 source cut 下
 完整的规则目录、逐条中立翻译和最近七天的 Hub journal evidence；目录前后必须完全稳定，
 evidence coverage 必须完整且未截断，事件必须来自同一 bridge/epoch 并位于 catalog baseline
@@ -82,6 +89,18 @@ evidence coverage 必须完整且未截断，事件必须来自同一 bridge/epo
 原 HA 规则使用独立、版本化的 `foreignRuleControl@1` 中立扩展进行状态读回和启停。该扩展只接受 `foreignRules@2` 产生的 opaque `ruleRef`、Hub 生成的操作幂等键和预期 source fingerprint；原生配置 id、entity、service、URL 与原生响应始终留在适配器内部。`automations@1` 继续只管理 Hub 创建的自动化，两个扩展互不扩张权限。
 
 家庭成员批准精确 `ready` revision 后，Hub 先读回原规则的运行状态和配置指纹，再原子记录 `switching`。首期切换先停用原规则并确认其为暂停状态，再通过现有 Proposal 部署通道创建并验证 Hob 自动化；这段有界切换窗口不允许原规则和新规则同时运行。Hub 只有在原规则保持暂停、新规则运行、部署 identity 和配置指纹全部匹配时记录 `verified`。任一步出现 stale source、超时、未知结果或读回不一致时，Hub 停止后续写入；已知失败恢复原规则，未知结果先读回再决定恢复或继续，系统不盲目重放命令。
+
+迁移 Proposal 的 generic conflict cut 只排除它正在替换的那一条精确 source rule。该排除由
+Hub-owned migration lane、精确 Proposal revision 和稳定目录中唯一匹配的 opaque ruleRef
+共同证明；标准 Proposal、缺失或歧义匹配不能使用这条出口。目录中的其他规则继续参加
+文本重叠与冲突检查，被排除的 source rule 继续由 source fingerprint、catalog watermark
+和服务端双跑证据约束，绝不从迁移证据链中消失。
+
+家庭成员批准后，Hub 在读取或暂停 source rule 之前，按当前 HomeWorld 的精确 schema、
+schemaVersion、有效状态、新鲜 watermark、predicate 和 action 语义执行一次无写入 preflight；
+目标 binding 和 authority 复核后、目标自动化写入前再次执行同一检查。能力退回 generic
+schema、状态变成 unknown/unavailable/stale、动作映射不再受审查或 schema 漂移时，切换在
+第一笔远端写入前关闭，并要求重新准备精确方案。
 
 回退固定执行 `verified → rolling_back → restored`：Hub 先停止并撤下 Hob 自动化，确认其不再运行，再按切换前快照恢复原规则并读回。回退中的未知结果保留两个自动化的最后已知状态、操作幂等键、actor、精确 Proposal/Artifact revision、source fingerprint 和 bridge watermark，并进入可恢复的 `needs_attention`。
 

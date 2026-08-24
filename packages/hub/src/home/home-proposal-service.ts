@@ -24,7 +24,10 @@ import {
   type SqliteProposalStoreOptions,
   ProposalStoreError,
 } from "./proposal-store.js";
-import type { HomeWorldService } from "../world/home-world-service.js";
+import type {
+  HomeWorldArtifactPlanPreflightResult,
+  HomeWorldService,
+} from "../world/home-world-service.js";
 import { householdCapabilityLabel } from "../world/home-world-service.js";
 import {
   parseArtifactContent,
@@ -53,6 +56,16 @@ export interface ProposalDeploymentPort {
     | { readonly reason: string }
     | { readonly revalidationReason: string; readonly updatedGateDisclosure?: { readonly actionPolicyClasses: readonly ("direct" | "confirmation")[]; readonly confirmationDeviceNames?: readonly string[] } }
     | { readonly blockedKind: "not_configured" | "not_approved" | "unknown_capability" | "protected"; readonly blockedReason: string };
+  /**
+   * Rechecks the approved neutral plan against the current read-side world.
+   * The result is deliberately closed and read-only; providers never cross
+   * this seam and a blocked result carries only a stable household-neutral
+   * reason code.
+   */
+  preflight?(request: {
+    readonly kind: CreateProposalInput["kind"];
+    readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
+  }): HomeWorldArtifactPlanPreflightResult | Promise<HomeWorldArtifactPlanPreflightResult>;
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
@@ -152,6 +165,9 @@ export class HomeProposalService extends Service {
   }
 
   async createDraftGoverned(input: CreateHomeProposalDraftInput): Promise<ProposalCreationResult> {
+    if (isRecord(input) && Object.prototype.hasOwnProperty.call(input, "sourceRuleRef")) {
+      throw new TypeError("Only the Hub-owned migration ingress may select a source rule");
+    }
     return this.createDraftGovernedInLane(input, "standard");
   }
 
@@ -162,15 +178,22 @@ export class HomeProposalService extends Service {
   async createMigrationDraftGoverned(input: CreateHomeMigrationDraftInput): Promise<ProposalCreationResult> {
     if (!isRecord(input)
       || Object.prototype.hasOwnProperty.call(input, "reviewLane")
-      || Object.prototype.hasOwnProperty.call(input, "provenance")) {
+      || Object.prototype.hasOwnProperty.call(input, "provenance")
+      || !isBoundedId(input.sourceRuleRef)) {
       throw new TypeError("Migration review lane is selected by the Hub-owned ingress");
     }
-    return this.createDraftGovernedInLane(input as unknown as CreateHomeProposalDraftInput, "migration");
+    const { sourceRuleRef, ...draft } = input;
+    return this.createDraftGovernedInLane(
+      draft as unknown as CreateHomeProposalDraftInput,
+      "migration",
+      sourceRuleRef,
+    );
   }
 
   private async createDraftGovernedInLane(
     input: CreateHomeProposalDraftInput,
     reviewLane: "standard" | "migration",
+    migrationSourceRuleRef?: string,
   ): Promise<ProposalCreationResult> {
     const artifactCandidate = validateDraftInput(input);
     const world = this.ctx.get("homeWorld") as HomeWorldService | undefined;
@@ -242,17 +265,41 @@ export class HomeProposalService extends Service {
     ]));
     const catalogs = await world.foreignRuleCatalog();
     const catalogsByBridge = new Map(catalogs.map((catalog) => [catalog.bridgeId, catalog]));
-    const conflictAvailable = selectedDevices.length === 0
-      || (relevantBridgeIds.size > 0
-        && [...relevantBridgeIds].every((bridgeId) => catalogsByBridge.get(bridgeId)?.status === "available"));
-    const rules = catalogs.flatMap((catalog) =>
+    const stableCatalogs = catalogs.filter((catalog) => {
+      if (!relevantBridgeIds.has(catalog.bridgeId) || catalog.status !== "available"
+        || catalog.epochId === undefined || catalog.lastSeq === undefined) return false;
+      const watermark = snapshot.watermarkVector?.[catalog.bridgeId]
+        ?? snapshot.bridgeWatermarks.find((candidate) => candidate.bridgeId === catalog.bridgeId);
+      return watermark?.epochId === catalog.epochId && watermark.lastSeq === catalog.lastSeq;
+    });
+    const relevantCatalogs = catalogs.filter((catalog) => relevantBridgeIds.has(catalog.bridgeId));
+    const conflictAvailable = reviewLane === "migration"
+      ? selectedDevices.length === 0
+        || (relevantBridgeIds.size > 0 && [...relevantBridgeIds].every((bridgeId) => {
+          const rows = relevantCatalogs.filter((catalog) => catalog.bridgeId === bridgeId);
+          return rows.length === 1 && stableCatalogs.includes(rows[0]!);
+        }))
+      : selectedDevices.length === 0
+        || (relevantBridgeIds.size > 0
+          && [...relevantBridgeIds].every((bridgeId) => catalogsByBridge.get(bridgeId)?.status === "available"));
+    const rules = (reviewLane === "migration" ? stableCatalogs : catalogs).flatMap((catalog) =>
       relevantBridgeIds.has(catalog.bridgeId) && catalog.status === "available" ? catalog.rules : []);
     const proposalText = `${input.title} ${input.summary} ${input.intent.description}`;
-    const matches = conflictAvailable
-      ? rules.filter((rule) => rule.name !== undefined && overlaps(proposalText, rule.name))
+    let matches: CreateProposalInput["conflictCheck"]["matches"] = [];
+    if (reviewLane === "migration") {
+      if (!conflictAvailable || migrationSourceRuleRef === undefined) {
+        throw new TypeError("Migration source catalog is unavailable");
+      }
+      const sourceMatches = rules.filter((rule) => rule.ruleRef === migrationSourceRuleRef);
+      if (sourceMatches.length !== 1) {
+        throw new TypeError("Migration source rule is missing or ambiguous");
+      }
+      matches = [{ identity: migrationSourceRuleRef, relation: "possible_overlap" }];
+    } else if (conflictAvailable) {
+      matches = rules.filter((rule) => rule.name !== undefined && overlaps(proposalText, rule.name))
         .slice(0, 20)
-        .map((rule) => ({ identity: rule.ruleRef, relation: "possible_overlap" as const }))
-      : [];
+        .map((rule) => ({ identity: rule.ruleRef, relation: "possible_overlap" as const }));
+    }
     const diagnostics = new Map(snapshot.diagnostics.map((item) => [item.bridgeId, item]));
     const currentReferenceCandidates: CreateProposalInput["evidence"]["references"] = selectedDevices.flatMap((device) => {
       if (device.capabilities.length === 0) {
@@ -906,6 +953,7 @@ export interface CreateHomeProposalDraftInput {
 
 /** Migration ingress input: the Hub owns both producer and review-lane fields. */
 export type CreateHomeMigrationDraftInput = Omit<CreateHomeProposalDraftInput, "provenance"> & {
+  readonly sourceRuleRef: string;
   readonly provenance?: never;
   readonly reviewLane?: never;
 };
@@ -981,6 +1029,13 @@ function boundedRationaleText(value: unknown): value is string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isBoundedId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim() === value
+    && value.length > 0
+    && Buffer.byteLength(value, "utf8") <= 200;
 }
 
 function latestObservedAt(values: readonly (string | undefined)[], fallback: string): string {

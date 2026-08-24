@@ -250,7 +250,7 @@ async function waitForReady(context: Context): Promise<void> {
   assert.fail("test peer did not become ready");
 }
 
-test("a test-only peer crosses the neutral execution matrix without a Home Assistant adapter", async () => {
+test("a test-only peer stays fail-closed until its automation semantics are explicitly reviewed", async () => {
   const adapter = new TestOnlyPeerAdapter();
   const catalog = new BridgeCatalog();
   catalog.register(peerRegistration(adapter));
@@ -323,7 +323,6 @@ test("a test-only peer crosses the neutral execution matrix without a Home Assis
     }]);
     assert.equal(context.homeWorld.snapshot().devices[0]?.states[0]?.attrs.value, false);
 
-    const deployment = new BridgeAutomationDeployment(context.homeWorld);
     const content = {
       trigger: { kind: "schedule" as const, timezone: "Asia/Shanghai", daysOfWeek: [1], at: "22:30" },
       conditions: [],
@@ -337,6 +336,26 @@ test("a test-only peer crosses the neutral execution matrix without a Home Assis
         withinSeconds: 30,
       }],
     };
+    const guardedDeployment = new BridgeAutomationDeployment(context.homeWorld);
+    const guarded = guardedDeployment.resolveIntent({
+      proposalId: "peer-evening-switch",
+      kind: "automation-draft",
+      artifactCandidate: { schemaVersion: "1", content },
+      actionPolicyClasses: ["direct"],
+    });
+    assert.deepEqual(guarded, {
+      reason: "方案里的设备当前状态或能力语义已经变化，需要重新准备后再启用；家里的设置保持原样。",
+    });
+    assert.equal(adapter.deployed.length, 0);
+
+    const deployment = new BridgeAutomationDeployment({
+      resolveActionAuthority: context.homeWorld.resolveActionAuthority.bind(context.homeWorld),
+      capabilityDeviceName: context.homeWorld.capabilityDeviceName.bind(context.homeWorld),
+      automationBridgeForTargets: context.homeWorld.automationBridgeForTargets.bind(context.homeWorld),
+      automationsHandleFor: context.homeWorld.automationsHandleFor.bind(context.homeWorld),
+      automationBridgeById: context.homeWorld.automationBridgeById.bind(context.homeWorld),
+      checkArtifactPlanSemantics: () => ({ status: "compatible" }),
+    });
     const resolved = deployment.resolveIntent({
       proposalId: "peer-evening-switch",
       kind: "automation-draft",

@@ -262,6 +262,59 @@ test("finds only the exact migration proposal identity through the narrow owner 
   }
 });
 
+test("reads one exact migration source overlap without exposing it through proposal projections", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const migration = store.createMigrationGoverned(input({
+      artifactCandidate,
+      dedupKey: "ha-migration:expected-source",
+      idempotencyKey: "ha-migration:expected-source:v1",
+      provenance: { producer: "home-automation-migration" },
+    }));
+    assert.equal(migration.kind, "created");
+    if (migration.kind !== "created") throw new Error("expected migration proposal");
+
+    assert.deepEqual(
+      store.getMigrationExpectedSourceRuleRef(migration.proposal.id, migration.proposal.revision),
+      { status: "expected", ruleRef: "automation-aggregate" },
+    );
+    assert.deepEqual(
+      store.getMigrationExpectedSourceRuleRef(migration.proposal.id, migration.proposal.revision + 1),
+      { status: "unavailable" },
+    );
+
+    const standard = store.create(input({
+      dedupKey: "standard-source-lookup",
+      idempotencyKey: "standard-source-lookup:v1",
+    }));
+    assert.deepEqual(store.getMigrationExpectedSourceRuleRef(standard.id, standard.revision), {
+      status: "not_migration",
+    });
+
+    const ambiguous = store.createMigrationGoverned(input({
+      artifactCandidate,
+      dedupKey: "ha-migration:ambiguous-source",
+      idempotencyKey: "ha-migration:ambiguous-source:v1",
+      provenance: { producer: "home-automation-migration" },
+      conflictCheck: {
+        status: "checked",
+        existingAutomationCount: 2,
+        matches: [
+          { identity: "source-a", relation: "possible_overlap" },
+          { identity: "source-b", relation: "possible_overlap" },
+        ],
+      },
+    }));
+    assert.equal(ambiguous.kind, "created");
+    if (ambiguous.kind !== "created") throw new Error("expected ambiguous migration proposal");
+    assert.deepEqual(store.getMigrationExpectedSourceRuleRef(ambiguous.proposal.id, ambiguous.proposal.revision), {
+      status: "unavailable",
+    });
+  } finally {
+    store.close();
+  }
+});
+
 test("generic proposal admission cannot select the migration lane or masquerade as its producer", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {

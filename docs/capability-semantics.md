@@ -137,6 +137,15 @@ unlisted domain remain outside the boolean actuator schema. In particular, a
 policy, household approval, deployment read-back, and rollback remain separate
 required gates after schema compatibility.
 
+Deployment re-runs the same exact-schema semantics against a fresh HomeWorld
+read before a migration pauses its source rule and again immediately before the
+target automation write. The preflight accepts only one current valid state per
+capability on a ready, gap-free bridge cut. A generic or changed schema,
+unknown/unavailable value, stale state, unsupported predicate, or unreviewed
+action mapping closes the write path and preserves the existing household
+configuration. Compilation evidence proves the reviewed historical cut;
+deployment preflight proves that its semantic assumptions still hold now.
+
 ### Cover and `set_level` fail-closed boundary
 
 The current HA projection does not provide a reviewed normalized cover position,

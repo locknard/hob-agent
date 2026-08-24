@@ -8,6 +8,7 @@ import { z } from "zod";
 import { ensurePrivateSqliteFiles } from "../sqlite-private-files.js";
 import { artifactContentSchema } from "../artifact/neutral-artifact.js";
 import type { HubVerifiedProposalSource } from "../artifact/proposal-source-port.js";
+import type { ArtifactCurrentConflictMigrationSourceResult } from "../artifact/artifact-current-conflict-source.js";
 import {
   ARTIFACT_PREPARATION_JOB_ERROR_CODES,
   ARTIFACT_PREPARATION_JOB_STAGES,
@@ -1014,6 +1015,50 @@ export class SqliteProposalStore {
       FROM proposals WHERE proposal_id = ?`)
       .get(proposalId) as ProposalRow | undefined;
     return row ? fromRow(row) : undefined;
+  }
+
+  /**
+   * Root-private read-only source identity lookup for Artifact current-rule
+   * capture. It never expires, promotes, mutates, or projects this identity
+   * through Context, Agent, or Inbox surfaces.
+   */
+  getMigrationExpectedSourceRuleRef(
+    proposalId: string,
+    revision: number,
+  ): ArtifactCurrentConflictMigrationSourceResult {
+    if (typeof proposalId !== "string"
+      || proposalId.length === 0
+      || proposalId !== proposalId.trim()
+      || Buffer.byteLength(proposalId, "utf8") > 200
+      || !Number.isSafeInteger(revision)
+      || revision < 1) {
+      return { status: "unavailable" };
+    }
+    let row: ProposalRow | undefined;
+    try {
+      row = this.db.prepare(`SELECT
+          proposal_id, producer, idempotency_key, status, revision,
+          created_at, updated_at, payload_json
+        FROM proposals WHERE proposal_id = ?`).get(proposalId) as ProposalRow | undefined;
+    } catch {
+      return { status: "unavailable" };
+    }
+    if (row === undefined) return { status: "not_migration" };
+    let proposal: ProposalEnvelope;
+    try {
+      proposal = fromRow(row);
+    } catch {
+      return { status: "unavailable" };
+    }
+    if (proposal.revision !== revision) return { status: "unavailable" };
+    if (proposal.provenance.producer !== HOME_AUTOMATION_MIGRATION_PRODUCER
+      || proposal.reviewLane !== "migration") {
+      return { status: "not_migration" };
+    }
+    if (proposal.conflictCheck.status !== "checked") return { status: "unavailable" };
+    const matches = proposal.conflictCheck.matches.filter((match) => match.relation === "possible_overlap");
+    if (matches.length !== 1) return { status: "unavailable" };
+    return { status: "expected", ruleRef: matches[0]!.identity };
   }
 
   /**

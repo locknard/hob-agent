@@ -99,6 +99,7 @@ const SWITCH_FAILURE_REASON = "迁移切换没有完成，原有规则保持可�
 const SWITCH_UNKNOWN_REASON = "迁移切换结果暂时无法确认，已停止后续写入。";
 const ROLLBACK_FAILURE_REASON = "迁移回退没有完成，原有规则状态需要处理。";
 const ROLLBACK_UNKNOWN_REASON = "迁移回退结果暂时无法确认，已停止后续写入。";
+const SEMANTIC_PREFLIGHT_FAILURE_REASON = "方案里的设备当前状态或能力语义已经变化，需要重新准备后再启用；家里的设置保持原样。";
 
 /**
  * Governs migration cutover around the existing BridgeAutomationDeployment.
@@ -113,6 +114,13 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
 
   resolveIntent(request: Parameters<ProposalDeploymentPort["resolveIntent"]>[0]): ReturnType<ProposalDeploymentPort["resolveIntent"]> {
     return this.base.resolveIntent(request);
+  }
+
+  preflight(request: Parameters<NonNullable<ProposalDeploymentPort["preflight"]>>[0]): ReturnType<NonNullable<ProposalDeploymentPort["preflight"]>> {
+    if (this.base.preflight === undefined) {
+      return { status: "blocked", reason: "invalid_plan" };
+    }
+    return this.base.preflight(request);
   }
 
   async deploy(request: Parameters<ProposalDeploymentPort["deploy"]>[0]): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {
@@ -137,6 +145,9 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     if (request.revision !== lookup.reviewProposalRevision + 1) {
       return failed("迁移方案的批准版本已经变化，需要重新准备。");
     }
+
+    const semanticPreflight = await this.readSemanticPreflight(request);
+    if (semanticPreflight.status === "blocked") return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
 
     const control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
     if (control === undefined) {
@@ -222,6 +233,8 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     request: Parameters<ProposalDeploymentPort["deploy"]>[0],
     lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
   ): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {
+    const semanticPreflight = await this.readSemanticPreflight(request);
+    if (semanticPreflight.status === "blocked") return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
     const control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
     if (control === undefined) return failed(SWITCH_UNKNOWN_REASON);
     const source = await this.readSource(control, lookup.ruleRef);
@@ -517,6 +530,17 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
 
   status(request: Parameters<NonNullable<ProposalDeploymentPort["status"]>>[0]): ReturnType<NonNullable<ProposalDeploymentPort["status"]>> {
     return this.base.status?.(request) ?? { status: "unknown" };
+  }
+
+  private async readSemanticPreflight(
+    request: Parameters<NonNullable<ProposalDeploymentPort["preflight"]>>[0],
+  ): Promise<Awaited<ReturnType<NonNullable<ProposalDeploymentPort["preflight"]>>>> {
+    if (this.base.preflight === undefined) return { status: "blocked", reason: "invalid_plan" };
+    try {
+      return await this.base.preflight(request);
+    } catch {
+      return { status: "blocked", reason: "invalid_plan" };
+    }
   }
 
   pause(request: Parameters<NonNullable<ProposalDeploymentPort["pause"]>>[0]): ReturnType<NonNullable<ProposalDeploymentPort["pause"]>> {

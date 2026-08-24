@@ -13,7 +13,10 @@ import {
 } from "./artifact-assessments.js";
 import { compileNeutralArtifact } from "./artifact-compiler.js";
 import { ArtifactRiskConflictSource } from "./artifact-conflict-source.js";
-import { ArtifactCurrentConflictSource } from "./artifact-current-conflict-source.js";
+import {
+  ArtifactCurrentConflictSource,
+  type ArtifactCurrentConflictMigrationSourceResult,
+} from "./artifact-current-conflict-source.js";
 import { neutralDryRunProducer } from "./artifact-dry-run.js";
 import { ArtifactEvidenceProducer } from "./artifact-evidence-producer.js";
 import {
@@ -45,7 +48,13 @@ import type {
   HomeWorldSnapshot,
 } from "../world/home-world-service.js";
 
-interface PipelineProposalPort extends ApprovedProposalSource, ArtifactCompilationProposalPort {}
+interface PipelineProposalPort extends ApprovedProposalSource, ArtifactCompilationProposalPort {
+  /** Root-private migration source lookup; standard proposal ports omit it. */
+  readonly getMigrationExpectedSourceRuleRef?: (
+    proposalId: string,
+    revision: number,
+  ) => ArtifactCurrentConflictMigrationSourceResult;
+}
 
 interface PipelineHomeWorldPort {
   readonly snapshot: () => HomeWorldSnapshot;
@@ -81,6 +90,11 @@ export async function createArtifactPipelineComposition(
     get: options.proposals.get.bind(options.proposals),
     withApprovedProposalAtRevision: options.proposals.withApprovedProposalAtRevision.bind(options.proposals),
   };
+  const migrationSource = options.proposals.getMigrationExpectedSourceRuleRef === undefined
+    ? undefined
+    : {
+      getMigrationExpectedSourceRuleRef: options.proposals.getMigrationExpectedSourceRuleRef.bind(options.proposals),
+    };
   const homeWorld = {
     snapshot: options.homeWorld.snapshot.bind(options.homeWorld),
     queryRecentEvidence: options.homeWorld.queryRecentEvidence.bind(options.homeWorld),
@@ -115,6 +129,7 @@ export async function createArtifactPipelineComposition(
     registry: registry.currentConflict,
     homeWorld,
     existing: existingConflict,
+    ...(migrationSource === undefined ? {} : { migration: migrationSource }),
   });
   const worldCut = new ArtifactWorldCutSource({
     artifacts: registry.worldCut,

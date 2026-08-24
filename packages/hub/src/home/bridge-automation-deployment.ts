@@ -8,7 +8,22 @@ import type {
   BridgeAutomationTrigger,
 } from "@hob/bridge-contract";
 
+import {
+  checkCapabilityAction,
+  checkCapabilityPredicate,
+  resolveCapabilityRead,
+  type CapabilityActionResult,
+  type CapabilityPredicateResult,
+  type CapabilityReadResult,
+  type CapabilitySemanticsState,
+} from "../artifact/capability-semantics.js";
 import { parseArtifactContent } from "../artifact/neutral-artifact.js";
+import type {
+  HomeWorldArtifactPlanCapabilityState,
+  HomeWorldArtifactPlanPreflightReason,
+  HomeWorldArtifactPlanPreflightResult,
+  HomeWorldArtifactPlanStateResult,
+} from "../world/home-world-service.js";
 import type { ProposalDeploymentPort } from "./home-proposal-service.js";
 import type { ProposalDeploymentIntent, ProposalDeploymentTargetBinding } from "./proposal-store.js";
 import type { ProposalDeploymentOutcome } from "./proposal-store.js";
@@ -36,9 +51,14 @@ export interface AutomationBridgeSource {
     readonly automations: AutomationsExtension;
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined;
+  /** Optional in test-only adapters; the production HomeWorld supplies state. */
+  currentArtifactPlanState?(hwCapabilityIds: readonly string[]): HomeWorldArtifactPlanStateResult;
+  /** Root-private override for a composed read-side preflight. */
+  checkArtifactPlanSemantics?(content: unknown): HomeWorldArtifactPlanPreflightResult;
 }
 
 const NO_BRIDGE_REASON = "这个家还没有可用的自动化部署通道，方案已保留，接通后可以重试。";
+const SEMANTIC_PREFLIGHT_REASON = "方案里的设备当前状态或能力语义已经变化，需要重新准备后再启用；家里的设置保持原样。";
 
 export class BridgeAutomationDeployment implements ProposalDeploymentPort {
   constructor(private readonly world: AutomationBridgeSource) {}
@@ -67,6 +87,8 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     if (capabilityIds === undefined) {
       return { reason: "自动化方案的内容没有通过校验，家里的设置保持原样。" };
     }
+    const semanticPreflight = this.checkArtifactPlanSemantics(parsed);
+    if (semanticPreflight.status === "blocked") return { reason: householdSemanticReason(semanticPreflight.reason) };
     const bridge = this.world.automationBridgeForTargets(capabilityIds);
     if (bridge === undefined) return { reason: NO_BRIDGE_REASON };
     const targets: ProposalDeploymentTargetBinding[] = [];
@@ -175,6 +197,8 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
         return { status: "failed", reason: "设备的接入方式在批准后发生了变化，家里的设置保持原样；重新准备后再启用。" };
       }
     }
+    const semanticPreflight = this.checkArtifactPlanSemantics(request.artifactCandidate.content);
+    if (semanticPreflight.status === "blocked") return { status: "failed", reason: householdSemanticReason(semanticPreflight.reason) };
     const spec = compileAutomationSpec(request.proposalId, request.title, request.artifactCandidate.content, bridge.resolveTarget);
     if ("reason" in spec) return { status: "failed", reason: spec.reason };
     if (spec.value.automationId !== request.intent.deploymentId) {
@@ -190,6 +214,68 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
       };
     }
     return { status: "failed", reason: deployRejectionReason(result.reason) };
+  }
+
+  preflight(request: Parameters<NonNullable<ProposalDeploymentPort["preflight"]>>[0]): HomeWorldArtifactPlanPreflightResult {
+    if (request.kind !== "automation-draft" || request.artifactCandidate === undefined) {
+      return { status: "blocked", reason: "invalid_plan" };
+    }
+    try {
+      const parsed = parseArtifactContent(request.artifactCandidate.content);
+      return this.checkArtifactPlanSemantics(parsed);
+    } catch {
+      return { status: "blocked", reason: "invalid_plan" };
+    }
+  }
+
+  private checkArtifactPlanSemantics(content: unknown): HomeWorldArtifactPlanPreflightResult {
+    let parsed: ReturnType<typeof parseArtifactContent>;
+    try {
+      parsed = parseArtifactContent(content);
+    } catch {
+      return { status: "blocked", reason: "invalid_plan" };
+    }
+    if (this.world.checkArtifactPlanSemantics !== undefined) {
+      try {
+        return normalizePreflightResult(this.world.checkArtifactPlanSemantics(parsed));
+      } catch {
+        return { status: "blocked", reason: "invalid_plan" };
+      }
+    }
+    const capabilityIds = deviceCapabilityIdsOf(parsed);
+    if (capabilityIds === undefined) return { status: "blocked", reason: "invalid_plan" };
+    if (this.world.currentArtifactPlanState === undefined) return { status: "compatible" };
+    let stateResult: HomeWorldArtifactPlanStateResult;
+    try {
+      stateResult = this.world.currentArtifactPlanState(capabilityIds);
+    } catch {
+      return { status: "blocked", reason: "invalid_plan" };
+    }
+    if (stateResult.status === "blocked") return normalizePreflightResult(stateResult);
+    const states = new Map(stateResult.capabilities.map((state) => [state.hwCapabilityId, state]));
+    for (const capabilityId of capabilityIds) {
+      const state = states.get(capabilityId);
+      if (state === undefined) return { status: "blocked", reason: "target_unavailable" };
+      const read = safeRead(state);
+      if (read === undefined) return { status: "blocked", reason: "invalid_plan" };
+      if (read.status !== "available") return { status: "blocked", reason: preflightReason(read.reason) };
+    }
+    for (const predicate of [...parsed.conditions, ...parsed.postconditions]) {
+      const state = states.get(predicate.source.hwCapabilityId);
+      if (state === undefined) return { status: "blocked", reason: "target_unavailable" };
+      const result = safePredicate(state, predicate);
+      if (result === undefined) return { status: "blocked", reason: "invalid_plan" };
+      if (result.status !== "compatible") return { status: "blocked", reason: preflightReason(result.reason) };
+    }
+    for (const action of parsed.actions) {
+      if (action.kind === "notify_local") continue;
+      const state = states.get(action.target.hwCapabilityId);
+      if (state === undefined) return { status: "blocked", reason: "target_unavailable" };
+      const result = safeAction(state, action);
+      if (result === undefined) return { status: "blocked", reason: "invalid_plan" };
+      if (result.status !== "compatible") return { status: "blocked", reason: preflightReason(result.reason) };
+    }
+    return { status: "compatible" };
   }
 
   /** Asks the target bridge whether the deployed automation actually runs. */
@@ -256,6 +342,98 @@ function deviceCapabilityIdsOf(content: unknown): readonly string[] | undefined 
     if (action.kind !== "notify_local") ids.add(action.target.hwCapabilityId);
   }
   return [...ids];
+}
+
+type ParsedArtifactContent = ReturnType<typeof parseArtifactContent>;
+type ArtifactPredicate = ParsedArtifactContent["conditions"][number] | ParsedArtifactContent["postconditions"][number];
+type ArtifactDeviceAction = Exclude<ParsedArtifactContent["actions"][number], { readonly kind: "notify_local" }>;
+
+function safeRead(state: HomeWorldArtifactPlanCapabilityState): CapabilityReadResult | undefined {
+  try {
+    return resolveCapabilityRead({
+      capability: { schema: state.schema, schemaVersion: state.schemaVersion },
+      state: semanticsState(state),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function safePredicate(
+  state: HomeWorldArtifactPlanCapabilityState,
+  predicate: ArtifactPredicate,
+): CapabilityPredicateResult | undefined {
+  try {
+    return checkCapabilityPredicate({
+      capability: { schema: state.schema, schemaVersion: state.schemaVersion },
+      state: semanticsState(state),
+      operator: predicate.operator,
+      value: predicate.value,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function safeAction(
+  state: HomeWorldArtifactPlanCapabilityState,
+  action: ArtifactDeviceAction,
+): CapabilityActionResult | undefined {
+  try {
+    return checkCapabilityAction({
+      capability: { schema: state.schema, schemaVersion: state.schemaVersion },
+      state: semanticsState(state),
+      action,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function semanticsState(state: HomeWorldArtifactPlanCapabilityState): CapabilitySemanticsState {
+  return {
+    attrs: state.attrs,
+    validity: state.validity,
+    freshness: state.freshness,
+  };
+}
+
+function normalizePreflightResult(value: unknown): HomeWorldArtifactPlanPreflightResult {
+  if (value !== null && typeof value === "object" && "status" in value) {
+    const status = (value as { readonly status?: unknown }).status;
+    if (status === "compatible") return { status };
+    if (status === "blocked") {
+      const reason = (value as { readonly reason?: unknown }).reason;
+      if (isPreflightReason(reason)) return { status, reason };
+    }
+  }
+  return { status: "blocked", reason: "invalid_plan" };
+}
+
+function isPreflightReason(value: unknown): value is HomeWorldArtifactPlanPreflightReason {
+  return value === "invalid_plan"
+    || value === "target_unavailable"
+    || value === "schema_unsupported"
+    || value === "schema_mismatch"
+    || value === "state_missing"
+    || value === "state_stale"
+    || value === "state_invalid"
+    || value === "value_unsupported"
+    || value === "value_invalid"
+    || value === "operator_unsupported"
+    || value === "predicate_type_mismatch"
+    || value === "set_level_unsupported"
+    || value === "action_mapping_unreviewed"
+    || value === "not_writable"
+    || value === "action_invalid";
+}
+
+function preflightReason(value: string): HomeWorldArtifactPlanPreflightReason {
+  return isPreflightReason(value) ? value : "invalid_plan";
+}
+
+function householdSemanticReason(_reason: HomeWorldArtifactPlanPreflightReason): string {
+  return SEMANTIC_PREFLIGHT_REASON;
 }
 
 /** Stable, adapter-safe automation identity derived from the proposal id. */

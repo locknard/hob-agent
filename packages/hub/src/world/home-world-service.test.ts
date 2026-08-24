@@ -303,6 +303,8 @@ test("projects a private authority candidate input with revision-bound opaque id
     assert.equal(input?.configured, true);
     assert.equal(input?.approved, true);
     assert.equal(input?.available, true);
+    assert.equal(ctx.homeWorld.isActionAuthorityConfiguredForBridge("hwc-light", "bridge-authority"), true);
+    assert.equal(ctx.homeWorld.isActionAuthorityConfiguredForBridge("hwc-light", "other-bridge"), false);
     assert.equal(input?.registrationGeneration, 7);
     assert.match(input?.bindingIdentity ?? "", /^sha256:[0-9a-f]{64}$/);
     assert.match(input?.configurationIdentity ?? "", /^sha256:[0-9a-f]{64}$/);
@@ -700,6 +702,43 @@ test("fails closed when one authority target has ambiguous capability bindings",
     await waitFor(() => ctx.homeWorld.runtime("bridge-ambiguous") !== undefined);
     assert.equal(ctx.homeWorld.resolveAuthorityCandidateInput("hwc-light"), undefined);
     assert.equal(counters.requestResync, 0);
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("projects one exact current neutral state for deployment preflight", async () => {
+  const catalog = new BridgeCatalog();
+  const bridge = syntheticBridge("bridge-plan-state", "remote-plan-state", snapshotFor("bridge-plan-state", "remote-plan-state"));
+  catalog.register(registration(() => bridge));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry("bridge-plan-state")],
+    new Map([["bridge-plan-state", bridge]]),
+  ));
+  try {
+    await waitFor(() => ctx.homeWorld.snapshot().bridges["bridge-plan-state"]?.diagnostics.connectionState === "ready");
+    const capability = ctx.homeWorld.snapshot().devices[0]!.capabilities[0]!;
+    const current = ctx.homeWorld.currentArtifactPlanState([capability.hwCapabilityId]);
+    assert.deepEqual(current, {
+      status: "available",
+      capabilities: [{
+        hwCapabilityId: capability.hwCapabilityId,
+        schema: "synthetic.light",
+        schemaVersion: "1.0.0",
+        attrs: { state: "on" },
+        validity: "valid",
+        freshness: "fresh",
+      }],
+    });
+    assert.equal("nativeId" in current.capabilities[0]!, false, "preflight carries no native binding fields");
+    assert.deepEqual(ctx.homeWorld.currentArtifactPlanState(["missing-capability"]), {
+      status: "blocked",
+      reason: "target_unavailable",
+    });
   } finally {
     await fiber.dispose();
   }

@@ -34,6 +34,7 @@ import {
 import {
   canonicalExtensionKey,
   normalizeBridgeStreamError,
+  type JsonValue,
   type BridgeAdapter,
   type BridgeStreamError,
   type BridgeStreamErrorReason,
@@ -313,6 +314,47 @@ export interface HomeWorldEvidenceResult {
   readonly coverage: readonly HomeWorldEvidenceCoverage[];
   readonly truncated: boolean;
 }
+
+/** Closed read-side result used by deployment preflight; no provider data crosses it. */
+export type HomeWorldArtifactPlanPreflightReason =
+  | "invalid_plan"
+  | "target_unavailable"
+  | "schema_unsupported"
+  | "schema_mismatch"
+  | "state_missing"
+  | "state_stale"
+  | "state_invalid"
+  | "value_unsupported"
+  | "value_invalid"
+  | "operator_unsupported"
+  | "predicate_type_mismatch"
+  | "set_level_unsupported"
+  | "action_mapping_unreviewed"
+  | "not_writable"
+  | "action_invalid";
+
+export type HomeWorldArtifactPlanPreflightResult =
+  | { readonly status: "compatible" }
+  | { readonly status: "blocked"; readonly reason: HomeWorldArtifactPlanPreflightReason };
+
+/**
+ * Current neutral state for a bounded artifact capability set. Bindings and
+ * adapter identifiers stay inside HomeWorld; deployment receives only the
+ * schema, state attributes, and closed freshness projection it needs for
+ * semantic checks.
+ */
+export interface HomeWorldArtifactPlanCapabilityState {
+  readonly hwCapabilityId: string;
+  readonly schema: string;
+  readonly schemaVersion: string;
+  readonly attrs: Readonly<Record<string, JsonValue>>;
+  readonly validity: "valid";
+  readonly freshness: "fresh";
+}
+
+export type HomeWorldArtifactPlanStateResult =
+  | { readonly status: "available"; readonly capabilities: readonly HomeWorldArtifactPlanCapabilityState[] }
+  | { readonly status: "blocked"; readonly reason: HomeWorldArtifactPlanPreflightReason };
 
 export interface HomeWorldActivityQuery {
   readonly lookbackHours: number;
@@ -1018,6 +1060,95 @@ export class HomeWorldService extends Service {
   }
 
   /**
+   * Captures the exact current neutral state required by artifact semantic
+   * checks. A capability must resolve to one schema, one state row, and a
+   * ready, gap-free bridge watermark; every other outcome is closed to a
+   * stable reason code before any deployment code can write.
+   */
+  currentArtifactPlanState(hwCapabilityIds: readonly string[]): HomeWorldArtifactPlanStateResult {
+    try {
+      if (!Array.isArray(hwCapabilityIds) || hwCapabilityIds.length > 16) {
+        return { status: "blocked", reason: "invalid_plan" };
+      }
+      const ids = [...new Set(hwCapabilityIds)];
+      if (ids.some((id) => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(id))) {
+        return { status: "blocked", reason: "invalid_plan" };
+      }
+      if (ids.length === 0) return { status: "available", capabilities: [] };
+
+      const snapshot = this.snapshot();
+      const capabilities: HomeWorldArtifactPlanCapabilityState[] = [];
+      for (const hwCapabilityId of ids) {
+        const matches = snapshot.devices.flatMap((device) => device.capabilities
+          .filter((capability) => capability.hwCapabilityId === hwCapabilityId)
+          .map((capability) => ({ capability, device })));
+        if (matches.length === 0) return { status: "blocked", reason: "target_unavailable" };
+
+        const first = matches[0]!;
+        if (matches.some((match) => match.capability.hwId !== first.capability.hwId
+          || match.capability.schema !== first.capability.schema
+          || match.capability.schemaVersion !== first.capability.schemaVersion)) {
+          return { status: "blocked", reason: "schema_mismatch" };
+        }
+        for (const match of matches) {
+          if (match.device.validity !== "valid") {
+            return {
+              status: "blocked",
+              reason: match.device.validity === "stale" ? "state_stale" : "state_invalid",
+            };
+          }
+          const descriptorBindings = new Map(match.device.descriptor.capabilities
+            .map((ref) => [ref.nativeInstanceId, ref] as const));
+          for (const binding of match.capability.bindings) {
+            if (binding.bridgeId !== match.device.bridgeId || binding.nativeId !== match.device.nativeId) continue;
+            const descriptor = descriptorBindings.get(binding.nativeInstanceId);
+            if (descriptor === undefined
+              || descriptor.schema !== match.capability.schema
+              || descriptor.schemaVersion !== match.capability.schemaVersion) {
+              return { status: "blocked", reason: "schema_mismatch" };
+            }
+          }
+        }
+
+        const stateMatches = matches.flatMap((match) => match.device.states
+          .filter((state) => match.capability.bindings.some((binding) => (
+            binding.bridgeId === match.device.bridgeId
+              && binding.nativeId === state.nativeId
+              && binding.nativeInstanceId === state.nativeInstanceId
+          )))
+          .map((state) => ({ state, device: match.device })));
+        if (stateMatches.length === 0) return { status: "blocked", reason: "state_missing" };
+        if (stateMatches.length !== 1) return { status: "blocked", reason: "target_unavailable" };
+        const selected = stateMatches[0]!;
+        const bridge = snapshot.bridges[selected.device.bridgeId];
+        if (bridge === undefined
+          || bridge.watermark === null
+          || bridge.diagnostics.connectionState !== "ready"
+          || bridge.metrics.consistency !== "ready"
+          || bridge.metrics.connection !== "up"
+          || bridge.diagnostics.historyGapCount !== 0
+          || bridge.diagnostics.recentHistoryGaps.length !== 0) {
+          return { status: "blocked", reason: "state_stale" };
+        }
+        if (!isPlainJsonRecord(selected.state.attrs)) {
+          return { status: "blocked", reason: "state_invalid" };
+        }
+        capabilities.push({
+          hwCapabilityId,
+          schema: first.capability.schema,
+          schemaVersion: first.capability.schemaVersion,
+          attrs: cloneJson(selected.state.attrs),
+          validity: "valid",
+          freshness: "fresh",
+        });
+      }
+      return { status: "available", capabilities };
+    } catch {
+      return { status: "blocked", reason: "invalid_plan" };
+    }
+  }
+
+  /**
    * Reconciles a read-side state authority. A candidate is accepted only when
    * the coordinator's resync seam observes the expected binding in a complete
    * epoch; this method never exposes an action executor.
@@ -1034,6 +1165,16 @@ export class HomeWorldService extends Service {
   resolveActionAuthority(hwCapabilityId: string): ActionAuthorityResolution {
     this.refreshIdentity();
     return this.authority.resolveActionAuthority(hwCapabilityId, this.authorityAvailability(hwCapabilityId));
+  }
+
+  /** Closed bridge-binding predicate used by artifact preparation composition. */
+  isActionAuthorityConfiguredForBridge(hwCapabilityId: string, bridgeId: string): boolean {
+    this.refreshIdentity();
+    try {
+      return this.authority.isActionAuthorityConfiguredForBridge(hwCapabilityId, bridgeId);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -2360,6 +2501,10 @@ function metricsFor(diagnostics: HubBridgeDiagnostics): HomeWorldBridgeMetrics {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function isPlainJsonRecord(value: unknown): value is Readonly<Record<string, JsonValue>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function authorityDigest(

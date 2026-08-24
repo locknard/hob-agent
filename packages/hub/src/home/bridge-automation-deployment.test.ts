@@ -29,6 +29,18 @@ function bridgeStub(overrides: {
   readonly resolvable?: boolean;
   readonly authority?: { status: string; policyClass?: string; reason?: string };
   readonly deviceName?: string;
+  readonly preflight?: () => { readonly status: "compatible" } | { readonly status: "blocked"; readonly reason: string };
+  readonly currentState?: {
+    readonly status: "available";
+    readonly capabilities: readonly {
+      readonly hwCapabilityId: string;
+      readonly schema: string;
+      readonly schemaVersion: string;
+      readonly attrs: Readonly<Record<string, unknown>>;
+      readonly validity: "valid";
+      readonly freshness: "fresh";
+    }[];
+  } | { readonly status: "blocked"; readonly reason: string };
 } = {}) {
   const calls: { deploys: BridgeAutomationSpec[]; toggles: unknown[]; withdrawals: unknown[] } = {
     deploys: [], toggles: [], withdrawals: [],
@@ -61,6 +73,8 @@ function bridgeStub(overrides: {
       automationsHandleFor: (bridgeId: string) => bridgeId === "ha-main" ? bridge.automations : undefined,
       resolveActionAuthority: () => (overrides.authority ?? { status: "available", policyClass: "direct" }),
       capabilityDeviceName: () => overrides.deviceName,
+      currentArtifactPlanState: overrides.currentState === undefined ? undefined : () => overrides.currentState,
+      checkArtifactPlanSemantics: overrides.preflight === undefined ? undefined : () => overrides.preflight!(),
     },
   };
 }
@@ -91,6 +105,89 @@ test("compiles the neutral artifact with resolved bindings and reports a verifie
   assert.equal(spec.actions[0]?.kind, "set_boolean");
   assert.equal((spec.actions[0] as { target: { binding: { nativeId: string } } }).target.binding.nativeId, "dev-hwc-strip");
   assert.equal("actor" in spec, false, "the Hub audit actor never enters the provider-native spec");
+});
+
+test("checks the neutral current state with the reviewed schema semantics", () => {
+  const boolState = {
+    status: "available" as const,
+    capabilities: [
+      {
+        hwCapabilityId: "hwc-presence",
+        schema: "ha.boolean-actuator",
+        schemaVersion: "1.0.0",
+        attrs: { state: "on", value: true },
+        validity: "valid" as const,
+        freshness: "fresh" as const,
+      },
+      {
+        hwCapabilityId: "hwc-strip",
+        schema: "ha.boolean-actuator",
+        schemaVersion: "1.0.0",
+        attrs: { state: "off", value: false },
+        validity: "valid" as const,
+        freshness: "fresh" as const,
+      },
+    ],
+  };
+  const request = {
+    proposalId: "proposal-current-semantics",
+    kind: "automation-draft" as const,
+    artifactCandidate: { schemaVersion: "1" as const, content },
+    actionPolicyClasses: ["direct"],
+  };
+  const compatible = new BridgeAutomationDeployment(bridgeStub({ currentState: boolState }).world).resolveIntent(request);
+  assert.ok("deploymentId" in compatible);
+
+  const driftedTargets = [
+    { schema: "ha.entity", attrs: { state: "off" } },
+    { schema: "ha.boolean-actuator", attrs: { state: "unknown" } },
+    { schema: "ha.boolean-actuator", attrs: { state: "unavailable", available: false } },
+  ] as const;
+  for (const drift of driftedTargets) {
+    const currentState = {
+      ...boolState,
+      capabilities: boolState.capabilities.map((state) => state.hwCapabilityId === "hwc-strip"
+        ? { ...state, ...drift }
+        : state),
+    };
+    const blocked = new BridgeAutomationDeployment(bridgeStub({ currentState }).world).resolveIntent(request);
+    assert.ok("reason" in blocked);
+    assert.match((blocked as { readonly reason: string }).reason, /当前状态或能力语义|重新准备/);
+  }
+});
+
+test("rechecks current plan semantics before intent and again before the bridge write", async () => {
+  let checks = 0;
+  const { calls, world } = bridgeStub({
+    preflight: () => {
+      checks += 1;
+      return checks === 1
+        ? { status: "compatible" as const }
+        : { status: "blocked" as const, reason: "state_stale" };
+    },
+  });
+  const port = new BridgeAutomationDeployment(world);
+  const request = {
+    proposalId: "proposal-semantic-drift",
+    kind: "automation-draft" as const,
+    artifactCandidate: { schemaVersion: "1" as const, content },
+    actionPolicyClasses: ["direct"],
+  };
+  const intent = port.resolveIntent(request);
+  assert.ok("deploymentId" in intent);
+
+  const outcome = await port.deploy({
+    ...request,
+    revision: 1,
+    actor: "household-owner",
+    title: "睡前关闭",
+    intent,
+  });
+
+  assert.equal(checks, 2, "the plan is checked once for intent and once immediately before write");
+  assert.equal(outcome.status, "failed");
+  assert.match((outcome as { readonly reason: string }).reason, /当前设备状态|重新准备/);
+  assert.equal(calls.deploys.length, 0, "semantic drift never reaches the bridge write");
 });
 
 
