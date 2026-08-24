@@ -38,6 +38,7 @@ export function apply(ctx: Context): void {
       "2. Read every compact inventory page before claiming that a sensing capability is absent or recommending hardware.",
       "Compact generic sensor labels do not prove that a specific measurement is missing. Inspect relevant detailed device state; if it still cannot establish the capability, report it as unknown rather than absent.",
       "3. Inspect bounded activity, exact-device snapshots, and post-baseline evidence relevant to the question. Missing or partial coverage is unknown, never proof of quiet or a routine.",
+      "For a why or just-changed question, select one exact evidence event and call get_home_causality with that event's hwCapabilityId and provenance. Activity counts or timestamps alone never establish a cause. If causality is partial, unknown, or unavailable, say that the source chain is incomplete and do not guess.",
       "4. Inspect existing rule metadata when the question concerns current automation behavior.",
       "5. Prefer an explanation and a reversible software or schedule trial before suggesting new hardware.",
       "6. Hardware suggestions may name only the allowed sensing capability. Never name a brand, product, store, camera, or microphone. Explain necessity, placement, privacy impact, and a no-purchase alternative. With partial or insufficient confidence, hardware is optional and a reversible validation trial is required before purchase; recommended hardware requires sufficient evidence.",

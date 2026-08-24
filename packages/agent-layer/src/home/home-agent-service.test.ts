@@ -483,6 +483,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "get_home_activity",
     "get_home_snapshot",
     "get_home_evidence",
+    "get_home_causality",
     "get_home_rules",
     "list_home_proposals",
     "create_home_proposal",
@@ -511,6 +512,18 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.match(
     loadedSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
     /one exact device.*relevant semantic kinds/is,
+  );
+  const answerSkill = await ctx.tools.execute({
+    callId: "load-home-answer-skill" as never,
+    name: "skill",
+    arguments: { name: "answer-home-question" },
+    agent: ctx.homeAgent.agent,
+    signal: new AbortController().signal,
+  });
+  assert.equal(answerSkill.isError, false);
+  assert.match(
+    answerSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
+    /exact evidence event.*get_home_causality.*partial.*unknown.*source chain.*do not guess/is,
   );
 
   ctx.homeAgent.agent.followup(createUserMessage({

@@ -33,6 +33,7 @@ import * as HomeCalibrationTool from "./home-calibration-tool.js";
 import { HomeCalibrationCoverageService } from "./home-calibration-tool.js";
 import { HomeInventoryCoverageService } from "./home-inventory-tool.js";
 import * as HomeEvidenceTool from "./home-evidence-tool.js";
+import * as HomeCausalityTool from "./home-causality-tool.js";
 import * as HomeRulesTool from "./home-rules-tool.js";
 import { HomeRulesCoverageService } from "./home-rules-tool.js";
 import * as HomeProposalTool from "./home-proposal-tool.js";
@@ -504,6 +505,7 @@ export class DshHomeAgentService extends Service {
     }
     await this.ctx.plugin(HomeSnapshotTool);
     await this.ctx.plugin(HomeEvidenceTool);
+    await this.ctx.plugin(HomeCausalityTool);
     await this.ctx.plugin(HomeRulesCoverageService);
     await this.ctx.plugin(HomeRulesTool);
     await this.ctx.plugin(HomeProposalTool);
