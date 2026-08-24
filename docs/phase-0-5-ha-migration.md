@@ -147,4 +147,18 @@ pnpm assess:home-migration -- --bridge-id <configured-bridge-id>
 `automations@1` 或 `actions@1`，也不替代 Proposal、Artifact、simulation、一次
 决定或 deployment gate。
 
+评估完成后，可对一个明确的 opaque assessment id 做只读 candidate preview：
+
+```sh
+pnpm preview:home-migration -- --assessment-id <assessment-id>
+```
+
+命令只接受上一阶段生成的 32 位小写十六进制 id，重新读取 durable assessment，
+仅逐条调用现有 `createArtifactCandidate` 处理 `eligible` 规则。开始和结束都必须
+看到与 assessment 完全相同的 source bridge `epochId + lastSeq`；切换中发生漂移时
+返回固定 `source_unstable`，不交付 partial counts。输出只有 assessment id、eligible /
+candidate / needs-attention 聚合、固定原因计数和 `remoteWritesPerformed: false`。
+它不创建 Proposal/Artifact，不调用 prepare、refresh、deploy、control 或 actions，
+同一 assessment 可安全重跑。
+
 每一步都以确定性测试、`pnpm test`、`pnpm check`、`git diff --check` 和真实浏览器双视口证据交付。任何实现都以本决议的状态机、权限边界、首期子集和 fail-closed 规则为验收依据。

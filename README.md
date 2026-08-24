@@ -174,6 +174,20 @@ assessment id, aggregate rule dispositions, a fixed status, and
 `foreignRuleControl@1`, deploy an automation, or control a device. Candidate,
 simulation, approval, and deployment remain separate governed stages.
 
+To preview the neutral candidate cut for one durable assessment, pass its
+opaque 32-hex id explicitly:
+
+```sh
+pnpm preview:home-migration -- --assessment-id <assessment-id>
+```
+
+The command rechecks the assessment status, source bridge ready cut, and exact
+source watermark before and after translating only eligible rules. It prints
+only the assessment id, aggregate candidate/needs-attention counts, fixed
+reason counts, and `remoteWritesPerformed: false`. It creates no Proposal or
+Artifact and does not prepare, refresh, deploy, pause, resume, close, or call
+bridge/device action surfaces; a source drift returns fixed `source_unstable`.
+
 To preview canonical-journal retention without connecting a bridge, loading a
 model, deleting evidence, or writing a retention audit, reuse `HOB_DATA_DIR`
 and `HOB_BRIDGES` and select one configured bridge:
