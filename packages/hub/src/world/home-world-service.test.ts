@@ -263,6 +263,95 @@ test("mounts as homeWorld, consumes every configured bridge once, and aggregates
   await fiber.dispose();
 });
 
+test("notifies bridge-ready subscribers only after each accepted sync is indexed", async () => {
+  const catalog = new BridgeCatalog();
+  const bridgeId = "bridge-ready";
+  const first = snapshotFor(bridgeId, "remote-ready");
+  const secondEpoch = "bridge-ready-epoch-2";
+  const second: Envelope[] = [
+    syncStart(secondEpoch, "remote-ready"),
+    eventEnvelope(secondEpoch, 2, {
+      kind: "device-upserted",
+      device: {
+        nativeId: `${bridgeId}-lamp`,
+        name: `${bridgeId} lamp`,
+        capabilities: [{
+          nativeInstanceId: `${bridgeId}-lamp:main`,
+          schema: "synthetic.light",
+          schemaVersion: "1.0.0",
+          semanticKind: "light",
+          space: { nativeSpaceId: `${bridgeId}-living`, name: "Living room" },
+        }],
+      },
+    }),
+    eventEnvelope(secondEpoch, 3, {
+      kind: "state",
+      state: {
+        nativeId: `${bridgeId}-lamp`,
+        nativeInstanceId: `${bridgeId}-lamp:main`,
+        attrs: { state: "off" },
+        time: { sourceTsQuality: "none" },
+        origin: "observed",
+      },
+    }),
+    eventEnvelope(secondEpoch, 4, {
+      kind: "sync-complete",
+      manifest: { snapshotId: `${secondEpoch}-snapshot`, deviceEnvelopeCount: 1, stateEnvelopeCount: 1 },
+    }),
+  ];
+  const bridge = syntheticBridge(bridgeId, "remote-ready", [...first, ...second]);
+  catalog.register(registration(() => bridge));
+  const registry = new BridgeRegistry({ catalog });
+  const ctx = new Context();
+  const fiber = await ctx.plugin(HomeWorldService, testRuntimeOptions(
+    catalog,
+    registry,
+    [entry(bridgeId)],
+    new Map([[bridgeId, bridge]]),
+    { maxRestarts: 0 },
+  ));
+  const service = ctx.homeWorld;
+  const events: Array<{
+    metadata: unknown;
+    diagnostics: string | undefined;
+    watermark: ReturnType<HomeWorldService["worldModelWatermark"]>;
+  }> = [];
+  const pending = new Promise<void>(() => undefined);
+  const unsubscribe = service.subscribe((metadata) => {
+    const snapshot = service.snapshot().bridges[bridgeId];
+    events.push({
+      metadata,
+      diagnostics: snapshot?.diagnostics.connectionState,
+      watermark: service.worldModelWatermark(bridgeId),
+    });
+    return pending;
+  });
+  service.onBridgeReady(() => { throw new Error("sync listener failed"); });
+  service.onBridgeReady(async () => { throw new Error("async sync listener failed"); });
+
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    await waitFor(() => events.length === 2);
+    assert.deepEqual(events.map((event) => event.metadata), [
+      { bridgeId },
+      { bridgeId },
+    ]);
+    assert.deepEqual(events.map((event) => event.diagnostics), ["ready", "ready"]);
+    assert.deepEqual(events.map((event) => event.watermark), [
+      { epochId: `${bridgeId}-epoch`, lastSeq: 4 },
+      { epochId: secondEpoch, lastSeq: 4 },
+    ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    unsubscribe();
+    await fiber.dispose();
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("projects a private authority candidate input with revision-bound opaque identities", async () => {
   const catalog = new BridgeCatalog();
   const bridge = syntheticBridge("bridge-authority", "remote-authority", snapshotFor("bridge-authority", "remote-authority"));

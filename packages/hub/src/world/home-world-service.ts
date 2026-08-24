@@ -417,6 +417,15 @@ export interface HomeWorldDiagnostics {
   };
 }
 
+/** Bounded neutral metadata emitted after a live bridge sync is ready. */
+export interface HomeWorldBridgeReadyMetadata {
+  readonly bridgeId: string;
+}
+
+export type HomeWorldBridgeReadyListener = (
+  metadata: HomeWorldBridgeReadyMetadata,
+) => void | PromiseLike<void>;
+
 export interface HomeWorldMetricSummary {
   consistency: readonly {
     bridgeId: string;
@@ -479,6 +488,7 @@ export class HomeWorldService extends Service {
   private readonly identityByDevice = new Map<string, IdentityObservation>();
   private readonly identityDescriptorFingerprints = new Map<string, string>();
   private readonly authorityResyncBaselines = new Map<string, JournalWatermark | undefined>();
+  private readonly bridgeReadyListeners = new Set<HomeWorldBridgeReadyListener>();
   private readonly suppliedRegistry: BridgeRegistry | undefined;
   private worldModelIndexValue: WorldModelIndex | undefined;
   private ownsWorldModelIndex = false;
@@ -591,6 +601,18 @@ export class HomeWorldService extends Service {
   /** Metadata-only bridge enumeration for Hub-owned operational status seams. */
   bridgeIds(): readonly string[] {
     return [...this.runtimesById.keys()].sort();
+  }
+
+  /** Subscribes to each live bridge sync that reaches a materialized ready cut. */
+  subscribe(listener: HomeWorldBridgeReadyListener): () => void {
+    if (this.stopTask !== undefined || typeof listener !== "function") return () => undefined;
+    this.bridgeReadyListeners.add(listener);
+    return () => { this.bridgeReadyListeners.delete(listener); };
+  }
+
+  /** Explicit bridge-ready alias for callers that prefer event-shaped naming. */
+  onBridgeReady(listener: HomeWorldBridgeReadyListener): () => void {
+    return this.subscribe(listener);
   }
 
   /** Caller-owned read-model handle, useful for recovery diagnostics only. */
@@ -1661,6 +1683,7 @@ export class HomeWorldService extends Service {
     if (this.stopTask) return this.stopTask;
     this.stopTask = (async () => {
       this.stopController?.abort();
+      this.bridgeReadyListeners.clear();
       if (this.monitorTimer !== undefined) clearInterval(this.monitorTimer);
       for (const runtime of this.runtimesById.values()) runtime.subscriptionAbort?.abort();
       const tasks = [...this.runtimesById.values()].map((runtime) => runtime.task).filter((task): task is Promise<void> => task !== undefined);
@@ -1773,8 +1796,10 @@ export class HomeWorldService extends Service {
             }
             if (envelope.event.kind === "sync-complete") {
               runtime.committedNonSpatialNativeIds = new Set(runtime.pendingNonSpatialNativeIds);
-              this.materializeWorldModel(runtime);
+              const materialized = this.materializeWorldModel(runtime);
               runtime.currentProcessReadyAt = this.clock();
+              const metadata = this.bridgeReadyMetadata(runtime, materialized);
+              if (metadata !== undefined) this.notifyBridgeReady(metadata);
             }
           }
           // A remote identity mismatch is a security boundary failure, not a
@@ -2000,6 +2025,33 @@ export class HomeWorldService extends Service {
       allowRejectedEvents: rejected.length > 0,
       rejectedNativeIds,
     });
+  }
+
+  private bridgeReadyMetadata(
+    runtime: HomeWorldBridgeRuntime,
+    materialized: WorldModelApplyResult | undefined,
+  ): HomeWorldBridgeReadyMetadata | undefined {
+    const diagnostics = runtime.ingest.diagnostics();
+    if (diagnostics.connectionState !== "ready" || materialized === undefined) return undefined;
+    const consistentWatermark = runtime.journal.consistentWatermark?.(runtime.bridgeId);
+    if (consistentWatermark === undefined
+      || materialized.epochId !== consistentWatermark.epochId
+      || materialized.lastSeq !== consistentWatermark.lastSeq) return undefined;
+    const indexedWatermark = this.worldModelIndexValue?.consistentWatermark(runtime.bridgeId);
+    if (indexedWatermark?.epochId !== consistentWatermark.epochId
+      || indexedWatermark.lastSeq !== consistentWatermark.lastSeq) return undefined;
+    return Object.freeze({ bridgeId: runtime.bridgeId });
+  }
+
+  private notifyBridgeReady(metadata: HomeWorldBridgeReadyMetadata): void {
+    for (const listener of [...this.bridgeReadyListeners]) {
+      // A subscriber cannot hold up ingest; both synchronous throws and
+      // asynchronous rejections stay inside this notification boundary.
+      void Promise.resolve().then(() => {
+        if (!this.bridgeReadyListeners.has(listener)) return;
+        return listener(metadata);
+      }).catch(() => undefined);
+    }
   }
 
   private createJournal(entry: BridgeConfigEntry<unknown>): IngestJournal {
