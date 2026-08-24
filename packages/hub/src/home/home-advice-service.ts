@@ -97,6 +97,7 @@ const TOOL_PROGRESS: Readonly<Record<string, HomeAdviceNonTerminalProgressType>>
   get_home_activity: "evaluating_evidence",
   get_home_calibration: "evaluating_evidence",
   get_home_evidence: "evaluating_evidence",
+  get_home_causality: "causality",
   get_home_rules: "checking_rules",
   report_home_advice: "composing_answer",
 };
@@ -357,6 +358,10 @@ export class HomeAdviceService extends Service {
       : setInterval(() => this.captureTrace(active, agent), this.progressPollIntervalMs);
     try {
       const report = await agent.requestAdvice(active.question, active.controller.signal);
+      // Capture the terminal redacted trace before the report closes the
+      // durable lifecycle; this catches a completed causality call that lands
+      // between two polling ticks.
+      this.captureTrace(active, agent);
       if (active.preserveBackgroundOnShutdown) return;
       if (active.cancelRequested || active.controller.signal.aborted) {
         this.finishFailed(active, "cancelled");
@@ -365,6 +370,7 @@ export class HomeAdviceService extends Service {
       const completedAt = timestamp(this.clock);
       if (this.store.complete({ id: active.id, report, completedAt })) this.publishStoredEvent(active.id);
     } catch {
+      this.captureTrace(active, agent);
       if (active.preserveBackgroundOnShutdown) return;
       this.finishFailed(active, active.cancelRequested || active.controller.signal.aborted ? "cancelled" : "failed");
     } finally {
@@ -393,6 +399,10 @@ export class HomeAdviceService extends Service {
     const trace = agent.traceSnapshot?.();
     if (trace === undefined || trace.sessionId.length === 0) return;
     for (const tool of trace.tools) {
+      // A causal explanation is evidence only after the governed tool has
+      // completed. Keep the id unclaimed while running so a later completed
+      // snapshot can produce the one durable marker; failed calls stay absent.
+      if (tool.name === "get_home_causality" && tool.status !== "completed") continue;
       if (active.traceToolIds.has(tool.id)) continue;
       active.traceToolIds.add(tool.id);
       const progressType = TOOL_PROGRESS[tool.name];

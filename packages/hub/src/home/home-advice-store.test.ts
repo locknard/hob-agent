@@ -159,6 +159,52 @@ test("upgrades the legacy advice table while preserving terminal records", async
   store.close();
 });
 
+test("upgrades an existing advice event table so causality progress remains durable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-advice-events-migration-"));
+  const path = join(directory, "advice.sqlite");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`CREATE TABLE home_advice (
+    advice_id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'background', 'completed', 'failed')),
+    report_json TEXT,
+    created_at TEXT NOT NULL,
+    background_at TEXT,
+    completed_at TEXT,
+    completion_notification_pending INTEGER NOT NULL DEFAULT 0
+      CHECK (completion_notification_pending IN (0, 1)),
+    CHECK ((status = 'running' AND report_json IS NULL AND background_at IS NULL
+      AND completed_at IS NULL AND completion_notification_pending = 0)
+      OR (status = 'background' AND report_json IS NULL AND background_at IS NOT NULL
+        AND completed_at IS NULL AND completion_notification_pending = 0)
+      OR (status = 'failed' AND report_json IS NULL AND completed_at IS NOT NULL)
+      OR (status = 'completed' AND report_json IS NOT NULL AND completed_at IS NOT NULL))
+  ) STRICT;
+  CREATE TABLE home_advice_events (
+    advice_id TEXT NOT NULL,
+    event_id INTEGER NOT NULL CHECK (event_id >= 1),
+    stage TEXT NOT NULL CHECK (stage IN (
+      'accepted', 'inspecting_home', 'reading_inventory', 'checking_rules',
+      'evaluating_evidence', 'composing_answer', 'background', 'completed',
+      'failed', 'cancelled'
+    )),
+    event_at TEXT NOT NULL,
+    PRIMARY KEY (advice_id, event_id),
+    FOREIGN KEY (advice_id) REFERENCES home_advice(advice_id)
+  ) STRICT;
+  INSERT INTO home_advice
+    (advice_id, question, status, report_json, created_at, background_at, completed_at, completion_notification_pending)
+    VALUES ('advice-old-events', 'Why did it move?', 'background', NULL, '2026-08-20T10:00:00.000Z', '2026-08-20T10:00:00.500Z', NULL, 0);
+  INSERT INTO home_advice_events (advice_id, event_id, stage, event_at)
+    VALUES ('advice-old-events', 1, 'accepted', '2026-08-20T10:00:00.000Z');`);
+  legacy.close();
+
+  const store = new SqliteHomeAdviceStore({ path });
+  store.appendProgress({ id: "advice-old-events", type: "causality", at: "2026-08-20T10:00:01.000Z" });
+  assert.deepEqual(store.events("advice-old-events").map((event) => event.type), ["accepted", "causality"]);
+  store.close();
+});
+
 test("peeks and acknowledges completion notifications in oldest order across store connections", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-advice-notifications-"));
   const path = join(directory, "advice.sqlite");

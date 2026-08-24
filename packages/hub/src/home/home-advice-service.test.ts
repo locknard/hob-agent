@@ -25,7 +25,11 @@ const authenticatedActor: OneShotActionActor = {
   device: { kind: "private", boundPrincipalId: "adult-1" },
 };
 
-function emptyTrace(tools: readonly { readonly id: string; readonly name: string }[] = []) {
+function emptyTrace(tools: readonly {
+  readonly id: string;
+  readonly name: string;
+  readonly status?: "running" | "completed" | "failed";
+}[] = []) {
   return {
     sessionId: "home-main",
     asOfSeq: tools.length,
@@ -35,7 +39,7 @@ function emptyTrace(tools: readonly { readonly id: string; readonly name: string
       ...tool,
       turn: 1,
       step: index + 1,
-      status: "running" as const,
+      status: tool.status ?? "running",
       startedAt: index + 1,
     })),
     compactions: [],
@@ -342,6 +346,53 @@ test("replays only safe semantic progress derived from DSH tool metadata", async
     assert.deepEqual(replayed.map((event) => event.type), events);
     assert.equal(JSON.stringify(replayed).includes("tool-1"), false);
     assert.equal(JSON.stringify(replayed).includes("get_home_inventory"), false);
+
+    ctx.homeAgent.release();
+    await eventually(() => ctx.homeAdvice.get(running.id)?.status === "completed");
+    unsubscribe();
+  } finally {
+    ctx.homeAgent.release();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("persists a causality stage only when the redacted trace contains get_home_causality", async () => {
+  const ctx = new Context();
+  await ctx.plugin(ReadyWorld);
+  await ctx.plugin(DeferredAdviceAgent);
+  await ctx.plugin(HomeAdviceService, {
+    path: ":memory:",
+    idFactory: () => "advice-causality-progress",
+    clock: () => "2026-08-20T10:00:00.000Z",
+    progressPollIntervalMs: 1,
+  });
+
+  const running = await ctx.homeAdvice.ask("Why did the curtain move?");
+  try {
+    const events: string[] = [];
+    const unsubscribe = ctx.homeAdvice.subscribe(running.id, (event) => events.push(event.type));
+    ctx.homeAgent.trace = emptyTrace([
+      { id: "tool-evidence", name: "get_home_evidence", status: "completed" },
+      { id: "tool-causality", name: "get_home_causality", status: "running" },
+    ]);
+    await eventually(() => events.includes("evaluating_evidence"));
+    assert.equal(events.includes("causality"), false);
+
+    ctx.homeAgent.trace = emptyTrace([
+      { id: "tool-evidence", name: "get_home_evidence", status: "completed" },
+      { id: "tool-causality", name: "get_home_causality", status: "failed" },
+    ]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    assert.equal(events.includes("causality"), false);
+
+    ctx.homeAgent.trace = emptyTrace([
+      { id: "tool-evidence", name: "get_home_evidence", status: "completed" },
+      { id: "tool-causality", name: "get_home_causality", status: "completed" },
+      { id: "tool-report", name: "report_home_advice", status: "completed" },
+    ]);
+    await eventually(() => events.includes("causality"));
+    assert.deepEqual(events.slice(0, 4), ["accepted", "evaluating_evidence", "causality", "composing_answer"]);
+    assert.equal(JSON.stringify(ctx.homeAdvice.events(running.id)).includes("get_home_causality"), false);
 
     ctx.homeAgent.release();
     await eventually(() => ctx.homeAdvice.get(running.id)?.status === "completed");

@@ -158,6 +158,19 @@ errors. Its counts include devices with and without an accepted neutral space
 binding so an incomplete household map stays visible, plus aggregate
 available/unavailable existing-rule coverage before a model call. See
 [`docs/home-validation.md`](docs/home-validation.md).
+
+After one explicit advice turn, export its safe durable acceptance manifest by
+passing the returned advice id:
+
+```sh
+pnpm export:home-advice -- --advice-id <advice-id>
+```
+
+The command reads `HOB_DATA_DIR/home-advice.sqlite` read-only and prints only
+bounded status, stage/timing, causality presence, and report aggregates. It
+never prints the question, report text, device identifiers, tool payloads,
+prompts, credentials, or provider data. Exit code `2` means the manifest is
+insufficient evidence, including when the durable causality stage is absent.
 It also separates explicitly non-spatial service objects from genuine
 space-review gaps through the neutral, epoch-bound `orgHints@1` extension, and
 reports pending identity-governance work only as aggregate counts. Aggregate

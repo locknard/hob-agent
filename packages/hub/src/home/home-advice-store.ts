@@ -16,6 +16,8 @@ export type HomeAdviceProgressType =
   | "reading_inventory"
   | "checking_rules"
   | "evaluating_evidence"
+  /** Internal acceptance evidence; the Inbox boundary intentionally drops this stage. */
+  | "causality"
   | "composing_answer"
   | "background"
   | "completed"
@@ -96,6 +98,7 @@ const EVENT_TYPES = [
   "reading_inventory",
   "checking_rules",
   "evaluating_evidence",
+  "causality",
   "composing_answer",
   "background",
   "completed",
@@ -109,6 +112,7 @@ const NON_TERMINAL_EVENT_TYPES = [
   "reading_inventory",
   "checking_rules",
   "evaluating_evidence",
+  "causality",
   "composing_answer",
   "background",
 ] as const satisfies readonly Exclude<HomeAdviceProgressType, "completed" | "failed" | "cancelled">[];
@@ -410,7 +414,7 @@ export class SqliteHomeAdviceStore implements HomeAdviceStore {
         event_id INTEGER NOT NULL CHECK (event_id >= 1),
         stage TEXT NOT NULL CHECK (stage IN (
           'accepted', 'inspecting_home', 'reading_inventory', 'checking_rules',
-          'evaluating_evidence', 'composing_answer', 'background', 'completed',
+          'evaluating_evidence', 'causality', 'composing_answer', 'background', 'completed',
           'failed', 'cancelled'
         )),
         event_at TEXT NOT NULL,
@@ -420,6 +424,48 @@ export class SqliteHomeAdviceStore implements HomeAdviceStore {
       CREATE INDEX IF NOT EXISTS home_advice_events_cursor
         ON home_advice_events (advice_id, event_id ASC);
     `);
+    this.ensureEventSchema();
+  }
+
+  private ensureEventSchema(): void {
+    const existing = this.db.prepare(`SELECT sql FROM sqlite_master
+      WHERE type = 'table' AND name = 'home_advice_events'`).get() as Row | undefined;
+    if (existing === undefined) return;
+    if (typeof existing.sql === "string" && /['"]causality['"]/u.test(existing.sql)) return;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const legacy = "home_advice_events_legacy_upgrade";
+      const existingLegacy = this.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+        .get(legacy) as Row | undefined;
+      if (existingLegacy !== undefined) throw new Error("Home advice event schema migration is already in progress");
+      this.db.exec(`ALTER TABLE home_advice_events RENAME TO ${legacy};`);
+      this.createAdviceEventsTable();
+      this.db.exec(`INSERT INTO home_advice_events (advice_id, event_id, stage, event_at)
+        SELECT advice_id, event_id, stage, event_at FROM ${legacy};
+        DROP TABLE ${legacy};
+        CREATE INDEX IF NOT EXISTS home_advice_events_cursor
+          ON home_advice_events (advice_id, event_id ASC);
+        COMMIT;`);
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
+  }
+
+  private createAdviceEventsTable(): void {
+    this.db.exec(`CREATE TABLE home_advice_events (
+      advice_id TEXT NOT NULL,
+      event_id INTEGER NOT NULL CHECK (event_id >= 1),
+      stage TEXT NOT NULL CHECK (stage IN (
+        'accepted', 'inspecting_home', 'reading_inventory', 'checking_rules',
+        'evaluating_evidence', 'causality', 'composing_answer', 'background', 'completed',
+        'failed', 'cancelled'
+      )),
+      event_at TEXT NOT NULL,
+      PRIMARY KEY (advice_id, event_id),
+      FOREIGN KEY (advice_id) REFERENCES home_advice(advice_id)
+    ) STRICT;`);
   }
 
   private migrateLegacyTable(): void {
