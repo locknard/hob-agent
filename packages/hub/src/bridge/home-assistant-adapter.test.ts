@@ -1342,6 +1342,7 @@ function foreignRuleMigrationFetchFake(
 
 function foreignRuleControlFetchFake(config: unknown, initialState: "on" | "off" = "on") {
   const requests: Array<{ method: string; url: string; headers: Record<string, string> }> = [];
+  const configReads: unknown[] = [];
   let configBody = config;
   let state = initialState;
   let invalidConfigJson = false;
@@ -1359,6 +1360,7 @@ function foreignRuleControlFetchFake(config: unknown, initialState: "on" | "off"
       return new Response(JSON.stringify({ state }), { status: 200 });
     }
     if (url.endsWith("/api/config/automation/config/arrival_light")) {
+      if (method === "GET") configReads.push(configBody);
       return invalidConfigJson
         ? new Response("not-json", { status: configStatus })
         : new Response(JSON.stringify(configBody), { status: configStatus });
@@ -1368,6 +1370,7 @@ function foreignRuleControlFetchFake(config: unknown, initialState: "on" | "off"
   return {
     fetchImpl,
     requests,
+    configReads,
     setState(next: "on" | "off") { state = next; },
     setConfig(next: unknown) { configBody = next; },
     setInvalidConfig(next: boolean) { invalidConfigJson = next; },
@@ -1810,13 +1813,15 @@ test("reads one foreign rule through an opaque ruleRef with a neutral fingerprin
 
 test("rejects a stale foreign source before sending a service command", async () => {
   const socket = new FakeSocket();
-  const fake = foreignRuleControlFetchFake({
+  const nativeConfig = {
     alias: "到家灯光",
+    description: "hob:到家灯光",
     mode: "single",
     trigger: [{ platform: "state", entity_id: "light.kitchen" }],
     condition: [],
     action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
-  });
+  };
+  const fake = foreignRuleControlFetchFake(nativeConfig);
   const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
   const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
   const first = iterator.next();
@@ -1825,15 +1830,18 @@ test("rejects a stale foreign source before sending a service command", async ()
   while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
   const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
   const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
+  if (observed.status !== "running") assert.fail("expected a running source rule");
+  fake.setConfig({ ...nativeConfig, alias: "preflight 已漂移", description: "hob:preflight 已漂移" });
   const result = await handle.setEnabled({
     ruleRef,
-    expectedSourceFingerprint: `sha256:${"b".repeat(64)}`,
+    expectedSourceFingerprint: observed.sourceFingerprint,
     enabled: false,
     operationId: "0123456789abcdef0123456789abcdef",
   }, { signal: new AbortController().signal });
 
   assert.deepEqual(result, { status: "rejected", reason: "stale_source" });
-  assert.equal(socket.sent.some((message) => message.type === "call_service"), false);
+  assert.equal(socket.sent.filter((message) => message.type === "call_service").length, 0);
   await adapter.control.dispose();
   void first;
 });
@@ -1946,10 +1954,11 @@ test("returns effect-uncertain when Home Assistant does not acknowledge a foreig
   void first;
 });
 
-test("does not verify a foreign rule after an acknowledged toggle when its config fingerprint drifts", async () => {
+test("returns unknown when a foreign rule config drifts between preflight and final read-back", async () => {
   const socket = new FakeSocket();
   const nativeConfig = {
     alias: "到家灯光",
+    description: "hob:到家灯光",
     mode: "single",
     trigger: [{ platform: "state", entity_id: "light.kitchen" }],
     condition: [],
@@ -1966,6 +1975,7 @@ test("does not verify a foreign rule after an acknowledged toggle when its confi
   const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
   const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
   if (observed.status !== "running") assert.fail("expected a running source rule");
+  const configReadsBeforeSetEnabled = fake.configReads.length;
 
   const pending = handle.setEnabled({
     ruleRef,
@@ -1975,11 +1985,25 @@ test("does not verify a foreign rule after an acknowledged toggle when its confi
   }, { signal: new AbortController().signal });
   await new Promise<void>((resolve) => setImmediate(resolve));
   const command = socket.sent.at(-1)!;
-  fake.setConfig({ ...nativeConfig, alias: "被改写的规则" });
+  assert.equal(command.type, "call_service");
+  assert.equal(socket.sent.filter((message) => message.type === "call_service").length, 1);
+  fake.setConfig({ ...nativeConfig, alias: "被改写的规则", description: "外部修改后的描述" });
   fake.setState("off");
   socket.receive({ id: command.id, type: "result", success: true, result: null });
 
-  assert.deepEqual(await pending, { status: "unknown", reason: "upstream_unavailable" });
+  const result = await pending;
+  assert.deepEqual(result, { status: "unknown", reason: "upstream_unavailable" });
+  assert.notEqual(result.status, "running");
+  assert.notEqual(result.status, "paused");
+  const configReads = fake.configReads.slice(configReadsBeforeSetEnabled);
+  assert.equal(configReads.length, 2, "setEnabled reads config once before and once after the service command");
+  assert.deepEqual(configReads[0], nativeConfig);
+  assert.equal((configReads[0] as { alias: string }).alias, "到家灯光");
+  assert.equal((configReads[0] as { description: string }).description, "hob:到家灯光");
+  assert.equal((configReads[1] as { alias: string }).alias, "被改写的规则");
+  assert.equal((configReads[1] as { description: string }).description, "外部修改后的描述");
+  assert.notDeepEqual(configReads[0], configReads[1], "the final config has a different source fingerprint");
+  assert.equal(socket.sent.filter((message) => message.type === "call_service").length, 1);
   await adapter.control.dispose();
   void first;
 });
