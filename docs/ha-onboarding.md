@@ -85,8 +85,11 @@ locator 报告“已配置”，不会为了渲染页面读取 Keychain；Bridge
 - “为什么这个设备刚刚变化？”：展示已验证的状态事件和当前可确认的来源类别。
 
 HA `context.user_id` 会先在桥域内匿名化，再形成家庭成员来源证据。缺少可确认来源的
-事件明确显示“原因未知”。HA automation trace、logbook 与 recorder 尚未导入时，产品
-不会把时间接近的传感器、规则或物理操作猜成完整触发链。
+事件明确显示“原因未知”。`history@1` 可导入有界 recorder 历史并回答发生了什么、何时
+发生；它不证明原因。`automationTrace@1` 只在同一 live epoch 中已有精确 HA context 与
+稳定规则身份关联时读取对应运行；权限不足、trace 未保留、身份缺失或重同步都会显示为
+partial、unknown 或 unavailable。产品不会用时间邻近、实体名称或 ID 后缀猜测完整触发链，
+也不引入单独的 logbook 因果来源。
 
 产品在此阶段不显示“自动化控制台”。在积累足够观察证据后，才以提案形式邀请用户
 开启“生成自动化建议”；建议仍须提供 dry-run、diff、批准和一键撤销。

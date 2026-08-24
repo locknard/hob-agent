@@ -78,6 +78,7 @@ const DEFAULT_SYSTEM_PROMPT = [
   "A window_before_baseline coverage reason means part of the requested interval was not observed, not that the home was quiet.",
   "When a proposal relies on recent behavior, include the selected hub capability IDs and bounded lookback so the Hub can bind trusted event provenance.",
   "Use get_home_history for what happened or when a recorded state changed; imported recorder history never proves why and must not be passed to get_home_causality.",
+  "For a why or just-changed question, call get_home_causality for one exact evidence event. When its attribution is external-rule, call get_home_automation_trace with the same exact evidence provenance before answering; preserve partial, unknown, and unavailable results without guessing.",
   "Before proposing an automation, inspect existing household rules and treat unavailable catalogs as incomplete conflict coverage.",
   "When neutral media tools are available, preserve distinct Hub capability IDs: the same media label does not mean the same endpoint.",
   "An empty media search does not prove that no match exists because provider search is best-effort.",

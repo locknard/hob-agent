@@ -531,6 +531,14 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     answerSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
     /what happened.*when.*get_home_history.*never proves why.*get_home_causality/is,
   );
+  assert.match(
+    answerSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
+    /external-rule.*get_home_automation_trace.*same.*hwCapabilityId.*provenance.*before answering/is,
+  );
+  assert.match(
+    answerSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
+    /automation trace.*complete.*partial.*unknown.*unavailable.*do not guess/is,
+  );
 
   ctx.homeAgent.agent.followup(createUserMessage({
     content: [{ type: "text", text: "What can you see?" }],
@@ -543,6 +551,10 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.match(adapter.requests[0]?.system ?? "", /Persistent behavior changes remain review-only proposals/is);
   assert.match(adapter.requests[0]?.system ?? "", /same.*media.*label.*not.*same.*endpoint/is);
   assert.match(adapter.requests[0]?.system ?? "", /mediaRef.*does not grant.*authority/is);
+  assert.match(
+    adapter.requests[0]?.system ?? "",
+    /external-rule.*get_home_automation_trace.*same exact evidence provenance.*before answering/is,
+  );
   assert.match(adapter.requests[0]?.system ?? "", /empty.*media.*search.*not.*prove.*no.*match/is);
   assert.match(adapter.requests[0]?.system ?? "", /window_before_baseline.*not observed/is);
   assert.match(adapter.requests[0]?.system ?? "", /prefer one exact hub device.*semantic kinds/is);

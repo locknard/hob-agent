@@ -134,6 +134,43 @@ remaining incomplete-epoch and proposal-pin invariants before exposing any
 apply operation. The bounded quota remains sufficient for this manual pilot
 and must never trigger automatic deletion.
 
+## 2026-08-25 M2 explanation checkpoint
+
+An isolated model-free launch against the same real HA household reached a
+ready HomeWorld cut with 74 neutral devices, 777 capabilities, 538 current
+states, six spaces, and 12 readable foreign rules. The journal reported one
+healthy capacity partition, and the launch created no identity-link or
+capability-binding proposal. The separate HA bootstrap surface contained 79
+devices and 15 automation entities.
+
+The configured credential can call the admin-only `trace/contexts` command.
+Only one of the 15 automation entities currently has a bounded stable
+`unique_id`, however, and the retained context response did not provide one
+complete safe association for this checkpoint. The adapter therefore did not
+call `trace/get` and did not infer an item ID from an entity name or suffix.
+This is the expected fail-closed result: recorder/history remains valid evidence
+for what and when, while a missing stable automation identity keeps why at
+rule-only or unknown coverage.
+
+The next M2 acceptance run keeps one ready epoch open until ordinary household
+activity produces a `foreign_rule` causality event for an automation with a
+stable ID. It then follows the exact evidence provenance through
+`get_home_causality` and `automationTrace@1`. The operator first reviews the
+read-only stable-ID coverage and adds IDs in Home Assistant through an explicit
+household maintenance decision when broader explanation coverage is desired.
+The pilot never triggers an automation merely to manufacture evidence.
+
+Run the bounded model-free listener with the same private bridge configuration:
+
+```sh
+HOB_TRACE_BRIDGE_ID='<configured-bridge-id>' \
+  pnpm pilot:home-automation-trace --timeout-seconds 60
+```
+
+The timeout accepts an integer from 1 through 900 seconds. Standard output is
+one redacted JSON result containing only outcome, status, run state/outcome,
+and closed reasons. `not_observed` is a valid quiet-window result.
+
 After every run:
 
 - return to the full runtime Inbox;

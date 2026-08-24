@@ -16,6 +16,7 @@
     "metrics:proposal-success": "tsx packages/hub/src/cli/proposal-success-metrics.ts",
     "dev:migration-fixture": "tsx scripts/product-migration-fixture.ts",
     "observe:home": "tsx packages/hub/src/cli/home-observe-once.ts",
+    "pilot:home-automation-trace": "tsx packages/hub/src/cli/home-automation-trace-pilot.ts",
     "retain:home": "tsx packages/hub/src/cli/home-retention-operation.ts",
     "credentials:model": "tsx packages/hub/src/cli/model-credential-setup.ts",
     "credentials:bridge": "tsx packages/hub/src/cli/bridge-credential-setup.ts",
