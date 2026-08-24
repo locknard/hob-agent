@@ -68,6 +68,11 @@ the household, verify a model and Home Assistant connection, then optionally
 verify private ASR and TTS. The same Product Host switches that paired browser
 to the operational product and creates its durable local product session.
 
+The single-image container run keeps the same process and requires the
+operator-managed encrypted-vault key mount; see
+[`docs/container-runtime.md`](docs/container-runtime.md) for the fixed
+`HOB_VAULT_KEY_FILE` path, owner-only key setup, and host-network requirement.
+
 `HOB_MODEL` and `HOB_BRIDGES` remain explicit inputs for command-line
 diagnostics and credential utilities. They do not directly start the production
 household Agent or bridge runtime. The diagnostic bridge catalog contains only

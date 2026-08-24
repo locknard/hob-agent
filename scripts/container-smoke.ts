@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_BASE_IMAGE = "node:22.19.0-bookworm-slim@sha256:4a4884e8a44826194dff92ba316264f392056cbe243dcc9fd3551e71cea02b90";
 const EXPECTED_ENTRYPOINT = ["node", "--import", "tsx/esm", "packages/hub/src/main.ts"];
+const EXPECTED_VAULT_KEY_PATH = "/run/secrets/hob-vault-key";
 
 function requireContract(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -35,7 +36,9 @@ async function main(): Promise<void> {
   requireContract(fromLines[0] === `FROM ${EXPECTED_BASE_IMAGE}`, "Dockerfile must pin the approved Node base image by digest");
   requireContract(dockerfile.includes("WORKDIR /app"), "Dockerfile must use one application workdir");
   requireContract(/\bHOB_DATA_DIR=\/data\b/u.test(dockerfile), "Dockerfile must bind the durable data root to /data");
+  requireContract(dockerfile.includes(`HOB_VAULT_KEY_FILE=${EXPECTED_VAULT_KEY_PATH}`), "Dockerfile must require the read-only encrypted-vault key mount");
   requireContract(dockerfile.includes("VOLUME [\"/data\"]"), "Dockerfile must declare exactly the /data volume");
+  requireContract(dockerLines.filter((line) => /^VOLUME\s+/u.test(line)).length === 1, "Dockerfile must declare one durable volume");
   requireContract(dockerfile.includes("USER node"), "Dockerfile must run the Hub as the non-root node user");
   requireContract(dockerfile.includes("STOPSIGNAL SIGTERM"), "Dockerfile must preserve the Hub's SIGTERM shutdown path");
   requireContract(dockerfile.includes("EXPOSE 8787"), "Dockerfile must document the default local product port");
@@ -46,6 +49,17 @@ async function main(): Promise<void> {
   requireContract(packageJson.scripts?.start === "tsx packages/hub/src/main.ts", "container and bare-process starts must share the existing main entrypoint");
   requireContract(operatorDocs.includes("--network host"), "operator run instructions must use host networking for the loopback-bound product listener");
   requireContract(!operatorDocs.includes("-p 8787:8787"), "operator run instructions must not advertise NAT port publishing for the loopback-bound listener");
+  requireContract(operatorDocs.includes(`HOB_VAULT_KEY_FILE=${EXPECTED_VAULT_KEY_PATH}`), "operator instructions must name the fixed encrypted-vault key path");
+  requireContract(operatorDocs.includes("--mount type=bind"), "operator instructions must bind the operator-managed key file");
+  requireContract(operatorDocs.includes(`dst=${EXPECTED_VAULT_KEY_PATH}`), "operator instructions must mount the key at the fixed path");
+  requireContract(operatorDocs.includes("readonly"), "operator instructions must mount the key read-only");
+  requireContract(operatorDocs.includes("openssl rand -hex 32"), "operator instructions must generate an exact 32-byte hex key without printing it");
+  requireContract(operatorDocs.includes("/var/lib/hob-agent/hob-vault-key"), "operator instructions must keep the key source outside the repository checkout");
+  requireContract(operatorDocs.includes("chmod 600"), "operator instructions must keep the key owner-only");
+  requireContract(operatorDocs.includes("chown 1000:1000"), "operator instructions must make the owner-only key readable by the node UID");
+  requireContract(!/(?:-e|--env)[^\n]*HOB_VAULT_KEY_FILE/iu.test(operatorDocs), "operator instructions must not put a vault key or path in a command-line env option");
+  const vaultKeyUnderData = /(?:HOB_VAULT_KEY_FILE|hob-vault-key)[^\n]*(?:\/data(?:\/|$)|data\/)|(?:\/data(?:\/|$)|data\/)[^\n]*(?:HOB_VAULT_KEY_FILE|hob-vault-key)/iu;
+  requireContract(!vaultKeyUnderData.test(operatorDocs), "operator instructions must keep the key outside the durable /data volume");
 
   const entrypointLine = dockerLines.find((line) => /^ENTRYPOINT\s+/u.test(line));
   requireContract(entrypointLine !== undefined, "Dockerfile must declare a direct executable entrypoint");
@@ -66,6 +80,8 @@ async function main(): Promise<void> {
     ".env*",
     "home/**",
     "home-template/",
+    "hob-vault-key",
+    "**/hob-vault-key",
     "*.db",
     "*.db-shm",
     "*.db-wal",

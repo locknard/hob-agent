@@ -8,6 +8,8 @@ node_modules
 **/.env*
 home/**
 home-template/
+hob-vault-key
+**/hob-vault-key
 *.db
 *.db-shm
 *.db-wal

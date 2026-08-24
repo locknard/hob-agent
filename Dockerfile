@@ -2,6 +2,7 @@ FROM node:22.19.0-bookworm-slim@sha256:4a4884e8a44826194dff92ba316264f392056cbe2
 
 ENV NODE_ENV=production \
     HOB_DATA_DIR=/data \
+    HOB_VAULT_KEY_FILE=/run/secrets/hob-vault-key \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 WORKDIR /app
@@ -22,8 +23,9 @@ RUN corepack enable pnpm \
 COPY contracts ./contracts
 COPY packages ./packages
 
-RUN mkdir -p /data \
-    && chown -R node:node /app /data
+RUN mkdir -p /data /run/secrets \
+    && chown -R node:node /app /data /run/secrets \
+    && chmod 0700 /run/secrets
 
 EXPOSE 8787
 STOPSIGNAL SIGTERM
