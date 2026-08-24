@@ -284,6 +284,213 @@ test("eligible rules advance through an independent durable workflow with neutra
   assert.equal(ready?.status, "assessed");
 });
 
+test("an approved ready rule records a durable switch, verification, rollback, and restore chain", async () => {
+  const service = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "b".repeat(32),
+    idempotencyKeyFactory: () => "c".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "flat_and" },
+        action: { kind: "reversible" },
+        sourceFingerprint: eligibleFingerprint,
+      }),
+    },
+  });
+  const created = await service.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  service.translateRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    proposalId: "proposal-switch",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"1".repeat(64)}`,
+  });
+  service.simulateRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "translated",
+    artifactId: "artifact-switch",
+    artifactRevision: 1,
+    artifactContentHash: `sha256:${"2".repeat(64)}`,
+    compileResultId: `sha256:${"3".repeat(64)}`,
+    dryRunResultId: `sha256:${"4".repeat(64)}`,
+  });
+  service.readyRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "simulated",
+    reviewProposalRevision: 2,
+  });
+
+  const switching = service.startRuleSwitch({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "ready",
+    approvedProposalRevision: 3,
+    switchOperationId: "a".repeat(32),
+    switchActor: "member:alice",
+    sourceWasEnabled: true,
+  });
+  assert.equal(switching?.rules[0]?.workflow?.status, "switching");
+  assert.equal(switching?.rules[0]?.workflow?.proposalId, "proposal-switch");
+  assert.equal(switching?.rules[0]?.workflow?.approvedProposalRevision, 3);
+
+  const verified = service.verifyRuleSwitch({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "switching",
+    deploymentId: "deployment-1",
+    deploymentTarget: "home-assistant",
+    deploymentConfigFingerprint: `sha256:${"5".repeat(64)}`,
+  });
+  assert.equal(verified?.rules[0]?.workflow?.status, "verified");
+  assert.equal(verified?.rules[0]?.workflow?.switchOperationId, "a".repeat(32));
+
+  const rollingBack = service.startRuleRollback({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "verified",
+    rollbackOperationId: "b".repeat(32),
+    rollbackActor: "member:alice",
+  });
+  assert.equal(rollingBack?.rules[0]?.workflow?.status, "rolling_back");
+
+  const restored = service.restoreRule({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "rolling_back",
+  });
+  assert.equal(restored?.rules[0]?.workflow?.status, "restored");
+  assert.equal(restored?.rules[0]?.workflow?.deploymentTarget, "home-assistant");
+});
+
+test("failed switch and rollback operations can resume with fresh operation receipts", async () => {
+  const service = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "d".repeat(32),
+    idempotencyKeyFactory: () => "e".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "flat_and" },
+        action: { kind: "reversible" },
+        sourceFingerprint: eligibleFingerprint,
+      }),
+    },
+  });
+  const created = await service.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  service.translateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "assessed", proposalId: "proposal-resume", candidateProposalRevision: 1, candidateContentHash: `sha256:${"6".repeat(64)}` });
+  service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-resume", artifactRevision: 1, artifactContentHash: `sha256:${"7".repeat(64)}`, compileResultId: `sha256:${"8".repeat(64)}`, dryRunResultId: `sha256:${"9".repeat(64)}` });
+  service.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
+  service.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "1".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
+  const failedSwitch = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_failed" });
+  assert.equal(failedSwitch?.rules[0]?.workflow?.status, "needs_attention");
+  assert.equal(service.resumeRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", switchOperationId: "1".repeat(32), switchActor: "member:alice" }), undefined);
+
+  const resumedSwitch = service.resumeRuleSwitch({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "needs_attention",
+    switchOperationId: "2".repeat(32),
+    switchActor: "member:bob",
+  });
+  assert.equal(resumedSwitch?.rules[0]?.workflow?.status, "switching");
+  assert.equal(resumedSwitch?.rules[0]?.workflow?.switchOperationId, "2".repeat(32));
+  assert.equal(resumedSwitch?.rules[0]?.workflow?.approvedProposalRevision, 3);
+  assert.equal(resumedSwitch?.rules[0]?.workflow?.sourceWasEnabled, true);
+
+  service.verifyRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", deploymentId: "deployment-resume", deploymentTarget: "home-assistant", deploymentConfigFingerprint: `sha256:${"a".repeat(64)}` });
+  const failedVerification = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "verified", reason: "verification_failed" });
+  assert.equal(failedVerification?.rules[0]?.workflow?.status, "needs_attention");
+  const resumedRollback = service.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "3".repeat(32), rollbackActor: "member:bob" });
+  assert.equal(resumedRollback?.rules[0]?.workflow?.status, "rolling_back");
+  assert.equal(resumedRollback?.rules[0]?.workflow?.deploymentId, "deployment-resume");
+  assert.equal(resumedRollback?.rules[0]?.workflow?.rollbackOperationId, "3".repeat(32));
+
+  const failedRollback = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "rolling_back", reason: "rollback_unknown" });
+  assert.equal(failedRollback?.rules[0]?.workflow?.status, "needs_attention");
+  assert.equal(service.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "3".repeat(32), rollbackActor: "member:bob" }), undefined);
+  const resumedAgain = service.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "4".repeat(32), rollbackActor: "member:carol" });
+  assert.equal(resumedAgain?.rules[0]?.workflow?.status, "rolling_back");
+  assert.equal(resumedAgain?.rules[0]?.workflow?.rollbackOperationId, "4".repeat(32));
+
+  assert.equal(service.resumeRuleRollback({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "needs_attention",
+    rollbackOperationId: "5".repeat(32),
+    rollbackActor: "member:carol",
+    nativeBody: "blocked",
+  } as never), undefined);
+});
+
+test("source-stale preflight and unrelated failure reasons cannot resume switching", async () => {
+  const service = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "f".repeat(32),
+    idempotencyKeyFactory: () => "0".repeat(32),
+    translator: { assess: async (request) => ({ ruleRef: request.ruleRef, trigger: { kind: "state" }, condition: { kind: "flat_and" }, action: { kind: "reversible" }, sourceFingerprint: eligibleFingerprint }) },
+  });
+  const created = await service.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  service.translateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "assessed", proposalId: "proposal-preflight-resume", candidateProposalRevision: 1, candidateContentHash: `sha256:${"a".repeat(64)}` });
+  service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-preflight-resume", artifactRevision: 1, artifactContentHash: `sha256:${"b".repeat(64)}`, compileResultId: `sha256:${"c".repeat(64)}`, dryRunResultId: `sha256:${"d".repeat(64)}` });
+  service.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
+  service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", reason: "source_stale" });
+  assert.equal(service.resumeRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", switchOperationId: "6".repeat(32), switchActor: "member:alice" }), undefined);
+});
+
+test("switch recovery receipts survive SQLite restart and duplicate resumes do not mutate", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-resume-restart-"));
+  const path = join(directory, "migrations.sqlite");
+  try {
+    const firstStore = new SqliteHomeAutomationMigrationStore({ path });
+    const first = new HomeAutomationMigrationService({
+      store: firstStore,
+      clock: () => now,
+      migrationIdFactory: () => "1".repeat(32),
+      idempotencyKeyFactory: () => "2".repeat(32),
+      translator: { assess: async (request) => ({ ruleRef: request.ruleRef, trigger: { kind: "state" }, condition: { kind: "flat_and" }, action: { kind: "reversible" }, sourceFingerprint: eligibleFingerprint }) },
+    });
+    const created = await first.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+    first.translateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "assessed", proposalId: "proposal-sqlite-resume", candidateProposalRevision: 1, candidateContentHash: `sha256:${"3".repeat(64)}` });
+    first.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-sqlite-resume", artifactRevision: 1, artifactContentHash: `sha256:${"4".repeat(64)}`, compileResultId: `sha256:${"5".repeat(64)}`, dryRunResultId: `sha256:${"6".repeat(64)}` });
+    first.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
+    first.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "7".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
+    first.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_unknown" });
+    first.close();
+
+    const secondStore = new SqliteHomeAutomationMigrationStore({ path });
+    const second = new HomeAutomationMigrationService({ store: secondStore, clock: () => now });
+    const resumed = second.resumeRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", switchOperationId: "8".repeat(32), switchActor: "member:bob" });
+    assert.equal(resumed?.rules[0]?.workflow?.status, "switching");
+    assert.equal(resumed?.rules[0]?.workflow?.switchOperationId, "8".repeat(32));
+    assert.equal(resumed?.rules[0]?.workflow?.approvedProposalRevision, 3);
+    assert.equal(second.resumeRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", switchOperationId: "9".repeat(32), switchActor: "member:carol" }), undefined);
+    assert.equal(second.get(created.assessment.migrationId)?.rules[0]?.workflow?.status, "switching");
+
+    second.verifyRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", deploymentId: "deployment-sqlite-resume", deploymentTarget: "home-assistant", deploymentConfigFingerprint: `sha256:${"a".repeat(64)}` });
+    second.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "verified", reason: "verification_failed" });
+    const rollback = second.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "b".repeat(32), rollbackActor: "member:bob" });
+    assert.equal(rollback?.rules[0]?.workflow?.status, "rolling_back");
+    assert.equal(rollback?.rules[0]?.workflow?.deploymentId, "deployment-sqlite-resume");
+    second.close();
+
+    const third = new SqliteHomeAutomationMigrationStore({ path });
+    assert.equal(third.get(created.assessment.migrationId)?.rules[0]?.workflow?.status, "rolling_back");
+    assert.equal(third.get(created.assessment.migrationId)?.rules[0]?.workflow?.rollbackOperationId, "b".repeat(32));
+    third.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("workflow failure keeps a fixed reason and metadata or unsupported rules cannot advance", async () => {
   const failedService = new HomeAutomationMigrationService({
     store: new InMemoryHomeAutomationMigrationStore(),

@@ -548,7 +548,9 @@ function workflowEqual(left: HomeAutomationMigrationRuleWorkflow, right: HomeAut
   const keys: readonly (keyof HomeAutomationMigrationRuleWorkflow)[] = [
     "status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash",
     "artifactId", "artifactRevision", "artifactContentHash", "translatedAt", "compileResultId", "dryRunResultId",
-    "simulatedAt", "readyAt", "reviewProposalRevision", "failedAt", "failureReason",
+    "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor",
+    "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt",
+    "rollbackOperationId", "rollbackActor", "rollbackStartedAt", "restoredAt", "failedAt", "failureReason",
   ];
   return keys.every((key) => left[key] === right[key]);
 }
@@ -557,7 +559,8 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
   const allowedKeys = [
     "migrationId", "ruleRef", "from", "to", "transitionedAt", "proposalId", "candidateProposalRevision",
     "candidateContentHash", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "failureReason",
-    "reviewProposalRevision",
+    "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled",
+    "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "rollbackOperationId", "rollbackActor",
   ] as const;
   if (!isRecord(input) || !hasOnlyKeys(input, allowedKeys)
     || !isMigrationId(input.migrationId)
@@ -593,6 +596,33 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
   if (input.dryRunResultId !== undefined && !isDigest(input.dryRunResultId)) {
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
+  if (input.approvedProposalRevision !== undefined && !isPositiveSafeInteger(input.approvedProposalRevision)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.switchOperationId !== undefined && !is128BitHex(input.switchOperationId)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.switchActor !== undefined && !isBoundedText(input.switchActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.sourceWasEnabled !== undefined && input.sourceWasEnabled !== true) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.deploymentId !== undefined && !isBoundedText(input.deploymentId, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentIdLength)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.deploymentTarget !== undefined && !isBoundedText(input.deploymentTarget, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentTargetLength)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.deploymentConfigFingerprint !== undefined && !isDigest(input.deploymentConfigFingerprint)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.rollbackOperationId !== undefined && !is128BitHex(input.rollbackOperationId)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.rollbackActor !== undefined && !isBoundedText(input.rollbackActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
   if (input.failureReason !== undefined && !isWorkflowFailureReason(input.failureReason)) {
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
@@ -601,7 +631,10 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.candidateProposalRevision === undefined || input.candidateContentHash === undefined
       || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
       || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
-      || input.failureReason !== undefined) {
+      || input.failureReason !== undefined || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined
+      || input.switchActor !== undefined || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined
+      || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined
+      || input.rollbackActor !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "simulated") {
@@ -609,14 +642,62 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.artifactRevision === undefined || input.artifactContentHash === undefined
       || input.compileResultId === undefined || input.dryRunResultId === undefined
       || input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
-      || input.reviewProposalRevision !== undefined || input.failureReason !== undefined) {
+      || input.reviewProposalRevision !== undefined || input.failureReason !== undefined || input.approvedProposalRevision !== undefined
+      || input.switchOperationId !== undefined || input.switchActor !== undefined || input.sourceWasEnabled !== undefined
+      || input.deploymentId !== undefined || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined
+      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "ready") {
     if (input.from !== "simulated" || input.reviewProposalRevision === undefined || input.proposalId !== undefined || input.candidateProposalRevision !== undefined
       || input.candidateContentHash !== undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
       || input.artifactContentHash !== undefined || input.compileResultId !== undefined
-      || input.dryRunResultId !== undefined || input.failureReason !== undefined) {
+      || input.dryRunResultId !== undefined || input.failureReason !== undefined || input.approvedProposalRevision !== undefined
+      || input.switchOperationId !== undefined || input.switchActor !== undefined || input.sourceWasEnabled !== undefined
+      || input.deploymentId !== undefined || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined
+      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.to === "switching") {
+    if ((input.from !== "ready" && input.from !== "needs_attention") || input.switchOperationId === undefined
+      || input.switchActor === undefined
+      || input.from === "ready" && (input.approvedProposalRevision === undefined || input.sourceWasEnabled !== true)
+      || input.from === "needs_attention" && (input.approvedProposalRevision !== undefined || input.sourceWasEnabled !== undefined)
+      || input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
+      || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
+      || input.deploymentId !== undefined || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined
+      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined || input.failureReason !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.to === "verified") {
+    if (input.from !== "switching" || input.deploymentId === undefined || input.deploymentTarget === undefined
+      || input.deploymentConfigFingerprint === undefined || input.proposalId !== undefined || input.candidateProposalRevision !== undefined
+      || input.candidateContentHash !== undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
+      || input.artifactContentHash !== undefined || input.compileResultId !== undefined || input.dryRunResultId !== undefined
+      || input.reviewProposalRevision !== undefined || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined
+      || input.switchActor !== undefined || input.sourceWasEnabled !== undefined || input.rollbackOperationId !== undefined
+      || input.rollbackActor !== undefined || input.failureReason !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.to === "rolling_back") {
+    if ((input.from !== "verified" && input.from !== "needs_attention") || input.rollbackOperationId === undefined || input.rollbackActor === undefined
+      || input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
+      || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
+      || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
+      || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
+      || input.deploymentConfigFingerprint !== undefined || input.failureReason !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.to === "restored") {
+    if (input.from !== "rolling_back" || input.proposalId !== undefined || input.candidateProposalRevision !== undefined
+      || input.candidateContentHash !== undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
+      || input.artifactContentHash !== undefined || input.compileResultId !== undefined || input.dryRunResultId !== undefined
+      || input.reviewProposalRevision !== undefined || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined
+      || input.switchActor !== undefined || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined
+      || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined
+      || input.rollbackActor !== undefined || input.failureReason !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.from === "translated") {
@@ -625,7 +706,10 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
     }
     if (input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
       || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
-      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined) {
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
+      || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
+      || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
+      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.from === "simulated") {
@@ -634,7 +718,20 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
     }
     if (input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
       || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
-      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined) {
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
+      || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
+      || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
+      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
+      throw new TypeError("Home automation migration rule workflow transition is invalid");
+    }
+  } else if (input.from === "ready" || input.from === "switching" || input.from === "verified" || input.from === "rolling_back") {
+    if (!isAllowedWorkflowFailurePair(input.from, input.failureReason)
+      || input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
+      || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
+      || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
+      || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
+      || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
+      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else {
@@ -709,6 +806,73 @@ function buildWorkflowTransition(
       reviewProposalRevision: input.reviewProposalRevision!,
     };
   }
+  if (input.to === "switching") {
+    if (input.from === "ready") {
+      if (current.reviewProposalRevision! >= Number.MAX_SAFE_INTEGER
+        || input.approvedProposalRevision !== current.reviewProposalRevision! + 1) {
+        throw new TypeError("Migration workflow approved proposal revision must immediately follow the review revision");
+      }
+    } else if (current.failureReason !== "switch_failed" && current.failureReason !== "switch_unknown") {
+      throw new TypeError("Migration workflow switch recovery requires a switch failure");
+    } else if (current.approvedProposalRevision === undefined || current.switchOperationId === undefined
+      || current.switchActor === undefined || current.sourceWasEnabled !== true || current.switchStartedAt === undefined
+      || input.switchOperationId === current.switchOperationId) {
+      throw new TypeError("Migration workflow switch recovery requires complete switching evidence");
+    }
+    const withoutFailure = clearWorkflowFailure(current);
+    return {
+      ...withoutFailure,
+      status: "switching",
+      ...(input.from === "ready" ? { approvedProposalRevision: input.approvedProposalRevision! } : {}),
+      switchOperationId: input.switchOperationId!,
+      switchActor: input.switchActor!,
+      sourceWasEnabled: true,
+      switchStartedAt: input.transitionedAt,
+    };
+  }
+  if (input.to === "verified") {
+    return {
+      ...current,
+      status: "verified",
+      deploymentId: input.deploymentId!,
+      deploymentTarget: input.deploymentTarget!,
+      deploymentConfigFingerprint: input.deploymentConfigFingerprint!,
+      verifiedAt: input.transitionedAt,
+    };
+  }
+  if (input.to === "rolling_back") {
+    if (input.from === "needs_attention") {
+      const canResumeFromVerification = current.failureReason === "verification_failed"
+        && current.deploymentId !== undefined && current.deploymentTarget !== undefined
+        && current.deploymentConfigFingerprint !== undefined && current.verifiedAt !== undefined
+        && current.rollbackOperationId === undefined && current.rollbackActor === undefined && current.rollbackStartedAt === undefined;
+      const canResumeExistingRollback = (current.failureReason === "rollback_failed" || current.failureReason === "rollback_unknown")
+        && current.deploymentId !== undefined && current.deploymentTarget !== undefined
+        && current.deploymentConfigFingerprint !== undefined && current.verifiedAt !== undefined
+        && current.rollbackOperationId !== undefined && current.rollbackActor !== undefined && current.rollbackStartedAt !== undefined;
+      if (!canResumeFromVerification && !canResumeExistingRollback) {
+        throw new TypeError("Migration workflow rollback recovery requires verified or rollback evidence");
+      }
+      if (canResumeExistingRollback && input.rollbackOperationId === current.rollbackOperationId) {
+        throw new TypeError("Migration workflow rollback recovery requires a new operation id");
+      }
+    }
+    const withoutFailure = clearWorkflowFailure(current);
+    return {
+      ...withoutFailure,
+      status: "rolling_back",
+      rollbackOperationId: input.rollbackOperationId!,
+      rollbackActor: input.rollbackActor!,
+      rollbackStartedAt: input.transitionedAt,
+    };
+  }
+  if (input.to === "restored") {
+    return {
+      ...current,
+      status: "restored",
+      restoredAt: input.transitionedAt,
+    };
+  }
   return {
     ...current,
     status: "needs_attention",
@@ -717,8 +881,16 @@ function buildWorkflowTransition(
   };
 }
 
+function clearWorkflowFailure(value: HomeAutomationMigrationRuleWorkflow): HomeAutomationMigrationRuleWorkflow {
+  const next = { ...value };
+  delete next.failedAt;
+  delete next.failureReason;
+  return next;
+}
+
 function workflowLastTimestamp(value: HomeAutomationMigrationRuleWorkflow): string {
-  return value.failedAt ?? value.readyAt ?? value.simulatedAt ?? value.translatedAt ?? value.assessedAt;
+  return value.failedAt ?? value.restoredAt ?? value.rollbackStartedAt ?? value.verifiedAt
+    ?? value.switchStartedAt ?? value.readyAt ?? value.simulatedAt ?? value.translatedAt ?? value.assessedAt;
 }
 
 function validateClose(input: HomeAutomationMigrationCloseCommand): void {
@@ -845,6 +1017,76 @@ function validateWorkflow(value: unknown, parentSourceFingerprint: unknown): Hom
       simulatedAt: value.simulatedAt, readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
     };
   }
+  if (value.status === "switching") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt"])
+      || !isSwitchingWorkflowFields(value)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "switching", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+      artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+      compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+      readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+      approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+      switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+    };
+  }
+  if (value.status === "verified") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt"])
+      || !isVerifiedWorkflowFields(value)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "verified", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+      artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+      compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+      readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+      approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+      switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+      deploymentId: value.deploymentId, deploymentTarget: value.deploymentTarget,
+      deploymentConfigFingerprint: value.deploymentConfigFingerprint, verifiedAt: value.verifiedAt,
+    };
+  }
+  if (value.status === "rolling_back") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt", "rollbackOperationId", "rollbackActor", "rollbackStartedAt"])
+      || !isRollingBackWorkflowFields(value)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "rolling_back", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+      artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+      compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+      readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+      approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+      switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+      deploymentId: value.deploymentId, deploymentTarget: value.deploymentTarget,
+      deploymentConfigFingerprint: value.deploymentConfigFingerprint, verifiedAt: value.verifiedAt,
+      rollbackOperationId: value.rollbackOperationId, rollbackActor: value.rollbackActor,
+      rollbackStartedAt: value.rollbackStartedAt,
+    };
+  }
+  if (value.status === "restored") {
+    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt", "rollbackOperationId", "rollbackActor", "rollbackStartedAt", "restoredAt"])
+      || !isRestoredWorkflowFields(value)) {
+      throw new Error("Stored home automation migration is corrupt");
+    }
+    return {
+      status: "restored", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+      artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+      compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+      readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+      approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+      switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+      deploymentId: value.deploymentId, deploymentTarget: value.deploymentTarget,
+      deploymentConfigFingerprint: value.deploymentConfigFingerprint, verifiedAt: value.verifiedAt,
+      rollbackOperationId: value.rollbackOperationId, rollbackActor: value.rollbackActor,
+      rollbackStartedAt: value.rollbackStartedAt, restoredAt: value.restoredAt,
+    };
+  }
   const failureReason = value.failureReason;
   if (!isWorkflowFailureReason(failureReason) || !isIsoTimestamp(value.failedAt)) {
     throw new Error("Stored home automation migration is corrupt");
@@ -861,8 +1103,71 @@ function validateWorkflow(value: unknown, parentSourceFingerprint: unknown): Hom
     return {
       status: "needs_attention", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
       candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
-      failedAt: value.failedAt, failureReason,
+      failedAt: value.failedAt as string, failureReason,
     };
+  }
+  if (failureReason === "source_stale" || failureReason === "switch_unknown") {
+    if (hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "failedAt", "failureReason"])
+      && isReadyWorkflowFields(value) && Date.parse(value.failedAt as string) >= Date.parse(value.readyAt as string)) {
+      return {
+        status: "needs_attention", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+        candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+        artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+        compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+        readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+        failedAt: value.failedAt as string, failureReason,
+      };
+    }
+  }
+  if (failureReason === "switch_failed" || failureReason === "switch_unknown" || failureReason === "verification_failed") {
+    if (hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "failedAt", "failureReason"])
+      && isSwitchingWorkflowFields(value) && Date.parse(value.failedAt as string) >= Date.parse(value.switchStartedAt as string)) {
+      return {
+        status: "needs_attention", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+        candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+        artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+        compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+        readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+        approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+        switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+        failedAt: value.failedAt as string, failureReason,
+      };
+    }
+  }
+  if (failureReason === "verification_failed") {
+    if (hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt", "failedAt", "failureReason"])
+      && isVerifiedWorkflowFields(value) && Date.parse(value.failedAt as string) >= Date.parse(value.verifiedAt as string)) {
+      return {
+        status: "needs_attention", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+        candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+        artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+        compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+        readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+        approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+        switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+        deploymentId: value.deploymentId, deploymentTarget: value.deploymentTarget,
+        deploymentConfigFingerprint: value.deploymentConfigFingerprint, verifiedAt: value.verifiedAt,
+        failedAt: value.failedAt as string, failureReason,
+      };
+    }
+  }
+  if (failureReason === "rollback_failed" || failureReason === "rollback_unknown") {
+    if (hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt", "rollbackOperationId", "rollbackActor", "rollbackStartedAt", "failedAt", "failureReason"])
+      && isRollingBackWorkflowFields(value) && Date.parse(value.failedAt as string) >= Date.parse(value.rollbackStartedAt as string)) {
+      return {
+        status: "needs_attention", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+        candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+        artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+        compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+        readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+        approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+        switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+        deploymentId: value.deploymentId, deploymentTarget: value.deploymentTarget,
+        deploymentConfigFingerprint: value.deploymentConfigFingerprint, verifiedAt: value.verifiedAt,
+        rollbackOperationId: value.rollbackOperationId, rollbackActor: value.rollbackActor,
+        rollbackStartedAt: value.rollbackStartedAt, failedAt: value.failedAt as string, failureReason,
+      };
+    }
   }
   if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "failedAt", "failureReason"])
     || !isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
@@ -881,8 +1186,98 @@ function validateWorkflow(value: unknown, parentSourceFingerprint: unknown): Hom
     candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
     artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
     compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId,
-    simulatedAt: value.simulatedAt, failedAt: value.failedAt, failureReason,
+    simulatedAt: value.simulatedAt, failedAt: value.failedAt as string, failureReason,
   };
+}
+
+interface ReadyWorkflowFields {
+  readonly proposalId: string;
+  readonly candidateProposalRevision: number;
+  readonly candidateContentHash: string;
+  readonly translatedAt: string;
+  readonly artifactId: string;
+  readonly artifactRevision: number;
+  readonly artifactContentHash: string;
+  readonly compileResultId: string;
+  readonly dryRunResultId: string;
+  readonly simulatedAt: string;
+  readonly readyAt: string;
+  readonly reviewProposalRevision: number;
+}
+
+interface SwitchingWorkflowFields extends ReadyWorkflowFields {
+  readonly approvedProposalRevision: number;
+  readonly switchOperationId: string;
+  readonly switchActor: string;
+  readonly sourceWasEnabled: true;
+  readonly switchStartedAt: string;
+}
+
+interface VerifiedWorkflowFields extends SwitchingWorkflowFields {
+  readonly deploymentId: string;
+  readonly deploymentTarget: string;
+  readonly deploymentConfigFingerprint: string;
+  readonly verifiedAt: string;
+}
+
+interface RollingBackWorkflowFields extends VerifiedWorkflowFields {
+  readonly rollbackOperationId: string;
+  readonly rollbackActor: string;
+  readonly rollbackStartedAt: string;
+}
+
+interface RestoredWorkflowFields extends RollingBackWorkflowFields {
+  readonly restoredAt: string;
+}
+
+function isReadyWorkflowFields(value: Record<string, unknown>): value is Record<string, unknown> & ReadyWorkflowFields {
+  return isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
+    && isPositiveSafeInteger(value.candidateProposalRevision) && value.candidateProposalRevision < Number.MAX_SAFE_INTEGER
+    && isDigest(value.candidateContentHash) && isIsoTimestamp(value.translatedAt)
+    && isBoundedText(value.artifactId, HOME_AUTOMATION_MIGRATION_LIMITS.maxArtifactIdLength)
+    && isPositiveSafeInteger(value.artifactRevision) && isDigest(value.artifactContentHash)
+    && isDigest(value.compileResultId) && isDigest(value.dryRunResultId)
+    && isIsoTimestamp(value.simulatedAt) && isIsoTimestamp(value.readyAt)
+    && isPositiveSafeInteger(value.reviewProposalRevision)
+    && value.reviewProposalRevision === value.candidateProposalRevision + 1
+    && Date.parse(value.translatedAt) >= Date.parse(value.assessedAt as string)
+    && Date.parse(value.simulatedAt) >= Date.parse(value.translatedAt)
+    && Date.parse(value.readyAt) >= Date.parse(value.simulatedAt);
+}
+
+function isSwitchingWorkflowFields(value: Record<string, unknown>): value is Record<string, unknown> & SwitchingWorkflowFields {
+  return isReadyWorkflowFields(value)
+    && isPositiveSafeInteger(value.approvedProposalRevision)
+    && value.reviewProposalRevision < Number.MAX_SAFE_INTEGER
+    && value.approvedProposalRevision === value.reviewProposalRevision + 1
+    && is128BitHex(value.switchOperationId)
+    && isBoundedText(value.switchActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength)
+    && value.sourceWasEnabled === true
+    && isIsoTimestamp(value.switchStartedAt)
+    && Date.parse(value.switchStartedAt) >= Date.parse(value.readyAt as string);
+}
+
+function isVerifiedWorkflowFields(value: Record<string, unknown>): value is Record<string, unknown> & VerifiedWorkflowFields {
+  return isSwitchingWorkflowFields(value)
+    && isBoundedText(value.deploymentId, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentIdLength)
+    && isBoundedText(value.deploymentTarget, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentTargetLength)
+    && isDigest(value.deploymentConfigFingerprint)
+    && isIsoTimestamp(value.verifiedAt)
+    && Date.parse(value.verifiedAt) >= Date.parse(value.switchStartedAt as string);
+}
+
+function isRollingBackWorkflowFields(value: Record<string, unknown>): value is Record<string, unknown> & RollingBackWorkflowFields {
+  return isVerifiedWorkflowFields(value)
+    && is128BitHex(value.rollbackOperationId)
+    && isBoundedText(value.rollbackActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength)
+    && isIsoTimestamp(value.rollbackStartedAt)
+    && Date.parse(value.rollbackStartedAt) >= Date.parse(value.verifiedAt as string);
+}
+
+function isRestoredWorkflowFields(value: Record<string, unknown>): value is Record<string, unknown> & RestoredWorkflowFields {
+  return isRollingBackWorkflowFields(value)
+    && isIsoTimestamp(value.restoredAt)
+    && Date.parse(value.restoredAt) >= Date.parse(value.rollbackStartedAt as string);
 }
 
 function assertStableRuleMetadata(
@@ -1014,16 +1409,35 @@ function isRuleAssessmentSemantics(value: Record<string, unknown>, workflow: Hom
 }
 
 function isWorkflowStatus(value: unknown): value is HomeAutomationMigrationRuleWorkflowStatus {
-  return value === "assessed" || value === "translated" || value === "simulated" || value === "ready" || value === "needs_attention";
+  return value === "assessed" || value === "translated" || value === "simulated" || value === "ready"
+    || value === "switching" || value === "verified" || value === "rolling_back" || value === "restored"
+    || value === "needs_attention";
 }
 
 function isWorkflowTarget(value: unknown): value is Exclude<HomeAutomationMigrationRuleWorkflowStatus, "assessed"> {
-  return value === "translated" || value === "simulated" || value === "ready" || value === "needs_attention";
+  return value === "translated" || value === "simulated" || value === "ready" || value === "switching"
+    || value === "verified" || value === "rolling_back" || value === "restored" || value === "needs_attention";
 }
 
 function isWorkflowFailureReason(value: unknown): value is HomeAutomationMigrationRuleWorkflowFailureReason {
   return value === "compile_failed" || value === "compile_unavailable"
-    || value === "simulation_failed" || value === "simulation_unavailable";
+    || value === "simulation_failed" || value === "simulation_unavailable"
+    || value === "source_stale" || value === "switch_failed" || value === "switch_unknown"
+    || value === "verification_failed" || value === "rollback_failed" || value === "rollback_unknown";
+}
+
+function isAllowedWorkflowFailurePair(from: unknown, reason: unknown): boolean {
+  if (from === "translated") return reason === "compile_failed" || reason === "compile_unavailable";
+  if (from === "simulated") return reason === "simulation_failed" || reason === "simulation_unavailable";
+  if (from === "ready") return reason === "source_stale" || reason === "switch_unknown";
+  if (from === "switching") return reason === "switch_failed" || reason === "switch_unknown" || reason === "verification_failed";
+  if (from === "verified") return reason === "verification_failed";
+  if (from === "rolling_back") return reason === "rollback_failed" || reason === "rollback_unknown";
+  return false;
+}
+
+function is128BitHex(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{32}$/u.test(value);
 }
 
 function isConditionClass(value: unknown): value is HomeAutomationMigrationRuleAssessment["conditionClass"] {

@@ -32,14 +32,24 @@ export type HomeAutomationMigrationRuleWorkflowStatus =
   | "translated"
   | "simulated"
   | "ready"
+  | "switching"
+  | "verified"
+  | "rolling_back"
+  | "restored"
   | "needs_attention";
 
-/** Fixed failure vocabulary for durable translation and simulation links. */
+/** Fixed failure vocabulary for durable translation, switching, and recovery links. */
 export type HomeAutomationMigrationRuleWorkflowFailureReason =
   | "compile_failed"
   | "compile_unavailable"
   | "simulation_failed"
-  | "simulation_unavailable";
+  | "simulation_unavailable"
+  | "source_stale"
+  | "switch_failed"
+  | "switch_unknown"
+  | "verification_failed"
+  | "rollback_failed"
+  | "rollback_unknown";
 
 export type HomeAutomationMigrationCloseReason = "household_closed" | "superseded" | "stale_source";
 
@@ -106,6 +116,19 @@ export interface HomeAutomationMigrationRuleWorkflow {
   readonly simulatedAt?: string;
   readonly readyAt?: string;
   readonly reviewProposalRevision?: number;
+  readonly approvedProposalRevision?: number;
+  readonly switchOperationId?: string;
+  readonly switchActor?: string;
+  readonly sourceWasEnabled?: true;
+  readonly switchStartedAt?: string;
+  readonly deploymentId?: string;
+  readonly deploymentTarget?: string;
+  readonly deploymentConfigFingerprint?: string;
+  readonly verifiedAt?: string;
+  readonly rollbackOperationId?: string;
+  readonly rollbackActor?: string;
+  readonly rollbackStartedAt?: string;
+  readonly restoredAt?: string;
   readonly failedAt?: string;
   readonly failureReason?: HomeAutomationMigrationRuleWorkflowFailureReason;
 }
@@ -126,6 +149,15 @@ export interface HomeAutomationMigrationRuleWorkflowTransition {
   readonly compileResultId?: string;
   readonly dryRunResultId?: string;
   readonly reviewProposalRevision?: number;
+  readonly approvedProposalRevision?: number;
+  readonly switchOperationId?: string;
+  readonly switchActor?: string;
+  readonly sourceWasEnabled?: true;
+  readonly deploymentId?: string;
+  readonly deploymentTarget?: string;
+  readonly deploymentConfigFingerprint?: string;
+  readonly rollbackOperationId?: string;
+  readonly rollbackActor?: string;
   readonly failureReason?: HomeAutomationMigrationRuleWorkflowFailureReason;
 }
 
@@ -190,6 +222,9 @@ export const HOME_AUTOMATION_MIGRATION_LIMITS = Object.freeze({
   maxNameLength: 256,
   maxProposalIdLength: 200,
   maxArtifactIdLength: 200,
+  maxOperationActorLength: 200,
+  maxDeploymentIdLength: 200,
+  maxDeploymentTargetLength: 200,
   maxBridgeIdLength: 200,
   maxEpochIdLength: 256,
   maxInputBytes: 64 * 1024,

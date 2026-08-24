@@ -78,10 +78,59 @@ export interface HomeAutomationMigrationReadyRuleInput {
   readonly reviewProposalRevision: number;
 }
 
+export interface HomeAutomationMigrationStartRuleSwitchInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "ready";
+  readonly approvedProposalRevision: number;
+  readonly switchOperationId: string;
+  readonly switchActor: string;
+  readonly sourceWasEnabled: true;
+}
+
+export interface HomeAutomationMigrationVerifyRuleSwitchInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "switching";
+  readonly deploymentId: string;
+  readonly deploymentTarget: string;
+  readonly deploymentConfigFingerprint: string;
+}
+
+export interface HomeAutomationMigrationStartRuleRollbackInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "verified";
+  readonly rollbackOperationId: string;
+  readonly rollbackActor: string;
+}
+
+export interface HomeAutomationMigrationResumeRuleSwitchInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "needs_attention";
+  readonly switchOperationId: string;
+  readonly switchActor: string;
+}
+
+export interface HomeAutomationMigrationResumeRuleRollbackInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "needs_attention";
+  readonly rollbackOperationId: string;
+  readonly rollbackActor: string;
+}
+
+export interface HomeAutomationMigrationRestoreRuleInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "rolling_back";
+}
+
 export interface HomeAutomationMigrationFailRuleWorkflowInput {
   readonly migrationId: string;
   readonly ruleRef: string;
-  readonly from: "translated" | "simulated";
+  readonly from: "ready" | "translated" | "simulated" | "switching" | "verified" | "rolling_back";
   readonly reason: HomeAutomationMigrationRuleWorkflowFailureReason;
 }
 
@@ -209,6 +258,62 @@ export class HomeAutomationMigrationService {
   /** Marks one simulated rule ready after its existing attestations are complete. */
   readyRule(input: HomeAutomationMigrationReadyRuleInput): HomeAutomationMigrationAssessment | undefined {
     return this.transitionRuleWorkflow({ ...input, to: "ready" });
+  }
+
+  /** Records the governed switch start after the approved proposal revision is checked. */
+  startRuleSwitch(input: HomeAutomationMigrationStartRuleSwitchInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictStartRuleSwitchInput(input)) return undefined;
+    return this.transitionRuleWorkflow({ ...input, to: "switching" });
+  }
+
+  /** Resumes a switch only after a durable, switching-stage uncertainty is read back and selected for recovery. */
+  resumeRuleSwitch(input: HomeAutomationMigrationResumeRuleSwitchInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictResumeRuleSwitchInput(input)) return undefined;
+    const workflow = this.store.get(input.migrationId)?.rules.find((rule) => rule.ruleRef === input.ruleRef)?.workflow;
+    if (workflow?.status !== "needs_attention"
+      || (workflow.failureReason !== "switch_failed" && workflow.failureReason !== "switch_unknown")
+      || workflow.approvedProposalRevision === undefined || workflow.switchOperationId === undefined
+      || workflow.switchActor === undefined || workflow.sourceWasEnabled !== true || workflow.switchStartedAt === undefined
+      || workflow.switchOperationId === input.switchOperationId) return undefined;
+    return this.transitionRuleWorkflow({ ...input, to: "switching" });
+  }
+
+  /** Records neutral deployment evidence after the switch has been externally verified. */
+  verifyRuleSwitch(input: HomeAutomationMigrationVerifyRuleSwitchInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictVerifyRuleSwitchInput(input)) return undefined;
+    return this.transitionRuleWorkflow({ ...input, to: "verified" });
+  }
+
+  /** Records the governed rollback start for a verified deployment. */
+  startRuleRollback(input: HomeAutomationMigrationStartRuleRollbackInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictStartRuleRollbackInput(input)) return undefined;
+    return this.transitionRuleWorkflow({ ...input, to: "rolling_back" });
+  }
+
+  /** Resumes rollback after verification drift or an uncertain/failed rollback, using a fresh receipt. */
+  resumeRuleRollback(input: HomeAutomationMigrationResumeRuleRollbackInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictResumeRuleRollbackInput(input)) return undefined;
+    const workflow = this.store.get(input.migrationId)?.rules.find((rule) => rule.ruleRef === input.ruleRef)?.workflow;
+    const canResumeFromVerification = workflow?.status === "needs_attention"
+      && workflow.failureReason === "verification_failed" && workflow.deploymentId !== undefined
+      && workflow.deploymentTarget !== undefined && workflow.deploymentConfigFingerprint !== undefined
+      && workflow.verifiedAt !== undefined && workflow.rollbackOperationId === undefined
+      && workflow.rollbackActor === undefined && workflow.rollbackStartedAt === undefined;
+    const canResumeExistingRollback = workflow?.status === "needs_attention"
+      && (workflow.failureReason === "rollback_failed" || workflow.failureReason === "rollback_unknown")
+      && workflow.deploymentId !== undefined && workflow.deploymentTarget !== undefined
+      && workflow.deploymentConfigFingerprint !== undefined && workflow.verifiedAt !== undefined
+      && workflow.rollbackOperationId !== undefined && workflow.rollbackActor !== undefined
+      && workflow.rollbackStartedAt !== undefined;
+    if (!canResumeFromVerification && !canResumeExistingRollback) return undefined;
+    if (canResumeExistingRollback && workflow.rollbackOperationId === input.rollbackOperationId) return undefined;
+    return this.transitionRuleWorkflow({ ...input, to: "rolling_back" });
+  }
+
+  /** Records that the source configuration has been restored after rollback. */
+  restoreRule(input: HomeAutomationMigrationRestoreRuleInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictRestoreRuleInput(input)) return undefined;
+    return this.transitionRuleWorkflow({ ...input, to: "restored" });
   }
 
   /** Records a fixed compile or simulation failure without storing its payload. */
@@ -503,8 +608,87 @@ function isStrictWorkflowFailureInput(value: unknown): value is HomeAutomationMi
     return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "reason"])
       && isMigrationId(value.migrationId)
       && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
-      && (value.from === "translated" || value.from === "simulated")
-      && isWorkflowFailureReason(value.reason);
+      && isWorkflowFailureReason(value.reason)
+      && isAllowedWorkflowFailurePair(value.from, value.reason);
+  } catch {
+    return false;
+  }
+}
+
+function isStrictStartRuleSwitchInput(value: unknown): value is HomeAutomationMigrationStartRuleSwitchInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled"])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && value.from === "ready"
+      && isPositiveSafeInteger(value.approvedProposalRevision)
+      && is128BitHex(value.switchOperationId)
+      && isBoundedText(value.switchActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength)
+      && value.sourceWasEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
+function isStrictResumeRuleSwitchInput(value: unknown): value is HomeAutomationMigrationResumeRuleSwitchInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "switchOperationId", "switchActor"])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && value.from === "needs_attention"
+      && is128BitHex(value.switchOperationId)
+      && isBoundedText(value.switchActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength);
+  } catch {
+    return false;
+  }
+}
+
+function isStrictVerifyRuleSwitchInput(value: unknown): value is HomeAutomationMigrationVerifyRuleSwitchInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint"])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && value.from === "switching"
+      && isBoundedText(value.deploymentId, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentIdLength)
+      && isBoundedText(value.deploymentTarget, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentTargetLength)
+      && isDigest(value.deploymentConfigFingerprint);
+  } catch {
+    return false;
+  }
+}
+
+function isStrictStartRuleRollbackInput(value: unknown): value is HomeAutomationMigrationStartRuleRollbackInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "rollbackOperationId", "rollbackActor"])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && value.from === "verified"
+      && is128BitHex(value.rollbackOperationId)
+      && isBoundedText(value.rollbackActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength);
+  } catch {
+    return false;
+  }
+}
+
+function isStrictResumeRuleRollbackInput(value: unknown): value is HomeAutomationMigrationResumeRuleRollbackInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "rollbackOperationId", "rollbackActor"])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && value.from === "needs_attention"
+      && is128BitHex(value.rollbackOperationId)
+      && isBoundedText(value.rollbackActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength);
+  } catch {
+    return false;
+  }
+}
+
+function isStrictRestoreRuleInput(value: unknown): value is HomeAutomationMigrationRestoreRuleInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from"])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && value.from === "rolling_back";
   } catch {
     return false;
   }
@@ -564,7 +748,23 @@ function isMigrationId(value: unknown): value is string {
 
 function isWorkflowFailureReason(value: unknown): value is HomeAutomationMigrationRuleWorkflowFailureReason {
   return value === "compile_failed" || value === "compile_unavailable"
-    || value === "simulation_failed" || value === "simulation_unavailable";
+    || value === "simulation_failed" || value === "simulation_unavailable"
+    || value === "source_stale" || value === "switch_failed" || value === "switch_unknown"
+    || value === "verification_failed" || value === "rollback_failed" || value === "rollback_unknown";
+}
+
+function isAllowedWorkflowFailurePair(from: unknown, reason: unknown): boolean {
+  if (from === "translated") return reason === "compile_failed" || reason === "compile_unavailable";
+  if (from === "simulated") return reason === "simulation_failed" || reason === "simulation_unavailable";
+  if (from === "ready") return reason === "source_stale" || reason === "switch_unknown";
+  if (from === "switching") return reason === "switch_failed" || reason === "switch_unknown" || reason === "verification_failed";
+  if (from === "verified") return reason === "verification_failed";
+  if (from === "rolling_back") return reason === "rollback_failed" || reason === "rollback_unknown";
+  return false;
+}
+
+function is128BitHex(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{32}$/u.test(value);
 }
 
 function create128BitHex(): string {
