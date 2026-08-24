@@ -43,6 +43,19 @@ import {
   type BridgeActionResult,
 } from "@hob/bridge-contract";
 import {
+  FOREIGN_RULE_MIGRATION_EXTENSION,
+  foreignRuleMigrationRequestSchema,
+  foreignRuleMigrationResultSchema,
+  type ForeignRuleMigrationBinding,
+  type ForeignRuleMigrationAction,
+  type ForeignRuleMigrationCondition,
+  type ForeignRuleMigrationHandle,
+  type ForeignRuleMigrationPlan,
+  type ForeignRuleMigrationResult,
+  type ForeignRuleMigrationTrigger,
+  type ForeignRuleMigrationUnsupportedReason,
+} from "@hob/bridge-contract";
+import {
   FOREIGN_RULES_EXTENSION,
   MAX_FOREIGN_RULES,
   type ForeignRuleCatalog,
@@ -70,6 +83,7 @@ export const DEFAULT_HOME_ASSISTANT_BOOTSTRAP_ITEMS = 4_096;
 const MAX_HOME_ASSISTANT_IDENTITY_CLAIMS = 16;
 const MAX_HOME_ASSISTANT_IDENTITY_CANDIDATES = 64;
 const MAX_HOME_ASSISTANT_IDENTITY_VALUE_LENGTH = 256;
+export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES = 256 * 1024;
 
 export interface HomeAssistantState {
   entity_id: string;
@@ -798,6 +812,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private stateAttrsByNativeInstanceId = new Map<string, Readonly<Record<string, unknown>>>();
   private healthByNativeId = new Map<string, "reachable" | "unreachable" | "unknown">();
   private foreignRuleCatalog: ForeignRuleCatalog | undefined;
+  private foreignRuleConfigIdsByRef = new Map<string, string>();
+  private foreignRuleTitlesByRef = new Map<string, string>();
   private resyncInFlight = false;
 
   constructor(
@@ -809,7 +825,13 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       coreVersion: HOME_ASSISTANT_CORE_VERSION,
       ecosystem: "home-assistant",
       heartbeatIntervalMs: HOME_ASSISTANT_HEARTBEAT_INTERVAL_MS,
-      extensions: Object.freeze([FOREIGN_RULES_EXTENSION, ORG_HINTS_EXTENSION, ACTIONS_EXTENSION, AUTOMATIONS_EXTENSION]),
+      extensions: Object.freeze([
+        FOREIGN_RULES_EXTENSION,
+        FOREIGN_RULE_MIGRATION_EXTENSION,
+        ORG_HINTS_EXTENSION,
+        ACTIONS_EXTENSION,
+        AUTOMATIONS_EXTENSION,
+      ]),
     });
     this.control = Object.freeze({
       requestResync: (signal: AbortSignal) => this.requestResync(signal),
@@ -837,6 +859,12 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       };
       return handle as ExtensionHandleRegistry[K];
     }
+    if (name === "foreignRuleMigration@1") {
+      const handle: ForeignRuleMigrationHandle = {
+        translate: (request, options) => this.translateForeignRule(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
     if (name === "actions@1") {
       const handle: ActionsExtension = {
         describe: (request) => this.describeAction(request),
@@ -854,6 +882,90 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       return handle as ExtensionHandleRegistry[K];
     }
     return undefined;
+  }
+
+  /**
+   * Reads one rule selected from the foreignRules@2 catalog.  The catalog
+   * reference is the only caller-controlled lookup key; native config ids
+   * remain private to this adapter and are never copied into the result.
+   */
+  private async translateForeignRule(
+    requestValue: unknown,
+    signal: AbortSignal,
+  ): Promise<ForeignRuleMigrationResult> {
+    const request = foreignRuleMigrationRequestSchema.safeParse(requestValue);
+    if (!request.success) return { status: "unsupported", reason: "unsupported_structure" };
+    if (signal.aborted) return { status: "unavailable", reason: "cancelled" };
+    if (this.lifecycle !== "running" || this.bridge === undefined || this.foreignRuleCatalog === undefined) {
+      return { status: "unavailable", reason: "not_ready" };
+    }
+    const nativeConfigId = this.foreignRuleConfigIdsByRef.get(request.data.ruleRef);
+    if (nativeConfigId === undefined) return { status: "unsupported", reason: "unknown_rule" };
+
+    try {
+      const fetched = await this.foreignRuleConfigRequest(nativeConfigId, signal);
+      if (signal.aborted) return { status: "unavailable", reason: "cancelled" };
+      if (!fetched.ok) return { status: "unavailable", reason: fetched.invalidResponse ? "invalid_response" : "upstream_unavailable" };
+      const canonical = canonicalNativeJson(fetched.body);
+      if (canonical === undefined || Buffer.byteLength(canonical, "utf8") > MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES) {
+        return { status: "unavailable", reason: "invalid_response" };
+      }
+      const sourceFingerprint = `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+      const parsed = await translateHomeAssistantRuleConfig(
+        fetched.body,
+        (entityId) => this.migrationBindingForEntity(entityId),
+        this.foreignRuleTitlesByRef.get(request.data.ruleRef),
+        (instanceTimezoneSignal) => this.instanceTimezone(instanceTimezoneSignal),
+        signal,
+      );
+      if (parsed.status !== "translated") return parsed;
+      const result = foreignRuleMigrationResultSchema.safeParse({
+        status: "translated",
+        ruleRef: request.data.ruleRef,
+        sourceFingerprint,
+        title: parsed.title,
+        plan: parsed.plan,
+      });
+      return result.success
+        ? result.data
+        : { status: "unavailable", reason: "invalid_response" };
+    } catch {
+      return signal.aborted
+        ? { status: "unavailable", reason: "cancelled" }
+        : { status: "unavailable", reason: "upstream_unavailable" };
+    }
+  }
+
+  private migrationBindingForEntity(entityId: string): ForeignRuleMigrationBinding | undefined {
+    const binding = this.bindingsByEntityId.get(entityId);
+    if (binding === undefined) return undefined;
+    return {
+      bridgeId: this.context.bridgeId,
+      nativeId: binding.nativeId,
+      nativeInstanceId: binding.nativeInstanceId,
+    };
+  }
+
+  private async foreignRuleConfigRequest(
+    nativeConfigId: string,
+    signal: AbortSignal,
+  ): Promise<{ readonly ok: boolean; readonly body?: unknown; readonly invalidResponse?: boolean }> {
+    const accessToken = await this.resolveAccessToken();
+    const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+    const response = await fetchImpl(
+      new URL(`/api/config/automation/config/${encodeURIComponent(nativeConfigId)}`, this.context.config.baseUrl),
+      { method: "GET", signal, headers: { authorization: `Bearer ${accessToken}` } },
+    );
+    if (!response.ok) return { ok: false };
+    try {
+      const bodyText = await response.text();
+      if (Buffer.byteLength(bodyText, "utf8") > MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES) {
+        return { ok: false, invalidResponse: true };
+      }
+      return { ok: true, body: JSON.parse(bodyText) as unknown };
+    } catch {
+      return { ok: false, invalidResponse: true };
+    }
   }
 
   /**
@@ -1235,6 +1347,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       this.queue = undefined;
       this.stateAttrsByNativeInstanceId.clear();
       this.healthByNativeId.clear();
+      this.foreignRuleConfigIdsByRef.clear();
+      this.foreignRuleTitlesByRef.clear();
       this.resyncInFlight = false;
       this.lifecycle = "disposed";
     }
@@ -1251,6 +1365,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     const snapshotId = this.snapshotId();
     const epochId = `${this.context.bridgeId}:${snapshotId}:${++homeAssistantEpochCounter}`;
     const foreignRules = projectForeignRules(snapshot);
+    this.foreignRuleConfigIdsByRef = new Map(foreignRules.configIdsByRuleRef);
+    this.foreignRuleTitlesByRef = new Map(foreignRules.titlesByRuleRef);
     this.foreignRuleCatalog = undefined;
     const remoteInstanceId = deriveHomeAssistantRemoteInstanceId(
       this.context.config.baseUrl,
@@ -1325,9 +1441,13 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
 function projectForeignRules(snapshot: HomeAssistantSnapshot): {
   readonly complete: boolean;
   readonly rules: ForeignRuleSummary[];
+  readonly configIdsByRuleRef: ReadonlyMap<string, string>;
+  readonly titlesByRuleRef: ReadonlyMap<string, string>;
 } {
   const states = new Map(snapshot.states.map((state) => [state.entity_id, state]));
   const rules: ForeignRuleSummary[] = [];
+  const configIdsByRuleRef = new Map<string, string>();
+  const titlesByRuleRef = new Map<string, string>();
   let complete = true;
   for (const raw of snapshot.entityRegistry) {
     if (!isRecord(raw)) continue;
@@ -1342,20 +1462,358 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
       continue;
     }
     const stableId = nonEmptyString(raw.id) ?? entityId;
+    const nativeConfigId = entityId.slice("automation.".length);
+    if (!/^[a-z0-9][a-z0-9_-]{0,255}$/u.test(nativeConfigId)) continue;
     const stateName = state && isRecord(state.attributes)
       ? nonEmptyString(state.attributes.friendly_name)
       : undefined;
     const name = nonEmptyString(raw.name) ?? nonEmptyString(raw.original_name) ?? stateName;
     const enabled = state?.state === "on" ? true : state?.state === "off" ? false : undefined;
     const updatedAt = state?.last_updated;
+    const ruleRef = `ha-rule:${createHash("sha256").update(stableId).digest("hex")}`;
+    configIdsByRuleRef.set(ruleRef, nativeConfigId);
+    if (name !== undefined) titlesByRuleRef.set(ruleRef, name.slice(0, 512));
     rules.push({
-      ruleRef: `ha-rule:${createHash("sha256").update(stableId).digest("hex")}`,
+      ruleRef,
       ...(name === undefined ? {} : { name: name.slice(0, 256) }),
       ...(enabled === undefined ? {} : { enabled }),
       ...(typeof updatedAt === "string" && updatedAt.length > 0 ? { updatedAt } : {}),
     });
   }
-  return { complete, rules: rules.sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)) };
+  return {
+    complete,
+    rules: rules.sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)),
+    configIdsByRuleRef,
+    titlesByRuleRef,
+  };
+}
+
+type ForeignRuleTranslationProjection =
+  | { readonly status: "translated"; readonly title: string; readonly plan: ForeignRuleMigrationPlan }
+  | { readonly status: "unsupported"; readonly reason: ForeignRuleMigrationUnsupportedReason }
+  | { readonly status: "unavailable"; readonly reason: "upstream_unavailable" | "invalid_response" | "cancelled" };
+
+const HOME_ASSISTANT_WEEKDAY_TO_NUMBER: Readonly<Record<string, number>> = Object.freeze({
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
+});
+
+async function translateHomeAssistantRuleConfig(
+  value: unknown,
+  bindingForEntity: (entityId: string) => ForeignRuleMigrationBinding | undefined,
+  fallbackTitle: string | undefined,
+  resolveTimezone: (signal: AbortSignal) => Promise<string | undefined>,
+  signal: AbortSignal,
+): Promise<ForeignRuleTranslationProjection> {
+  if (signal.aborted) return { status: "unavailable", reason: "cancelled" };
+  const config = recordValue(value);
+  if (config === undefined) return { status: "unavailable", reason: "invalid_response" };
+  if (!Object.keys(config).every((key) => ["id", "alias", "description", "mode", "trigger", "condition", "action"].includes(key))) {
+    return { status: "unsupported", reason: "unsupported_structure" };
+  }
+  if (config.mode !== undefined && config.mode !== "single") {
+    return { status: "unsupported", reason: "mode_not_single" };
+  }
+
+  const title = boundedHouseholdTitle(config.alias, fallbackTitle);
+  const triggerResult = await translateForeignTrigger(config.trigger, bindingForEntity, resolveTimezone, signal);
+  if (triggerResult.status !== "ok") return triggerResult;
+
+  const conditionsResult = translateForeignConditions(
+    config.condition,
+    bindingForEntity,
+    triggerResult.value.kind === "schedule",
+  );
+  if (conditionsResult.status !== "ok") return conditionsResult;
+
+  const planTrigger = triggerResult.value.kind === "schedule" && conditionsResult.daysOfWeek !== undefined
+    ? { ...triggerResult.value, daysOfWeek: conditionsResult.daysOfWeek }
+    : triggerResult.value;
+
+  const actionsResult = translateForeignActions(config.action, bindingForEntity);
+  if (actionsResult.status !== "ok") return actionsResult;
+
+  return {
+    status: "translated",
+    title,
+    plan: {
+      trigger: planTrigger,
+      conditions: conditionsResult.value,
+      actions: actionsResult.value,
+    },
+  };
+}
+
+async function translateForeignTrigger(
+  value: unknown,
+  bindingForEntity: (entityId: string) => ForeignRuleMigrationBinding | undefined,
+  resolveTimezone: (signal: AbortSignal) => Promise<string | undefined>,
+  signal: AbortSignal,
+): Promise<
+  | { readonly status: "ok"; readonly value: ForeignRuleMigrationTrigger }
+  | Extract<ForeignRuleTranslationProjection, { status: "unsupported" | "unavailable" }>
+> {
+  if (!Array.isArray(value)) return { status: "unsupported", reason: "unsupported_trigger" };
+  if (value.length !== 1) return { status: "unsupported", reason: value.length > 1 ? "multiple_triggers" : "unsupported_trigger" };
+  const trigger = recordValue(value[0]);
+  if (trigger === undefined || typeof trigger.platform !== "string") {
+    return { status: "unsupported", reason: "unsupported_trigger" };
+  }
+  if (trigger.platform === "time") {
+    if (!exactKeys(trigger, ["platform", "at"]) || typeof trigger.at !== "string") {
+      return { status: "unsupported", reason: "unsupported_trigger" };
+    }
+    const at = normalizeHomeAssistantTime(trigger.at);
+    if (at === undefined) return { status: "unsupported", reason: "unsupported_trigger" };
+    const timezone = await resolveTimezone(signal);
+    if (signal.aborted) return { status: "unavailable", reason: "cancelled" };
+    if (timezone === undefined) return { status: "unavailable", reason: "upstream_unavailable" };
+    return {
+      status: "ok",
+      value: {
+        kind: "schedule",
+        timezone,
+        daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+        at,
+      },
+    };
+  }
+  if (trigger.platform !== "state" || !exactKeys(trigger, ["platform", "entity_id"])) {
+    return { status: "unsupported", reason: "unsupported_trigger" };
+  }
+  const entityId = singleEntityId(trigger.entity_id);
+  if (entityId === undefined) return { status: "unsupported", reason: "unsupported_trigger" };
+  const binding = bindingForEntity(entityId);
+  if (binding === undefined) return { status: "unsupported", reason: "unbound_target" };
+  return { status: "ok", value: { kind: "capability_changed", source: binding } };
+}
+
+function translateForeignConditions(
+  value: unknown,
+  bindingForEntity: (entityId: string) => ForeignRuleMigrationBinding | undefined,
+  scheduleTrigger: boolean,
+):
+  | { readonly status: "ok"; readonly value: ForeignRuleMigrationPlan["conditions"]; readonly daysOfWeek?: number[] }
+  | Extract<ForeignRuleTranslationProjection, { status: "unsupported" }> {
+  if (value === undefined) return { status: "ok", value: [] };
+  const maxRawConditions = scheduleTrigger ? 9 : 8;
+  if (!Array.isArray(value) || value.length > maxRawConditions) return { status: "unsupported", reason: "unsupported_condition" };
+  const conditions: ForeignRuleMigrationCondition[] = [];
+  let daysOfWeek: number[] | undefined;
+  for (const raw of value) {
+    const condition = recordValue(raw);
+    if (condition === undefined || typeof condition.condition !== "string") {
+      return { status: "unsupported", reason: "unsupported_condition" };
+    }
+    if (condition.condition === "state") {
+      if (!exactKeys(condition, ["condition", "entity_id", "state"]) || typeof condition.state !== "string") {
+        return { status: "unsupported", reason: "unsupported_condition" };
+      }
+      const entityId = singleEntityId(condition.entity_id);
+      const binding = entityId === undefined ? undefined : bindingForEntity(entityId);
+      if (binding === undefined) return { status: "unsupported", reason: "unbound_target" };
+      conditions.push({ kind: "capability_value", source: binding, operator: "equals", value: condition.state });
+      continue;
+    }
+    if (condition.condition === "time") {
+      if (!scheduleTrigger || daysOfWeek !== undefined || !exactKeys(condition, ["condition", "weekday"])) {
+        return { status: "unsupported", reason: "unsupported_condition" };
+      }
+      const weekdays = Array.isArray(condition.weekday)
+        ? condition.weekday
+        : typeof condition.weekday === "string" ? [condition.weekday] : undefined;
+      const dayNumbers = weekdays === undefined
+        ? undefined
+        : weekdays.map((weekday) => typeof weekday === "string" ? HOME_ASSISTANT_WEEKDAY_TO_NUMBER[weekday] : undefined);
+      if (dayNumbers === undefined
+        || dayNumbers.length < 1
+        || dayNumbers.length > 7
+        || dayNumbers.some((day) => day === undefined)
+        || new Set(dayNumbers).size !== dayNumbers.length) {
+        return { status: "unsupported", reason: "unsupported_condition" };
+      }
+      daysOfWeek = [...dayNumbers as number[]].sort((left, right) => left - right);
+      continue;
+    }
+    if (condition.condition === "numeric_state") {
+      if (!exactKeys(condition, ["condition", "entity_id", "above", "below"]) &&
+        !exactKeys(condition, ["condition", "entity_id", "above"]) &&
+        !exactKeys(condition, ["condition", "entity_id", "below"])) {
+        return { status: "unsupported", reason: "unsupported_condition" };
+      }
+      const entityId = singleEntityId(condition.entity_id);
+      const binding = entityId === undefined ? undefined : bindingForEntity(entityId);
+      if (binding === undefined) return { status: "unsupported", reason: "unbound_target" };
+      if (typeof condition.above === "number" && Number.isFinite(condition.above) && condition.below === undefined) {
+        conditions.push({ kind: "capability_value", source: binding, operator: "greater_than", value: condition.above });
+        continue;
+      }
+      if (typeof condition.below === "number" && Number.isFinite(condition.below) && condition.above === undefined) {
+        conditions.push({ kind: "capability_value", source: binding, operator: "less_than", value: condition.below });
+        continue;
+      }
+    }
+    return { status: "unsupported", reason: "unsupported_condition" };
+  }
+  if (conditions.length > 8) return { status: "unsupported", reason: "unsupported_condition" };
+  return { status: "ok", value: conditions, ...(daysOfWeek === undefined ? {} : { daysOfWeek }) };
+}
+
+function translateForeignActions(
+  value: unknown,
+  bindingForEntity: (entityId: string) => ForeignRuleMigrationBinding | undefined,
+):
+  | { readonly status: "ok"; readonly value: ForeignRuleMigrationPlan["actions"] }
+  | Extract<ForeignRuleTranslationProjection, { status: "unsupported" }> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 4) return { status: "unsupported", reason: "unsupported_action" };
+  const actions: ForeignRuleMigrationAction[] = [];
+  for (const raw of value) {
+    const action = recordValue(raw);
+    if (action === undefined || typeof action.service !== "string") return { status: "unsupported", reason: "unsupported_action" };
+    if (action.service === "persistent_notification.create") {
+      if (!exactKeys(action, ["service", "data"]) || !isRecord(action.data)) {
+        return { status: "unsupported", reason: "unsupported_action" };
+      }
+      if (!exactKeys(action.data, ["message", "title"]) && !exactKeys(action.data, ["message"])) {
+        return { status: "unsupported", reason: "unsupported_action" };
+      }
+      if (typeof action.data.message !== "string" || boundedHouseholdMessage(action.data.message) === undefined) {
+        return { status: "unsupported", reason: "unsupported_action" };
+      }
+      actions.push({ kind: "notify_local", message: boundedHouseholdMessage(action.data.message)! });
+      continue;
+    }
+
+    const target = migrationActionTarget(action.target, bindingForEntity);
+    if (target.status !== "ok") return target;
+    if (action.service === "homeassistant.turn_on" || action.service === "homeassistant.turn_off") {
+      if (!exactKeys(action, ["service", "target"]) && !exactKeys(action, ["service", "target", "data"])) {
+        return { status: "unsupported", reason: "unsupported_action" };
+      }
+      if (action.data !== undefined && (!isRecord(action.data) || Object.keys(action.data).length > 0)) {
+        return { status: "unsupported", reason: "unsupported_action" };
+      }
+      actions.push({ kind: "set_boolean", target: target.value, value: action.service.endsWith("turn_on") });
+      continue;
+    }
+
+    const data = action.data;
+    if (!exactKeys(action, ["service", "target", "data"]) || !isRecord(data)) {
+      return { status: "unsupported", reason: "unsupported_action" };
+    }
+    const level = homeAssistantLevel(action.service, data);
+    if (level === undefined) return { status: "unsupported", reason: "unsupported_action" };
+    actions.push({ kind: "set_level", target: target.value, level });
+  }
+  return { status: "ok", value: actions };
+}
+
+function migrationActionTarget(
+  value: unknown,
+  bindingForEntity: (entityId: string) => ForeignRuleMigrationBinding | undefined,
+):
+  | { readonly status: "ok"; readonly value: ForeignRuleMigrationBinding }
+  | Extract<ForeignRuleTranslationProjection, { status: "unsupported" }> {
+  if (!isRecord(value) || !exactKeys(value, ["entity_id"])) return { status: "unsupported", reason: "unsupported_action" };
+  if (Array.isArray(value.entity_id) && value.entity_id.length !== 1) return { status: "unsupported", reason: "multiple_targets" };
+  const entityId = singleEntityId(value.entity_id);
+  if (entityId === undefined) return { status: "unsupported", reason: "unsupported_action" };
+  const binding = bindingForEntity(entityId);
+  return binding === undefined
+    ? { status: "unsupported", reason: "unbound_target" }
+    : { status: "ok", value: binding };
+}
+
+function homeAssistantLevel(service: string, data: Record<string, unknown>): number | undefined {
+  const field = service === "light.turn_on"
+    ? "brightness_pct"
+    : service === "cover.set_cover_position"
+      ? "position"
+      : service === "fan.set_percentage"
+        ? "percentage"
+        : service === "media_player.volume_set"
+          ? "volume_level"
+          : undefined;
+  if (field === undefined || !exactKeys(data, [field]) || typeof data[field] !== "number" || !Number.isFinite(data[field])) return undefined;
+  if (field === "volume_level") return data[field] >= 0 && data[field] <= 1 ? data[field] : undefined;
+  return data[field] >= 0 && data[field] <= 100 ? data[field] / 100 : undefined;
+}
+
+function normalizeHomeAssistantTime(value: string): string | undefined {
+  const match = /^(\d{2}):(\d{2})(?::(\d{2}))?$/u.exec(value);
+  if (match === null) return undefined;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = match[3] === undefined ? 0 : Number(match[3]);
+  if (hour > 23 || minute > 59 || second !== 0) return undefined;
+  return `${match[1]}:${match[2]}`;
+}
+
+function boundedHouseholdTitle(value: unknown, fallback: string | undefined): string {
+  return boundedHouseholdMessage(value) ?? boundedHouseholdMessage(fallback) ?? "Home Assistant 自动化";
+}
+
+function boundedHouseholdMessage(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text.length > 0
+    && text.length <= 512
+    && Buffer.byteLength(text, "utf8") <= 2_048
+    && !/[\u0000-\u001f\u007f]/u.test(text)
+    ? text
+    : undefined;
+}
+
+function singleEntityId(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (Array.isArray(value) && value.length === 1 && typeof value[0] === "string") return value[0].trim() || undefined;
+  return undefined;
+}
+
+function exactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  const expected = new Set(keys);
+  return Object.keys(record).every((key) => expected.has(key)) && keys.every((key) => Object.prototype.hasOwnProperty.call(record, key));
+}
+
+function canonicalNativeJson(value: unknown): string | undefined {
+  const normalized = canonicalNativeValue(value, 0, new Set<object>());
+  if (normalized === undefined) return undefined;
+  try {
+    return JSON.stringify(normalized);
+  } catch {
+    return undefined;
+  }
+}
+
+function canonicalNativeValue(value: unknown, depth: number, seen: Set<object>): unknown {
+  if (depth > 32) return undefined;
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return undefined;
+    seen.add(value);
+    const output = value.map((item) => canonicalNativeValue(item, depth + 1, seen));
+    seen.delete(value);
+    return output.some((item) => item === undefined) ? undefined : output;
+  }
+  if (isRecord(value)) {
+    if (seen.has(value)) return undefined;
+    seen.add(value);
+    const output: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      const item = canonicalNativeValue(value[key], depth + 1, seen);
+      if (item === undefined) return undefined;
+      output[key] = item;
+    }
+    seen.delete(value);
+    return output;
+  }
+  return undefined;
 }
 
 interface EntityBinding {
@@ -2026,6 +2484,10 @@ function normalizeBootstrapItemBudget(value: number | undefined): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) && !Array.isArray(value) ? value : undefined;
 }
 
 function nonEmptyString(value: unknown): string | undefined {
