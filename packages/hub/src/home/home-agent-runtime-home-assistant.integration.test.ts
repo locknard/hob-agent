@@ -57,6 +57,15 @@ class FakeSocket implements WebSocketLike {
   }
 }
 
+type FetchRequest = {
+  readonly method: string;
+  readonly url: string;
+  readonly body?: unknown;
+};
+
+const SOURCE_STATE_URL = "http://ha.local:8123/api/states/automation.arrival_light";
+const SOURCE_CONFIG_URL = "http://ha.local:8123/api/config/automation/config/arrival_light";
+
 function credentialSource() {
   return {
     async resolve(alias: string) {
@@ -93,16 +102,52 @@ function respondToBootstrap(socket: FakeSocket): void {
 }
 
 function createFetchFake() {
-  const requests: Array<{ method: string; url: string }> = [];
+  const requests: FetchRequest[] = [];
+  let sourceState: "on" | "off" = "on";
+  const targetAutomations = new Map<string, { config: Record<string, unknown>; state: "on" | "off" }>();
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
-    requests.push({ method: init?.method ?? "GET", url });
-    return new Response(JSON.stringify(RULE_CONFIG), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    const method = init?.method ?? "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) as unknown : undefined;
+    requests.push({ method, url, ...(body === undefined ? {} : { body }) });
+    if (url === SOURCE_STATE_URL && method === "GET") {
+      return new Response(JSON.stringify({ state: sourceState }), { status: 200 });
+    }
+    if (url === SOURCE_CONFIG_URL && method === "GET") {
+      return new Response(JSON.stringify(RULE_CONFIG), { status: 200 });
+    }
+    const targetMatch = /^http:\/\/ha\.local:8123\/api\/(?:states\/automation\.|config\/automation\/config\/)([a-z0-9][a-z0-9_]{2,120})$/u.exec(url);
+    const targetId = targetMatch?.[1];
+    if (targetId === undefined) return new Response("{}", { status: 404 });
+    if (method === "POST") {
+      if (typeof body !== "object" || body === null || Array.isArray(body)) {
+        return new Response("{}", { status: 400 });
+      }
+      targetAutomations.set(targetId, { config: body as Record<string, unknown>, state: "on" });
+      return new Response(JSON.stringify({ result: "ok" }), { status: 200 });
+    }
+    if (method === "DELETE") {
+      const existed = targetAutomations.delete(targetId);
+      return new Response("{}", { status: existed ? 200 : 404 });
+    }
+    const stored = targetAutomations.get(targetId);
+    if (stored === undefined) return new Response("{}", { status: 404 });
+    if (url.includes("/api/states/automation.")) {
+      return new Response(JSON.stringify({ state: stored.state }), { status: 200 });
+    }
+    return new Response(JSON.stringify(stored.config), { status: 200 });
   };
-  return { fetchImpl, requests };
+  return {
+    fetchImpl,
+    requests,
+    setSourceState(next: "on" | "off"): void {
+      sourceState = next;
+    },
+    sourceState(): "on" | "off" {
+      return sourceState;
+    },
+    targetAutomations,
+  };
 }
 
 function sendStateChanged(
@@ -152,7 +197,22 @@ function targetState(
   return undefined;
 }
 
-test("runs a real HA migration through preparation completion into an exact artifact review", async () => {
+async function waitForServiceCommand(
+  socket: FakeSocket,
+  service: "turn_on" | "turn_off",
+): Promise<Record<string, unknown>> {
+  return waitFor(
+    () => [...socket.sent].reverse().find((message) => (
+      message.type === "call_service"
+      && message.domain === "automation"
+      && message.service === service
+    )),
+    (message): message is Record<string, unknown> => message !== undefined,
+    `Home Assistant automation.${service} call_service`,
+  );
+}
+
+test("runs a real HA cutover through verified deployment and read-back rollback", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-home-agent-ha-runtime-"));
   const socket = new FakeSocket();
   const fetchFake = createFetchFake();
@@ -356,9 +416,81 @@ test("runs a real HA migration through preparation completion into an exact arti
       assert.fail("Artifact compiler result rows are unavailable");
     }
     assert.equal(compileResult.result.worldCutIdentity, dryRunResult.result.worldCutIdentity);
-    assert.equal(socket.sent.some((message) => message.type === "call_service"), false);
-    assert.equal(fetchFake.requests.every((request) => request.method === "GET"), true);
-    assert.equal(fetchFake.requests.every((request) => request.url.endsWith("/api/config/automation/config/arrival_light")), true);
+
+    const proposalBeforeEnable = runtime.context.homeProposals.get(prepared.proposalId);
+    if (proposalBeforeEnable === undefined) assert.fail("Prepared migration proposal is unavailable");
+    const enabling = runtime.context.homeProposals.enableProposal({
+      proposalId: prepared.proposalId,
+      expectedRevision: proposalBeforeEnable.revision,
+      reviewer: "household-owner",
+    });
+    const pauseCommand = await waitForServiceCommand(socket, "turn_off");
+    assert.equal(pauseCommand.domain, "automation");
+    assert.deepEqual(pauseCommand.target, { entity_id: "automation.arrival_light" });
+    assert.deepEqual(pauseCommand.service_data, {});
+    fetchFake.setSourceState("off");
+    if (typeof pauseCommand.id !== "number") assert.fail("Source pause command id is unavailable");
+    socket.receive({ id: pauseCommand.id, type: "result", success: true, result: null });
+    const enabled = await enabling;
+    assert.equal(enabled.lifecycle, "active", JSON.stringify(enabled));
+    assert.equal(fetchFake.sourceState(), "off");
+    const deployment = enabled.deployment;
+    if (deployment?.deploymentId === undefined || deployment.target === undefined) {
+      assert.fail("Verified target deployment identity is unavailable");
+    }
+    const deployedWorkflow = runtime.context.homeAutomationMigrations.get(assessed.assessment.migrationId)
+      ?.rules.find((candidate) => candidate.ruleRef === rule.ruleRef)?.workflow;
+    assert.equal(deployedWorkflow?.status, "verified");
+    assert.equal(fetchFake.targetAutomations.get(deployment.deploymentId)?.state, "on");
+
+    const post = fetchFake.requests.find((request) => (
+      request.method === "POST"
+      && request.url.endsWith(`/api/config/automation/config/${deployment.deploymentId}`)
+    ));
+    assert.ok(post, "target deployment must use the automation config POST");
+    assert.deepEqual(post.body, {
+      id: deployment.deploymentId,
+      alias: deployment.deploymentId,
+      description: "hob:晚间灯光",
+      trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+      condition: [{ condition: "state", entity_id: "light.kitchen", state: "off" }],
+      action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+      mode: "single",
+    });
+
+    const closing = runtime.context.homeProposals.closeAutomation({
+      proposalId: prepared.proposalId,
+      actor: "household-owner",
+    });
+    const restoreCommand = await waitForServiceCommand(socket, "turn_on");
+    assert.equal(restoreCommand.domain, "automation");
+    assert.deepEqual(restoreCommand.target, { entity_id: "automation.arrival_light" });
+    assert.deepEqual(restoreCommand.service_data, {});
+    fetchFake.setSourceState("on");
+    if (typeof restoreCommand.id !== "number") assert.fail("Source restore command id is unavailable");
+    socket.receive({ id: restoreCommand.id, type: "result", success: true, result: null });
+    const closed = await closing;
+    assert.equal(closed.lifecycle, "closed", JSON.stringify(closed));
+    assert.equal(fetchFake.sourceState(), "on");
+    const restoredWorkflow = runtime.context.homeAutomationMigrations.get(assessed.assessment.migrationId)
+      ?.rules.find((candidate) => candidate.ruleRef === rule.ruleRef)?.workflow;
+    assert.equal(restoredWorkflow?.status, "restored");
+    assert.equal(fetchFake.targetAutomations.has(deployment.deploymentId), false);
+
+    const serviceCalls = socket.sent.filter((message) => message.type === "call_service");
+    assert.deepEqual(serviceCalls, [pauseCommand, restoreCommand]);
+    assert.equal(fetchFake.requests.filter((request) => request.method === "POST").length, 1);
+    assert.equal(fetchFake.requests.filter((request) => request.method === "DELETE").length, 1);
+    assert.equal(fetchFake.requests.filter((request) => request.method !== "GET").every((request) => (
+      request.url.endsWith(`/api/config/automation/config/${deployment.deploymentId}`)
+    )), true);
+    const allowedReadUrls = new Set([
+      SOURCE_STATE_URL,
+      SOURCE_CONFIG_URL,
+      `http://ha.local:8123/api/states/automation.${deployment.deploymentId}`,
+      `http://ha.local:8123/api/config/automation/config/${deployment.deploymentId}`,
+    ]);
+    assert.equal(fetchFake.requests.filter((request) => request.method === "GET").every((request) => allowedReadUrls.has(request.url)), true);
   } finally {
     await runtime.stop();
     rmSync(directory, { recursive: true, force: true });
