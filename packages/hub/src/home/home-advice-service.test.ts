@@ -337,11 +337,23 @@ test("replays only safe semantic progress derived from DSH tool metadata", async
     await eventually(() => events.includes("reading_inventory"));
     ctx.homeAgent.trace = emptyTrace([
       { id: "tool-1", name: "get_home_inventory" },
+      { id: "tool-history", name: "get_home_history" },
+    ]);
+    await eventually(() => events.includes("evaluating_evidence"));
+    ctx.homeAgent.trace = emptyTrace([
+      { id: "tool-1", name: "get_home_inventory" },
+      { id: "tool-history", name: "get_home_history" },
       { id: "tool-2", name: "get_home_rules" },
       { id: "tool-3", name: "report_home_advice" },
     ]);
     await eventually(() => events.includes("composing_answer"));
-    assert.deepEqual(events.slice(0, 4), ["accepted", "reading_inventory", "checking_rules", "composing_answer"]);
+    assert.deepEqual(events.slice(0, 5), [
+      "accepted",
+      "reading_inventory",
+      "evaluating_evidence",
+      "checking_rules",
+      "composing_answer",
+    ]);
     const replayed = ctx.homeAdvice.events(running.id);
     assert.deepEqual(replayed.map((event) => event.type), events);
     assert.equal(JSON.stringify(replayed).includes("tool-1"), false);

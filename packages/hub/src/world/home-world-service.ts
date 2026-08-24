@@ -17,6 +17,12 @@ import {
   type ForeignRuleControlHandle,
   type ForeignRulesHandle,
 } from "@hob/bridge-contract";
+import {
+  HISTORY_EXTENSION_KEY,
+  historyPageSchema,
+  type HistoryHandle,
+  type HistoryPage,
+} from "@hob/bridge-contract";
 import { orgHintPayloadSchema } from "@hob/bridge-contract";
 import {
   CAUSALITY_EXTENSION,
@@ -70,6 +76,10 @@ import {
   type IngestJournal,
   type SqliteIngestJournalOptions,
 } from "./ingest-journal.js";
+import {
+  ImportedHistoryJournal,
+  type ImportedHistoryJournalOptions,
+} from "./imported-history-journal.js";
 import {
   WorldModelIndex,
   type WorldModelAggregateQuery,
@@ -134,6 +144,12 @@ export interface HomeWorldServiceOptions {
   readonly journalDirectory?: string;
   readonly journalPath?: (bridgeId: string, entry: BridgeConfigEntry<unknown>) => string;
   readonly journalOptions?: SqliteIngestJournalOptions;
+  /** Companion durable store for explicit imported-history reads. */
+  readonly importedHistoryJournalFactory?: (
+    bridgeId: string,
+    entry: BridgeConfigEntry<unknown>,
+  ) => ImportedHistoryJournal;
+  readonly importedHistoryJournalOptions?: ImportedHistoryJournalOptions;
   readonly scheduler?: HomeWorldSchedulerLike;
   readonly restartBackoffMs?: number | ((attempt: number, reason?: BridgeStreamErrorReason) => number);
   readonly maxRestarts?: number;
@@ -169,7 +185,11 @@ export interface HomeWorldBridgeRuntime {
   readonly adapterType: string;
   adapter: CatalogBridgeAdapter;
   readonly journal: IngestJournal;
+  readonly importedHistoryJournal: ImportedHistoryJournal;
   readonly ingest: BridgeIngest;
+  /** World-owned lifecycle fence for explicit provider-history reads. */
+  lifecycleGeneration: number;
+  resyncInFlight: number;
   extensionAvailability: Readonly<Record<string, "available" | "unavailable">>;
   restartCount: number;
   lastStreamError?: BridgeStreamErrorReason;
@@ -316,6 +336,59 @@ export interface HomeWorldEvidenceResult {
   readonly requestedUntil: string;
   readonly events: readonly HomeWorldEvidenceEvent[];
   readonly coverage: readonly HomeWorldEvidenceCoverage[];
+  readonly truncated: boolean;
+}
+
+/** Closed, household-safe reasons for an explicit imported-history read. */
+export type HomeWorldImportedHistoryCoverageReason =
+  | "bridge_not_ready"
+  | "missing_consistent_baseline"
+  | "history_unavailable"
+  | "journal_query_unavailable"
+  | "history_gap"
+  | "retention_floor_unknown"
+  | "empty_or_purged"
+  | "recorder_disabled"
+  | "invalid_response"
+  | "invalid_row"
+  | "response_too_large"
+  | "record_limit"
+  | "record_too_large"
+  | "timeout"
+  | "cancelled"
+  | "busy"
+  | "resync_stale"
+  | "source_conflict"
+  | "imported_quota"
+  | "query_truncated";
+
+export interface HomeWorldImportedHistoryQuery {
+  readonly hwCapabilityIds: readonly string[];
+  readonly lookbackHours: number;
+  readonly limit?: number;
+}
+
+export interface HomeWorldImportedHistoryEvent {
+  readonly hwId: string;
+  readonly hwCapabilityId: string;
+  readonly semanticKind?: CapabilitySemanticKind;
+  readonly value: string | number | boolean | null;
+  readonly observedAt: string;
+  readonly sourceTs?: string;
+  readonly sourceTsQuality: StateEvent["time"]["sourceTsQuality"];
+  readonly origin: "imported";
+}
+
+export interface HomeWorldImportedHistoryCoverage {
+  readonly status: "partial" | "unavailable";
+  readonly reasons: readonly HomeWorldImportedHistoryCoverageReason[];
+}
+
+export interface HomeWorldImportedHistoryResult {
+  readonly requestedSince: string;
+  readonly requestedUntil: string;
+  readonly events: readonly HomeWorldImportedHistoryEvent[];
+  readonly coverage: HomeWorldImportedHistoryCoverage;
   readonly truncated: boolean;
 }
 
@@ -505,6 +578,8 @@ export interface HomeWorldSnapshot {
   spaces: readonly WorldSpace[];
   devices: readonly HomeWorldDeviceSnapshot[];
 }
+
+const HOME_HISTORY_FETCH_TIMEOUT_MS = 5_000;
 
 const defaultScheduler: HomeWorldScheduler = {
   wait(delayMs, signal) {
@@ -911,6 +986,301 @@ export class HomeWorldService extends Service {
       attribution,
       value,
       reasons: qualityReasons,
+    };
+  }
+
+  /**
+   * Performs an explicit, bounded provider-history read. Imported rows are
+   * committed only after both live and consistent watermarks prove that the
+   * adapter read belongs to the same verified epoch; the companion journal is
+   * never part of live ingest or any world-model materialization path.
+   */
+  async queryImportedHistory(
+    input: HomeWorldImportedHistoryQuery,
+    signal?: AbortSignal,
+  ): Promise<HomeWorldImportedHistoryResult> {
+    const limit = validateImportedHistoryQuery(input);
+    const requestedUntil = this.clock();
+    const requestedSince = new Date(
+      Date.parse(requestedUntil) - input.lookbackHours * 60 * 60 * 1_000,
+    ).toISOString();
+    const reasons: HomeWorldImportedHistoryCoverageReason[] = [];
+    const addReason = (reason: HomeWorldImportedHistoryCoverageReason): void => {
+      if (!reasons.includes(reason)) reasons.push(reason);
+    };
+    const emptyResult = (): HomeWorldImportedHistoryResult => ({
+      requestedSince,
+      requestedUntil,
+      events: [],
+      coverage: {
+        status: "unavailable",
+        reasons: reasons.length === 0 ? ["history_unavailable"] : reasons,
+      },
+      truncated: false,
+    });
+    if (signal?.aborted) {
+      addReason("cancelled");
+      return emptyResult();
+    }
+
+    const snapshot = this.snapshot();
+    const capabilities = new Map(snapshot.devices
+      .flatMap((device) => device.capabilities)
+      .map((capability) => [capability.hwCapabilityId, capability] as const));
+    const selectedIds = [...new Set(input.hwCapabilityIds)];
+    const selected = selectedIds.map((id) => capabilities.get(id));
+    if (selected.some((capability) => capability === undefined)) {
+      throw new TypeError("home history selection contains an unavailable capability");
+    }
+
+    const groups = new Map<string, {
+      readonly bindings: HomeWorldBinding[];
+      readonly capabilitiesByBinding: Map<string, HomeWorldCapabilitySnapshot>;
+    }>();
+    for (const capability of selected as HomeWorldCapabilitySnapshot[]) {
+      for (const binding of capability.bindings) {
+        const group = groups.get(binding.bridgeId) ?? {
+          bindings: [],
+          capabilitiesByBinding: new Map<string, HomeWorldCapabilitySnapshot>(),
+        };
+        const key = evidenceBindingKey(binding.nativeId, binding.nativeInstanceId);
+        if (!group.capabilitiesByBinding.has(key)) group.bindings.push(binding);
+        group.capabilitiesByBinding.set(key, capability);
+        groups.set(binding.bridgeId, group);
+      }
+    }
+
+    const events: HomeWorldImportedHistoryEvent[] = [];
+    let available = false;
+    let truncated = false;
+    for (const bridgeId of [...groups.keys()].sort((left, right) => left.localeCompare(right))) {
+      if (signal?.aborted) {
+        addReason("cancelled");
+        break;
+      }
+      const group = groups.get(bridgeId)!;
+      if (group.bindings.length > 20) {
+        addReason("history_unavailable");
+        continue;
+      }
+      const runtime = this.runtimesById.get(bridgeId);
+      if (runtime === undefined) {
+        addReason("history_unavailable");
+        continue;
+      }
+      const initialConsistent = runtime.journal.consistentWatermark?.(bridgeId);
+      const initialLive = runtime.journal.watermark(bridgeId);
+      if (initialConsistent === undefined) {
+        addReason("missing_consistent_baseline");
+        continue;
+      }
+      if (initialLive === undefined
+        || initialLive.epochId !== initialConsistent.epochId
+        || initialLive.lastSeq < initialConsistent.lastSeq) {
+        addReason("resync_stale");
+        continue;
+      }
+      if (runtime.ingest.diagnostics().connectionState !== "ready") {
+        addReason("bridge_not_ready");
+        continue;
+      }
+      if (runtime.extensionAvailability[HISTORY_EXTENSION_KEY] !== "available") {
+        addReason("history_unavailable");
+        continue;
+      }
+      if (runtime.resyncInFlight > 0) {
+        addReason("resync_stale");
+        continue;
+      }
+      const lifecycleGeneration = runtime.lifecycleGeneration;
+
+      // Resolve the binding on the captured adapter. The adapter identity is
+      // checked again after the await so a restart cannot commit stale data.
+      const adapter = runtime.adapter;
+      const handle = adapter.extension(HISTORY_EXTENSION_KEY) as HistoryHandle | undefined;
+      if (handle === undefined || typeof handle.fetchHistory !== "function") {
+        addReason("history_unavailable");
+        continue;
+      }
+      const liveCut = runtime.journal.consistentWatermark?.(bridgeId);
+      const liveBeforeCall = runtime.journal.watermark(bridgeId);
+      if (liveCut === undefined) {
+        addReason("missing_consistent_baseline");
+        continue;
+      }
+      if (liveBeforeCall === undefined
+        || liveBeforeCall.epochId !== liveCut.epochId
+        || liveBeforeCall.lastSeq < liveCut.lastSeq) {
+        addReason("resync_stale");
+        continue;
+      }
+      let request: Parameters<HistoryHandle["fetchHistory"]>[0];
+      try {
+        request = {
+          since: requestedSince,
+          until: requestedUntil,
+          bindings: group.bindings.map(({ nativeId, nativeInstanceId }) => ({ nativeId, nativeInstanceId })),
+          liveCut: { ...liveCut },
+        };
+      } catch {
+        addReason("invalid_response");
+        continue;
+      }
+      const fetched = await fetchImportedHistory(handle, request, signal);
+      if (fetched.status !== "fulfilled") {
+        addReason(fetched.status === "cancelled" ? "cancelled" : fetched.status === "timeout" ? "timeout" : "history_unavailable");
+        if (fetched.status === "cancelled") break;
+        continue;
+      }
+      if (signal?.aborted) {
+        addReason("cancelled");
+        break;
+      }
+      if (this.runtimesById.get(bridgeId) !== runtime
+        || runtime.adapter !== adapter
+        || runtime.lifecycleGeneration !== lifecycleGeneration
+        || runtime.resyncInFlight > 0) {
+        addReason("resync_stale");
+        continue;
+      }
+      const parsed = historyPageSchema.safeParse(fetched.value);
+      if (!parsed.success) {
+        addReason("invalid_response");
+        continue;
+      }
+      const page: HistoryPage = parsed.data;
+      if (page.sourceRange.since !== requestedSince
+        || page.sourceRange.until !== requestedUntil
+        || page.liveCut.epochId !== liveCut.epochId
+        || page.liveCut.lastSeq !== liveCut.lastSeq) {
+        addReason("invalid_response");
+        continue;
+      }
+      const capabilitySchemas = this.catalog.requireAdapter(runtime.adapterType).capabilitySchemas;
+      let pageBindingsValid = true;
+      for (const record of page.records) {
+        const capability = group.capabilitiesByBinding.get(evidenceBindingKey(
+          record.state.nativeId,
+          record.state.nativeInstanceId,
+        ));
+        const majorVersion = Number.parseInt(capability?.schemaVersion.split(".")[0] ?? "", 10);
+        const registration = capabilitySchemas.find((candidate) => (
+          candidate.schema === capability?.schema && candidate.majorVersion === majorVersion
+        ));
+        try {
+          if (capability === undefined
+            || registration === undefined
+            || !registration.attrsSchema.safeParse(record.state.attrs).success) {
+            pageBindingsValid = false;
+            break;
+          }
+        } catch {
+          pageBindingsValid = false;
+          break;
+        }
+      }
+      if (!pageBindingsValid) {
+        addReason("invalid_response");
+        continue;
+      }
+      const liveAfter = runtime.journal.watermark(bridgeId);
+      const consistentAfter = runtime.journal.consistentWatermark?.(bridgeId);
+      if (liveAfter === undefined
+        || consistentAfter === undefined
+        || liveAfter.epochId !== liveCut.epochId
+        || liveAfter.lastSeq < liveCut.lastSeq
+        || consistentAfter.epochId !== liveCut.epochId
+        || consistentAfter.lastSeq < liveCut.lastSeq) {
+        addReason("resync_stale");
+        continue;
+      }
+      if (runtime.lifecycleGeneration !== lifecycleGeneration || runtime.resyncInFlight > 0) {
+        addReason("resync_stale");
+        continue;
+      }
+      if (runtime.ingest.diagnostics().connectionState !== "ready") {
+        addReason("bridge_not_ready");
+        continue;
+      }
+
+      let committed: ReturnType<ImportedHistoryJournal["commitPage"]>;
+      try {
+        committed = runtime.importedHistoryJournal.commitPage({
+          bridgeId,
+          page,
+          expectedLiveCut: liveCut,
+        });
+      } catch (error) {
+        addReason(importedHistoryCommitFailureReason(error));
+        continue;
+      }
+      for (const reason of committed.reasons) addReason(reason);
+      if (!committed.committed) continue;
+      if (page.coverage === "partial") available = true;
+
+      let imported;
+      try {
+        imported = runtime.importedHistoryJournal.queryImportedEvidence({
+          bridgeId,
+          since: requestedSince,
+          until: requestedUntil,
+          bindings: group.bindings.map(({ nativeId, nativeInstanceId }) => ({ nativeId, nativeInstanceId })),
+          limit,
+        });
+      } catch {
+        addReason("journal_query_unavailable");
+        continue;
+      }
+      if (imported.truncated) {
+        truncated = true;
+        addReason("query_truncated");
+      }
+      for (const gap of imported.gaps) addReason(gap.reason);
+      if (imported.records.length > 0) available = true;
+      for (const record of imported.records) {
+        const state = record.state;
+        const capability = group.capabilitiesByBinding.get(evidenceBindingKey(
+          state.nativeId,
+          state.nativeInstanceId,
+        ));
+        if (capability === undefined) continue;
+        const value = evidenceScalarForCapability(capability, state.attrs);
+        if (value === undefined) continue;
+        const observedAt = state.time.sourceTs;
+        if (observedAt === undefined) {
+          addReason("invalid_row");
+          continue;
+        }
+        events.push({
+          hwId: capability.hwId,
+          hwCapabilityId: capability.hwCapabilityId,
+          ...(capability.semanticKind === undefined ? {} : { semanticKind: capability.semanticKind }),
+          value,
+          observedAt,
+          sourceTs: observedAt,
+          sourceTsQuality: state.time.sourceTsQuality,
+          origin: "imported",
+        });
+      }
+    }
+
+    events.sort((left, right) => left.observedAt.localeCompare(right.observedAt)
+      || left.hwCapabilityId.localeCompare(right.hwCapabilityId)
+      || JSON.stringify(left.value).localeCompare(JSON.stringify(right.value)));
+    if (events.length > limit) {
+      events.splice(limit);
+      truncated = true;
+      addReason("query_truncated");
+    }
+    return {
+      requestedSince,
+      requestedUntil,
+      events,
+      coverage: {
+        status: available ? "partial" : "unavailable",
+        reasons: reasons.length === 0 ? ["history_unavailable"] : reasons,
+      },
+      truncated,
     };
   }
 
@@ -1830,7 +2200,10 @@ export class HomeWorldService extends Service {
       for (const runtime of this.runtimesById.values()) runtime.subscriptionAbort?.abort();
       const tasks = [...this.runtimesById.values()].map((runtime) => runtime.task).filter((task): task is Promise<void> => task !== undefined);
       await Promise.allSettled(tasks);
-      for (const runtime of this.runtimesById.values()) runtime.journal.close();
+      for (const runtime of this.runtimesById.values()) {
+        runtime.journal.close();
+        runtime.importedHistoryJournal.close();
+      }
       if (this.ownsWorldModelIndex) {
         this.worldModelIndexValue?.close();
         this.worldModelIndexValue = undefined;
@@ -1845,8 +2218,14 @@ export class HomeWorldService extends Service {
     if (this.runtimesById.has(entry.bridgeId)) throw new Error(`Duplicate homeWorld bridgeId "${entry.bridgeId}"`);
     const adapter = this.registry.load(entry);
     let journal: IngestJournal | undefined;
+    let importedHistoryJournal: ImportedHistoryJournal | undefined;
     try {
-      journal = this.createJournal(entry);
+      const sharedJournalPath = this.options.journalFactory === undefined
+        || this.options.importedHistoryJournalFactory === undefined
+        ? this.journalPath(entry)
+        : undefined;
+      journal = this.createJournal(entry, sharedJournalPath);
+      importedHistoryJournal = this.createImportedHistoryJournal(entry, sharedJournalPath);
       const extensions = negotiateExtensions(adapter, registeredExtensionSchemas(this.options.extensionSchemas));
       const registration = this.catalog.requireAdapter(entry.adapterType);
       const registeredSchemas = new Set(registration.capabilitySchemas.map((schema) => `${schema.schema}@${schema.majorVersion}`));
@@ -1891,13 +2270,17 @@ export class HomeWorldService extends Service {
         adapterType: entry.adapterType,
         adapter,
         journal,
+        importedHistoryJournal,
         ingest,
+        lifecycleGeneration: 0,
+        resyncInFlight: 0,
         extensionAvailability: extensions.status,
         restartCount: 0,
         lastTermination: "running",
         pendingNonSpatialNativeIds: new Set(),
         committedNonSpatialNativeIds: readCommittedOrgHints(journal, entry.bridgeId, consistentWatermark?.epochId),
       };
+      this.installIngestLifecycleGuard(runtime);
       this.materializeWorldModel(runtime);
       this.runtimesById.set(entry.bridgeId, runtime);
       runtime.task = this.runBridge(runtime, entry);
@@ -1906,6 +2289,11 @@ export class HomeWorldService extends Service {
         journal?.close();
       } catch {
         // Preserve the startup failure while still attempting adapter cleanup.
+      }
+      try {
+        importedHistoryJournal?.close();
+      } catch {
+        // Preserve the startup failure while still attempting store cleanup.
       }
       try {
         await adapter.control.dispose();
@@ -1926,6 +2314,10 @@ export class HomeWorldService extends Service {
       try {
         for await (const envelope of runtime.adapter.events(subscriptionAbort.signal)) {
           if (signal.aborted || subscriptionAbort.signal.aborted) break;
+          if (envelope.event.kind === "sync-start"
+            && runtime.ingest.diagnostics().lastSyncCompleteAt !== undefined) {
+            runtime.lifecycleGeneration += 1;
+          }
           const result = await runtime.ingest.ingest(envelope);
           // A fold window is an admission optimization, never a visibility
           // stall: each adapter batch exposes its latest accepted state.
@@ -1991,6 +2383,7 @@ export class HomeWorldService extends Service {
       if (signal.aborted) return;
       try {
         const next = this.registry.load(entry);
+        runtime.lifecycleGeneration += 1;
         runtime.adapter = next;
         const extensions = negotiateExtensions(next, registeredExtensionSchemas(this.options.extensionSchemas));
         runtime.extensionAvailability = extensions.status;
@@ -2196,11 +2589,37 @@ export class HomeWorldService extends Service {
     }
   }
 
-  private createJournal(entry: BridgeConfigEntry<unknown>): IngestJournal {
+  private installIngestLifecycleGuard(runtime: HomeWorldBridgeRuntime): void {
+    const requestResync = runtime.ingest.requestResync.bind(runtime.ingest);
+    runtime.ingest.requestResync = async (signal?: AbortSignal) => {
+      runtime.lifecycleGeneration += 1;
+      runtime.resyncInFlight += 1;
+      try {
+        return await requestResync(signal);
+      } finally {
+        runtime.resyncInFlight -= 1;
+        runtime.lifecycleGeneration += 1;
+      }
+    };
+  }
+
+  private createJournal(entry: BridgeConfigEntry<unknown>, path?: string): IngestJournal {
     if (this.options.journalFactory) return this.options.journalFactory(entry.bridgeId, entry);
-    const path = this.options.journalPath?.(entry.bridgeId, entry)
-      ?? (this.options.journalDirectory === undefined ? ":memory:" : join(this.options.journalDirectory, `${encodeURIComponent(entry.bridgeId)}.sqlite`));
-    return new SqliteIngestJournal(path, this.options.journalOptions);
+    return new SqliteIngestJournal(path ?? this.journalPath(entry), this.options.journalOptions);
+  }
+
+  private createImportedHistoryJournal(entry: BridgeConfigEntry<unknown>, path?: string): ImportedHistoryJournal {
+    if (this.options.importedHistoryJournalFactory) {
+      return this.options.importedHistoryJournalFactory(entry.bridgeId, entry);
+    }
+    return new ImportedHistoryJournal(path ?? this.journalPath(entry), this.options.importedHistoryJournalOptions);
+  }
+
+  private journalPath(entry: BridgeConfigEntry<unknown>): string {
+    return this.options.journalPath?.(entry.bridgeId, entry)
+      ?? (this.options.journalDirectory === undefined
+        ? ":memory:"
+        : join(this.options.journalDirectory, `${encodeURIComponent(entry.bridgeId)}.sqlite`));
   }
 
   private clock(): string {
@@ -2729,6 +3148,66 @@ function validateEvidenceQuery(input: HomeWorldEvidenceQuery): number {
     throw new TypeError("home evidence query is invalid or unbounded");
   }
   return limit;
+}
+
+function validateImportedHistoryQuery(input: HomeWorldImportedHistoryQuery): number {
+  const limit = input?.limit === undefined ? 100 : input.limit;
+  if (!input || typeof input !== "object"
+    || !Array.isArray(input.hwCapabilityIds)
+    || input.hwCapabilityIds.length < 1
+    || input.hwCapabilityIds.length > 20
+    || input.hwCapabilityIds.some((id) => typeof id !== "string" || id.length === 0 || id.length > 200)
+    || !Number.isSafeInteger(input.lookbackHours)
+    || input.lookbackHours < 1
+    || input.lookbackHours > 168
+    || !Number.isSafeInteger(limit)
+    || limit < 1
+    || limit > 200) {
+    throw new TypeError("home history query is invalid or unbounded");
+  }
+  return limit;
+}
+
+function importedHistoryCommitFailureReason(
+  error: unknown,
+): "invalid_row" | "journal_query_unavailable" {
+  return error instanceof RangeError || error instanceof TypeError
+    ? "invalid_row"
+    : "journal_query_unavailable";
+}
+
+type ImportedHistoryFetchResult =
+  | { readonly status: "fulfilled"; readonly value: unknown }
+  | { readonly status: "cancelled" | "timeout" | "rejected" };
+
+async function fetchImportedHistory(
+  handle: HistoryHandle,
+  request: Parameters<HistoryHandle["fetchHistory"]>[0],
+  signal: AbortSignal | undefined,
+): Promise<ImportedHistoryFetchResult> {
+  if (signal?.aborted) return { status: "cancelled" };
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromCaller = (): void => controller.abort();
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, HOME_HISTORY_FETCH_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    const outcome = await awaitMigrationRead(
+      () => handle.fetchHistory(request, { signal: controller.signal }),
+      controller.signal,
+    );
+    if (signal?.aborted) return { status: "cancelled" };
+    if (timedOut) return { status: "timeout" };
+    if (outcome.status === "fulfilled") return { status: "fulfilled", value: outcome.value };
+    return { status: "rejected" };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromCaller);
+  }
 }
 
 function validateCausalityQuery(input: HomeWorldCausalityQuery): void {

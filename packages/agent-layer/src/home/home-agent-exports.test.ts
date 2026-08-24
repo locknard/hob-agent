@@ -7,6 +7,7 @@ import { ModelProviderResolver } from "@hob-agent/agent-layer/model-provider-res
 import { inject, name, projectHomeSnapshot } from "@hob-agent/agent-layer/home-snapshot-tool";
 import { pageHomeInventory } from "@hob-agent/agent-layer/home-inventory-tool";
 import { pageHomeRules } from "@hob-agent/agent-layer/home-rules-tool";
+import { inject as historyInject, name as historyName } from "@hob-agent/agent-layer/home-history-tool";
 
 test("exports the neutral Home Agent and snapshot tool entry points", () => {
   assert.equal(typeof DshHomeAgentService, "function");
@@ -15,6 +16,8 @@ test("exports the neutral Home Agent and snapshot tool entry points", () => {
   assert.equal(typeof projectAgentLoopTrace, "function");
   assert.equal(name, "dsh-home-snapshot-tool");
   assert.deepEqual(inject, ["tools", "homeWorld"]);
+  assert.equal(historyName, "dsh-home-history-tool");
+  assert.deepEqual(historyInject, ["tools", "homeWorld"]);
   assert.deepEqual(projectHomeSnapshot(undefined), {
     spaces: [],
     devices: [],

@@ -97,6 +97,7 @@ const TOOL_PROGRESS: Readonly<Record<string, HomeAdviceNonTerminalProgressType>>
   get_home_activity: "evaluating_evidence",
   get_home_calibration: "evaluating_evidence",
   get_home_evidence: "evaluating_evidence",
+  get_home_history: "evaluating_evidence",
   get_home_causality: "causality",
   get_home_rules: "checking_rules",
   report_home_advice: "composing_answer",

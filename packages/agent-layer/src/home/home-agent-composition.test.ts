@@ -348,6 +348,7 @@ test("contributes tenant SKILL.md through the official registry without adding t
       "get_home_activity",
       "get_home_calibration",
       "get_home_evidence",
+      "get_home_history",
       "get_home_causality",
       "get_home_inventory",
       "get_home_rules",

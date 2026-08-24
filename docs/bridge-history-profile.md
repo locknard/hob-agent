@@ -1,6 +1,6 @@
 # Platform bridge History profile (`history@1`)
 
-Status: architecture decision for the first recorder-history slice. The
+Status: implemented Phase 0 profile for the first recorder-history slice. The
 profile is read-only. It does not add an execution path, a second runtime, or a
 new persistence service.
 
@@ -26,8 +26,7 @@ compatible future transport and does not expand the first implementation.
 
 ## Handle shape
 
-The contract package will define the following shape when `history@1` is
-implemented. This document freezes the boundary before that code lands.
+The contract package defines the following implemented `history@1` shape.
 
 ```ts
 interface HistoryHandle {
@@ -46,13 +45,15 @@ interface HistoryRequest {
     readonly nativeId: string;
     readonly nativeInstanceId: string;
   }[];
+  /** Hub-owned verified cut captured immediately before the adapter call. */
+  readonly liveCut: { readonly epochId: string; readonly lastSeq: number };
 }
 
 interface HistoryPage {
   readonly importId: string;
   readonly source: "home-assistant-recorder";
   readonly sourceRange: { readonly since: string; readonly until: string };
-  /** The live cut observed before the read; this is not a live event sequence. */
+  /** Exact echo of request.liveCut; this is not a history event sequence. */
   readonly liveCut: { readonly epochId: string; readonly lastSeq: number };
   readonly coverage: "partial" | "unavailable";
   readonly reasons: readonly HistoryCoverageReason[];
@@ -157,12 +158,18 @@ is not imported as a behavior event.
 
 ## Epoch, baseline, and resync
 
-The Hub captures the current verified live cut before calling the handle:
+The Hub captures the current verified live cut and places it in the request
+before calling the handle:
 
 ```text
 liveCut = { epochId: consistentWatermark.epochId,
             lastSeq: consistentWatermark.lastSeq }
 ```
+
+The adapter echoes that exact cut in `HistoryPage`. The Hub rejects a page whose
+cut differs from the request, whose bridge lifecycle or ready state changed
+during the read, or whose adapter was replaced. An adapter-local send cursor
+can never be mistaken for the Hub's durable consistent watermark.
 
 The imported range may precede or overlap that live cut. The cut records the
 relationship between the imported read and the current live stream; it does
@@ -179,7 +186,10 @@ imported page, because the page remains in its independent partition.
 
 The imported partition has its own bounded retention and quota accounting. It
 never evicts live evidence to make room for recorder history. Quota pressure
-returns `partial: imported_quota` and records an imported-history gap.
+returns `partial: imported_quota`. The journal persists one byte-accounted
+quota gap per bridge and requested range when the remaining partition capacity
+can hold that gap; otherwise the current result remains the signal and the hard
+partition cap remains intact.
 
 The first durable layout uses the same local SQLite file but separate tables:
 

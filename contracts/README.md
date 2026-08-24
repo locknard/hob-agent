@@ -58,6 +58,10 @@ frozen core surfaces:
   bounded `CauseRef` annotates one accepted state sequence in the same epoch;
   platform-native user, rule, context, and entity identifiers never cross the
   contract.
+- `bridge-history.ts` defines the optional, read-only `history@1` handle. It
+  accepts only bounded UTC ranges and Hub-owned binding pairs, returns imported
+  `StateEvent` records with explicit partial coverage, and echoes the exact
+  caller-provided live cut.
 - Closed identity-claim provenance (`device_reported`,
   `independent_registry`, `platform_registry`, or `inferred`) and bridge-scoped
   credential materials (`secret_text`, `oauth`, and `certificate`). The

@@ -20,7 +20,9 @@ Product Bundle contributes
 compact paginated `get_home_inventory`, metadata-only post-baseline
 `get_home_activity` candidate triage, bounded paginated read-only
 `get_home_snapshot`, bounded read-only `get_home_evidence`, and review-only
-`create_home_proposal` tools through DSH's registry; it does not create a
+`get_home_history` for scalar imported recorder events about what happened and
+when, and `create_home_proposal` tools through DSH's registry; imported history
+never proves why and is not passed to `get_home_causality`. It does not create a
 parallel Agent or tool system. The read tools inject the neutral `homeWorld`
 service. Inventory discovery returns up to 50 compact device summaries without
 current values or capability/native identities, so an observation can exhaust

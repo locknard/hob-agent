@@ -10,6 +10,7 @@ import { runBridgeAdapterConformance } from "@hob/bridge-contract";
 import type { ActionsExtension, AutomationsExtension, AutomationsExtensionV2, BridgeActionDescriptor } from "@hob/bridge-contract";
 import type { ForeignRuleMigrationHandle, ForeignRulesHandle } from "@hob/bridge-contract";
 import type { ForeignRuleControlHandle } from "@hob/bridge-contract";
+import { HISTORY_EXTENSION, type HistoryHandle } from "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
 import { BridgeRegistry, MemoryBridgeRegistryStore } from "./bridge-registry.js";
 import {
@@ -515,6 +516,20 @@ async function readSnapshot(
   return events;
 }
 
+async function startAndSync(
+  adapter: HomeAssistantBridgeAdapter,
+  socket: FakeSocket,
+  respond: () => void = () => respondToBootstrap(socket),
+): Promise<Envelope[]> {
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respond();
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+  return events;
+}
+
 test("inherits the device area when an HA entity has no area override", async () => {
   const socket = new FakeSocket();
   const { adapter } = createAdapter(socket);
@@ -558,6 +573,7 @@ test("factory construction is synchronous and does not resolve credentials or to
       { id: "actions", version: "1.0.0" },
       { id: "automations", version: "1.0.0" },
       { id: "automations", version: "2.0.0" },
+      { id: "history", version: "1.0.0" },
     ],
   });
   void socket;
@@ -624,6 +640,464 @@ test("exposes existing automations through the bounded read-only foreignRules ex
   assert.equal(JSON.stringify(rules).includes("automation.arrival_light"), false);
   assert.equal(JSON.stringify(catalog).includes("must-not-cross-contract"), false);
   assert.equal(adapter.extension("foreignRules@1" as never), undefined);
+  await adapter.control.dispose();
+});
+
+test("keeps history unavailable before running and reads one bound imported state after sync", async () => {
+  const socket = new FakeSocket();
+  const requests: Array<{ url: string; method: string; headers: Record<string, string> }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requests.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      headers: { ...(init?.headers as Record<string, string>) },
+    });
+    return new Response(JSON.stringify([[
+      {
+        entity_id: "light.kitchen",
+        state: "on",
+        attributes: { brightness: 200, vendor_secret: "do-not-cross" },
+        last_updated: "2026-08-20T00:10:00.000Z",
+      },
+    ]]), { status: 200 });
+  };
+  const { adapter, calls } = createAdapter(socket, {}, { fetchImpl });
+  assert.equal(adapter.info.extensions.some((extension) => extension.id === HISTORY_EXTENSION.id), true);
+  const preRunHandle = adapter.extension("history@1") as HistoryHandle | undefined;
+  assert.notEqual(preRunHandle, undefined);
+  const preRunPage = await preRunHandle!.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: "pre-run", lastSeq: 1 },
+  }, { signal: new AbortController().signal });
+  assert.deepEqual(preRunPage.coverage, "unavailable");
+  assert.deepEqual(preRunPage.reasons, ["history_unavailable"]);
+  assert.deepEqual(requests, []);
+  assert.deepEqual(calls, []);
+  const restarted = createAdapter(new FakeSocket(), {}, { fetchImpl });
+  const restartedPage = await (restarted.adapter.extension("history@1") as HistoryHandle)!.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: "pre-run", lastSeq: 1 },
+  }, { signal: new AbortController().signal });
+  assert.notEqual(restartedPage.importId, preRunPage.importId);
+
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+  assert.equal(adapter.info.extensions.some((extension) => extension.id === HISTORY_EXTENSION.id), true);
+
+  const handle = adapter.extension("history@1") as HistoryHandle | undefined;
+  assert.notEqual(handle, undefined);
+  const page = await handle!.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  }, { signal: new AbortController().signal });
+  assert.equal(page.records.length, 1);
+  assert.equal(page.records[0]?.state.origin, "imported");
+  assert.equal(JSON.stringify(page).includes("vendor_secret"), false);
+  assert.equal(requests[0]?.method, "GET");
+  assert.equal(requests[0]?.headers.authorization, "Bearer ha-secret");
+  assert.match(requests[0]?.url ?? "", /\/api\/history\/period\//);
+  await adapter.control.dispose();
+});
+
+test("uses the exact HA history query and projects timestamps without native fields", async () => {
+  const socket = new FakeSocket();
+  const requests: Array<{ url: string; method: string; headers: Record<string, string> }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requests.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      headers: { ...(init?.headers as Record<string, string>) },
+    });
+    return new Response(JSON.stringify([[
+      {
+        entity_id: "light.kitchen",
+        state: "off",
+        attributes: {},
+        last_changed: "2026-08-20T00:20:00.000Z",
+      },
+      {
+        entity_id: "light.kitchen",
+        state: "on",
+        attributes: { brightness: 200, context: "must-not-cross" },
+        last_updated: "2026-08-20T00:10:00.000Z",
+      },
+      {
+        entity_id: "light.kitchen",
+        state: "on",
+        attributes: {},
+        last_updated: "not-a-timestamp",
+        last_changed: "2026-08-20T00:30:00.000Z",
+      },
+      {
+        entity_id: "light.unknown",
+        state: "on",
+        attributes: {},
+        last_updated: "2026-08-20T00:40:00.000Z",
+      },
+    ]]), { status: 200 });
+  };
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const events = await startAndSync(adapter, socket);
+  const page = await (adapter.extension("history@1") as HistoryHandle)!.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  }, { signal: new AbortController().signal });
+
+  assert.equal(page.records.length, 3);
+  assert.deepEqual(page.records.map((record) => record.state.time), [
+    { sourceTs: "2026-08-20T00:10:00.000Z", sourceTsQuality: "platform" },
+    { sourceTs: "2026-08-20T00:20:00.000Z", sourceTsQuality: "platform" },
+    { sourceTsQuality: "none" },
+  ]);
+  assert.equal(page.records.every((record) => record.state.origin === "imported"), true);
+  assert.equal(page.records.every((record) => !("context" in record.state.attrs)), true);
+  assert.equal(page.reasons.includes("invalid_row"), true);
+  assert.deepEqual(page.liveCut, { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq });
+
+  const requestUrl = new URL(requests[0]!.url);
+  assert.equal(requests[0]!.method, "GET");
+  assert.equal(requests[0]!.headers.authorization, "Bearer ha-secret");
+  assert.equal(requestUrl.pathname, "/api/history/period/2026-08-20T00%3A00%3A00.000Z");
+  assert.equal(requestUrl.searchParams.get("end_time"), "2026-08-20T01:00:00.000Z");
+  assert.equal(requestUrl.searchParams.get("filter_entity_id"), "light.kitchen");
+  assert.equal(requestUrl.searchParams.has("skip_initial_state"), true);
+  assert.equal(requestUrl.searchParams.get("significant_changes_only"), "1");
+  assert.equal(requestUrl.searchParams.get("minimal_response"), "0");
+  assert.equal(requestUrl.searchParams.get("no_attributes"), "0");
+  await adapter.control.dispose();
+});
+
+test("omits invalid nested rows and commits no prefix when the record limit is exceeded", async () => {
+  const socket = new FakeSocket();
+  let responseRows: unknown[] = [[
+    {
+      entity_id: "light.kitchen",
+      state: "on",
+      attributes: {},
+      last_updated: "2026-08-20T00:10:00.000Z",
+    },
+    { entity_id: "light.kitchen", state: "on", attributes: "invalid" },
+  ]];
+  const fetchImpl: typeof fetch = async () => new Response(JSON.stringify(responseRows), { status: 200 });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const events = await startAndSync(adapter, socket);
+  const handle = adapter.extension("history@1") as HistoryHandle;
+  const request = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  };
+  const partial = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(partial.records.length, 1);
+  assert.equal(partial.reasons.includes("invalid_row"), true);
+  assert.deepEqual(partial.records.map((record) => record.historySeq), [1]);
+
+  responseRows = [[...Array.from({ length: 201 }, (_, index) => ({
+    entity_id: "light.kitchen",
+    state: index % 2 === 0 ? "on" : "off",
+    attributes: {},
+    last_updated: `2026-08-20T00:${String(index % 60).padStart(2, "0")}:00.000Z`,
+  }))]];
+  const limited = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(limited.coverage, "partial");
+  assert.deepEqual(limited.reasons, ["record_limit"]);
+  assert.deepEqual(limited.records, []);
+  await adapter.control.dispose();
+});
+
+test("omits a normalized history row over 64 KiB and bounds the raw response before parsing", async () => {
+  const socket = new FakeSocket();
+  let responseBody = JSON.stringify([[
+    {
+      entity_id: "sensor.temperature",
+      state: "x".repeat(70_000),
+      attributes: {},
+      last_updated: "2026-08-20T00:10:00.000Z",
+    },
+  ]]);
+  const fetchImpl: typeof fetch = async () => new Response(responseBody, { status: 200 });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const events = await startAndSync(adapter, socket, () => respondToBootstrap(socket, "sensor.temperature"));
+  const handle = adapter.extension("history@1") as HistoryHandle;
+  const request = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  };
+  const oversizedRecord = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.deepEqual(oversizedRecord.records, []);
+  assert.deepEqual(oversizedRecord.reasons, ["retention_floor_unknown", "record_too_large"]);
+
+  responseBody = JSON.stringify([[
+    {
+      entity_id: "sensor.temperature",
+      state: "x".repeat(1_100_000),
+      attributes: {},
+      last_updated: "2026-08-20T00:10:00.000Z",
+    },
+  ]]);
+  const oversizedResponse = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(oversizedResponse.coverage, "partial");
+  assert.deepEqual(oversizedResponse.reasons, ["response_too_large"]);
+  assert.deepEqual(oversizedResponse.records, []);
+  await adapter.control.dispose();
+});
+
+test("rejects a successful history response with no stream without an unbounded arrayBuffer read", async () => {
+  const socket = new FakeSocket();
+  let arrayBufferCalls = 0;
+  const response = {
+    ok: true,
+    status: 200,
+    body: null,
+    async arrayBuffer() {
+      arrayBufferCalls += 1;
+      return new ArrayBuffer(2 * 1024 * 1024);
+    },
+  } as Response;
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: async () => response });
+  const events = await startAndSync(adapter, socket);
+  const page = await (adapter.extension("history@1") as HistoryHandle).fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  }, { signal: new AbortController().signal });
+  assert.deepEqual(page.reasons, ["invalid_response"]);
+  assert.equal(arrayBufferCalls, 0);
+  await adapter.control.dispose();
+});
+
+test("returns unavailable for an unknown exact binding without issuing a history request", async () => {
+  const socket = new FakeSocket();
+  let fetchCalls = 0;
+  const fetchImpl: typeof fetch = async () => {
+    fetchCalls += 1;
+    return new Response("[]", { status: 200 });
+  };
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const events = await startAndSync(adapter, socket);
+  const page = await (adapter.extension("history@1") as HistoryHandle)!.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "wrong-entity" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  }, { signal: new AbortController().signal });
+  assert.equal(page.coverage, "unavailable");
+  assert.deepEqual(page.reasons, ["history_unavailable"]);
+  assert.equal(fetchCalls, 0);
+  await adapter.control.dispose();
+});
+
+test("keeps one history read in flight and reports caller cancellation without rows", async () => {
+  const socket = new FakeSocket();
+  let fetchStarted!: () => void;
+  const started = new Promise<void>((resolve) => { fetchStarted = resolve; });
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    fetchStarted();
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+    });
+  };
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const events = await startAndSync(adapter, socket);
+  const handle = adapter.extension("history@1") as HistoryHandle;
+  const request = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  };
+  const caller = new AbortController();
+  const first = handle.fetchHistory(request, { signal: caller.signal });
+  await started;
+  const busy = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(busy.coverage, "unavailable");
+  assert.deepEqual(busy.reasons, ["busy"]);
+  caller.abort();
+  const cancelled = await first;
+  assert.equal(cancelled.coverage, "unavailable");
+  assert.deepEqual(cancelled.reasons, ["cancelled"]);
+  await adapter.control.dispose();
+});
+
+test("returns deterministic coverage for empty, invalid, recorder-disabled, and non-UTF-8 responses", async () => {
+  const socket = new FakeSocket();
+  let response: Response = new Response("[]", { status: 200 });
+  const fetchImpl: typeof fetch = async () => response;
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const events = await startAndSync(adapter, socket);
+  const handle = adapter.extension("history@1") as HistoryHandle;
+  const request = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  };
+  const empty = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(empty.coverage, "partial");
+  assert.deepEqual(empty.reasons, ["retention_floor_unknown", "empty_or_purged"]);
+  assert.deepEqual(empty.records, []);
+
+  response = new Response(JSON.stringify({ unexpected: true }), { status: 200 });
+  const invalid = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(invalid.coverage, "unavailable");
+  assert.deepEqual(invalid.reasons, ["invalid_response"]);
+  assert.deepEqual(invalid.records, []);
+
+  response = new Response("recorder is disabled", { status: 404 });
+  const disabled = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(disabled.coverage, "unavailable");
+  assert.deepEqual(disabled.reasons, ["recorder_disabled"]);
+
+  response = new Response(new Uint8Array([0xc3, 0x28]), { status: 200 });
+  const invalidUtf8 = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.equal(invalidUtf8.coverage, "unavailable");
+  assert.deepEqual(invalidUtf8.reasons, ["invalid_response"]);
+  await adapter.control.dispose();
+});
+
+test("uses the five-second history deadline by default through a testable bounded timeout seam", async () => {
+  const socket = new FakeSocket();
+  const fetchImpl: typeof fetch = async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new Error("timed out")), { once: true });
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl, historyTimeoutMs: 5 });
+  const events = await startAndSync(adapter, socket);
+  const caller = new AbortController();
+  const pending = (adapter.extension("history@1") as HistoryHandle)!.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  }, { signal: caller.signal });
+  const abortCallerAfterDefaultWouldHaveExpired = setTimeout(() => caller.abort(), 100);
+  const page = await pending;
+  clearTimeout(abortCallerAfterDefaultWouldHaveExpired);
+  assert.equal(page.coverage, "unavailable");
+  assert.deepEqual(page.reasons, ["timeout"]);
+  await adapter.control.dispose();
+});
+
+test("settles an ignored history abort at the adapter deadline and releases the in-flight slot", async () => {
+  const socket = new FakeSocket();
+  let fetchCalls = 0;
+  const fetchImpl: typeof fetch = async () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) return new Promise<Response>(() => undefined);
+    return new Response("[]", { status: 200 });
+  };
+  const { adapter } = createAdapter(socket, {}, { fetchImpl, historyTimeoutMs: 5 });
+  const events = await startAndSync(adapter, socket);
+  const handle = adapter.extension("history@1") as HistoryHandle;
+  const request = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  };
+
+  const timedOut = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.deepEqual(timedOut.reasons, ["timeout"]);
+  const retry = await handle.fetchHistory(request, { signal: new AbortController().signal });
+  assert.deepEqual(retry.reasons, ["retention_floor_unknown", "empty_or_purged"]);
+  assert.equal(fetchCalls, 2);
+  await adapter.control.dispose();
+});
+
+test("bounds a credential provider that stops responding during a history read", async () => {
+  const socket = new FakeSocket();
+  let resolveCalls = 0;
+  const adapter = createHomeAssistantBridgeAdapter({
+    bridgeId: "bridge-ha",
+    config,
+    credentials: {
+      async resolve() {
+        resolveCalls += 1;
+        if (resolveCalls === 2) return new Promise<never>(() => undefined);
+        return { kind: "secret_text" as const, value: "ha-secret" };
+      },
+      async describe() {
+        return { configured: true };
+      },
+    },
+  }, {
+    socketFactory: () => socket,
+    snapshotIdFactory: () => "snapshot-1",
+    historyTimeoutMs: 5,
+    fetchImpl: async () => new Response("[]", { status: 200 }),
+  });
+  const events = await startAndSync(adapter, socket);
+  const handle = adapter.extension("history@1") as HistoryHandle;
+  const request = {
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  };
+
+  assert.deepEqual(
+    (await handle.fetchHistory(request, { signal: new AbortController().signal })).reasons,
+    ["timeout"],
+  );
+  assert.deepEqual(
+    (await handle.fetchHistory(request, { signal: new AbortController().signal })).reasons,
+    ["retention_floor_unknown", "empty_or_purged"],
+  );
+  assert.equal(resolveCalls, 3);
+  await adapter.control.dispose();
+});
+
+test("invalidates an in-flight history page as soon as resync starts", async () => {
+  const socket = new FakeSocket();
+  let release!: (response: Response) => void;
+  const pendingResponse = new Promise<Response>((resolve) => { release = resolve; });
+  let fetchCalls = 0;
+  const fetchImpl: typeof fetch = async () => {
+    fetchCalls += 1;
+    return pendingResponse;
+  };
+  const { adapter } = createAdapter(socket, {}, { fetchImpl });
+  const events = await startAndSync(adapter, socket);
+  const handle = adapter.extension("history@1") as HistoryHandle;
+  const pending = handle.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  }, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    await adapter.control.requestResync(new AbortController().signal),
+    { status: "completed" },
+  );
+  release(new Response("[]", { status: 200 }));
+  const page = await pending;
+  assert.equal(page.coverage, "unavailable");
+  assert.deepEqual(page.reasons, ["resync_stale"]);
+  const duringResync = await handle.fetchHistory({
+    since: "2026-08-20T00:00:00.000Z",
+    until: "2026-08-20T01:00:00.000Z",
+    bindings: [{ nativeId: "device-1", nativeInstanceId: "entity-stable-1" }],
+    liveCut: { epochId: events.at(-1)!.epochId, lastSeq: events.at(-1)!.seq },
+  }, { signal: new AbortController().signal });
+  assert.deepEqual(duringResync.reasons, ["resync_stale"]);
+  assert.equal(fetchCalls, 1);
   await adapter.control.dispose();
 });
 
@@ -996,6 +1470,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
       { key: "actions@1", available: true },
       { key: "automations@1", available: true },
       { key: "automations@2", available: true },
+      { key: "history@1", available: true },
     ],
   });
 

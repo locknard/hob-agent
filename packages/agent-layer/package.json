@@ -12,6 +12,7 @@
     "./home-activity-tool": "./src/home/home-activity-tool.ts",
     "./home-calibration-tool": "./src/home/home-calibration-tool.ts",
     "./home-evidence-tool": "./src/home/home-evidence-tool.ts",
+    "./home-history-tool": "./src/home/home-history-tool.ts",
     "./home-inventory-tool": "./src/home/home-inventory-tool.ts",
     "./home-media-tool": "./src/home/home-media-tool.ts",
     "./home-media-player-tool": "./src/home/home-media-player-tool.ts",

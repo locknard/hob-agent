@@ -483,6 +483,7 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
     "get_home_activity",
     "get_home_snapshot",
     "get_home_evidence",
+    "get_home_history",
     "get_home_causality",
     "get_home_rules",
     "list_home_proposals",
@@ -524,6 +525,10 @@ test("mounts the sole production Agent through the DSH runtime", async () => {
   assert.match(
     answerSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
     /exact evidence event.*get_home_causality.*partial.*unknown.*source chain.*do not guess/is,
+  );
+  assert.match(
+    answerSkill.content.map((item) => "text" in item ? item.text : "").join(" "),
+    /what happened.*when.*get_home_history.*never proves why.*get_home_causality/is,
   );
 
   ctx.homeAgent.agent.followup(createUserMessage({

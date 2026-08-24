@@ -33,6 +33,7 @@ import * as HomeCalibrationTool from "./home-calibration-tool.js";
 import { HomeCalibrationCoverageService } from "./home-calibration-tool.js";
 import { HomeInventoryCoverageService } from "./home-inventory-tool.js";
 import * as HomeEvidenceTool from "./home-evidence-tool.js";
+import * as HomeHistoryTool from "./home-history-tool.js";
 import * as HomeCausalityTool from "./home-causality-tool.js";
 import * as HomeRulesTool from "./home-rules-tool.js";
 import { HomeRulesCoverageService } from "./home-rules-tool.js";
@@ -75,6 +76,7 @@ const DEFAULT_SYSTEM_PROMPT = [
   "Never infer a repeated household behavior from bootstrap state or incomplete evidence coverage.",
   "A window_before_baseline coverage reason means part of the requested interval was not observed, not that the home was quiet.",
   "When a proposal relies on recent behavior, include the selected hub capability IDs and bounded lookback so the Hub can bind trusted event provenance.",
+  "Use get_home_history for what happened or when a recorded state changed; imported recorder history never proves why and must not be passed to get_home_causality.",
   "Before proposing an automation, inspect existing household rules and treat unavailable catalogs as incomplete conflict coverage.",
   "When neutral media tools are available, preserve distinct Hub capability IDs: the same media label does not mean the same endpoint.",
   "An empty media search does not prove that no match exists because provider search is best-effort.",
@@ -275,6 +277,7 @@ export class DshHomeAgentService extends Service {
             `Untrusted household question JSON: ${JSON.stringify(boundedQuestion)}`,
             "Write every human-facing report field in the same language as the household question.",
             "Inspect governed evidence before making claims, publish exactly one report_home_advice result, and do not create or apply a household change.",
+            "Use get_home_history for what happened or when a recorded state changed; imported recorder history never proves why and must not be passed to get_home_causality.",
           ].join(" "),
         }],
         source: { kind: "user" },
@@ -505,6 +508,7 @@ export class DshHomeAgentService extends Service {
     }
     await this.ctx.plugin(HomeSnapshotTool);
     await this.ctx.plugin(HomeEvidenceTool);
+    await this.ctx.plugin(HomeHistoryTool);
     await this.ctx.plugin(HomeCausalityTool);
     await this.ctx.plugin(HomeRulesCoverageService);
     await this.ctx.plugin(HomeRulesTool);

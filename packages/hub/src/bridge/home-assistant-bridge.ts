@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import WebSocket from "ws";
 import { z } from "zod";
@@ -81,6 +81,17 @@ import {
 import {
   CAUSALITY_EXTENSION,
   CAUSALITY_EXTENSION_KEY,
+  HISTORY_EXTENSION,
+  MAX_HISTORY_RECORD_BYTES,
+  MAX_HISTORY_RECORDS,
+  HistoryRecordSchema,
+  historyPageSchema,
+  historyRequestSchema,
+  type HistoryCoverageReason,
+  type HistoryHandle,
+  type HistoryPage,
+  type HistoryRecord,
+  type HistoryRequest,
   ORG_HINTS_EXTENSION,
   type OrgHintPayload,
 } from "@hob/bridge-contract";
@@ -106,6 +117,7 @@ const MAX_HOME_ASSISTANT_AUTOMATION_CONTEXTS = 256;
 const HOME_ASSISTANT_AUTOMATION_CONTEXT_TTL_MS = 60_000;
 const MAX_HOME_ASSISTANT_CONTEXT_ID_LENGTH = 36;
 const MAX_HOME_ASSISTANT_ENTITY_ID_LENGTH = 255;
+const HOME_ASSISTANT_HISTORY_TIMEOUT_MS = 5_000;
 /** Foreign-rule toggle operation entries retained for this adapter instance. */
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS = 128;
 /** Automation operation entries retained for this adapter instance. */
@@ -738,6 +750,10 @@ export interface HomeAssistantBridgeAdapterDependencies {
   readonly maxBootstrapItems?: number;
   /** Testable seam for the Home Assistant config REST API. */
   readonly fetchImpl?: typeof fetch;
+  /** Test-only import identifier seam; production uses a collision-resistant UUID. */
+  readonly historyImportIdFactory?: () => string;
+  /** Test-only deadline seam; production keeps the profile's five-second deadline. */
+  readonly historyTimeoutMs?: number;
 }
 
 const homeAssistantConfigSchema = z
@@ -961,6 +977,9 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private observedAutomationContexts = new Map<string, { readonly ruleRef: string; readonly observedAtMs: number }>();
   private foreignRuleControlOperations = new Map<string, ForeignRuleControlOperationEntry>();
   private automationOperations = new Map<string, HomeAssistantAutomationOperationEntry>();
+  private historyInFlight = false;
+  private historyAbortController: AbortController | undefined;
+  private historyGeneration = 0;
   private resyncInFlight = false;
 
   constructor(
@@ -981,6 +1000,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         ACTIONS_EXTENSION,
         AUTOMATIONS_EXTENSION,
         AUTOMATIONS_EXTENSION_V2,
+        HISTORY_EXTENSION,
       ]),
     });
     this.control = Object.freeze({
@@ -998,6 +1018,12 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   }
 
   extension<K extends keyof ExtensionHandleRegistry>(name: K): ExtensionHandleRegistry[K] | undefined {
+    if (name === "history@1") {
+      const handle: HistoryHandle = {
+        fetchHistory: (request, options) => this.fetchHistory(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
     if (name === "foreignRules@2") {
       const handle: ForeignRulesHandle = {
         catalog: async () => this.foreignRuleCatalog === undefined ? undefined : {
@@ -1889,6 +1915,169 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     }
   }
 
+  private async fetchHistory(requestValue: HistoryRequest, signal: AbortSignal): Promise<HistoryPage> {
+    const parsed = historyRequestSchema.safeParse(requestValue);
+    if (!parsed.success) throw new TypeError("Home Assistant history request is invalid");
+    const request = parsed.data;
+    const importId = this.nextHistoryImportId();
+    if (signal.aborted) return historyUnavailablePage(request, importId, "cancelled");
+    if (this.lifecycle !== "running" || this.bridge === undefined) {
+      return historyUnavailablePage(request, importId, "history_unavailable");
+    }
+    if (this.resyncInFlight) return historyUnavailablePage(request, importId, "resync_stale");
+    const resolved = resolveHistoryBindings(this.bindingsByEntityId, request.bindings);
+    if (resolved === undefined) return historyUnavailablePage(request, importId, "history_unavailable");
+    if (this.historyInFlight) return historyUnavailablePage(request, importId, "busy");
+
+    this.historyInFlight = true;
+    const historyGeneration = this.historyGeneration;
+    const timeoutController = new AbortController();
+    this.historyAbortController = timeoutController;
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, this.dependencies.historyTimeoutMs ?? HOME_ASSISTANT_HISTORY_TIMEOUT_MS);
+    const onAbort = (): void => timeoutController.abort(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const credential = await awaitHomeAssistantHistoryOperation(
+        () => this.resolveAccessToken(),
+        timeoutController.signal,
+      );
+      if (historyGeneration !== this.historyGeneration) {
+        return historyUnavailablePage(request, importId, "resync_stale");
+      }
+      if (credential.status !== "fulfilled") {
+        if (timedOut) return historyUnavailablePage(request, importId, "timeout");
+        if (signal.aborted) return historyUnavailablePage(request, importId, "cancelled");
+        return historyUnavailablePage(request, importId, "history_unavailable");
+      }
+      const accessToken = credential.value;
+      const url = new URL(
+        `/api/history/period/${encodeURIComponent(request.since)}`,
+        this.context.config.baseUrl,
+      );
+      url.searchParams.set("end_time", request.until);
+      url.searchParams.set("filter_entity_id", resolved.map((item) => item.entityId).join(","));
+      url.searchParams.set("skip_initial_state", "");
+      url.searchParams.set("significant_changes_only", "1");
+      url.searchParams.set("minimal_response", "0");
+      url.searchParams.set("no_attributes", "0");
+
+      const fetched = await awaitHomeAssistantHistoryOperation(async () => {
+        const fetchImpl = this.dependencies.fetchImpl ?? fetch;
+        return fetchImpl(url, {
+          method: "GET",
+          signal: timeoutController.signal,
+          headers: { authorization: `Bearer ${accessToken}` },
+        });
+      }, timeoutController.signal);
+      if (historyGeneration !== this.historyGeneration) {
+        return historyUnavailablePage(request, importId, "resync_stale");
+      }
+      if (fetched.status !== "fulfilled") {
+        return historyUnavailablePage(
+          request,
+          importId,
+          timedOut ? "timeout" : signal.aborted ? "cancelled" : "history_unavailable",
+        );
+      }
+      const response = fetched.value;
+      if (!response.ok) {
+        return historyUnavailablePage(
+          request,
+          importId,
+          response.status === 404 ? "recorder_disabled" : "history_unavailable",
+        );
+      }
+
+      const read = await awaitHomeAssistantHistoryOperation(
+        () => readBoundedHomeAssistantResponse(response, timeoutController.signal),
+        timeoutController.signal,
+      );
+      if (historyGeneration !== this.historyGeneration) {
+        return historyUnavailablePage(request, importId, "resync_stale");
+      }
+      if (read.status !== "fulfilled") {
+        return historyUnavailablePage(
+          request,
+          importId,
+          timedOut ? "timeout" : signal.aborted ? "cancelled" : "invalid_response",
+        );
+      }
+      if (read.value === "too_large") {
+        return historyPartialPage(request, importId, [], ["response_too_large"]);
+      }
+      const rawText = read.value;
+
+      let body: unknown;
+      try {
+        body = JSON.parse(rawText) as unknown;
+      } catch {
+        return historyUnavailablePage(request, importId, "invalid_response");
+      }
+      if (!Array.isArray(body)) return historyUnavailablePage(request, importId, "invalid_response");
+
+      const rowCount = body.reduce((count, group) => count + (Array.isArray(group) ? group.length : 1), 0);
+      if (rowCount > MAX_HISTORY_RECORDS) {
+        return historyPartialPage(request, importId, [], ["record_limit"]);
+      }
+
+      const reasons = new Set<HistoryCoverageReason>(["retention_floor_unknown"]);
+      const projectedStates: HistoryRecord["state"][] = [];
+      for (const group of body) {
+        if (!Array.isArray(group)) {
+          reasons.add("invalid_row");
+          continue;
+        }
+        for (const raw of group) {
+          const parsedRow = projectHomeAssistantHistoryRow(raw, resolved);
+          if (parsedRow.status === "invalid") {
+            reasons.add("invalid_row");
+            continue;
+          }
+          if (parsedRow.status === "record_too_large") {
+            reasons.add("record_too_large");
+            continue;
+          }
+          if (parsedRow.timestampInvalid) reasons.add("invalid_row");
+          projectedStates.push(parsedRow.state);
+        }
+      }
+      projectedStates.sort(compareHomeAssistantHistoryStates);
+      const records: HistoryRecord[] = [];
+      for (const state of projectedStates) {
+        const historySeq = records.length + 1;
+        const record = { historySeq, state } satisfies HistoryRecord;
+        if (Buffer.byteLength(JSON.stringify(record), "utf8") > MAX_HISTORY_RECORD_BYTES) {
+          reasons.add("record_too_large");
+          continue;
+        }
+        records.push(record);
+      }
+      if (rowCount === 0) reasons.add("empty_or_purged");
+      return historyPageSchema.parse({
+        importId,
+        source: "home-assistant-recorder",
+        sourceRange: { since: request.since, until: request.until },
+        liveCut: { ...request.liveCut },
+        coverage: "partial",
+        reasons: [...reasons],
+        records,
+      });
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      if (this.historyAbortController === timeoutController) this.historyAbortController = undefined;
+      this.historyInFlight = false;
+    }
+  }
+
+  private nextHistoryImportId(): string {
+    return this.dependencies.historyImportIdFactory?.() ?? `history-${randomUUID()}`;
+  }
+
   private async *runEvents(signal: AbortSignal): AsyncGenerator<ContractEnvelope> {
     if (this.lifecycle === "disposed") {
       throw new BridgeStreamError("protocol_error", "Home Assistant adapter was disposed before events started");
@@ -2105,6 +2294,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     const queue = this.queue;
     if (queue === undefined) return { status: "unsupported", reason: "not_ready" };
     this.resyncInFlight = true;
+    this.historyGeneration += 1;
+    this.historyAbortController?.abort(new Error("history invalidated by resync"));
     this.observedAutomationContexts.clear();
     void bridge.refreshSnapshot(signal).then(
       (snapshot) => queue.pushResync(snapshot),
@@ -2118,6 +2309,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private async dispose(): Promise<void> {
     if (this.lifecycle === "disposed") return;
     this.lifecycle = "disposed";
+    this.historyAbortController?.abort();
     this.queue?.close();
     this.bridge?.close();
   }
@@ -2850,7 +3042,202 @@ function boundedIdentityValue(value: unknown): string | undefined {
   return normalized;
 }
 
-function projectNativeState(nativeState: HomeAssistantNativeStateEvent, binding: EntityBinding): ContractStateEvent | undefined {
+interface ResolvedHistoryBinding {
+  readonly entityId: string;
+  readonly binding: EntityBinding;
+}
+
+function resolveHistoryBindings(
+  bindingsByEntityId: ReadonlyMap<string, EntityBinding>,
+  requested: readonly { readonly nativeId: string; readonly nativeInstanceId: string }[],
+): ResolvedHistoryBinding[] | undefined {
+  const resolved: ResolvedHistoryBinding[] = [];
+  for (const request of requested) {
+    const binding = [...bindingsByEntityId.values()].find((candidate) => (
+      candidate.nativeId === request.nativeId
+      && candidate.nativeInstanceId === request.nativeInstanceId
+    ));
+    if (binding === undefined) return undefined;
+    resolved.push({ entityId: binding.entityId, binding });
+  }
+  return resolved;
+}
+
+type ProjectedHistoryRow =
+  | { readonly status: "ok"; readonly state: HistoryRecord["state"]; readonly timestampInvalid: boolean }
+  | { readonly status: "invalid" }
+  | { readonly status: "record_too_large" };
+
+function projectHomeAssistantHistoryRow(
+  raw: unknown,
+  resolved: readonly ResolvedHistoryBinding[],
+): ProjectedHistoryRow {
+  if (!isRecord(raw)) return { status: "invalid" };
+  const entityId = typeof raw.entity_id === "string" ? raw.entity_id : undefined;
+  const resolvedBinding = entityId === undefined
+    ? undefined
+    : resolved.find((candidate) => candidate.entityId === entityId);
+  if (resolvedBinding === undefined || typeof raw.state !== "string" || !isRecord(raw.attributes)) {
+    return { status: "invalid" };
+  }
+
+  const hasLastUpdated = Object.prototype.hasOwnProperty.call(raw, "last_updated");
+  const rawTimestamp = hasLastUpdated ? raw.last_updated : raw.last_changed;
+  const timestampValid = isValidHomeAssistantHistoryTimestamp(rawTimestamp);
+  const state = projectNativeState({
+    entityId: resolvedBinding.entityId,
+    state: raw.state,
+    attrs: raw.attributes,
+    ts: timestampValid ? rawTimestamp as string : "",
+  }, resolvedBinding.binding, "imported");
+  if (state === undefined) return { status: "invalid" };
+  const candidateRecord = { historySeq: 1, state };
+  if (Buffer.byteLength(JSON.stringify(candidateRecord), "utf8") > MAX_HISTORY_RECORD_BYTES) {
+    return { status: "record_too_large" };
+  }
+  const parsedRecord = HistoryRecordSchema.safeParse(candidateRecord);
+  if (!parsedRecord.success) return { status: "invalid" };
+  return { status: "ok", state: parsedRecord.data.state, timestampInvalid: !timestampValid };
+}
+
+function compareHomeAssistantHistoryStates(
+  left: HistoryRecord["state"],
+  right: HistoryRecord["state"],
+): number {
+  const leftTimestamp = "sourceTs" in left.time ? left.time.sourceTs : undefined;
+  const rightTimestamp = "sourceTs" in right.time ? right.time.sourceTs : undefined;
+  if (leftTimestamp === undefined || rightTimestamp === undefined) {
+    if (leftTimestamp !== rightTimestamp) return leftTimestamp === undefined ? 1 : -1;
+  } else {
+    const timeDifference = Date.parse(leftTimestamp) - Date.parse(rightTimestamp);
+    if (timeDifference !== 0) return timeDifference;
+  }
+  return left.nativeId.localeCompare(right.nativeId)
+    || left.nativeInstanceId.localeCompare(right.nativeInstanceId)
+    || (canonicalNativeJson(left.attrs) ?? "").localeCompare(canonicalNativeJson(right.attrs) ?? "");
+}
+
+function isValidHomeAssistantHistoryTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim() !== value || value === "") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(value);
+  if (match === null) return false;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return false;
+  const date = new Date(parsed);
+  return date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() + 1 === Number(match[2])
+    && date.getUTCDate() === Number(match[3])
+    && date.getUTCHours() === Number(match[4])
+    && date.getUTCMinutes() === Number(match[5])
+    && date.getUTCSeconds() === Number(match[6]);
+}
+
+function historyUnavailablePage(
+  request: HistoryRequest,
+  importId: string,
+  reason: HistoryCoverageReason,
+): HistoryPage {
+  return historyPageSchema.parse({
+    importId,
+    source: "home-assistant-recorder",
+    sourceRange: { since: request.since, until: request.until },
+    liveCut: { ...request.liveCut },
+    coverage: "unavailable",
+    reasons: [reason],
+    records: [],
+  });
+}
+
+function historyPartialPage(
+  request: HistoryRequest,
+  importId: string,
+  records: readonly HistoryRecord[],
+  reasons: readonly HistoryCoverageReason[],
+): HistoryPage {
+  return historyPageSchema.parse({
+    importId,
+    source: "home-assistant-recorder",
+    sourceRange: { since: request.since, until: request.until },
+    liveCut: { ...request.liveCut },
+    coverage: "partial",
+    reasons: [...new Set(reasons)],
+    records,
+  });
+}
+
+type HomeAssistantHistoryOperation<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "rejected" | "aborted" };
+
+function awaitHomeAssistantHistoryOperation<T>(
+  operation: () => PromiseLike<T> | T,
+  signal: AbortSignal,
+): Promise<HomeAssistantHistoryOperation<T>> {
+  if (signal.aborted) return Promise.resolve({ status: "aborted" });
+  return new Promise<HomeAssistantHistoryOperation<T>>((resolve) => {
+    let settled = false;
+    const finish = (result: HomeAssistantHistoryOperation<T>): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = (): void => finish({ status: "aborted" });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    try {
+      Promise.resolve(operation()).then(
+        (value) => finish({ status: "fulfilled", value }),
+        () => finish({ status: "rejected" }),
+      );
+    } catch {
+      finish({ status: "rejected" });
+    }
+  });
+}
+
+async function readBoundedHomeAssistantResponse(
+  response: Response,
+  signal: AbortSignal,
+): Promise<string | "too_large"> {
+  if (response.body === null) {
+    throw new Error("Home Assistant history response has no bounded body stream");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      if (signal.aborted) throw signal.reason ?? new Error("history response cancelled");
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > MAX_HOME_ASSISTANT_MESSAGE_BYTES) {
+        await reader.cancel();
+        return "too_large";
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+function projectNativeState(
+  nativeState: HomeAssistantNativeStateEvent,
+  binding: EntityBinding,
+  origin: "observed" | "imported" = "observed",
+): ContractStateEvent | undefined {
   if (nativeState.entityId !== binding.entityId || nativeState.state.trim() === "") return undefined;
   const attrs = isHomeAssistantBooleanActuatorEntity(binding.entityId)
     ? projectBooleanActuatorAttributes(nativeState.state, nativeState.attrs)
@@ -2867,7 +3254,7 @@ function projectNativeState(nativeState: HomeAssistantNativeStateEvent, binding:
     time: nativeState.ts.trim() === ""
       ? { sourceTsQuality: "none" }
       : { sourceTs: nativeState.ts, sourceTsQuality: "platform" },
-    origin: "observed",
+    origin,
   };
 }
 
