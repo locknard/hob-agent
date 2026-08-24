@@ -110,6 +110,8 @@ import type {
   HomeAutomationMigrationSelectionProjection,
 } from "./home/home-automation-migration-selection.js";
 
+const PREPARATION_COMPLETION_HANDOFF_TIMEOUT_MS = 15_000;
+
 /** The only runtime methods exposed to the structural Inbox adapter. */
 export interface HomeAutomationMigrationSelectionInboxRuntimePort {
   listMigrationSelections(
@@ -317,7 +319,9 @@ class HomeAgentProductBundleRuntime {
         onPreparationCompleted: async ({ proposalId }) => {
           await this
             .service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations")
-            .refreshPreparedWorkflowForProposal(proposalId);
+            .refreshPreparedWorkflowForProposal(proposalId, {
+              signal: AbortSignal.timeout(PREPARATION_COMPLETION_HANDOFF_TIMEOUT_MS),
+            });
         },
       });
       await this.preparationRunner.start();

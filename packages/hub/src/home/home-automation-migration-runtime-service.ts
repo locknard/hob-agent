@@ -183,6 +183,9 @@ interface HomeAutomationMigrationPreparedArtifact {
   readonly dryRunResultId: string;
 }
 
+const DEFAULT_PREPARED_WORKFLOW_REFRESH_TIMEOUT_MS = 15_000;
+const MAX_PREPARED_WORKFLOW_REFRESH_TIMEOUT_MS = 120_000;
+
 export interface HomeAutomationMigrationRuntimeServiceOptions extends SqliteHomeAutomationMigrationStoreOptions {
   readonly clock?: () => string;
   readonly migrationIdFactory?: () => string;
@@ -192,6 +195,12 @@ export interface HomeAutomationMigrationRuntimeServiceOptions extends SqliteHome
 
 export interface HomeAutomationMigrationRuntimeAssessOptions {
   readonly signal?: AbortSignal;
+}
+
+/** Root-private bounded handoff options; no migration identity crosses this seam. */
+export interface HomeAutomationMigrationRuntimeRefreshOptions {
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
 }
 
 export interface HomeAutomationMigrationRuntimeCandidateInput {
@@ -386,31 +395,62 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   /** Root-private exact preparation completion hook; migration identity stays inside the Hub. */
   async refreshPreparedWorkflowForProposal(
     proposalId: string,
+    options: HomeAutomationMigrationRuntimeRefreshOptions = {},
   ): Promise<HomeAutomationMigrationRuntimePreparedWorkflowResult> {
     try {
-      const lookup = this.findWorkflowForProposal(proposalId);
-      if (lookup.status === "not_migration" || lookup.status === "ambiguous") {
-        return preparedWorkflowResult("not_applicable");
+      if (!isBoundedId(proposalId)) return preparedWorkflowResult("not_applicable");
+      if (!isPreparedWorkflowRefreshOptions(options)) return preparedWorkflowResult("needs_attention");
+      const deadline = new AbortController();
+      const signal = combineRefreshSignals(options.signal, deadline.signal);
+      const timeoutMs = options.timeoutMs ?? DEFAULT_PREPARED_WORKFLOW_REFRESH_TIMEOUT_MS;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let removeAbortListener = (): void => undefined;
+      const cancelled = new Promise<never>((_, reject) => {
+        const onAbort = (): void => reject(new Error("migration workflow refresh deadline exceeded"));
+        removeAbortListener = (): void => signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      });
+      timer = setTimeout(() => deadline.abort(), timeoutMs);
+      timer.unref?.();
+      try {
+        return await Promise.race([
+          this.refreshPreparedWorkflowForProposalWithSignal(proposalId, signal),
+          cancelled,
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        removeAbortListener();
       }
-      if (lookup.status === "ready") {
-        const assessment = this.migration.get(lookup.migrationId);
-        const rule = eligibleWorkflowRule(assessment, lookup.ruleRef);
-        if (rule?.workflow === undefined) return preparedWorkflowResult("needs_attention");
-        return workflowResult(lookup.ruleRef, rule.workflow).status === "ready"
-          ? preparedWorkflowResult("ready")
-          : preparedWorkflowResult("needs_attention");
-      }
-      if (lookup.status !== "governed"
-        || (lookup.workflowStatus !== "translated" && lookup.workflowStatus !== "simulated")) {
-        return preparedWorkflowResult("needs_attention");
-      }
-      return preparedWorkflowResult(await this.refreshRuleWorkflow({
-        migrationId: lookup.migrationId,
-        ruleRef: lookup.ruleRef,
-      }));
     } catch {
       return preparedWorkflowResult("needs_attention");
     }
+  }
+
+  private async refreshPreparedWorkflowForProposalWithSignal(
+    proposalId: string,
+    signal: AbortSignal,
+  ): Promise<HomeAutomationMigrationRuntimePreparedWorkflowResult> {
+    const lookup = this.findWorkflowForProposal(proposalId);
+    if (lookup.status === "not_migration" || lookup.status === "ambiguous") {
+      return preparedWorkflowResult("not_applicable");
+    }
+    if (lookup.status === "ready") {
+      const assessment = this.migration.get(lookup.migrationId);
+      const rule = eligibleWorkflowRule(assessment, lookup.ruleRef);
+      if (rule?.workflow === undefined) return preparedWorkflowResult("needs_attention");
+      return workflowResult(lookup.ruleRef, rule.workflow).status === "ready"
+        ? preparedWorkflowResult("ready")
+        : preparedWorkflowResult("needs_attention");
+    }
+    if (lookup.status !== "governed"
+      || (lookup.workflowStatus !== "translated" && lookup.workflowStatus !== "simulated")) {
+      return preparedWorkflowResult("needs_attention");
+    }
+    return preparedWorkflowResult(await this.refreshRuleWorkflow({
+      migrationId: lookup.migrationId,
+      ruleRef: lookup.ruleRef,
+    }, { signal }));
   }
 
   /** Records switching CAS state; bridge commands stay in the deployment decorator. */
@@ -630,6 +670,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
     try {
       const parsedInput = readWorkflowInput(input);
       if (parsedInput === undefined || !isRuntimeOptions(options)) return workflowFailure("invalid_input");
+      if (options.signal?.aborted) return workflowFailure("simulation_unavailable");
       let assessment = this.migration.get(parsedInput.migrationId);
       let rule = eligibleWorkflowRule(assessment, parsedInput.ruleRef);
       if (rule === undefined || assessment?.status !== "assessed" || rule.workflow === undefined) {
@@ -656,6 +697,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
         migrationId: parsedInput.migrationId,
         ruleRef: parsedInput.ruleRef,
       }, options.signal === undefined ? {} : { signal: options.signal });
+      if (options.signal?.aborted) return workflowFailure("simulation_unavailable");
       if (candidate.status !== "candidate") return this.failWorkflow(parsedInput, workflow, "simulation_unavailable");
 
       const projection = this.simulator.project({
@@ -702,6 +744,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
         } catch {
           evidence = undefined;
         }
+        if (options.signal?.aborted) return workflowFailure("simulation_unavailable");
         if (evidence === undefined || !sameSimulationSourceCut(evidence.sourceCut, sourceCut)) {
           return this.failWorkflow(parsedInput, workflow, "simulation_unavailable");
         }
@@ -725,6 +768,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
       let simulatedWorkflow = workflow;
       if (workflow.status === "translated") {
         if (projection.status !== "ready") return workflowResult(parsedInput.ruleRef, workflow);
+        if (options.signal?.aborted) return workflowFailure("simulation_unavailable");
         const refs = projection.preparedArtifact;
         const simulated = this.migration.simulateRule({
           migrationId: parsedInput.migrationId,
@@ -755,12 +799,14 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
         migrationId: parsedInput.migrationId,
         ruleRef: parsedInput.ruleRef,
       }, options.signal === undefined ? {} : { signal: options.signal });
+      if (options.signal?.aborted) return workflowFailure("simulation_unavailable");
       if (freshCandidate.status !== "candidate"
         || freshCandidate.sourceFingerprint !== workflow.sourceFingerprint
         || computeHomeAutomationMigrationCandidateContentHash(freshCandidate.content) !== workflow.candidateContentHash) {
         return this.failWorkflow(parsedInput, simulatedWorkflow, "simulation_unavailable");
       }
       const reviewProposalRevision = projection.reviewProposalRevision;
+      if (options.signal?.aborted) return workflowFailure("simulation_unavailable");
       const ready = this.migration.readyRule({
         migrationId: parsedInput.migrationId,
         ruleRef: parsedInput.ruleRef,
@@ -1069,6 +1115,36 @@ function isRuntimeOptions(value: unknown): value is HomeAutomationMigrationRunti
   } catch {
     return false;
   }
+}
+
+function isPreparedWorkflowRefreshOptions(value: unknown): value is HomeAutomationMigrationRuntimeRefreshOptions {
+  try {
+    return isRecord(value)
+      && Object.keys(value).every((key) => key === "signal" || key === "timeoutMs")
+      && (value.signal === undefined || isAbortSignalLike(value.signal))
+      && (value.timeoutMs === undefined
+        || typeof value.timeoutMs === "number"
+        && Number.isSafeInteger(value.timeoutMs)
+        && value.timeoutMs >= 1
+        && value.timeoutMs <= MAX_PREPARED_WORKFLOW_REFRESH_TIMEOUT_MS);
+  } catch {
+    return false;
+  }
+}
+
+function combineRefreshSignals(
+  caller: AbortSignal | undefined,
+  deadline: AbortSignal,
+): AbortSignal {
+  if (caller === undefined) return deadline;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([caller, deadline]);
+  const controller = new AbortController();
+  const abort = (signal: AbortSignal): void => controller.abort(signal.reason);
+  if (caller.aborted) abort(caller);
+  else caller.addEventListener("abort", () => abort(caller), { once: true });
+  if (deadline.aborted) abort(deadline);
+  else deadline.addEventListener("abort", () => abort(deadline), { once: true });
+  return controller.signal;
 }
 
 function isCloseReason(value: unknown): value is HomeAutomationMigrationCloseReason {

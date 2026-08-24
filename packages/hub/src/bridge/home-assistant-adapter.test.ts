@@ -661,6 +661,59 @@ test("translates one bound neutral boolean action through the actions extension"
   await adapter.control.dispose();
 });
 
+test("settles an aborted service command, clears pending state, and ignores a late ack", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const stream = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = stream.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await stream.next()).value!);
+
+  const handle = adapter.extension("actions@1") as ActionsExtension | undefined;
+  const controller = new AbortController();
+  const execution = handle!.execute({
+    requestId: "action-abort-1",
+    action: {
+      kind: "set_boolean",
+      target: {
+        hwCapabilityId: "cap-light",
+        binding: {
+          bridgeId: "bridge-ha",
+          nativeId: "device-1",
+          nativeInstanceId: "entity-stable-1",
+        },
+      },
+      value: true,
+    },
+  }, { signal: controller.signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.at(-1)!;
+  assert.equal(command.type, "call_service");
+
+  const bridge = (adapter as unknown as {
+    bridge: { pending: Map<number, unknown> };
+  }).bridge;
+  assert.equal(bridge.pending.size, 1);
+
+  try {
+    controller.abort(new Error("cancelled by test"));
+    const result = await Promise.race([
+      execution,
+      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 50)),
+    ]);
+    assert.deepEqual(result, { status: "unknown", reason: "cancelled" });
+    assert.equal(bridge.pending.size, 0);
+
+    socket.receive({ id: command.id, type: "result", success: true, result: null });
+    assert.equal(bridge.pending.size, 0);
+  } finally {
+    await adapter.control.dispose();
+    void first;
+  }
+});
+
 test("translates one bound neutral stop-media action through media_player.media_stop", async () => {
   const socket = new FakeSocket();
   const { adapter } = createAdapter(socket);

@@ -479,7 +479,7 @@ export class HomeAssistantBridge {
       service: input.service,
       target: { entity_id: input.entityId },
       service_data: { ...(input.serviceData ?? {}) },
-    });
+    }, signal);
     if (signal.aborted) throw signal.reason ?? new Error("Home Assistant action cancelled");
   }
 
@@ -560,11 +560,48 @@ export class HomeAssistantBridge {
     };
   }
 
-  private command(type: string, payload: Record<string, unknown> = {}): Promise<unknown> {
+  private command(
+    type: string,
+    payload: Record<string, unknown> = {},
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const id = this.nextCommandId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.send({ id, type, ...payload });
+      const onAbort = (): void => {
+        this.pending.delete(id);
+        signal?.removeEventListener("abort", onAbort);
+        const reason = signal?.reason;
+        reject(reason instanceof Error ? reason : new Error("Home Assistant command cancelled"));
+      };
+      const cleanup = (): void => {
+        signal?.removeEventListener("abort", onAbort);
+      };
+      this.pending.set(id, {
+        resolve: (result) => {
+          cleanup();
+          resolve(result);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
+      });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      try {
+        this.send({ id, type, ...payload });
+      } catch (error) {
+        this.pending.delete(id);
+        cleanup();
+        reject(error instanceof Error ? error : new Error("Home Assistant command failed"));
+      }
     });
   }
 

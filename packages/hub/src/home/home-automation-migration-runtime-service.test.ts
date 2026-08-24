@@ -607,6 +607,60 @@ test("refreshes one unique translated proposal through its exact identity", asyn
   }
 });
 
+test("bounds a hanging prepared refresh, aborts its candidate read, and rejects a late CAS", async () => {
+  const { context, proposals, world, worldFiber, migrationFiber, proposalFiber } = await setup(
+    ":memory:",
+    true,
+    true,
+    simulationEvidence,
+  );
+  try {
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessment.outcome, "created");
+    const prepared = await context.homeAutomationMigrations.prepareRuleReview({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+    });
+    assert.equal(prepared.status, "translated");
+    const preparationCallsBefore = proposals?.preparationCalls.length ?? 0;
+
+    let candidateSignal: AbortSignal | undefined;
+    let candidateAborted = false;
+    let releaseCandidate: ((value: ForeignRuleMigrationResult) => void) | undefined;
+    world.translateForeignRule = async (input) => {
+      candidateSignal = input.signal;
+      return await new Promise<ForeignRuleMigrationResult>((resolve) => {
+        releaseCandidate = resolve;
+        input.signal.addEventListener("abort", () => {
+          candidateAborted = true;
+          setTimeout(() => resolve(translatedRule), 0);
+        }, { once: true });
+      });
+    };
+
+    const refresh = (context.homeAutomationMigrations.refreshPreparedWorkflowForProposal as unknown as (
+      proposalId: string,
+      options?: unknown,
+    ) => Promise<unknown>)("proposal-living-room", { timeoutMs: 20 });
+    const refreshed = await Promise.race([
+      refresh,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("refresh test deadline exceeded")), 200)),
+    ]);
+
+    assert.deepEqual(refreshed, { status: "needs_attention", writesPerformed: false });
+    assert.equal(candidateSignal?.aborted, true);
+    assert.equal(candidateAborted, true);
+    releaseCandidate?.(translatedRule);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(context.homeAutomationMigrations.get(assessment.assessment.migrationId)?.rules[0]?.workflow?.status, "translated");
+    assert.equal(proposals?.preparationCalls.length, preparationCallsBefore + 1);
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
 test("returns one neutral success when an exact proposal refresh is already ready", async () => {
   const { context, proposals, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true);
   try {
