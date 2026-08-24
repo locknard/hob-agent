@@ -922,6 +922,103 @@ test("does not write when recovery preflight is unknown", async () => {
   assert.deepEqual(events, ["source.status"]);
 });
 
+test("closes an active switching receipt for every recovery preflight rejection without remote writes", async () => {
+  for (const scenario of [
+    {
+      name: "semantic preflight blocked",
+      kind: "semantic" as const,
+      reason: "verification_failed" as const,
+      events: ["runtime.fail"],
+    },
+    {
+      name: "source control missing",
+      kind: "control-missing" as const,
+      reason: "switch_unknown" as const,
+      events: ["runtime.fail"],
+    },
+    {
+      name: "source status unknown",
+      kind: "source-unknown" as const,
+      reason: "switch_unknown" as const,
+      events: ["source.status", "runtime.fail"],
+    },
+    {
+      name: "source fingerprint stale",
+      kind: "source-stale" as const,
+      reason: "switch_failed" as const,
+      events: ["source.status", "runtime.fail"],
+    },
+    {
+      name: "target status unknown",
+      kind: "target-unknown" as const,
+      reason: "switch_unknown" as const,
+      events: ["source.status", "base.status", "runtime.fail"],
+    },
+    {
+      name: "target paused",
+      kind: "target-paused" as const,
+      reason: "switch_failed" as const,
+      events: ["source.status", "base.status", "runtime.fail"],
+    },
+    {
+      name: "target fingerprint mismatched",
+      kind: "target-fingerprint" as const,
+      reason: "verification_failed" as const,
+      events: ["source.status", "base.status", "runtime.fail"],
+    },
+  ]) {
+    const { events, failCalls, runtime, base, control, sourcePort, wrapper } = deploymentFixture();
+    runtime.findWorkflowForProposal = () => {
+      const lookup = governedLookup("switching");
+      return scenario.kind === "target-fingerprint"
+        ? { ...lookup, deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT }
+        : lookup;
+    };
+
+    if (scenario.kind === "semantic") {
+      base.preflight = () => ({ status: "blocked" as const, reason: "state_stale" });
+    } else if (scenario.kind === "control-missing") {
+      sourcePort.foreignRuleControlFor = () => undefined;
+    } else if (scenario.kind === "source-unknown") {
+      control.status = async () => {
+        events.push("source.status");
+        return { status: "unknown", reason: "unavailable" } as const;
+      };
+    } else if (scenario.kind === "source-stale") {
+      control.status = async () => {
+        events.push("source.status");
+        return { status: "running", sourceFingerprint: `sha256:${"c".repeat(64)}` } as const;
+      };
+    } else if (scenario.kind === "target-unknown") {
+      base.status = async () => {
+        events.push("base.status");
+        return { status: "unknown" } as const;
+      };
+    } else if (scenario.kind === "target-paused") {
+      base.status = async () => {
+        events.push("base.status");
+        return { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+      };
+    } else if (scenario.kind === "target-fingerprint") {
+      base.status = async () => {
+        events.push("base.status");
+        return { status: "running", configFingerprint: `sha256:${"c".repeat(64)}` } as const;
+      };
+    }
+
+    const outcome = await wrapper.deploy(BASE_REQUEST);
+
+    assert.equal(outcome.status, "failed", scenario.name);
+    assert.deepEqual(events, scenario.events, scenario.name);
+    assert.deepEqual(failCalls, [{
+      migrationId: "0123456789abcdef0123456789abcdef",
+      ruleRef: "opaque-rule-ref",
+      from: "switching",
+      reason: scenario.reason,
+    }], scenario.name);
+  }
+});
+
 test("does not verify an un-fingerprinted running target during switching recovery", async () => {
   const { events, runtime, base, control, wrapper } = deploymentFixture();
   runtime.findWorkflowForProposal = () => governedLookup("switching");

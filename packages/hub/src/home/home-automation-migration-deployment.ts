@@ -251,20 +251,40 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     request: Parameters<ProposalDeploymentPort["deploy"]>[0],
     lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
   ): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {
+    const failPreflight = (reason: "switch_failed" | "switch_unknown" | "verification_failed"): void => {
+      if (lookup.workflowStatus === "switching") this.fail(lookup, "switching", reason);
+    };
     const semanticPreflight = await this.readSemanticPreflight(request);
-    if (semanticPreflight.status === "blocked") return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
+    if (semanticPreflight.status === "blocked") {
+      failPreflight("verification_failed");
+      return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
+    }
     const control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
-    if (control === undefined) return failed(SWITCH_UNKNOWN_REASON);
+    if (control === undefined) {
+      failPreflight("switch_unknown");
+      return failed(SWITCH_UNKNOWN_REASON);
+    }
     const source = await this.readSource(control, lookup.ruleRef);
-    if (source.status === "unknown") return failed(SWITCH_UNKNOWN_REASON);
+    if (source.status === "unknown") {
+      failPreflight("switch_unknown");
+      return failed(SWITCH_UNKNOWN_REASON);
+    }
     if (source.status === "missing" || source.sourceFingerprint !== lookup.sourceFingerprint) {
+      failPreflight("switch_failed");
       return failed("原有规则的来源已经变化，需要重新准备迁移。");
     }
     const target = await this.readTarget(request.intent.deploymentId, request.intent.target);
-    if (target.status === "unknown") return failed(SWITCH_UNKNOWN_REASON);
+    if (target.status === "unknown") {
+      failPreflight("switch_unknown");
+      return failed(SWITCH_UNKNOWN_REASON);
+    }
     const expectedFingerprint = lookup.deploymentConfigFingerprint;
-    if (target.status === "paused") return failed("迁移自动化的目标当前已暂停，需要人工确认后恢复。");
+    if (target.status === "paused") {
+      failPreflight("switch_failed");
+      return failed("迁移自动化的目标当前已暂停，需要人工确认后恢复。");
+    }
     if (target.status === "running" && expectedFingerprint !== undefined && target.configFingerprint !== expectedFingerprint) {
+      failPreflight("verification_failed");
       return failed("迁移自动化的部署指纹无法验证，已停止后续写入。");
     }
 
