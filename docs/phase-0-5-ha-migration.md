@@ -67,6 +67,31 @@ evidence coverage 必须完整且未截断，事件必须来自同一 bridge/epo
 
 状态转换由 Hub 原子记录。进程重启、桥超时、watermark 漂移、重复请求和 stale revision 都进入可恢复的明确状态；系统从不重复部署或把未知结果标记为成功。
 
+### 故障注入验收矩阵
+
+Phase 0.5 的故障注入只接受下表六个精确 `fault` 值。机器可验的闭集由
+`packages/hub/src/home/migration-fault-admission-matrix.ts` 提供；解析不接受大小写变体、
+别名或任意字符串。`expected durable state` 是故障后的最小耐久投影：
+`preserve_in_progress` 保留既有 `enabling`/`recovery_required` 意图，
+`needs_attention` 保留 workflow 的失败证据（一次决定之后 Proposal 同时保持
+`recovery_required`），`preserve_existing_decision` 不产生第二次决定，
+`recovery_required` 不得关闭工作流。
+
+| 故障注入（闭集值） | expected durable state | remote write allowance | required recovery exit | evidence source |
+| --- | --- | --- | --- | --- |
+| `restart` | `preserve_in_progress` | `existing_decision_only`：只按既有 receipt 幂等续接 | `resume_existing_receipt` | `migration_and_proposal_audit` |
+| `bridge_disconnect` | `needs_attention` | `none`：桥恢复并读回前停止后续写入 | `bridge_ready_then_fresh_readback` | `bridge_health_and_durable_manifest` |
+| `timeout` | `needs_attention` | `none`：未知结果先读回，不盲目重放 | `fresh_readback_before_retry` | `operation_receipt_and_durable_manifest` |
+| `state_drift` | `needs_attention` | `none`：旧 source cut 或 fingerprint 不得继续写入 | `revalidate_source_cut` | `source_cut_and_durable_manifest` |
+| `duplicate_submit` | `preserve_existing_decision` | `none`：返回既有幂等结果，不新增 Proposal 或决定 | `replay_existing_receipt` | `selection_and_proposal_idempotency_audit` |
+| `rollback_failure` | `recovery_required` | `fresh_recovery_receipt_only`：新 operation id 绑定既有恢复意图 | `new_recovery_receipt_then_restored` | `rollback_and_recovery_receipts` |
+
+任何未知 `fault` 都不是验收场景：解析结果固定为 `rejected`、`needs_attention`、
+`remoteWriteAllowance: none`、`manual_review`，证据源仅为 durable status；它不回显输入，
+也不获得任何远端写入权限。每个已接纳场景都必须保存表中证据源，并证明没有超出对应
+`remote write allowance` 的写入；回退失败只有在新 recovery receipt、源规则恢复且 Hob
+自动化撤下并读回一致后，才可离开 `recovery_required`。
+
 ## 权限边界
 
 | 角色 | 允许的能力 | 永久保留的边界 |
