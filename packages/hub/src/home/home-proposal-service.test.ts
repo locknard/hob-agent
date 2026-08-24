@@ -1646,6 +1646,63 @@ test("resumes a migration that crashed while enabling without a second decision"
   }
 });
 
+test("routes an enable-failed migration close through the approved deployment identity", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:20:00.000Z" });
+  const ctx = new Context();
+  const intent = {
+    deploymentId: "hob_migration_failed_close",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-1", nativeInstanceId: "ent-hwc-1" } }],
+  } as const;
+  const withdrawals: unknown[] = [];
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => intent,
+        deploy: async () => ({ status: "failed" as const, reason: "switch_failed" }),
+        withdraw: async (request: unknown) => {
+          withdrawals.push(request);
+          return { restored: true };
+        },
+      },
+    } as never);
+    const created = store.createMigrationGoverned({
+      ...candidate,
+      kind: "automation-draft",
+      artifactCandidate: automationCandidate,
+      dedupKey: "migration-failed-close",
+      idempotencyKey: "migration-failed-close:v1",
+      provenance: { producer: "home-automation-migration" },
+      intent: { ...candidate.intent, type: "automation-draft" },
+    });
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected migration proposal");
+    completePreparation(store, created.proposal.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.proposal.id });
+    const failed = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "member:alice" });
+    assert.equal(failed.lifecycle, "enable_failed");
+    assert.equal(failed.deployment?.deploymentId, intent.deploymentId);
+    assert.equal(failed.deployment?.target, intent.target);
+
+    const closed = await ctx.homeProposals.closeAutomation({ proposalId: failed.id, actor: "member:alice" });
+
+    assert.equal(closed.lifecycle, "closed");
+    assert.equal(closed.deployment?.status, "rolled_back");
+    assert.deepEqual(withdrawals, [{
+      proposalId: failed.id,
+      deploymentId: intent.deploymentId,
+      target: intent.target,
+      actor: "member:alice",
+    }]);
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
 test("keeps a migration close failure recovery_required and recovers without a second decision", async () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:30:00.000Z" });
   const ctx = new Context();

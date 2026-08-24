@@ -866,6 +866,8 @@ test("reports an explicit failure instead of a running automation when deploymen
     assert.equal(failed.lifecycle, "enable_failed");
     assert.equal(failed.applicationStatus, "failed");
     assert.equal(failed.deployment?.reason, "这个家还没有可用的部署通道");
+    assert.equal(failed.deployment?.deploymentId, "hob_deploy_fails", "the approved deployment identity survives a failed attempt");
+    assert.equal(failed.deployment?.target, "ha-main", "the approved deployment target survives a failed attempt");
     assert.equal(store.get(failed.id)?.lifecycle, "enable_failed");
 
     const closed = store.closeAutomation({ proposalId: failed.id, actor: "household-owner", restored: true });
@@ -1013,7 +1015,7 @@ test("retries a failed enablement without asking for a second decision", () => {
     const active = store.recordProposalDeployment({
       proposalId: retrying.id,
       expectedRevision: retrying.revision,
-      outcome: { status: "verified", deploymentId: "hob_retry_me", target: "ha-main" },
+      outcome: { status: "verified", deploymentId: "hob_deploy_fails", target: "ha-main" },
     });
     assert.equal(active.lifecycle, "active");
     assert.equal(active.audit.some((event) => event.action === "deployment_retried"), true);

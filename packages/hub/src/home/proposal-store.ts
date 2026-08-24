@@ -1287,6 +1287,8 @@ export class SqliteProposalStore {
       const requestedAt = current.deployment?.requestedAt ?? at;
       const reason = outcome.reason?.trim();
       const verified = outcome.status === "verified";
+      const deploymentId = outcome.deploymentId ?? current.deployment?.deploymentId;
+      const target = outcome.target ?? current.deployment?.target;
       return {
         ...current,
         revision,
@@ -1296,8 +1298,8 @@ export class SqliteProposalStore {
         deployment: {
           status: verified ? "verified" : "failed",
           requestedAt,
-          ...(outcome.deploymentId ? { deploymentId: outcome.deploymentId } : {}),
-          ...(outcome.target ? { target: outcome.target } : {}),
+          ...(deploymentId ? { deploymentId } : {}),
+          ...(target ? { target } : {}),
           ...(current.deployment?.targets === undefined ? {} : { targets: current.deployment.targets }),
           ...(verified ? { verifiedAt: at } : { failedAt: at }),
           ...(reason ? { reason } : {}),
