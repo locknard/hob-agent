@@ -135,6 +135,47 @@ function prepareSwitchingWorkflow(store: HomeAutomationMigrationStore): void {
   }), true);
 }
 
+function prepareCompileFailedWorkflow(store: HomeAutomationMigrationStore): void {
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const rule = {
+    ruleRef: "ha-rule-1",
+    name: "晚间灯光",
+    enabled: true,
+    updatedAt: createdAt,
+    triggerClass: "state" as const,
+    conditionClass: "flat_and" as const,
+    actionClass: "reversible" as const,
+    sourceFingerprint,
+    disposition: "eligible" as const,
+    workflow: { status: "assessed" as const, sourceFingerprint, assessedAt: createdAt },
+  };
+  store.discover({ ...discovered, analysisMode: "trusted_neutral", rules: [rule] });
+  assert.equal(store.assess({
+    migrationId: discovered.migrationId,
+    status: "assessed",
+    assessedAt: createdAt,
+    rules: [rule],
+  }), true);
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    to: "translated",
+    transitionedAt: createdAt,
+    proposalId: "proposal-close-guard-compile",
+    candidateProposalRevision: 1,
+    candidateContentHash: `sha256:${"b".repeat(64)}`,
+  }), true);
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "translated",
+    to: "needs_attention",
+    transitionedAt: createdAt,
+    failureReason: "compile_failed",
+  }), true);
+}
+
 test("in-memory store preserves discovered to assessed transitions and recovery", () => {
   const store = new InMemoryHomeAutomationMigrationStore();
   assert.equal(store.discover(discovered).outcome, "created");
@@ -226,6 +267,35 @@ test("sqlite close rolls back when a rule workflow is switching", async () => {
 
     const reopened = new SqliteHomeAutomationMigrationStore({ path });
     assert.deepEqual(reopened.get(discovered.migrationId), beforeClose);
+    reopened.close();
+  } finally {
+    store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("sqlite close permits a pre-write needs-attention workflow", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-close-prewrite-"));
+  const path = join(directory, "migrations.sqlite");
+  let store: SqliteHomeAutomationMigrationStore | undefined;
+  try {
+    store = new SqliteHomeAutomationMigrationStore({ path });
+    prepareCompileFailedWorkflow(store);
+    const beforeClose = store.get(discovered.migrationId);
+    assert.equal(beforeClose?.rules[0]?.workflow?.status, "needs_attention");
+    assert.equal(beforeClose?.rules[0]?.workflow?.switchOperationId, undefined);
+    assert.equal(beforeClose?.rules[0]?.workflow?.rollbackOperationId, undefined);
+    assert.equal(beforeClose?.rules[0]?.workflow?.deploymentId, undefined);
+    assert.equal(store.closeAssessment({
+      migrationId: discovered.migrationId,
+      closedAt: createdAt,
+      reason: "household_closed",
+    }), true);
+    assert.equal(store.get(discovered.migrationId)?.status, "closed");
+    store.close();
+
+    const reopened = new SqliteHomeAutomationMigrationStore({ path });
+    assert.equal(reopened.get(discovered.migrationId)?.status, "closed");
     reopened.close();
   } finally {
     store?.close();
@@ -1216,4 +1286,6 @@ test("ready preflight failures are limited to source-stale and unknown-switch re
   assert.equal(failed?.failureReason, "source_stale");
   assert.equal(failed?.proposalId, "proposal-preflight");
   assert.equal("switchOperationId" in (failed ?? {}), false);
+  assert.equal(store.closeAssessment({ migrationId: discovered.migrationId, closedAt: createdAt, reason: "household_closed" }), true);
+  assert.equal(store.get(discovered.migrationId)?.status, "closed");
 });

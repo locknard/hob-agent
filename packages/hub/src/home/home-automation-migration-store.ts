@@ -1259,10 +1259,13 @@ function assertStoredAggregateStatus(
 }
 
 function hasActiveRuleWorkflow(rules: readonly HomeAutomationMigrationRuleAssessment[]): boolean {
-  return rules.some((rule) => rule.workflow?.status === "switching"
-    || rule.workflow?.status === "verified"
-    || rule.workflow?.status === "rolling_back"
-    || rule.workflow?.status === "needs_attention");
+  return rules.some((rule) => {
+    const workflow = rule.workflow;
+    if (workflow === undefined) return false;
+    if (workflow.status === "switching" || workflow.status === "verified" || workflow.status === "rolling_back") return true;
+    return workflow.status === "needs_attention"
+      && (workflow.switchOperationId !== undefined || workflow.rollbackOperationId !== undefined || workflow.deploymentId !== undefined);
+  });
 }
 
 function validateDiscovery(input: HomeAutomationMigrationDiscovery): void {
