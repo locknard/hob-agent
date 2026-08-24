@@ -254,4 +254,17 @@ workflow 与 Proposal 跨库不一致时，命令固定返回 `outcome: "needs_a
 要求尚未创建的 Proposal 数据库；存在 link 时缺少 Proposal 数据库或 Proposal row 则返回
 固定的 unavailable/inconsistent reason。status 从不创建缺失文件。
 
+操作员需要保存完整、可交接的迁移证据时，使用同一 assessment id 的脱敏 manifest 命令：
+
+```sh
+pnpm evidence:home-migration -- --assessment-id <assessment-id> | tee migration-evidence.json
+```
+
+该命令沿用 status 的两库 read-only snapshot、普通文件检查和跨库一致性校验，不创建
+runtime、不调用 Bridge、不写入本地数据库。manifest 按固定顺序记录每条候选的 assessment、
+translation、simulation、ready、approval、switch、verification、rollback gate 时间和结果，
+唯一启用决定计数、恢复尝试/结果以及 receipt digest；输出不包含 `ruleRef`、principal、
+token、source fingerprint、native/provider identity 或原生 body。manifest 自身带有脱敏内容
+digest；损坏、缺失或跨库不一致时仍只返回固定 `needs_attention` reason。
+
 每一步都以确定性测试、`pnpm test`、`pnpm check`、`git diff --check` 和真实浏览器双视口证据交付。任何实现都以本决议的状态机、权限边界、首期子集和 fail-closed 规则为验收依据。

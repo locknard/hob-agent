@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 
 import { homeAutomationMigrationProposalIdentity } from "./home-automation-migration-preparation.js";
@@ -73,6 +74,21 @@ export const HOME_MIGRATION_PROPOSAL_DEPLOYMENT_STATUSES = [
   "rolled_back",
 ] as const;
 
+const HOME_MIGRATION_AUDIT_ACTIONS = [
+  "created", "approved", "rejected", "expired", "evidence_merged", "snoozed", "snooze_elapsed",
+  "prepared", "info_requested", "revalidation_required", "enable_unblocked", "deployment_retried",
+  "recovery_required", "recovery_started", "recovery_failed", "deployment_verified", "deployment_failed",
+  "drift_detected", "drift_restored", "paused", "resumed", "closed",
+] as const;
+
+const HOME_MIGRATION_EVIDENCE_GATES = [
+  "assessment", "translation", "simulation", "ready", "approval", "switch", "verification", "rollback",
+] as const;
+
+const HOME_MIGRATION_EVIDENCE_RECEIPTS = [
+  "approval", "candidate", "artifact", "compile", "dry_run", "switch", "deployment", "rollback", "recovery",
+] as const;
+
 /** Bounds one untrusted proposal row before JSON parsing in the status reader. */
 export const HOME_MIGRATION_STATUS_MAX_PROPOSAL_PAYLOAD_BYTES = 512 * 1024;
 
@@ -88,6 +104,57 @@ export interface HomeAutomationMigrationStatusPaths {
   readonly migrationPath: string;
   readonly proposalPath: string;
 }
+
+export type HomeMigrationEvidenceGateName = typeof HOME_MIGRATION_EVIDENCE_GATES[number];
+export type HomeMigrationEvidenceReceiptKind = typeof HOME_MIGRATION_EVIDENCE_RECEIPTS[number];
+
+export interface HomeAutomationMigrationEvidenceGate {
+  readonly name: HomeMigrationEvidenceGateName;
+  readonly status: "completed" | "in_progress" | "needs_attention" | "not_started";
+  readonly at?: string;
+  readonly failureReason?: typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number];
+}
+
+export interface HomeAutomationMigrationEvidenceReceipt {
+  readonly kind: HomeMigrationEvidenceReceiptKind;
+  /** A digest of a durable receipt identity; the identity itself never crosses this boundary. */
+  readonly digest: string;
+}
+
+export interface HomeAutomationMigrationEvidenceRecovery {
+  readonly attemptCount: number;
+  readonly result: "not_required" | "recovery_required" | "in_progress" | "failed" | "restored";
+  readonly receiptDigests: readonly string[];
+  readonly latestReceiptDigest?: string;
+}
+
+export interface HomeAutomationMigrationEvidenceWorkflow {
+  /** Stable position in the assessment; no rule identity is exposed. */
+  readonly ordinal: number;
+  readonly gates: readonly HomeAutomationMigrationEvidenceGate[];
+  readonly enableDecisionCount: number;
+  readonly recovery: HomeAutomationMigrationEvidenceRecovery;
+  readonly receipts: readonly HomeAutomationMigrationEvidenceReceipt[];
+}
+
+export interface HomeAutomationMigrationEvidenceReport {
+  readonly schemaVersion: "1";
+  readonly outcome: "evidence";
+  readonly assessmentId: string;
+  readonly assessment: HomeAutomationMigrationStatusReport["assessment"];
+  readonly assessmentGate: HomeAutomationMigrationEvidenceGate;
+  readonly selectionAudit: HomeAutomationMigrationStatusReport["selectionAudit"];
+  readonly workflows: readonly HomeAutomationMigrationEvidenceWorkflow[];
+  /** Digest of this redacted manifest, excluding this field while computing it. */
+  readonly manifestDigest: string;
+  readonly readMode: "durable_only";
+  readonly remoteWritesPerformed: false;
+  readonly localWritesPerformed: false;
+}
+
+export type HomeAutomationMigrationEvidenceResult =
+  | HomeAutomationMigrationEvidenceReport
+  | HomeAutomationMigrationStatusFailure;
 
 export interface HomeAutomationMigrationStatusReport {
   readonly schemaVersion: "1";
@@ -143,6 +210,7 @@ interface MigrationRead {
   readonly sourceBridgeId: string;
   readonly sourceEpochId: string;
   readonly sourceLastSeq: number;
+  readonly assessedAt?: string;
   readonly assessment: HomeAutomationMigrationStatusReport["assessment"];
   readonly selectionAudit: HomeAutomationMigrationStatusReport["selectionAudit"];
   readonly workflowLinks: readonly WorkflowLink[];
@@ -150,6 +218,7 @@ interface MigrationRead {
 
 interface ProposalRead {
   readonly proposals: HomeAutomationMigrationStatusReport["proposals"];
+  readonly records: readonly ParsedProposal[];
 }
 
 /**
@@ -196,11 +265,241 @@ export function readHomeMigrationStatusFromPaths(
   };
 }
 
+/**
+ * Reads the same durable stores as status and emits a bounded operator manifest.
+ * The manifest contains only stage outcomes and digests; it never opens a runtime
+ * or crosses the neutral bridge boundary.
+ */
+export function readHomeMigrationEvidenceFromPaths(
+  paths: HomeAutomationMigrationStatusPaths,
+  assessmentId: string,
+): HomeAutomationMigrationEvidenceResult {
+  if (!isOpaqueId(assessmentId)) throw new TypeError("invalid assessment id");
+  if (!isPath(paths?.migrationPath) || !isPath(paths?.proposalPath)) {
+    throw new TypeError("home migration evidence paths are invalid");
+  }
+
+  const migration = readMigrationStore(paths.migrationPath, assessmentId);
+  if (migration.kind === "failure") return failure(assessmentId, migration.reason);
+  if (migration.value.workflowLinks.length === 0) {
+    return buildEvidenceReport(migration.value, []);
+  }
+  const proposals = readProposalStore(paths.proposalPath, migration.value);
+  if (proposals.kind === "failure") return failure(assessmentId, proposals.reason);
+  return buildEvidenceReport(migration.value, proposals.value.records);
+}
+
+function buildEvidenceReport(
+  migration: MigrationRead,
+  proposals: readonly ParsedProposal[],
+): HomeAutomationMigrationEvidenceReport {
+  const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
+  const workflows = migration.workflowLinks.map((link, index) => {
+    const proposal = proposalById.get(link.proposalId);
+    return buildEvidenceWorkflow(index + 1, link.workflow, proposal);
+  });
+  const manifest: Omit<HomeAutomationMigrationEvidenceReport, "manifestDigest"> = {
+    schemaVersion: "1",
+    outcome: "evidence",
+    assessmentId: migration.migrationId,
+    assessment: migration.assessment,
+    assessmentGate: {
+      name: "assessment",
+      status: migration.assessedAt === undefined ? "not_started" : "completed",
+      ...(migration.assessedAt === undefined ? {} : { at: migration.assessedAt }),
+    },
+    selectionAudit: migration.selectionAudit,
+    workflows,
+    readMode: "durable_only",
+    remoteWritesPerformed: false,
+    localWritesPerformed: false,
+  };
+  return {
+    ...manifest,
+    manifestDigest: digestReceipt("manifest", JSON.stringify(manifest)),
+  };
+}
+
+function buildEvidenceWorkflow(
+  ordinal: number,
+  workflow: ParsedWorkflow,
+  proposal: ParsedProposal | undefined,
+): HomeAutomationMigrationEvidenceWorkflow {
+  const failureReason = workflow.failureReason;
+  const approvals = proposal?.auditEvents.filter((event) => event.action === "approved") ?? [];
+  const approval = approvals[0];
+  const recoveryEvents = proposal?.auditEvents.filter((event) => event.action === "recovery_required"
+    || event.action === "recovery_started" || event.action === "recovery_failed") ?? [];
+  const recoveryAttempts = proposal?.recoveryAttemptIds ?? [];
+  const recoveryStartedCount = recoveryEvents.filter((event) => event.action === "recovery_started").length;
+  const recoveryAttemptCount = Math.max(recoveryAttempts.length, recoveryStartedCount);
+  const recoveryFailed = recoveryEvents.some((event) => event.action === "recovery_failed");
+  const gates: HomeAutomationMigrationEvidenceGate[] = [
+    evidenceGate("assessment", "completed", workflow.assessedAt),
+    evidenceGate("translation", workflow.translatedAt === undefined ? "not_started" : "completed", workflow.translatedAt),
+    evidenceGate("simulation", simulationGateStatus(workflow), simulationGateTime(workflow), simulationGateFailure(failureReason)),
+    evidenceGate("ready", workflow.readyAt === undefined ? "not_started" : "completed", workflow.readyAt),
+    evidenceGate("approval", approval === undefined ? "not_started" : "completed", approval?.at),
+    evidenceGate("switch", switchGateStatus(workflow), switchGateTime(workflow), switchGateFailure(failureReason)),
+    evidenceGate("verification", verificationGateStatus(workflow), verificationGateTime(workflow), verificationGateFailure(failureReason)),
+    evidenceGate("rollback", rollbackGateStatus(workflow), rollbackGateTime(workflow), rollbackGateFailure(failureReason)),
+  ];
+  const receipts: HomeAutomationMigrationEvidenceReceipt[] = [];
+  for (const event of approvals) receipts.push({ kind: "approval", digest: digestReceipt("approval", event.id) });
+  addReceipt(receipts, "candidate", workflow.candidateContentHash);
+  addReceipt(receipts, "artifact", workflow.artifactId);
+  addReceipt(receipts, "compile", workflow.compileResultId);
+  addReceipt(receipts, "dry_run", workflow.dryRunResultId);
+  addReceipt(receipts, "switch", workflow.switchOperationId);
+  addReceipt(receipts, "deployment", workflow.deploymentConfigFingerprint);
+  addReceipt(receipts, "rollback", workflow.rollbackOperationId);
+  for (const event of recoveryEvents) receipts.push({ kind: "recovery", digest: digestReceipt("recovery", event.id) });
+  for (const id of recoveryAttempts) {
+    receipts.push({ kind: "recovery", digest: digestReceipt("recovery-attempt", id) });
+  }
+
+  const recoveryReceiptDigests = receipts
+    .filter((receipt) => receipt.kind === "rollback" || receipt.kind === "recovery")
+    .map((receipt) => receipt.digest);
+  const recovery: HomeAutomationMigrationEvidenceRecovery = {
+    attemptCount: recoveryAttemptCount,
+    result: recoveryResult(workflow, recoveryAttemptCount, recoveryFailed),
+    receiptDigests: recoveryReceiptDigests,
+    ...(recoveryReceiptDigests.at(-1) === undefined ? {} : { latestReceiptDigest: recoveryReceiptDigests.at(-1) }),
+  };
+  return {
+    ordinal,
+    gates,
+    enableDecisionCount: approvals.length,
+    recovery,
+    receipts,
+  };
+}
+
+function evidenceGate(
+  name: HomeMigrationEvidenceGateName,
+  status: HomeAutomationMigrationEvidenceGate["status"],
+  at?: string,
+  failureReason?: typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number],
+): HomeAutomationMigrationEvidenceGate {
+  return {
+    name,
+    status,
+    ...(at === undefined ? {} : { at }),
+    ...(failureReason === undefined ? {} : { failureReason }),
+  };
+}
+
+function simulationGateStatus(workflow: ParsedWorkflow): HomeAutomationMigrationEvidenceGate["status"] {
+  if (workflow.failureReason === "compile_failed"
+    || workflow.failureReason === "compile_unavailable"
+    || workflow.failureReason === "simulation_failed"
+    || workflow.failureReason === "simulation_unavailable") return "needs_attention";
+  return workflow.simulatedAt === undefined ? "not_started" : "completed";
+}
+
+function simulationGateTime(workflow: ParsedWorkflow): string | undefined {
+  return workflow.failureReason === "compile_failed"
+    || workflow.failureReason === "compile_unavailable"
+    || workflow.failureReason === "simulation_failed"
+    || workflow.failureReason === "simulation_unavailable"
+    ? workflow.failedAt : workflow.simulatedAt;
+}
+
+function simulationGateFailure(
+  failureReason: typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined,
+): typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined {
+  return failureReason === "compile_failed"
+    || failureReason === "compile_unavailable"
+    || failureReason === "simulation_failed"
+    || failureReason === "simulation_unavailable"
+    ? failureReason : undefined;
+}
+
+function switchGateStatus(workflow: ParsedWorkflow): HomeAutomationMigrationEvidenceGate["status"] {
+  if (workflow.failureReason === "source_stale" || workflow.failureReason === "switch_failed" || workflow.failureReason === "switch_unknown") return "needs_attention";
+  if (workflow.switchStartedAt === undefined) return "not_started";
+  return workflow.status === "switching" ? "in_progress" : "completed";
+}
+
+function switchGateTime(workflow: ParsedWorkflow): string | undefined {
+  return workflow.failureReason === "source_stale" ? workflow.failedAt : workflow.switchStartedAt;
+}
+
+function switchGateFailure(
+  failureReason: typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined,
+): typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined {
+  return failureReason === "source_stale" || failureReason === "switch_failed" || failureReason === "switch_unknown"
+    ? failureReason : undefined;
+}
+
+function verificationGateStatus(workflow: ParsedWorkflow): HomeAutomationMigrationEvidenceGate["status"] {
+  if (workflow.failureReason === "verification_failed") return "needs_attention";
+  if (workflow.verifiedAt !== undefined) return "completed";
+  if (workflow.status === "switching") return "in_progress";
+  return "not_started";
+}
+
+function verificationGateTime(workflow: ParsedWorkflow): string | undefined {
+  return workflow.failureReason === "verification_failed" ? workflow.failedAt : workflow.verifiedAt;
+}
+
+function verificationGateFailure(
+  failureReason: typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined,
+): typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined {
+  return failureReason === "verification_failed" ? failureReason : undefined;
+}
+
+function rollbackGateStatus(workflow: ParsedWorkflow): HomeAutomationMigrationEvidenceGate["status"] {
+  if (workflow.failureReason === "rollback_failed" || workflow.failureReason === "rollback_unknown") return "needs_attention";
+  if (workflow.restoredAt !== undefined) return "completed";
+  if (workflow.rollbackStartedAt !== undefined) return workflow.status === "rolling_back" ? "in_progress" : "completed";
+  return "not_started";
+}
+
+function rollbackGateTime(workflow: ParsedWorkflow): string | undefined {
+  return workflow.failureReason === "rollback_failed" || workflow.failureReason === "rollback_unknown"
+    ? workflow.failedAt : workflow.restoredAt ?? workflow.rollbackStartedAt;
+}
+
+function rollbackGateFailure(
+  failureReason: typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined,
+): typeof HOME_MIGRATION_WORKFLOW_FAILURE_REASONS[number] | undefined {
+  return failureReason === "rollback_failed" || failureReason === "rollback_unknown" ? failureReason : undefined;
+}
+
+function recoveryResult(
+  workflow: ParsedWorkflow,
+  attemptCount: number,
+  failed: boolean,
+): HomeAutomationMigrationEvidenceRecovery["result"] {
+  if (workflow.status === "rolling_back") return "in_progress";
+  if (workflow.failureReason === "verification_failed"
+    || workflow.failureReason === "rollback_failed"
+    || workflow.failureReason === "rollback_unknown") {
+    return failed ? "failed" : "recovery_required";
+  }
+  if (workflow.restoredAt !== undefined && attemptCount > 0) return "restored";
+  return "not_required";
+}
+
+function addReceipt(
+  receipts: HomeAutomationMigrationEvidenceReceipt[],
+  kind: Exclude<HomeMigrationEvidenceReceiptKind, "approval" | "recovery">,
+  value: string | undefined,
+): void {
+  if (value !== undefined) receipts.push({ kind, digest: digestReceipt(kind, value) });
+}
+
+function digestReceipt(kind: string, value: string): string {
+  return `sha256:${createHash("sha256").update(`${kind}:${value}`, "utf8").digest("hex")}`;
+}
+
 type ReadResult<T> = { readonly kind: "ok"; readonly value: T } | { readonly kind: "failure"; readonly reason: HomeMigrationStatusFailureReason };
 
 function readMigrationStore(path: string, assessmentId: string): ReadResult<MigrationRead> {
   return readDurableStore(path, "migration_store_unavailable", "migration_store_corrupt", (db) => {
-    const row = db.prepare(`SELECT source_bridge_id, source_epoch_id, source_last_seq, status, rules_json
+    const row = db.prepare(`SELECT source_bridge_id, source_epoch_id, source_last_seq, status, assessed_at, rules_json
       FROM home_automation_migrations WHERE migration_id = ?`).get(assessmentId) as Row | undefined;
     if (row === undefined) return { kind: "failure", reason: "assessment_not_found" };
     const parsed = parseMigrationRow(row);
@@ -217,6 +516,7 @@ function readMigrationStore(path: string, assessmentId: string): ReadResult<Migr
         sourceBridgeId: parsed.sourceBridgeId,
         sourceEpochId: parsed.sourceEpochId,
         sourceLastSeq: parsed.sourceLastSeq,
+        ...(parsed.assessedAt === undefined ? {} : { assessedAt: parsed.assessedAt }),
         assessment: parsed.assessment,
         workflowLinks: parsed.workflowLinks,
         selectionAudit,
@@ -265,9 +565,11 @@ function readProposalStore(path: string, migration: MigrationRead): ReadResult<P
       deploymentCounts[proposal.deploymentStatus] += 1;
     }
     if (missingProposalCount > 0) return { kind: "failure", reason: "cross_store_inconsistent" };
+    const records = migration.workflowLinks.map((link) => byId.get(link.proposalId)!);
     return {
       kind: "ok",
       value: {
+        records,
         proposals: {
           linkedWorkflowCount: migration.workflowLinks.length,
           missingProposalCount: 0,
@@ -354,6 +656,7 @@ interface ParsedMigration {
   readonly sourceBridgeId: string;
   readonly sourceEpochId: string;
   readonly sourceLastSeq: number;
+  readonly assessedAt?: string;
   readonly assessment: MigrationRead["assessment"];
   readonly workflowLinks: readonly WorkflowLink[];
 }
@@ -363,6 +666,7 @@ function parseMigrationRow(row: Row): ParsedMigration | undefined {
     || !isBoundedText(row.source_bridge_id, 200)
     || !isBoundedText(row.source_epoch_id, 256)
     || !isPositiveSafeInteger(row.source_last_seq)
+    || row.assessed_at !== null && !isIsoTimestamp(row.assessed_at)
     || typeof row.rules_json !== "string"
     || Buffer.byteLength(row.rules_json, "utf8") > 64 * 1024) return undefined;
   let rules: unknown;
@@ -398,6 +702,7 @@ function parseMigrationRow(row: Row): ParsedMigration | undefined {
     sourceBridgeId: row.source_bridge_id,
     sourceEpochId: row.source_epoch_id,
     sourceLastSeq: row.source_last_seq,
+    ...(typeof row.assessed_at === "string" ? { assessedAt: row.assessed_at } : {}),
     assessment: {
       status: row.status,
       ruleCount: rules.length,
@@ -636,6 +941,15 @@ interface ParsedProposal {
   readonly preparedArtifact?: PreparedArtifact;
   readonly deployment?: ProposalDeployment;
   readonly auditRevisions: ReadonlyMap<string, number>;
+  readonly auditEvents: readonly ParsedAuditEvent[];
+  readonly recoveryAttemptIds: readonly string[];
+}
+
+interface ParsedAuditEvent {
+  readonly id: string;
+  readonly at: string;
+  readonly action: typeof HOME_MIGRATION_AUDIT_ACTIONS[number];
+  readonly revision: number;
 }
 
 function parseProposalRow(row: Row): ParsedProposal | undefined {
@@ -690,8 +1004,11 @@ function parseProposalRow(row: Row): ParsedProposal | undefined {
     if (deployment === undefined) return undefined;
     deploymentStatus = deployment.status;
   }
-  const auditRevisions = parseAuditRevisions(payload.audit);
-  if (auditRevisions === undefined) return undefined;
+  const auditEvents = parseAuditEvents(payload.audit);
+  if (auditEvents === undefined) return undefined;
+  const auditRevisions = auditRevisionsFromEvents(auditEvents);
+  const recoveryAttemptIds = parseRecoveryAttemptIds(payload.recoveryAttempts);
+  if (recoveryAttemptIds === undefined) return undefined;
   return {
     id: row.proposal_id,
     revision: row.revision as number,
@@ -706,6 +1023,8 @@ function parseProposalRow(row: Row): ParsedProposal | undefined {
     ...(preparedArtifact === undefined ? {} : { preparedArtifact }),
     ...(deployment === undefined ? {} : { deployment }),
     auditRevisions,
+    auditEvents,
+    recoveryAttemptIds,
   };
 }
 
@@ -772,12 +1091,42 @@ function parseProposalDeployment(value: unknown): ProposalDeployment | undefined
   };
 }
 
-function parseAuditRevisions(value: unknown): ReadonlyMap<string, number> | undefined {
+function parseAuditEvents(value: unknown): readonly ParsedAuditEvent[] | undefined {
   if (!Array.isArray(value) || value.length === 0 || value.length > 100) return undefined;
-  const result = new Map<string, number>();
+  const result: ParsedAuditEvent[] = [];
+  let previousRevision = 0;
   for (const event of value) {
-    if (!isRecord(event) || typeof event.action !== "string" || !isPositiveSafeInteger(event.revision)) return undefined;
-    result.set(event.action, event.revision);
+    if (!isRecord(event)
+      || !isBoundedText(event.id, 256)
+      || !isIsoTimestamp(event.at)
+      || !isAuditAction(event.action)
+      || !isBoundedText(event.actor, 256)
+      || !isPositiveSafeInteger(event.revision)
+      || event.revision < previousRevision) return undefined;
+    previousRevision = event.revision;
+    result.push({ id: event.id, at: event.at, action: event.action, revision: event.revision });
+  }
+  return result;
+}
+
+function auditRevisionsFromEvents(events: readonly ParsedAuditEvent[]): ReadonlyMap<string, number> {
+  const result = new Map<string, number>();
+  for (const event of events) result.set(event.action, event.revision);
+  return result;
+}
+
+function parseRecoveryAttemptIds(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 50) return undefined;
+  const result: string[] = [];
+  for (const attempt of value) {
+    if (!isRecord(attempt)
+      || !isBoundedText(attempt.id, 256)
+      || !isBoundedText(attempt.actor, 256)
+      || !isPositiveSafeInteger(attempt.revision)
+      || !isIsoTimestamp(attempt.startedAt)
+      || attempt.reason !== undefined && !isBoundedText(attempt.reason, 1_000)) return undefined;
+    result.push(attempt.id);
   }
   return result;
 }
@@ -1057,6 +1406,10 @@ function isWorkflowFailureReason(value: unknown): value is typeof HOME_MIGRATION
 
 function isSelectionStatus(value: unknown): value is typeof HOME_MIGRATION_SELECTION_STATUSES[number] {
   return (HOME_MIGRATION_SELECTION_STATUSES as readonly unknown[]).includes(value);
+}
+
+function isAuditAction(value: unknown): value is typeof HOME_MIGRATION_AUDIT_ACTIONS[number] {
+  return (HOME_MIGRATION_AUDIT_ACTIONS as readonly unknown[]).includes(value);
 }
 
 function isProposalReviewStatus(value: unknown): value is typeof HOME_MIGRATION_PROPOSAL_REVIEW_STATUSES[number] {

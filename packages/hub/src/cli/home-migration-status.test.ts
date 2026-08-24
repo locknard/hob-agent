@@ -9,6 +9,9 @@ import {
   parseHomeMigrationStatusArgs,
   readHomeMigrationStatusFromPaths,
 } from "./home-migration-status.js";
+import {
+  readHomeMigrationEvidenceFromPaths,
+} from "../home/home-automation-migration-status-reader.js";
 import { SqliteHomeAutomationMigrationStore } from "../home/home-automation-migration-store.js";
 import { SqliteProposalStore } from "../home/proposal-store.js";
 import { homeAutomationMigrationProposalIdentity } from "../home/home-automation-migration-preparation.js";
@@ -35,6 +38,21 @@ test("requires one explicit lowercase assessment id", () => {
   assert.throws(() => parseHomeMigrationStatusArgs([]), /--assessment-id is required/);
   assert.throws(() => parseHomeMigrationStatusArgs(["--assessment-id", "A".repeat(32)]), /invalid assessment id/);
   assert.throws(() => parseHomeMigrationStatusArgs(["--assessment-id", ASSESSMENT_ID, "extra"]), /unknown argument/);
+});
+
+test("provides an explicit evidence CLI parser without inferring the assessment", async () => {
+  const evidenceCli = await import("./home-migration-evidence.js").catch(() => undefined);
+  assert.ok(evidenceCli, "the evidence CLI must exist");
+  if (evidenceCli === undefined) return;
+  assert.deepEqual(evidenceCli.parseHomeMigrationEvidenceArgs(["--assessment-id", ASSESSMENT_ID]), {
+    assessmentId: ASSESSMENT_ID,
+  });
+  assert.deepEqual(evidenceCli.parseHomeMigrationEvidenceArgs(["--", "--assessment-id", ASSESSMENT_ID]), {
+    assessmentId: ASSESSMENT_ID,
+  });
+  assert.throws(() => evidenceCli.parseHomeMigrationEvidenceArgs([]), /--assessment-id is required/);
+  assert.throws(() => evidenceCli.parseHomeMigrationEvidenceArgs(["--assessment-id", "A".repeat(32)]), /invalid assessment id/);
+  assert.throws(() => evidenceCli.parseHomeMigrationEvidenceArgs(["--assessment-id", ASSESSMENT_ID, "extra"]), /unknown argument/);
 });
 
 test("fails closed without creating either missing durable database", () => {
@@ -273,6 +291,135 @@ test("reports assessment, workflow, selection, and linked Proposal lifecycle as 
     const serialized = JSON.stringify(result);
     for (const secret of [privateName, "rule-private", "principal-private", "sha256:", "native-id", "provider-payload"]) {
       assert.equal(serialized.includes(secret), false, `report leaked ${secret}`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("emits a deterministic redacted evidence manifest for one verified decision", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-migration-evidence-red-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "proposals.sqlite");
+  try {
+    seedMigration(migrationPath, {
+      workflowStatus: "verified",
+      proposalId: "proposal-private",
+      privateName: "private household rule title",
+    });
+    seedProposal(proposalPath, {
+      id: "proposal-private",
+      title: "private proposal title",
+      status: "approved",
+      lifecycle: "active",
+      applicationStatus: "running",
+      deploymentStatus: "verified",
+      deploymentId: "native-id",
+      deploymentTarget: "provider-payload",
+    });
+
+    const result = readHomeMigrationEvidenceFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID) as {
+      readonly outcome: string;
+      readonly readMode: string;
+      readonly remoteWritesPerformed: boolean;
+      readonly localWritesPerformed: boolean;
+      readonly manifestDigest: string;
+      readonly assessmentGate: { readonly name: string; readonly status: string; readonly at?: string };
+      readonly workflows?: readonly {
+        readonly gates: readonly { readonly name: string; readonly status: string; readonly at?: string }[];
+        readonly enableDecisionCount: number;
+        readonly recovery: { readonly attemptCount: number; readonly result: string };
+        readonly receipts: readonly { readonly kind: string; readonly digest: string }[];
+      }[];
+    };
+    assert.deepEqual(readHomeMigrationEvidenceFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID), result);
+    assert.equal(result.outcome, "evidence");
+    assert.equal(result.readMode, "durable_only");
+    assert.equal(result.remoteWritesPerformed, false);
+    assert.equal(result.localWritesPerformed, false);
+    assert.match(result.manifestDigest, /^sha256:[a-f0-9]{64}$/u);
+    assert.deepEqual(result.assessmentGate, {
+      name: "assessment",
+      status: "completed",
+      at: "2026-08-24T08:00:00.000Z",
+    });
+    const workflow = result.workflows?.[0];
+    assert.ok(workflow);
+    assert.deepEqual(workflow.gates.map((gate) => gate.name), [
+      "assessment", "translation", "simulation", "ready", "approval", "switch", "verification", "rollback",
+    ]);
+    assert.deepEqual(workflow.gates.map((gate) => gate.status), [
+      "completed", "completed", "completed", "completed", "completed", "completed", "completed", "not_started",
+    ]);
+    assert.deepEqual(workflow.gates.map((gate) => gate.at), [
+      "2026-08-24T08:00:00.000Z",
+      "2026-08-24T08:00:00.500Z",
+      "2026-08-24T08:00:00.750Z",
+      "2026-08-24T08:00:00.900Z",
+      "2026-08-24T08:00:01.000Z",
+      "2026-08-24T08:00:01.000Z",
+      "2026-08-24T08:00:02.000Z",
+      undefined,
+    ]);
+    assert.equal(workflow.enableDecisionCount, 1);
+    assert.deepEqual(workflow.recovery, { attemptCount: 0, result: "not_required", receiptDigests: [] });
+    assert.ok(workflow.receipts.length >= 6);
+    assert.ok(workflow.receipts.every((receipt) => /^sha256:[a-f0-9]{64}$/u.test(receipt.digest)));
+    const serialized = JSON.stringify(result);
+    for (const secret of ["rule-private", "principal-private", "token", "sha256:" + "a".repeat(64), "native-id", "provider-payload", "private proposal title"]) {
+      assert.equal(serialized.includes(secret), false, `evidence leaked ${secret}`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps one approval while exposing a new recovery receipt in recovery_required", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-migration-evidence-recovery-red-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "proposals.sqlite");
+  try {
+    seedMigration(migrationPath, {
+      workflowStatus: "verified",
+      proposalId: "proposal-recovery",
+      privateName: "private recovery rule",
+    });
+    const verified = makeWorkflow("verified", "proposal-recovery");
+    replaceEligibleWorkflow(migrationPath, {
+      ...verified,
+      status: "needs_attention",
+      failedAt: "2026-08-24T08:00:03.000Z",
+      failureReason: "verification_failed",
+    });
+    seedProposal(proposalPath, {
+      id: "proposal-recovery",
+      title: "private recovery proposal",
+      status: "approved",
+      lifecycle: "recovery_required",
+      applicationStatus: "failed",
+      deploymentStatus: "failed",
+      revision: 6,
+      deploymentId: "native-id",
+      deploymentTarget: "provider-payload",
+      recoveryAttemptIds: ["recovery-first", "recovery-second"],
+      recoveryStartedCount: 2,
+    });
+
+    const result = readHomeMigrationEvidenceFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID);
+    assert.equal(result.outcome, "evidence");
+    if (result.outcome !== "evidence") return;
+    const workflow = result.workflows[0];
+    assert.ok(workflow);
+    assert.equal(workflow.enableDecisionCount, 1);
+    assert.equal(workflow.recovery.attemptCount, 2);
+    assert.equal(workflow.recovery.result, "recovery_required");
+    assert.ok(workflow.recovery.latestReceiptDigest);
+    assert.match(workflow.recovery.latestReceiptDigest!, /^sha256:[a-f0-9]{64}$/u);
+    assert.ok(workflow.recovery.receiptDigests.length >= 3);
+    assert.equal(new Set(workflow.recovery.receiptDigests).size, workflow.recovery.receiptDigests.length);
+    const serialized = JSON.stringify(result);
+    for (const secret of ["rule-private", "recovery-private", "recovery-first", "recovery-second", "native-id", "provider-payload"]) {
+      assert.equal(serialized.includes(secret), false, `recovery evidence leaked ${secret}`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -922,13 +1069,15 @@ function seedProposal(path: string, input: {
   readonly id: string;
   readonly title: string;
   readonly status: "approved";
-  readonly lifecycle: "active" | "closed";
-  readonly applicationStatus: "running" | "withdrawn";
-  readonly deploymentStatus: "verified" | "rolled_back";
+  readonly lifecycle: "active" | "closed" | "recovery_required";
+  readonly applicationStatus: "running" | "failed" | "withdrawn";
+  readonly deploymentStatus: "failed" | "verified" | "rolled_back";
   readonly revision?: number;
   readonly deploymentId?: string;
   readonly deploymentTarget?: string;
   readonly deploymentConfigFingerprint?: string;
+  readonly recoveryStartedCount?: number;
+  readonly recoveryAttemptIds?: readonly string[];
 }): void {
   const store = new SqliteProposalStore({ path });
   const db = (store as unknown as { db: DatabaseSync }).db;
@@ -951,6 +1100,14 @@ function seedProposal(path: string, input: {
       ? { configFingerprint: deploymentConfigFingerprint } : {}),
     ...(input.deploymentStatus === "verified" ? { verifiedAt: "2026-08-24T08:00:02.000Z" } : {}),
   };
+  const recoveryStartedCount = input.recoveryStartedCount ?? 0;
+  const recoveryAudits = Array.from({ length: recoveryStartedCount }, (_, index) => ({
+    id: `audit-recovery-${index + 1}`,
+    at: `2026-08-24T08:00:0${4 + index}.000Z`,
+    action: "recovery_started",
+    actor: "recovery-private",
+    revision: 5 + index,
+  }));
   const audit = [
     { id: "audit-created", at: "2026-08-24T08:00:00.000Z", action: "created", actor: "home-automation-migration", revision: 1 },
     { id: "audit-prepared", at: "2026-08-24T08:00:00.500Z", action: "prepared", actor: "system", revision: 2 },
@@ -958,6 +1115,7 @@ function seedProposal(path: string, input: {
     ...(input.deploymentStatus === "verified"
       ? [{ id: "audit-deployment", at: "2026-08-24T08:00:02.000Z", action: "deployment_verified", actor: "system", revision: 4 }]
       : [{ id: "audit-deployment", at: "2026-08-24T08:00:02.000Z", action: "deployment_failed", actor: "system", revision: 4 }]),
+    ...recoveryAudits,
     ...(input.lifecycle === "closed"
       ? [{ id: "audit-closed", at: "2026-08-24T08:00:03.000Z", action: "closed", actor: "household-owner", revision }]
       : []),
@@ -988,6 +1146,14 @@ function seedProposal(path: string, input: {
           dryRunResultId: `sha256:${"e".repeat(64)}`,
         },
         deployment,
+        ...(input.recoveryAttemptIds === undefined ? {} : {
+          recoveryAttempts: input.recoveryAttemptIds.map((id, index) => ({
+            id,
+            actor: "recovery-private",
+            revision: 5 + index,
+            startedAt: `2026-08-24T08:00:0${4 + index}.000Z`,
+          })),
+        }),
         conflictCheck: { status: "checked", existingAutomationCount: 1, matches: [{ identity: "rule-private", relation: "possible_overlap" }] },
         audit,
         title: input.title,
