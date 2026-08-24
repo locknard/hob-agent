@@ -21,6 +21,7 @@ import {
   type HomeWorldLaunchConfig,
   type LaunchEnvironment,
 } from "../launch-config.js";
+import { acquireRuntimeOwnerLease } from "../runtime-owner-lease.js";
 
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_MS = 250;
@@ -121,44 +122,49 @@ export async function previewHomeMigrationCandidates(
   const pollMs = boundedInteger(options.pollMs ?? DEFAULT_POLL_MS, 10, 5_000, "poll interval");
   const candidateTimeoutMs = boundedInteger(options.candidateTimeoutMs ?? DEFAULT_CANDIDATE_TIMEOUT_MS, 1, 600_000, "candidate timeout");
   const config = readHomeWorldLaunchConfig(environment);
-  const runtime = await (options.createRuntime ?? createDefaultRuntime)(config);
   const wait = options.wait ?? defaultWait;
   const now = options.now ?? Date.now;
+  const ownerLease = await acquireRuntimeOwnerLease(config.dataDirectory);
 
   try {
-    let assessment: HomeAutomationMigrationAssessment | undefined;
+    const runtime = await (options.createRuntime ?? createDefaultRuntime)(config);
     try {
-      assessment = runtime.get(assessmentId);
-    } catch {
-      return failClosed(assessmentId, "assessment_inconsistent");
-    }
-    if (assessment === undefined) return failClosed(assessmentId, "assessment_not_found");
-    const assessmentFailure = validateAssessment(assessmentId, assessment);
-    if (assessmentFailure !== undefined) return failClosed(assessmentId, assessmentFailure);
-    if (!config.bridges.some((bridge) => bridge.bridgeId === assessment.sourceBridgeId)) {
-      return failClosed(assessmentId, "source_unavailable");
-    }
-    try {
-      await waitForReadyCut(runtime, assessment.sourceBridgeId, readyTimeoutMs, pollMs, wait, now);
-    } catch {
-      return failClosed(assessmentId, "ready_timeout");
-    }
-    if (!sourceWatermarkMatches(runtime, assessment)) {
-      return failClosed(assessmentId, "source_unstable");
-    }
+      let assessment: HomeAutomationMigrationAssessment | undefined;
+      try {
+        assessment = runtime.get(assessmentId);
+      } catch {
+        return failClosed(assessmentId, "assessment_inconsistent");
+      }
+      if (assessment === undefined) return failClosed(assessmentId, "assessment_not_found");
+      const assessmentFailure = validateAssessment(assessmentId, assessment);
+      if (assessmentFailure !== undefined) return failClosed(assessmentId, assessmentFailure);
+      if (!config.bridges.some((bridge) => bridge.bridgeId === assessment.sourceBridgeId)) {
+        return failClosed(assessmentId, "source_unavailable");
+      }
+      try {
+        await waitForReadyCut(runtime, assessment.sourceBridgeId, readyTimeoutMs, pollMs, wait, now);
+      } catch {
+        return failClosed(assessmentId, "ready_timeout");
+      }
+      if (!sourceWatermarkMatches(runtime, assessment)) {
+        return failClosed(assessmentId, "source_unstable");
+      }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), candidateTimeoutMs);
-    try {
-      const receipt = await previewEligibleRules(runtime, assessment, controller.signal);
-      return sourceWatermarkMatches(runtime, assessment)
-        ? receipt
-        : failClosed(assessmentId, "source_unstable");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), candidateTimeoutMs);
+      try {
+        const receipt = await previewEligibleRules(runtime, assessment, controller.signal);
+        return sourceWatermarkMatches(runtime, assessment)
+          ? receipt
+          : failClosed(assessmentId, "source_unstable");
+      } finally {
+        clearTimeout(timer);
+      }
     } finally {
-      clearTimeout(timer);
+      await runtime.close();
     }
   } finally {
-    await runtime.close();
+    await ownerLease.release();
   }
 }
 

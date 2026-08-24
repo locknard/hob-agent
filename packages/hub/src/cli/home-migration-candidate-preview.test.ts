@@ -7,6 +7,10 @@ import {
   previewHomeMigrationCandidates,
   type HomeMigrationCandidatePreviewRuntime,
 } from "./home-migration-candidate-preview.js";
+import {
+  acquireRuntimeOwnerLease,
+  RuntimeOwnerLeaseBusyError,
+} from "../runtime-owner-lease.js";
 
 const BRIDGE_ID = "bridge-a";
 const ASSESSMENT_ID = "a".repeat(32);
@@ -23,6 +27,22 @@ const ENV = {
     credentialRefs: { "access-token": "HOB_HA_TOKEN" },
   }]),
 };
+
+test("fails before creating an operator runtime while the product owner lease is held", async () => {
+  const lease = await acquireRuntimeOwnerLease(ENV.HOB_DATA_DIR, { heartbeatIntervalMs: 0 });
+  let created = false;
+  try {
+    await assert.rejects(() => previewHomeMigrationCandidates(ENV, ASSESSMENT_ID, {
+      createRuntime: () => {
+        created = true;
+        throw new Error("operator runtime must not be created");
+      },
+    }), RuntimeOwnerLeaseBusyError);
+    assert.equal(created, false);
+  } finally {
+    await lease.release();
+  }
+});
 
 test("requires one explicit lowercase 32-hex assessment id", () => {
   assert.deepEqual(parseHomeMigrationCandidatePreviewArgs(["--assessment-id", ASSESSMENT_ID]), {

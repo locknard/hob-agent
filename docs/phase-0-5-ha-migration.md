@@ -223,6 +223,12 @@ candidate / needs-attention 聚合、固定原因计数和 `remoteWritesPerforme
 它不创建 Proposal/Artifact，不调用 prepare、refresh、deploy、control 或 actions，
 同一 assessment 可安全重跑。
 
+Assessment 和 candidate preview 在创建任何 HomeWorld、bridge 连接或 migration
+SQLite 之前取得 `HOB_DATA_DIR` 的进程级 runtime owner lease；ProductRuntimeSupervisor
+在整个产品生命周期持有同一 lease。新鲜 owner 使 operator fail closed，陈旧的普通
+sidecar 只按有界、原子身份检查恢复。durable status 保持独立的 SQLite read-only
+路径，不需要 runtime lease。完整决议见 [`docs/runtime-owner-lease.md`](./runtime-owner-lease.md)。
+
 完成评估、选择或后续工作流步骤后，操作员可以查询同一个 opaque assessment id 的
 耐久证据聚合：
 

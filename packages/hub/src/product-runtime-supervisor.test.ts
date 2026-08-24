@@ -29,6 +29,10 @@ import {
   type RuntimeProductBundle,
   type ProductRuntimeSupervisorOptions,
 } from "./product-runtime-supervisor.js";
+import {
+  acquireRuntimeOwnerLease,
+  RuntimeOwnerLeaseBusyError,
+} from "./runtime-owner-lease.js";
 
 const draft: ProductBootstrapConfigDraft = {
   householdName: "梧桐家",
@@ -43,6 +47,34 @@ const draft: ProductBootstrapConfigDraft = {
   },
   bridges: [],
 };
+
+test("holds the data-directory owner lease for the supervisor lifetime", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-owner-lease-"));
+  const runtime = new ProductRuntimeSupervisor({
+    dataDirectory: directory,
+    port: 0,
+    pairingCode: "LIVE-HOME",
+    mountOperational: async () => mountedBundle().bundle,
+  });
+  try {
+    await runtime.start();
+    let competingLease: Awaited<ReturnType<typeof acquireRuntimeOwnerLease>> | undefined;
+    try {
+      await assert.rejects(async () => {
+        competingLease = await acquireRuntimeOwnerLease(directory, { heartbeatIntervalMs: 0 });
+      }, RuntimeOwnerLeaseBusyError);
+    } finally {
+      await competingLease?.release();
+    }
+
+    await runtime.stop();
+    const afterStop = await acquireRuntimeOwnerLease(directory, { heartbeatIntervalMs: 0 });
+    await afterStop.release();
+  } finally {
+    await runtime.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("mounts one degraded model resolver and settings owner for the exact operational bundle", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-product-runtime-supervisor-model-owner-"));

@@ -46,6 +46,10 @@ import { ProductOperationalVoiceSettings } from "./product-operational-voice-set
 import { ProductVoiceCleanupLedger, type ProductVoiceCleanupEntry } from "./product-voice-cleanup-ledger.js";
 import { PrivateVoiceGateway } from "./voice/private-voice-gateway.js";
 import { PrivateVoiceProviderRuntime } from "./voice/private-voice-provider-runtime.js";
+import {
+  acquireRuntimeOwnerLease,
+  type RuntimeOwnerLease,
+} from "./runtime-owner-lease.js";
 
 const PRODUCT_SESSION_COOKIE = "hob_product_session";
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -189,6 +193,7 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     RuntimeProductBundle
   >;
   private activeBundle: RuntimeProductBundle | undefined;
+  private runtimeOwnerLease: RuntimeOwnerLease | undefined;
   private setupFiber: Fiber | undefined;
   private setupSurface: ProductSetupHttpService | undefined;
   private statusValue: "created" | "starting" | "running" | "stopping" | "stopped" = "created";
@@ -252,6 +257,9 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
     }
     this.statusValue = "starting";
     try {
+      // The supervisor is the process-level owner. Acquire before loading
+      // durable stores or mounting any bridge/runtime child.
+      this.runtimeOwnerLease = await acquireRuntimeOwnerLease(this.options.dataDirectory);
       const active = await this.configurationStore.load();
       await this.recoverOperationalModelCleanup(active).catch(() => undefined);
       await this.recoverOperationalVoiceCleanup(active).catch(() => undefined);
@@ -660,6 +668,8 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
 
   private async disposeRuntime(): Promise<void> {
     let failure: unknown;
+    const runtimeOwnerLease = this.runtimeOwnerLease;
+    this.runtimeOwnerLease = undefined;
     // Closing first establishes the shutdown boundary before either HTTP
     // surface or runtime generation begins to drain. The model resolver then
     // releases any retirement receipts that the closed settings owner awaits.
@@ -697,9 +707,13 @@ export class ProductRuntimeSupervisor implements HomeHubRuntime {
       await this.host.dispose();
     } catch (error) {
       failure ??= error;
-    } finally {
-      this.statusValue = "stopped";
     }
+    try {
+      await runtimeOwnerLease?.release();
+    } catch (error) {
+      failure ??= error;
+    }
+    this.statusValue = "stopped";
     if (failure !== undefined) throw failure;
   }
 }

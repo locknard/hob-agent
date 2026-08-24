@@ -6,6 +6,10 @@ import {
   parseHomeMigrationAssessmentArgs,
   type HomeMigrationAssessmentRuntime,
 } from "./home-migration-assess.js";
+import {
+  acquireRuntimeOwnerLease,
+  RuntimeOwnerLeaseBusyError,
+} from "../runtime-owner-lease.js";
 
 const ENV = {
   HOB_DATA_DIR: "/tmp/hob-home-migration-assess-test",
@@ -21,6 +25,22 @@ const ENV = {
 };
 
 const ASSESSMENT_ID = "a".repeat(32);
+
+test("fails before creating an operator runtime while the product owner lease is held", async () => {
+  const lease = await acquireRuntimeOwnerLease(ENV.HOB_DATA_DIR, { heartbeatIntervalMs: 0 });
+  let created = false;
+  try {
+    await assert.rejects(() => assessHomeMigrationEnvironment(ENV, "bridge-a", {
+      createRuntime: () => {
+        created = true;
+        throw new Error("operator runtime must not be created");
+      },
+    }), RuntimeOwnerLeaseBusyError);
+    assert.equal(created, false);
+  } finally {
+    await lease.release();
+  }
+});
 
 test("requires one explicit bounded bridge id", () => {
   assert.deepEqual(parseHomeMigrationAssessmentArgs(["--bridge-id", "bridge-a"]), {

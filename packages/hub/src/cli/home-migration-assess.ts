@@ -16,6 +16,7 @@ import {
   type HomeWorldLaunchConfig,
   type LaunchEnvironment,
 } from "../launch-config.js";
+import { acquireRuntimeOwnerLease } from "../runtime-owner-lease.js";
 
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_MS = 250;
@@ -93,22 +94,27 @@ export async function assessHomeMigrationEnvironment(
   if (!config.bridges.some((bridge) => bridge.bridgeId === bridgeId)) {
     throw new Error("configured bridge id is not configured");
   }
-  const runtime = await (options.createRuntime ?? createDefaultRuntime)(config);
   const wait = options.wait ?? defaultWait;
   const now = options.now ?? Date.now;
+  const ownerLease = await acquireRuntimeOwnerLease(config.dataDirectory);
 
   try {
-    await waitForReadyCut(runtime, bridgeId, readyTimeoutMs, pollMs, wait, now);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), assessmentTimeoutMs);
+    const runtime = await (options.createRuntime ?? createDefaultRuntime)(config);
     try {
-      const result = await runtime.assessBridgeCatalog(bridgeId, { signal: controller.signal });
-      return projectReceipt(result);
+      await waitForReadyCut(runtime, bridgeId, readyTimeoutMs, pollMs, wait, now);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), assessmentTimeoutMs);
+      try {
+        const result = await runtime.assessBridgeCatalog(bridgeId, { signal: controller.signal });
+        return projectReceipt(result);
+      } finally {
+        clearTimeout(timer);
+      }
     } finally {
-      clearTimeout(timer);
+      await runtime.close();
     }
   } finally {
-    await runtime.close();
+    await ownerLease.release();
   }
 }
 
