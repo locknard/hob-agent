@@ -657,7 +657,11 @@ interface InboxHttpPort {
     readonly idempotencyKey: string;
   }): Promise<InboxConversationCorrectionResult>;
   getProductReviewProjection?(actor?: InboxReviewActor, selectedProposalId?: string): InboxProductReviewProjection | Promise<InboxProductReviewProjection>;
-  getProductShellProjection?(actor?: InboxReviewActor, batchRequestId?: string): InboxProductShellProjection | Promise<InboxProductShellProjection>;
+  getProductShellProjection?(
+    actor?: InboxReviewActor,
+    batchRequestId?: string,
+    includeMigrationSelections?: boolean,
+  ): InboxProductShellProjection | Promise<InboxProductShellProjection>;
   prepareMigrationSelection?(input: { readonly selectionToken: string; readonly actor: InboxReviewActor }): Promise<unknown>;
   acknowledgeCompletionNotification?(adviceId: string): boolean;
   acknowledgeMediaActionCompletionNotification?(turnId: string): boolean;
@@ -2093,7 +2097,10 @@ export class ProposalInboxHttpService extends Service {
     const controlFeedback = route === "control" && actionTicketId !== undefined
       ? await this.productControlFeedback(actionTicketId)
       : undefined;
-    const shellProjection = await this.productShellProjection(batchRequestId);
+    const shellProjection = await this.productShellProjection(
+      batchRequestId,
+      route === "automations" && !head,
+    );
     const privateVoice = route === "settings"
       ? await this.privateVoiceHttp.settingsContext(privateVoiceSavedNotice)
       : undefined;
@@ -2362,16 +2369,19 @@ export class ProposalInboxHttpService extends Service {
     }
   }
 
-  private async productShellProjection(batchRequestId?: string): Promise<InboxProductShellProjection | undefined> {
+  private async productShellProjection(
+    batchRequestId?: string,
+    includeMigrationSelections = false,
+  ): Promise<InboxProductShellProjection | undefined> {
     const readProjection = this.inbox.getProductShellProjection;
     if (readProjection === undefined) return undefined;
     try {
-      const value = await readProjection.call(this.inbox, this.principal, batchRequestId);
+      const value = await readProjection.call(this.inbox, this.principal, batchRequestId, includeMigrationSelections);
       if (!isRecord(value)) return undefined;
       if (value.migrationSelections === undefined) return value as unknown as InboxProductShellProjection;
       return {
         ...(value as unknown as InboxProductShellProjection),
-        migrationSelections: this.principal?.present === true
+        migrationSelections: includeMigrationSelections && this.principal?.present === true
           ? normalizeMigrationSelections(
             value.migrationSelections,
             canUsePrivateProposalReviewPrincipal(this.principal),

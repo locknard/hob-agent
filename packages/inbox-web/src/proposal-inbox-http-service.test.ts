@@ -102,19 +102,23 @@ class StubInbox extends Service {
 
 class MigrationSelectionInbox extends StubInbox {
   readonly preparations: unknown[] = [];
+  readonly migrationProjectionReads: boolean[] = [];
   prepareResult: unknown = { status: "prepared", proposalId: "proposal-opaque" };
 
-  getProductShellProjection() {
+  getProductShellProjection(_actor?: unknown, _batchRequestId?: string, includeMigrationSelections = false) {
+    this.migrationProjectionReads.push(includeMigrationSelections);
     return {
       connection: { state: "quiet" as const, lastContact: "刚刚" },
       spaces: [],
       controlSpaces: [],
       activity: [],
-      migrationSelections: [
-        { name: "晚间灯光", status: "selectable", selectionToken: "a".repeat(32) },
-        { name: "起床灯", status: "prepared", proposalId: "proposal-ready" },
-        { name: "旧规则", status: "unavailable", ruleRef: "native-rule", sourceFingerprint: "sha256:secret" },
-      ],
+      migrationSelections: includeMigrationSelections
+        ? [
+          { name: "晚间灯光", status: "selectable", selectionToken: "a".repeat(32) },
+          { name: "起床灯", status: "prepared", proposalId: "proposal-ready" },
+          { name: "旧规则", status: "unavailable", ruleRef: "native-rule", sourceFingerprint: "sha256:secret" },
+        ]
+        : [],
     };
   }
 
@@ -917,6 +921,7 @@ test("serves safe migration selections and prepares only the server-bound token"
   const page = await fetch(`${origin}/automations`, { headers });
   assert.equal(page.status, 200);
   const html = await page.text();
+  assert.deepEqual((ctx.homeInbox as unknown as MigrationSelectionInbox).migrationProjectionReads, [true]);
   assert.match(html, /晚间灯光/);
   assert.match(html, /准备迁移建议/);
   assert.match(html, new RegExp(`name="selectionToken" value="${"a".repeat(32)}"`));
@@ -946,6 +951,38 @@ test("serves safe migration selections and prepares only the server-bound token"
     selectionToken: "a".repeat(32),
     actor: adminPrincipal,
   }]);
+
+  await fiber.dispose();
+  await inboxFiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("reads migration selections only for a real automations GET", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(MigrationSelectionInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adminPrincipal,
+  });
+  const origin = ctx.homeInboxHttp.origin;
+  const routes: readonly [string, "GET" | "HEAD"][] = [
+    ["/home", "GET"],
+    ["/review-center", "GET"],
+    ["/conversation", "GET"],
+    ["/voice", "GET"],
+    ["/automations", "HEAD"],
+    ["/automations", "GET"],
+  ];
+  for (const [path, method] of routes) {
+    const response = await fetch(`${origin}${path}`, {
+      method,
+      headers: { authorization },
+      redirect: "manual",
+    });
+    assert.equal(response.status, 200, `${method} ${path}`);
+  }
+  assert.deepEqual((ctx.homeInbox as unknown as MigrationSelectionInbox).migrationProjectionReads, [false, false, false, false, false, true]);
 
   await fiber.dispose();
   await inboxFiber.dispose();

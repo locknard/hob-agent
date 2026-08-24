@@ -578,7 +578,11 @@ export class ProposalInboxService extends Service {
     };
   }
 
-  getProductShellProjection(actor?: InboxReviewActor, batchRequestId?: string): InboxProductShellProjection {
+  getProductShellProjection(
+    actor?: InboxReviewActor,
+    batchRequestId?: string,
+    includeMigrationSelections = false,
+  ): InboxProductShellProjection {
     const world = this.world?.snapshot();
     const now = this.now();
     const actionDescriptorFor = this.runtime?.actionDescriptorFor === undefined
@@ -599,7 +603,9 @@ export class ProposalInboxService extends Service {
     const energy = projectEnergyToday(world, this.world, now, this.timezone);
     const concern = this.projectConcern(now);
     const automations = this.projectAutomations();
-    const migrationSelections = this.projectMigrationSelections(actor);
+    const migrationSelections = includeMigrationSelections
+      ? this.projectMigrationSelections(actor)
+      : undefined;
     return {
       ...projection,
       ...(energy === undefined ? {} : { energy }),

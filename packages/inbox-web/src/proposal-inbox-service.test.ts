@@ -855,7 +855,7 @@ test("projects authenticated migration selections as safe three-state product ro
   };
   const fiber = await ctx.plugin(ProposalInboxService, { migrationSelection: selectionPort } as never);
 
-  const projection = ctx.homeInbox.getProductShellProjection(runtimeAdminActor);
+  const projection = ctx.homeInbox.getProductShellProjection(runtimeAdminActor, undefined, true);
   assert.deepEqual(projection.migrationSelections, [
     { name: "晚间灯光", status: "selectable", selectionToken: "a".repeat(32) },
     { name: "起床灯", status: "prepared", proposalId: "proposal-migration" },
@@ -864,6 +864,27 @@ test("projects authenticated migration selections as safe three-state product ro
   assert.deepEqual(seenActors, [runtimeAdminActor]);
   assert.equal("ruleRef" in (projection.migrationSelections?.[2] ?? {}), false);
   assert.equal("sourceFingerprint" in (projection.migrationSelections?.[2] ?? {}), false);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("does not read migration selections from the default shell projection", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubReviewedProposals);
+  let listed = 0;
+  const fiber = await ctx.plugin(ProposalInboxService, {
+    migrationSelection: {
+      list() {
+        listed += 1;
+        return [{ name: "私有规则", status: "selectable", token: "a".repeat(32) }];
+      },
+    },
+  } as never);
+
+  const projection = ctx.homeInbox.getProductShellProjection(runtimeAdminActor);
+  assert.equal(projection.migrationSelections, undefined);
+  assert.equal(listed, 0);
 
   await fiber.dispose();
   await ctx.fiber.dispose();
@@ -881,7 +902,7 @@ test("does not list private migration selections without an authenticated produc
   };
   const fiber = await ctx.plugin(ProposalInboxService, { migrationSelection: selectionPort } as never);
 
-  const projection = ctx.homeInbox.getProductShellProjection();
+  const projection = ctx.homeInbox.getProductShellProjection(undefined, undefined, true);
   assert.deepEqual(projection.migrationSelections, []);
   assert.equal(listed, 0);
 
@@ -900,7 +921,7 @@ test("keeps a shared present session read-only while still showing the private r
   };
   const fiber = await ctx.plugin(ProposalInboxService, { migrationSelection: selectionPort } as never);
 
-  const projection = ctx.homeInbox.getProductShellProjection({ ...runtimeAdminActor, device: { kind: "shared" } });
+  const projection = ctx.homeInbox.getProductShellProjection({ ...runtimeAdminActor, device: { kind: "shared" } }, undefined, true);
   assert.deepEqual(projection.migrationSelections, [{
     name: "私有规则",
     status: "unavailable",
@@ -960,7 +981,7 @@ test("fails closed on malformed and duplicate migration selection rows", async (
     },
   } as never);
 
-  const projection = ctx.homeInbox.getProductShellProjection(runtimeAdminActor);
+  const projection = ctx.homeInbox.getProductShellProjection(runtimeAdminActor, undefined, true);
   assert.deepEqual(projection.migrationSelections, [
     { name: "晚间灯光", status: "selectable", selectionToken: "b".repeat(32) },
     { name: "迁移建议", status: "prepared", proposalId: "proposal-1" },
