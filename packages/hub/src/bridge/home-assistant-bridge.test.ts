@@ -146,6 +146,7 @@ test("authenticates, reads a bootstrap snapshot, and forwards native state chang
       { type: "config/device_registry/list", event_type: undefined },
       { type: "config/area_registry/list", event_type: undefined },
       { type: "subscribe_events", event_type: "state_changed" },
+      { type: "subscribe_events", event_type: "automation_triggered" },
     ],
   );
 
@@ -163,7 +164,7 @@ test("authenticates, reads a bootstrap snapshot, and forwards native state chang
   assert.equal(snapshot.entityRegistry.length, 0);
   assert.equal(snapshot.health.bridge, "up");
 
-  const subscription = commands.at(-1)!;
+  const subscription = commands.find((command) => command.event_type === "state_changed")!;
   socket.receive({
     id: subscription.id,
     type: "event",

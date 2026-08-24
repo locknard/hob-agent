@@ -102,6 +102,10 @@ const MAX_HOME_ASSISTANT_IDENTITY_CLAIMS = 16;
 const MAX_HOME_ASSISTANT_IDENTITY_CANDIDATES = 64;
 const MAX_HOME_ASSISTANT_IDENTITY_VALUE_LENGTH = 256;
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES = 256 * 1024;
+const MAX_HOME_ASSISTANT_AUTOMATION_CONTEXTS = 256;
+const HOME_ASSISTANT_AUTOMATION_CONTEXT_TTL_MS = 60_000;
+const MAX_HOME_ASSISTANT_CONTEXT_ID_LENGTH = 36;
+const MAX_HOME_ASSISTANT_ENTITY_ID_LENGTH = 255;
 /** Foreign-rule toggle operation entries retained for this adapter instance. */
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS = 128;
 /** Automation operation entries retained for this adapter instance. */
@@ -128,6 +132,8 @@ export interface HomeAssistantBridgeOptions {
   socketFactory?: SocketFactory;
   /** Internal adapter seam that retains the native state value for projection. */
   onNativeStateEvent?: (event: HomeAssistantNativeStateEvent) => void;
+  /** Internal adapter seam for observed automation action contexts. */
+  onNativeAutomationTriggeredEvent?: (event: HomeAssistantNativeAutomationTriggeredEvent) => void;
   /** Transport failures after startup are surfaced to the neutral adapter. */
   onDisconnect?: (error: Error) => void;
   connectTimeoutMs?: number;
@@ -142,6 +148,14 @@ export interface HomeAssistantNativeStateEvent {
   ts: string;
   /** Sanitized presence of HA context.user_id; raw context never crosses this seam. */
   userId?: string;
+  /** Ephemeral internal join key; never projected into the neutral contract. */
+  contextId?: string;
+}
+
+export interface HomeAssistantNativeAutomationTriggeredEvent {
+  entityId: string;
+  /** Ephemeral internal join key; never projected into the neutral contract. */
+  contextId: string;
 }
 
 export const DEFAULT_HOME_ASSISTANT_CONNECT_TIMEOUT_MS = 5_000;
@@ -538,6 +552,7 @@ export class HomeAssistantBridge {
     }
     if (message.type === "event" && typeof message.id === "number") {
       this.forwardStateEvent(message);
+      this.forwardAutomationTriggeredEvent(message);
     }
   }
 
@@ -558,8 +573,17 @@ export class HomeAssistantBridge {
       this.command("config/device_registry/list"),
       this.command("config/area_registry/list"),
     ];
-    if (subscribeEvents) commands.push(this.command("subscribe_events", { event_type: "state_changed" }));
+    const stateSubscription = subscribeEvents
+      ? this.command("subscribe_events", { event_type: "state_changed" })
+      : Promise.resolve(undefined);
+    // HA may reject this event subscription for non-admin tokens.  The state
+    // stream remains the required path; absent evidence stays unknown.
+    const automationSubscription = subscribeEvents
+      ? this.command("subscribe_events", { event_type: "automation_triggered" }).catch(() => undefined)
+      : Promise.resolve(undefined);
     const [states, entityRegistry, deviceRegistry, areaRegistry] = await Promise.all(commands);
+    await stateSubscription;
+    await automationSubscription;
     const stateList = asArray<HomeAssistantState>(states);
     const entityList = asArray(entityRegistry);
     const deviceList = asArray(deviceRegistry);
@@ -644,14 +668,27 @@ export class HomeAssistantBridge {
     const userId = isRecord(event.context)
       ? boundedHomeAssistantUserId(event.context.user_id)
       : undefined;
+    const contextId = resolveHomeAssistantStateContextId(event.context, newState.context);
     const nativeEvent: HomeAssistantNativeStateEvent = {
       entityId,
       state: newState.state,
       attrs: newState.attributes,
       ts: event.time_fired,
       ...(userId === undefined ? {} : { userId }),
+      ...(contextId === undefined ? {} : { contextId }),
     };
     this.options.onNativeStateEvent?.(nativeEvent);
+  }
+
+  private forwardAutomationTriggeredEvent(message: Record<string, unknown>): void {
+    const event = message.event;
+    if (!isRecord(event) || event.event_type !== "automation_triggered" || !isRecord(event.data)) return;
+    const entityId = boundedHomeAssistantEntityId(event.data.entity_id);
+    const contextId = isRecord(event.context)
+      ? boundedHomeAssistantContextId(event.context.id)
+      : undefined;
+    if (entityId === undefined || !entityId.startsWith("automation.") || contextId === undefined) return;
+    this.options.onNativeAutomationTriggeredEvent?.({ entityId, contextId });
   }
 
   private send(message: Record<string, unknown>): void {
@@ -920,6 +957,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private foreignRuleCatalog: ForeignRuleCatalog | undefined;
   private foreignRuleConfigIdsByRef = new Map<string, string>();
   private foreignRuleTitlesByRef = new Map<string, string>();
+  private foreignRuleRefsByAutomationEntityId = new Map<string, string>();
+  private observedAutomationContexts = new Map<string, { readonly ruleRef: string; readonly observedAtMs: number }>();
   private foreignRuleControlOperations = new Map<string, ForeignRuleControlOperationEntry>();
   private automationOperations = new Map<string, HomeAssistantAutomationOperationEntry>();
   private resyncInFlight = false;
@@ -1870,6 +1909,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         connectTimeoutMs: this.dependencies.connectTimeoutMs,
         maxBootstrapItems: this.dependencies.maxBootstrapItems,
         onNativeStateEvent: (event) => queue.pushState(event),
+        onNativeAutomationTriggeredEvent: (event) => queue.pushAutomationTriggered(event),
         onDisconnect: (error) => queue.fail(mapHomeAssistantStreamError(error)),
       });
       this.bridge = bridge;
@@ -1897,6 +1937,10 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
           yield* snapshotEnvelopes(current, "resync");
           continue;
         }
+        if (item.kind === "automation-triggered") {
+          this.observeAutomationTriggered(item.event);
+          continue;
+        }
         const binding = this.bindingsByEntityId.get(item.event.entityId);
         if (binding === undefined) continue;
         const state = projectNativeState(item.event, binding);
@@ -1908,14 +1952,19 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         const principalRef = item.event.userId === undefined
           ? undefined
           : deriveHomeAssistantPrincipalRef(this.context.bridgeId, item.event.userId);
+        const foreignRuleRef = item.event.contextId === undefined
+          ? undefined
+          : this.foreignRuleForAutomationContext(item.event.contextId);
         yield current.envelope({
           kind: "ext",
           ext: CAUSALITY_EXTENSION_KEY,
           payload: {
             refSeq: stateEnvelope.seq,
-            cause: principalRef === undefined
-              ? { kind: "unknown" }
-              : { kind: "user", principalRef },
+            cause: foreignRuleRef === undefined
+              ? principalRef === undefined
+                ? { kind: "unknown" }
+                : { kind: "user", principalRef }
+              : { kind: "foreign_rule", ruleRef: foreignRuleRef },
           },
         });
         const nextHealth = healthForNativeState(item.event.state);
@@ -1938,6 +1987,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       this.healthByNativeId.clear();
       this.foreignRuleConfigIdsByRef.clear();
       this.foreignRuleTitlesByRef.clear();
+      this.foreignRuleRefsByAutomationEntityId.clear();
+      this.observedAutomationContexts.clear();
       this.resyncInFlight = false;
       this.lifecycle = "disposed";
     }
@@ -1956,6 +2007,8 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     const foreignRules = projectForeignRules(snapshot);
     this.foreignRuleConfigIdsByRef = new Map(foreignRules.configIdsByRuleRef);
     this.foreignRuleTitlesByRef = new Map(foreignRules.titlesByRuleRef);
+    this.foreignRuleRefsByAutomationEntityId = new Map(foreignRules.ruleRefsByAutomationEntityId);
+    this.observedAutomationContexts.clear();
     this.foreignRuleCatalog = undefined;
     const remoteInstanceId = deriveHomeAssistantRemoteInstanceId(
       this.context.config.baseUrl,
@@ -1969,9 +2022,51 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
       remoteInstanceId,
       envelope: (event) => ({ epochId, seq: seq++, event }),
       commitForeignRuleCatalog: (lastSeq) => {
-        this.foreignRuleCatalog = { epochId, lastSeq, ...foreignRules };
+        this.foreignRuleCatalog = {
+          epochId,
+          lastSeq,
+          complete: foreignRules.complete,
+          rules: foreignRules.rules,
+        };
       },
     };
+  }
+
+  private observeAutomationTriggered(event: HomeAssistantNativeAutomationTriggeredEvent): void {
+    if (this.resyncInFlight) return;
+    const ruleRef = this.foreignRuleRefsByAutomationEntityId.get(event.entityId);
+    if (ruleRef === undefined) return;
+    const nowMs = this.automationContextNowMs();
+    this.pruneAutomationContexts(nowMs);
+    this.observedAutomationContexts.delete(event.contextId);
+    this.observedAutomationContexts.set(event.contextId, { ruleRef, observedAtMs: nowMs });
+    while (this.observedAutomationContexts.size > MAX_HOME_ASSISTANT_AUTOMATION_CONTEXTS) {
+      const oldest = this.observedAutomationContexts.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.observedAutomationContexts.delete(oldest);
+    }
+  }
+
+  private foreignRuleForAutomationContext(contextId: string): string | undefined {
+    this.pruneAutomationContexts(this.automationContextNowMs());
+    return this.observedAutomationContexts.get(contextId)?.ruleRef;
+  }
+
+  private pruneAutomationContexts(nowMs: number): void {
+    for (const [contextId, observed] of this.observedAutomationContexts) {
+      if (nowMs - observed.observedAtMs >= HOME_ASSISTANT_AUTOMATION_CONTEXT_TTL_MS) {
+        this.observedAutomationContexts.delete(contextId);
+      }
+    }
+  }
+
+  private automationContextNowMs(): number {
+    const configured = this.dependencies.clock?.();
+    if (configured !== undefined) {
+      const parsed = Date.parse(configured);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return Date.now();
   }
 
   private async resolveAccessToken(): Promise<string> {
@@ -2010,6 +2105,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     const queue = this.queue;
     if (queue === undefined) return { status: "unsupported", reason: "not_ready" };
     this.resyncInFlight = true;
+    this.observedAutomationContexts.clear();
     void bridge.refreshSnapshot(signal).then(
       (snapshot) => queue.pushResync(snapshot),
       (error: unknown) => queue.fail(mapHomeAssistantStreamError(error)),
@@ -2032,11 +2128,13 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
   readonly rules: ForeignRuleSummary[];
   readonly configIdsByRuleRef: ReadonlyMap<string, string>;
   readonly titlesByRuleRef: ReadonlyMap<string, string>;
+  readonly ruleRefsByAutomationEntityId: ReadonlyMap<string, string>;
 } {
   const states = new Map(snapshot.states.map((state) => [state.entity_id, state]));
   const rules: ForeignRuleSummary[] = [];
   const configIdsByRuleRef = new Map<string, string>();
   const titlesByRuleRef = new Map<string, string>();
+  const ruleRefsByAutomationEntityId = new Map<string, string>();
   let complete = true;
   for (const raw of snapshot.entityRegistry) {
     if (!isRecord(raw)) continue;
@@ -2061,6 +2159,7 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
     const updatedAt = state?.last_updated;
     const ruleRef = `ha-rule:${createHash("sha256").update(stableId).digest("hex")}`;
     configIdsByRuleRef.set(ruleRef, nativeConfigId);
+    ruleRefsByAutomationEntityId.set(entityId, ruleRef);
     if (name !== undefined) titlesByRuleRef.set(ruleRef, name.slice(0, 512));
     rules.push({
       ruleRef,
@@ -2074,6 +2173,7 @@ function projectForeignRules(snapshot: HomeAssistantSnapshot): {
     rules: rules.sort((left, right) => left.ruleRef.localeCompare(right.ruleRef)),
     configIdsByRuleRef,
     titlesByRuleRef,
+    ruleRefsByAutomationEntityId,
   };
 }
 
@@ -2997,6 +3097,7 @@ function mapHomeAssistantStreamError(error: unknown): BridgeStreamError {
 
 type NativeQueueItem =
   | { kind: "state"; event: HomeAssistantNativeStateEvent }
+  | { kind: "automation-triggered"; event: HomeAssistantNativeAutomationTriggeredEvent }
   | { kind: "resync"; snapshot: HomeAssistantSnapshot }
   | { kind: "heartbeat" };
 
@@ -3103,6 +3204,10 @@ class NativeStateQueue {
 
   pushState(event: HomeAssistantNativeStateEvent): void {
     this.pushValue({ kind: "state", event });
+  }
+
+  pushAutomationTriggered(event: HomeAssistantNativeAutomationTriggeredEvent): void {
+    this.pushValue({ kind: "automation-triggered", event });
   }
 
   pushResync(snapshot: HomeAssistantSnapshot): void {
@@ -3218,6 +3323,40 @@ function boundedHomeAssistantUserId(value: unknown): string | undefined {
     || /[\u0000-\u001f\u007f\s]/u.test(text)
     ? undefined
     : text;
+}
+
+function boundedHomeAssistantContextId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text === ""
+    || text !== value
+    || Array.from(text).length > MAX_HOME_ASSISTANT_CONTEXT_ID_LENGTH
+    || /[\u0000-\u001f\u007f\s]/u.test(text)
+    ? undefined
+    : text;
+}
+
+function boundedHomeAssistantEntityId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text === ""
+    || text !== value
+    || Array.from(text).length > MAX_HOME_ASSISTANT_ENTITY_ID_LENGTH
+    || /[\u0000-\u001f\u007f\s]/u.test(text)
+    ? undefined
+    : text;
+}
+
+function resolveHomeAssistantStateContextId(
+  eventContext: unknown,
+  stateContext: unknown,
+): string | undefined {
+  const eventRecord = isRecord(eventContext);
+  const stateRecord = isRecord(stateContext);
+  const eventId = eventRecord ? boundedHomeAssistantContextId(eventContext.id) : undefined;
+  const stateId = stateRecord ? boundedHomeAssistantContextId(stateContext.id) : undefined;
+  if (eventRecord && stateRecord) return eventId !== undefined && eventId === stateId ? eventId : undefined;
+  return eventId ?? stateId;
 }
 
 function createNodeSocket(url: string): WebSocketLike {

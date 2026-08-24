@@ -230,7 +230,7 @@ test("registers and projects the strict boolean-actuator schema for the four exa
   await unavailableAdapter.control.dispose();
 });
 
-function respondToForeignRuleBootstrap(socket: FakeSocket): void {
+function respondToForeignRuleBootstrap(socket: FakeSocket, automationSubscriptionSuccess = true): void {
   socket.receive({ type: "auth_required", ha_version: "2026.8.0" });
   socket.receive({ type: "auth_ok", ha_version: "2026.8.0" });
   const commands = socket.sent.slice(1) as Array<{ id: number; type: string }>;
@@ -250,7 +250,11 @@ function respondToForeignRuleBootstrap(socket: FakeSocket): void {
             : command.type === "config/area_registry/list"
               ? []
               : [];
-    socket.receive({ id: command.id, type: "result", success: true, result });
+    const optionalAutomationSubscription = command.type === "subscribe_events"
+      && command.event_type === "automation_triggered";
+    socket.receive(optionalAutomationSubscription && !automationSubscriptionSuccess
+      ? { id: command.id, type: "result", success: false, error: { message: "Unauthorized" } }
+      : { id: command.id, type: "result", success: true, result });
   }
 }
 
@@ -1180,6 +1184,439 @@ test("emits limited unknown causality without guessing physical or foreign-rule 
       cause: { kind: "unknown" },
     },
   });
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("attributes an observed automation action to the existing opaque foreign rule", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+
+  const subscriptions = socket.sent.filter((message) => message.type === "subscribe_events");
+  assert.deepEqual(subscriptions.map((message) => message.event_type), ["state_changed", "automation_triggered"]);
+  const stateSubscription = subscriptions.find((message) => message.event_type === "state_changed");
+  const automationSubscription = subscriptions.find((message) => message.event_type === "automation_triggered");
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+  const ruleRef = ((await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())?.rules[0])?.ruleRef;
+  assert.match(ruleRef ?? "", /^ha-rule:/);
+
+  const stateNext = iterator.next();
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      time_fired: "2026-08-18T00:00:02.000Z",
+      context: { id: "automation-context-id", parent_id: "source-context-id" },
+      data: { entity_id: "automation.arrival_light" },
+    },
+  });
+  socket.receive({
+    id: stateSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-18T00:00:03.000Z",
+      context: { id: "automation-context-id", parent_id: "source-context-id" },
+      data: {
+        entity_id: "light.kitchen",
+        new_state: { state: "on", attributes: {} },
+      },
+    },
+  });
+  const stateEnvelope = await stateNext;
+  assert.equal(stateEnvelope.value?.event.kind, "state");
+  const causalityEnvelope = await iterator.next();
+  assert.deepEqual(causalityEnvelope.value?.event, {
+    kind: "ext",
+    ext: "causality@1",
+    payload: {
+      refSeq: stateEnvelope.value!.seq,
+      cause: { kind: "foreign_rule", ruleRef },
+    },
+  });
+  assert.equal(JSON.stringify(causalityEnvelope.value).includes("automation-context-id"), false);
+  assert.equal(JSON.stringify(causalityEnvelope.value).includes("automation.arrival_light"), false);
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("keeps the required state stream when automation event subscription is rejected", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket, false);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+
+  const stateSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "state_changed"
+  ));
+  const automationSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "automation_triggered"
+  ));
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+
+  const next = iterator.next();
+  socket.receive({
+    id: stateSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "state_changed",
+      time_fired: "2026-08-18T00:00:04.000Z",
+      data: {
+        entity_id: "light.kitchen",
+        new_state: { state: "on", attributes: {} },
+      },
+    },
+  });
+  const stateEnvelope = await next;
+  const causalityEnvelope = await iterator.next();
+  assert.deepEqual(causalityEnvelope.value?.event, {
+    kind: "ext",
+    ext: "causality@1",
+    payload: { refSeq: stateEnvelope.value!.seq, cause: { kind: "unknown" } },
+  });
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("does not infer a foreign rule from parent-only, unknown-entity, or invalid trigger evidence", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+  const stateSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "state_changed"
+  ));
+  const automationSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "automation_triggered"
+  ));
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+
+  const receiveStateCause = async (
+    state: "on" | "off",
+    context: Record<string, unknown>,
+    time: string,
+  ): Promise<unknown> => {
+    const next = iterator.next();
+    socket.receive({
+      id: stateSubscription!.id,
+      type: "event",
+      event: {
+        event_type: "state_changed",
+        time_fired: time,
+        context,
+        data: {
+          entity_id: "light.kitchen",
+          new_state: { state, attributes: {}, context },
+        },
+      },
+    });
+    await next;
+    const causeEnvelope = await iterator.next();
+    return causeEnvelope.value?.event.kind === "ext"
+      ? causeEnvelope.value.event.payload.cause
+      : undefined;
+  };
+
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { id: "valid-auto-context", parent_id: "source-context" },
+      data: { entity_id: "automation.arrival_light" },
+    },
+  });
+  assert.deepEqual(await receiveStateCause(
+    "on",
+    { id: "target-context", parent_id: "valid-auto-context" },
+    "2026-08-18T00:00:05.000Z",
+  ), { kind: "unknown" });
+
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { id: "unknown-auto-context" },
+      data: { entity_id: "automation.not_in_registry" },
+    },
+  });
+  assert.deepEqual(await receiveStateCause(
+    "off",
+    { id: "unknown-auto-context" },
+    "2026-08-18T00:00:06.000Z",
+  ), { kind: "unknown" });
+
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { parent_id: "invalid-auto-context" },
+      data: { entity_id: "automation.arrival_light" },
+    },
+  });
+  assert.deepEqual(await receiveStateCause(
+    "on",
+    { id: "invalid-auto-context" },
+    "2026-08-18T00:00:07.000Z",
+  ), { kind: "unknown" });
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("preserves receive order and never rewrites a cause after a late automation event", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+  const stateSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "state_changed"
+  ));
+  const automationSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "automation_triggered"
+  ));
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+  const ruleRef = ((await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())?.rules[0])?.ruleRef;
+
+  const receiveState = async (state: "on" | "off", time: string): Promise<unknown> => {
+    const next = iterator.next();
+    socket.receive({
+      id: stateSubscription!.id,
+      type: "event",
+      event: {
+        event_type: "state_changed",
+        time_fired: time,
+        context: { id: "late-context" },
+        data: {
+          entity_id: "light.kitchen",
+          new_state: { state, attributes: {}, context: { id: "late-context" } },
+        },
+      },
+    });
+    await next;
+    const causeEnvelope = await iterator.next();
+    return causeEnvelope.value?.event.kind === "ext"
+      ? causeEnvelope.value.event.payload.cause
+      : undefined;
+  };
+
+  assert.deepEqual(await receiveState("on", "2026-08-18T00:00:08.000Z"), { kind: "unknown" });
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { id: "late-context" },
+      data: { entity_id: "automation.arrival_light" },
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(await receiveState("off", "2026-08-18T00:00:09.000Z"), {
+    kind: "foreign_rule",
+    ruleRef,
+  });
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("clears observed automation contexts when a resync starts a new epoch", async () => {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket);
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+  const stateSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "state_changed"
+  ));
+  const automationSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "automation_triggered"
+  ));
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+
+  const sendState = async (state: "on" | "off", time: string): Promise<unknown> => {
+    const next = iterator.next();
+    socket.receive({
+      id: stateSubscription!.id,
+      type: "event",
+      event: {
+        event_type: "state_changed",
+        time_fired: time,
+        context: { id: "resync-context" },
+        data: {
+          entity_id: "light.kitchen",
+          new_state: { state, attributes: {}, context: { id: "resync-context" } },
+        },
+      },
+    });
+    const stateEnvelope = await next;
+    const causeEnvelope = await iterator.next();
+    return causeEnvelope.value?.event.kind === "ext"
+      ? causeEnvelope.value.event.payload.cause
+      : undefined;
+  };
+
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { id: "resync-context" },
+      data: { entity_id: "automation.arrival_light" },
+    },
+  });
+  assert.deepEqual(await sendState("on", "2026-08-18T00:00:10.000Z"), {
+    kind: "foreign_rule",
+    ruleRef: ((await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())?.rules[0])?.ruleRef,
+  });
+
+  const previousCommandCount = socket.sent.length;
+  const resync = adapter.control.requestResync(new AbortController().signal);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(await sendState("off", "2026-08-18T00:00:10.500Z"), { kind: "unknown" });
+  assert.deepEqual(await resync, { status: "completed" });
+  const resyncCommands = socket.sent.slice(previousCommandCount) as Array<{ id: number; type: string }>;
+  assert.deepEqual(resyncCommands.map((command) => command.type), [
+    "get_states",
+    "config/entity_registry/list",
+    "config/device_registry/list",
+    "config/area_registry/list",
+  ]);
+  for (const command of resyncCommands) {
+    const result = command.type === "get_states"
+      ? [
+          { entity_id: "automation.arrival_light", state: "on", attributes: { friendly_name: "Arrival light" } },
+          { entity_id: "light.kitchen", state: "off", attributes: { friendly_name: "Kitchen light" } },
+        ]
+      : command.type === "config/entity_registry/list"
+        ? [
+            { id: "automation-stable-1", entity_id: "automation.arrival_light", device_id: "device-automation", name: "Arrival light" },
+            { id: "entity-light-1", entity_id: "light.kitchen", device_id: "device-light", name: "Kitchen light" },
+          ]
+        : command.type === "config/device_registry/list"
+          ? [{ id: "device-automation", name: "Automations" }, { id: "device-light", name: "Kitchen" }]
+          : [];
+    socket.receive({ id: command.id, type: "result", success: true, result });
+  }
+  const replayEvents: Envelope[] = [];
+  while (replayEvents.at(-1)?.event.kind !== "sync-complete") {
+    replayEvents.push((await iterator.next()).value!);
+  }
+  assert.deepEqual(await sendState("on", "2026-08-18T00:00:11.000Z"), { kind: "unknown" });
+
+  await adapter.control.dispose();
+  controller.abort();
+});
+
+test("expires observed automation contexts before reusing an old context id", async () => {
+  const socket = new FakeSocket();
+  let now = 1_000_000;
+  const { adapter } = createAdapter(socket, {}, { clock: () => new Date(now).toISOString() });
+  const controller = new AbortController();
+  const iterator = adapter.events(controller.signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") {
+    events.push((await iterator.next()).value!);
+  }
+  const stateSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "state_changed"
+  ));
+  const automationSubscription = socket.sent.find((message) => (
+    message.type === "subscribe_events" && message.event_type === "automation_triggered"
+  ));
+  assert.notEqual(stateSubscription, undefined);
+  assert.notEqual(automationSubscription, undefined);
+  const ruleRef = ((await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())?.rules[0])?.ruleRef;
+
+  const sendState = async (state: "on" | "off", time: string): Promise<unknown> => {
+    const next = iterator.next();
+    const context = { id: "expiring-context" };
+    socket.receive({
+      id: stateSubscription!.id,
+      type: "event",
+      event: {
+        event_type: "state_changed",
+        time_fired: time,
+        context,
+        data: {
+          entity_id: "light.kitchen",
+          new_state: { state, attributes: {}, context },
+        },
+      },
+    });
+    await next;
+    const causeEnvelope = await iterator.next();
+    return causeEnvelope.value?.event.kind === "ext"
+      ? causeEnvelope.value.event.payload.cause
+      : undefined;
+  };
+
+  socket.receive({
+    id: automationSubscription!.id,
+    type: "event",
+    event: {
+      event_type: "automation_triggered",
+      context: { id: "expiring-context" },
+      data: { entity_id: "automation.arrival_light" },
+    },
+  });
+  assert.deepEqual(await sendState("on", "2026-08-18T00:00:12.000Z"), {
+    kind: "foreign_rule",
+    ruleRef,
+  });
+
+  now += 60_001;
+  assert.deepEqual(await sendState("off", "2026-08-18T00:01:13.000Z"), { kind: "unknown" });
 
   await adapter.control.dispose();
   controller.abort();
