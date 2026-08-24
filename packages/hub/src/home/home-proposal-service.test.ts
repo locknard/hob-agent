@@ -1343,6 +1343,72 @@ test("drift survives persistence and the fingerprint baseline reaches the record
   }
 });
 
+test("passes the authenticated reviewer and bounded retry actor to deployment", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T02:30:00.000Z" });
+  const ctx = new Context();
+  const seenActors: string[] = [];
+  const intent = {
+    deploymentId: "hob_actor_flow",
+    target: "ha-main",
+    targets: [{
+      hwCapabilityId: "hwc-1",
+      binding: { bridgeId: "ha-main", nativeId: "dev-hwc-1", nativeInstanceId: "ent-hwc-1" },
+    }],
+  } as const;
+  let deploymentCount = 0;
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => intent,
+        deploy: async (request: { readonly actor: string }) => {
+          seenActors.push(request.actor);
+          deploymentCount += 1;
+          return deploymentCount === 3
+            ? { status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target }
+            : { status: "failed" as const, reason: "deployment unavailable" };
+        },
+      },
+    } as never);
+
+    const created = store.create({
+      ...candidate,
+      kind: "automation-draft",
+      idempotencyKey: "deployment-actor:v1",
+      dedupKey: "deployment-actor",
+      intent: { ...candidate.intent, type: "automation-draft" },
+      artifactCandidate: automationCandidate,
+    });
+    completePreparation(store, created.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.id });
+
+    const firstFailure = await ctx.homeProposals.enableProposal({
+      proposalId: ready.id,
+      reviewer: "authenticated-reviewer",
+    });
+    assert.equal(firstFailure.lifecycle, "enable_failed");
+
+    const secondFailure = await ctx.homeProposals.retryEnable({
+      proposalId: firstFailure.id,
+      actor: "retry-operator",
+    });
+    assert.equal(secondFailure.lifecycle, "enable_failed");
+
+    const active = await ctx.homeProposals.retryEnable({ proposalId: secondFailure.id });
+    assert.equal(active.lifecycle, "active");
+    assert.deepEqual(seenActors, [
+      "authenticated-reviewer",
+      "retry-operator",
+      "household-owner",
+    ]);
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
 test("a configuration gap blocks visibly and the settings recheck re-enables the same card", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);

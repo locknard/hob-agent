@@ -141,6 +141,8 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
   async deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
+    /** Hub audit principal; the ecosystem adapter accepts it without interpreting it. */
+    readonly actor: string;
     readonly kind: string;
     readonly title: string;
     readonly artifactCandidate?: { readonly schemaVersion: "1"; readonly content: unknown };
@@ -212,7 +214,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     await this.toggle(request, true);
   }
 
-  async withdraw(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string }): Promise<{ readonly restored: boolean }> {
+  async withdraw(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string }): Promise<{ readonly restored: boolean }> {
     const automations = request.target === undefined ? undefined : this.world.automationsHandleFor(request.target);
     if (automations === undefined) return { restored: false };
     const result = await automations.withdraw(

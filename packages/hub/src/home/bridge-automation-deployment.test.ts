@@ -71,6 +71,7 @@ test("compiles the neutral artifact with resolved bindings and reports a verifie
   const outcome = await port.deploy({
     proposalId: "proposal-Media.Power:41",
     revision: 3,
+    actor: "household-owner",
     kind: "automation-draft",
     title: "睡前自动关掉多媒体室电源",
     artifactCandidate: { schemaVersion: "1", content },
@@ -89,6 +90,7 @@ test("compiles the neutral artifact with resolved bindings and reports a verifie
   assert.equal(spec.trigger.kind, "schedule");
   assert.equal(spec.actions[0]?.kind, "set_boolean");
   assert.equal((spec.actions[0] as { target: { binding: { nativeId: string } } }).target.binding.nativeId, "dev-hwc-strip");
+  assert.equal("actor" in spec, false, "the Hub audit actor never enters the provider-native spec");
 });
 
 
@@ -166,7 +168,7 @@ test("fails in household language when no bridge, no binding, or the adapter rej
     capabilityDeviceName: () => undefined,
   });
   const missing = await noBridge.deploy({
-    proposalId: "p1", revision: 1, kind: "automation-draft", title: "t",
+    proposalId: "p1", revision: 1, actor: "household-owner", kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
     intent: { deploymentId: "hob_p", target: "ha-main", targets: [
       { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
@@ -177,7 +179,7 @@ test("fails in household language when no bridge, no binding, or the adapter rej
 
   const unbound = new BridgeAutomationDeployment(bridgeStub({ resolvable: false }).world);
   const unresolved = await unbound.deploy({
-    proposalId: "p2", revision: 1, kind: "automation-draft", title: "t",
+    proposalId: "p2", revision: 1, actor: "household-owner", kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
     intent: { deploymentId: "hob_p", target: "ha-main", targets: [
       { hwCapabilityId: "hwc-presence", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-presence", nativeInstanceId: "ent-hwc-presence" } },
@@ -191,7 +193,7 @@ test("fails in household language when no bridge, no binding, or the adapter rej
     bridgeStub({ deployResult: { status: "rejected", reason: "unsupported" } }).world,
   );
   const rejected = await rejecting.deploy({
-    proposalId: "p3", revision: 1, kind: "automation-draft", title: "t",
+    proposalId: "p3", revision: 1, actor: "household-owner", kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
     intent: { deploymentId: "hob_p3", target: "ha-main", targets: [
       { hwCapabilityId: "hwc-presence", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-presence", nativeInstanceId: "ent-hwc-presence" } },
@@ -206,7 +208,7 @@ test("fails in household language when no bridge, no binding, or the adapter rej
 test("deploy fails closed when the intent no longer covers the plan's capabilities", async () => {
   const port = new BridgeAutomationDeployment(bridgeStub().world);
   const partial = await port.deploy({
-    proposalId: "p-partial", revision: 1, kind: "automation-draft", title: "t",
+    proposalId: "p-partial", revision: 1, actor: "household-owner", kind: "automation-draft", title: "t",
     artifactCandidate: { schemaVersion: "1", content },
     intent: { deploymentId: "hob_p_partial", target: "ha-main", targets: [
       { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
@@ -221,7 +223,7 @@ test("pause, resume and withdraw address only the hub deployment", async () => {
   const port = new BridgeAutomationDeployment(world);
   await port.pause({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
   await port.resume({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
-  const withdrawal = await port.withdraw({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
+  const withdrawal = await port.withdraw({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main", actor: "household-owner" });
   assert.deepEqual(calls.toggles, [
     { nativeAutomationId: "hob_p1", enabled: false },
     { nativeAutomationId: "hob_p1", enabled: true },

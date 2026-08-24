@@ -55,6 +55,8 @@ export interface ProposalDeploymentPort {
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
+    /** The bounded Hub principal responsible for this deployment attempt. */
+    readonly actor: string;
     readonly kind: CreateProposalInput["kind"];
     readonly title: string;
     readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
@@ -65,7 +67,7 @@ export interface ProposalDeploymentPort {
     | { readonly status: "running" | "paused" | "missing" | "unknown"; readonly configFingerprint?: string };
   pause?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
   resume?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
-  withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string }):
+  withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string }):
     | Promise<{ readonly restored: boolean }>
     | { readonly restored: boolean };
 }
@@ -471,7 +473,7 @@ export class HomeProposalService extends Service {
         ? { deploymentIntent: backfill }
         : {}),
     });
-    const outcome = await this.deploy(enabling);
+    const outcome = await this.deploy(enabling, input.actor ?? "household-owner");
     return this.store.recordProposalDeployment({
       proposalId: enabling.id,
       expectedRevision: enabling.revision,
@@ -539,7 +541,7 @@ export class HomeProposalService extends Service {
       ...(resolved === undefined ? {} : { deploymentIntent: resolved }),
     });
     if (!automation) return enabling;
-    const outcome = await this.deploy(enabling);
+    const outcome = await this.deploy(enabling, input.reviewer);
     return this.store.recordProposalDeployment({
       proposalId: enabling.id,
       expectedRevision: enabling.revision,
@@ -555,7 +557,7 @@ export class HomeProposalService extends Service {
       : undefined;
   }
 
-  private async deploy(proposal: ProposalEnvelope): Promise<ProposalDeploymentOutcome> {
+  private async deploy(proposal: ProposalEnvelope, actor: string): Promise<ProposalDeploymentOutcome> {
     if (this.deployment === undefined) {
       return { status: "failed", reason: "这个家还没有可用的自动化部署通道，方案已保留，接通后可以重试。" };
     }
@@ -567,6 +569,7 @@ export class HomeProposalService extends Service {
       return await this.deployment.deploy({
         proposalId: proposal.id,
         revision: proposal.revision,
+        actor,
         kind: proposal.kind,
         title: proposal.title,
         artifactCandidate: proposal.artifactCandidate,
@@ -619,6 +622,7 @@ export class HomeProposalService extends Service {
         proposalId: current.id,
         deploymentId: current.deployment.deploymentId,
         target: current.deployment.target,
+        actor: input.actor ?? "household-owner",
       });
       restored = result?.restored === true;
     }
