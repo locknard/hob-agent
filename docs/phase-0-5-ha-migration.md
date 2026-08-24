@@ -18,6 +18,7 @@ discovered → assessed → translated → simulated → ready → switching →
       └───────────┴────────────┴────────────┴──────────┴──────────┴→ needs_attention
 
 verified → rolling_back → restored
+needs_attention(switch_failed | switch_unknown) → restored
 ```
 
 - `discovered`：Hub 从 HA `foreignRules@2` 目录取得有界规则摘要，并绑定 `epochId + lastSeq`。
@@ -52,6 +53,8 @@ evidence coverage 必须完整且未截断，事件必须来自同一 bridge/epo
 
 - `rolling_back`：家庭成员或 Hub 按明确回退条件请求恢复；Hub 先停止 HobAgent 创建的自动化，再恢复原配置并等待读回。
 - `restored`：回退后的 HA 状态与切换前快照一致，Hub 写入完成审计；回退失败继续进入 `needs_attention`。
+
+未形成 verified deployment identity 的切换失败使用独立的精确终结出口。Hub 只有在读回原规则以原 source fingerprint 运行且批准目标不存在后，才把 `switch_failed` 或 `switch_unknown` 的确切失败回执 CAS 为 `restored`；终结记录保留原 approved revision、switch operation、actor、切换时间和失败证据。陈旧回执、未知状态、暂停目标或任一身份不匹配均保持 fail-closed。
 
 状态转换由 Hub 原子记录。进程重启、桥超时、watermark 漂移、重复请求和 stale revision 都进入可恢复的明确状态；系统从不重复部署或把未知结果标记为成功。
 
