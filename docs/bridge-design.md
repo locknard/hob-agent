@@ -255,6 +255,12 @@ ExtensionDeclaration 是开放数组项，不在 core 中枚举扩展名字；�
 
 ### 4.1 actions(M3):indeterminate 禁自动重试、高危上浮;幂等两层(homeWorld 治理/审计 + adapter 执行边缘);只发 action authority。
 ### 4.2 history:`fetchHistory(range)`,origin 恒 imported,证据降权,dry-run 声明血统。
+
+`history@1` 的最小 handle、预算、独立 imported-history 分区、resync stale、
+去重与 recorder 完整度规则冻结于
+[`docs/bridge-history-profile.md`](./bridge-history-profile.md)。REST 是首个
+实现 transport；历史读取不得推进 live watermark、不得进入 snapshot manifest，
+也不得由 recorder 时间线推断 cause。
 ### 4.3 foreignRules:清单/启发式警告/证据/防重复提案/低保真迁移;不承诺确定性干涉模拟;steps 上限 64KB;IR 未来工作(双驱动:迁移保真 + 干涉模拟);归属以制品登记簿裁决。
 ### 4.4 artifactHost:随写路径里程碑;登记簿彼时实现,唯一真相源;平台标签仅 hint。
 
