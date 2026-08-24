@@ -152,7 +152,10 @@ interface ProposalRead {
   readonly proposals: HomeAutomationMigrationStatusReport["proposals"];
 }
 
-/** Reads only existing SQLite files in read-only mode; it never runs schema setup or PRAGMA. */
+/**
+ * Reads only existing SQLite files in read-only mode; it never runs schema setup or writes.
+ * Each store has an independent guarded read transaction; separate SQLite files do not share a common atomic snapshot.
+ */
 export function readHomeMigrationStatusFromPaths(
   paths: HomeAutomationMigrationStatusPaths,
   assessmentId: string,
@@ -196,10 +199,7 @@ export function readHomeMigrationStatusFromPaths(
 type ReadResult<T> = { readonly kind: "ok"; readonly value: T } | { readonly kind: "failure"; readonly reason: HomeMigrationStatusFailureReason };
 
 function readMigrationStore(path: string, assessmentId: string): ReadResult<MigrationRead> {
-  if (!isRegularFile(path)) return { kind: "failure", reason: "migration_store_unavailable" };
-  let db: DatabaseSync | undefined;
-  try {
-    db = new DatabaseSync(path, { readOnly: true });
+  return readDurableStore(path, "migration_store_unavailable", "migration_store_corrupt", (db) => {
     const row = db.prepare(`SELECT source_bridge_id, source_epoch_id, source_last_seq, status, rules_json
       FROM home_automation_migrations WHERE migration_id = ?`).get(assessmentId) as Row | undefined;
     if (row === undefined) return { kind: "failure", reason: "assessment_not_found" };
@@ -222,18 +222,11 @@ function readMigrationStore(path: string, assessmentId: string): ReadResult<Migr
         selectionAudit,
       },
     };
-  } catch (error) {
-    return { kind: "failure", reason: isMissingPathError(error) ? "migration_store_unavailable" : "migration_store_corrupt" };
-  } finally {
-    try { db?.close(); } catch { /* preserve the fixed result */ }
-  }
+  });
 }
 
 function readProposalStore(path: string, migration: MigrationRead): ReadResult<ProposalRead> {
-  if (!isRegularFile(path)) return { kind: "failure", reason: "proposal_store_unavailable" };
-  let db: DatabaseSync | undefined;
-  try {
-    db = new DatabaseSync(path, { readOnly: true });
+  return readDurableStore(path, "proposal_store_unavailable", "proposal_store_corrupt", (db) => {
     // Probe the schema even when this assessment has not linked a Proposal.
     db.prepare(`SELECT proposal_id, producer, idempotency_key, revision, status,
         created_at, updated_at, payload_json FROM proposals WHERE 1 = 0`).all();
@@ -286,11 +279,75 @@ function readProposalStore(path: string, migration: MigrationRead): ReadResult<P
         },
       },
     };
+  });
+}
+
+type StoreUnavailableReason = "migration_store_unavailable" | "proposal_store_unavailable";
+type StoreCorruptReason = "migration_store_corrupt" | "proposal_store_corrupt";
+
+interface DurableFileMetadata {
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly mode: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
+}
+
+function readDurableStore<T>(
+  path: string,
+  unavailableReason: StoreUnavailableReason,
+  corruptReason: StoreCorruptReason,
+  read: (db: DatabaseSync) => ReadResult<T>,
+): ReadResult<T> {
+  const beforeOpen = readRegularFileMetadata(path);
+  if (beforeOpen === undefined) return { kind: "failure", reason: unavailableReason };
+
+  let db: DatabaseSync | undefined;
+  let transactionStarted = false;
+  let dataVersionBefore: bigint | undefined;
+  let result: ReadResult<T> = { kind: "failure", reason: unavailableReason };
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    if (!sameDurableFileMetadata(beforeOpen, readRegularFileMetadata(path))) return result;
+
+    dataVersionBefore = readDataVersion(db);
+    db.exec("BEGIN DEFERRED");
+    transactionStarted = true;
+    // The store callback performs every durable row read against this one snapshot.
+    result = read(db);
   } catch (error) {
-    return { kind: "failure", reason: isMissingPathError(error) ? "proposal_store_unavailable" : "proposal_store_corrupt" };
+    result = { kind: "failure", reason: isUnavailableStoreError(error) ? unavailableReason : corruptReason };
   } finally {
-    try { db?.close(); } catch { /* preserve the fixed result */ }
+    if (transactionStarted) {
+      try {
+        db?.exec("ROLLBACK");
+      } catch {
+        result = { kind: "failure", reason: unavailableReason };
+      }
+    }
+
+    if (dataVersionBefore !== undefined && db !== undefined) {
+      try {
+        // SQLite reports commits from other connections after this snapshot ends.
+        if (readDataVersion(db) !== dataVersionBefore) {
+          result = { kind: "failure", reason: unavailableReason };
+        }
+      } catch {
+        result = { kind: "failure", reason: unavailableReason };
+      }
+    }
+    if (!sameDurableFileMetadata(beforeOpen, readRegularFileMetadata(path))) {
+      result = { kind: "failure", reason: unavailableReason };
+    }
+
+    try {
+      db?.close();
+    } catch {
+      result = { kind: "failure", reason: unavailableReason };
+    }
   }
+  return result;
 }
 
 interface ParsedMigration {
@@ -891,17 +948,58 @@ function isPath(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.trim() === value;
 }
 
-function isRegularFile(path: string): boolean {
+function readRegularFileMetadata(path: string): DurableFileMetadata | undefined {
   try {
-    return lstatSync(path).isFile();
+    const metadata = lstatSync(path, { bigint: true });
+    if (!metadata.isFile()) return undefined;
+    return {
+      dev: metadata.dev,
+      ino: metadata.ino,
+      mode: metadata.mode,
+      size: metadata.size,
+      mtimeNs: metadata.mtimeNs,
+      ctimeNs: metadata.ctimeNs,
+    };
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+function sameDurableFileMetadata(
+  before: DurableFileMetadata | undefined,
+  after: DurableFileMetadata | undefined,
+): boolean {
+  return before !== undefined && after !== undefined
+    && before.dev === after.dev
+    && before.ino === after.ino
+    && before.mode === after.mode
+    && before.size === after.size
+    && before.mtimeNs === after.mtimeNs
+    && before.ctimeNs === after.ctimeNs;
+}
+
+function readDataVersion(db: DatabaseSync): bigint {
+  const statement = db.prepare("PRAGMA data_version");
+  statement.setReadBigInts(true);
+  const row = statement.get() as Row | undefined;
+  if (typeof row?.data_version !== "bigint" || row.data_version < 0n) {
+    throw new Error("SQLite data_version is invalid");
+  }
+  return row.data_version;
 }
 
 function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null
     && (error as { readonly code?: unknown }).code === "ENOENT";
+}
+
+function isUnavailableStoreError(error: unknown): boolean {
+  if (isMissingPathError(error)) return true;
+  if (typeof error !== "object" || error === null) return false;
+  const code = (error as { readonly code?: unknown }).code;
+  if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES") return true;
+  const sqliteCode = (error as { readonly errcode?: unknown }).errcode;
+  return sqliteCode === 5 || sqliteCode === 6 || sqliteCode === 14;
 }
 
 function isBoundedText(value: unknown, maximum: number): value is string {

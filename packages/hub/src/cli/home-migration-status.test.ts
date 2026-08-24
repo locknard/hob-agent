@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -99,6 +99,86 @@ test("rejects a non-regular migration path before opening it", () => {
       localWritesPerformed: false,
     });
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when the migration database commits during the read", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-migration-status-migration-commit-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "missing-proposals.sqlite");
+  const writer = (() => {
+    seedMigration(migrationPath, { workflowStatus: "assessed", privateName: "private" });
+    const setup = new DatabaseSync(migrationPath);
+    setup.exec("PRAGMA journal_mode = WAL");
+    setup.close();
+    return new DatabaseSync(migrationPath);
+  })();
+  const statementPrototype = sqliteStatementPrototype();
+  const originalAll = statementPrototype.all;
+  let committed = false;
+  statementPrototype.all = function (this: SqliteStatementPrototype, ...parameters: unknown[]): unknown {
+    const result = originalAll.apply(this, parameters);
+    if (!committed) {
+      committed = true;
+      writer.prepare("UPDATE home_automation_migrations SET source_last_seq = source_last_seq + 1 WHERE migration_id = ?")
+        .run(ASSESSMENT_ID);
+    }
+    return result;
+  };
+  try {
+    assert.deepEqual(readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID), {
+      schemaVersion: "1",
+      outcome: "needs_attention",
+      assessmentId: ASSESSMENT_ID,
+      reason: "migration_store_unavailable",
+      readMode: "durable_only",
+      remoteWritesPerformed: false,
+      localWritesPerformed: false,
+    });
+    assert.equal(committed, true);
+  } finally {
+    statementPrototype.all = originalAll;
+    writer.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when the Proposal path is replaced during the read", () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-migration-status-proposal-replace-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "proposals.sqlite");
+  const replacementPath = join(directory, "replacement-proposals.sqlite");
+  seedMigration(migrationPath, { workflowStatus: "assessed", privateName: "private" });
+  replaceEligibleWorkflow(migrationPath, makeReadyWorkflow("proposal-replaced"));
+  seedReadyProposal(replacementPath, "proposal-replaced");
+  seedReadyProposal(proposalPath, "proposal-replaced");
+  const statementPrototype = sqliteStatementPrototype();
+  const originalAll = statementPrototype.all;
+  let replaced = false;
+  let allCalls = 0;
+  statementPrototype.all = function (this: SqliteStatementPrototype, ...parameters: unknown[]): unknown {
+    const result = originalAll.apply(this, parameters);
+    allCalls += 1;
+    if (!replaced && allCalls === 3) {
+      replaced = true;
+      renameSync(replacementPath, proposalPath);
+    }
+    return result;
+  };
+  try {
+    assert.deepEqual(readHomeMigrationStatusFromPaths({ migrationPath, proposalPath }, ASSESSMENT_ID), {
+      schemaVersion: "1",
+      outcome: "needs_attention",
+      assessmentId: ASSESSMENT_ID,
+      reason: "proposal_store_unavailable",
+      readMode: "durable_only",
+      remoteWritesPerformed: false,
+      localWritesPerformed: false,
+    });
+    assert.equal(replaced, true);
+  } finally {
+    statementPrototype.all = originalAll;
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -619,6 +699,19 @@ test("fails closed before parsing an oversized Proposal payload", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+interface SqliteStatementPrototype {
+  all: (...parameters: unknown[]) => unknown;
+}
+
+function sqliteStatementPrototype(): SqliteStatementPrototype {
+  const probe = new DatabaseSync(":memory:");
+  try {
+    return Object.getPrototypeOf(probe.prepare("SELECT 1")) as SqliteStatementPrototype;
+  } finally {
+    probe.close();
+  }
+}
 
 function seedMigration(
   path: string,
