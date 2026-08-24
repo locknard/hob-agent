@@ -12,7 +12,7 @@ const DEPLOYMENT_FINGERPRINT = `sha256:${"b".repeat(64)}`;
 const SWITCH_OPERATION_ID = "9be3b4dceaa5ee83f586d923469eb20b";
 const PERSISTED_SWITCH_OPERATION_ID = "11111111111111111111111111111111";
 const ROLLBACK_OPERATION_ID = "6374645a003501464e33bcaa734d4ed3";
-const RECOVERY_SWITCH_OPERATION_ID = "a93e2e0295393bddeb0ecd7d78e5474e";
+const RECOVERY_SWITCH_OPERATION_ID = "1327fcc9190451509e41812042f0792b";
 const RECOVERY_ROLLBACK_OPERATION_ID = "b089ca611391d06fde794987c0fdc66b";
 const BASE_REQUEST = {
   proposalId: "proposal-migration",
@@ -1341,6 +1341,78 @@ test("closes an active switching receipt for every recovery preflight rejection 
       expectedSwitchOperationId: PERSISTED_SWITCH_OPERATION_ID,
     }], scenario.name);
   }
+});
+
+test("restarts switching recovery with a fresh operation id after a crash-left receipt", async () => {
+  const { events, runtime, wrapper } = deploymentFixture();
+  let workflow: "switching" | "needs_attention" | "verified" = "switching";
+  let receipt = {
+    operationId: PERSISTED_SWITCH_OPERATION_ID,
+    startedAt: "2026-08-24T00:00:03.000Z",
+  };
+  const deployment = {
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    deploymentTarget: BASE_REQUEST.intent.target,
+    deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT,
+  } as const;
+  const resumeOperationIds: string[] = [];
+  runtime.findWorkflowForProposal = () => {
+    if (workflow === "verified") return governedVerifiedLookup();
+    if (workflow === "switching") {
+      return {
+        ...governedLookup("switching"),
+        ...deployment,
+        switchOperationId: receipt.operationId,
+        switchStartedAt: receipt.startedAt,
+      };
+    }
+    return {
+      ...governedLookup("needs_attention", "switch_unknown"),
+      ...deployment,
+      switchOperationId: receipt.operationId,
+      switchStartedAt: receipt.startedAt,
+    };
+  };
+  runtime.failRuleWorkflow = (value: unknown) => {
+    events.push("runtime.fail");
+    const input = value as { readonly from: string; readonly expectedSwitchOperationId?: string };
+    if (input.from === "switching") {
+      assert.equal(input.expectedSwitchOperationId, receipt.operationId);
+      workflow = "needs_attention";
+    }
+    return true;
+  };
+  runtime.resumeRuleSwitch = (...args: unknown[]) => {
+    events.push("runtime.resumeSwitch");
+    const input = args[0] as { readonly switchOperationId: string };
+    resumeOperationIds.push(input.switchOperationId);
+    if (input.switchOperationId === receipt.operationId) return false;
+    receipt = {
+      operationId: input.switchOperationId,
+      startedAt: "2026-08-24T00:00:03.000Z",
+    };
+    workflow = "switching";
+    if (resumeOperationIds.length === 1) throw new Error("simulated crash after recovery receipt");
+    return true;
+  };
+  runtime.verifyRuleSwitch = () => {
+    events.push("runtime.verifySwitch");
+    workflow = "verified";
+    return true;
+  };
+
+  await assert.rejects(() => wrapper.deploy(BASE_REQUEST), /simulated crash after recovery receipt/);
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "verified",
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    configFingerprint: DEPLOYMENT_FINGERPRINT,
+  });
+  assert.equal(resumeOperationIds.length, 2);
+  assert.notEqual(resumeOperationIds[1], resumeOperationIds[0]);
+  assert.equal(resumeOperationIds.every((value) => /^[0-9a-f]{32}$/.test(value)), true);
 });
 
 test("does not verify an un-fingerprinted running target during switching recovery", async () => {

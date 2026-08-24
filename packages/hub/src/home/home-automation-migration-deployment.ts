@@ -324,8 +324,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return this.restoreFailedSwitchAfterReadback(request, failureReason);
     }
 
-    const switchOperationId = operationId(
-      "switch",
+    const switchOperationId = recoverySwitchOperationId(
       request.proposalId,
       `recovery:${request.deploymentId}:${request.target}`,
       request.lookup,
@@ -455,7 +454,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return failed("迁移自动化的部署指纹无法验证，已停止后续写入。");
     }
 
-    const switchOperationId = operationId("switch", request.proposalId, `recovery:${request.revision}`, lookup);
+    const switchOperationId = recoverySwitchOperationId(request.proposalId, `recovery:${request.revision}`, lookup);
     const failSwitch = (reason: "switch_failed" | "switch_unknown" | "verification_failed"): void => {
       this.fail(lookup, "switching", reason, switchOperationId);
     };
@@ -1258,9 +1257,18 @@ function operationId(
   proposalId: string,
   revision: number | string,
   lookup: Exclude<HomeAutomationMigrationDeploymentLookup, { readonly status: "not_migration" | "ambiguous" }>,
+  receiptIdentity?: string,
 ): string {
   return createHash("sha256")
-    .update(`${kind}\u0000${lookup.migrationId}\u0000${lookup.ruleRef}\u0000${proposalId}\u0000${revision}`, "utf8")
+    .update(`${kind}\u0000${lookup.migrationId}\u0000${lookup.ruleRef}\u0000${proposalId}\u0000${revision}${receiptIdentity === undefined ? "" : `\u0000${receiptIdentity}`}`, "utf8")
     .digest("hex")
     .slice(0, 32);
+}
+
+function recoverySwitchOperationId(
+  proposalId: string,
+  revision: string,
+  lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
+): string {
+  return operationId("switch", proposalId, revision, lookup, lookup.switchOperationId ?? lookup.switchStartedAt);
 }
