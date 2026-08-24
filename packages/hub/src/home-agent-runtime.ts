@@ -41,7 +41,14 @@ import {
   HomeAdviceService,
   type HomeAdviceServiceOptions,
 } from "./home/home-advice-service.js";
-import { ProposalInboxService, type InboxPreparationRetryInput } from "@hob-agent/inbox-web/service";
+import {
+  ProposalInboxService,
+  type InboxPreparationRetryInput,
+  type InboxReviewActor,
+  type ProposalInboxMigrationSelection,
+  type ProposalInboxMigrationSelectionPort,
+  type ProposalInboxMigrationSelectionPrepareResult,
+} from "@hob-agent/inbox-web/service";
 import {
   ProposalInboxHttpService,
   type ProposalInboxHttpOptions,
@@ -96,6 +103,95 @@ import {
   HomeAutomationMigrationRuntimeService,
   type HomeAutomationMigrationRuntimeServiceOptions,
 } from "./home/home-automation-migration-runtime-service.js";
+import type {
+  HomeAutomationMigrationSelectionPrincipal,
+  HomeAutomationMigrationSelectionProjection,
+} from "./home/home-automation-migration-selection.js";
+
+/** The only runtime methods exposed to the structural Inbox adapter. */
+export interface HomeAutomationMigrationSelectionInboxRuntimePort {
+  listMigrationSelections(
+    principal: HomeAutomationMigrationSelectionPrincipal,
+  ): readonly HomeAutomationMigrationSelectionProjection[];
+  submitMigrationSelection(
+    token: string,
+    principal: HomeAutomationMigrationSelectionPrincipal,
+  ): Promise<HomeAutomationMigrationSelectionProjection>;
+}
+
+/**
+ * Adapts the Hub-owned selection facade to Inbox's presentation-only seam.
+ * Inbox remains the presence gate; this adapter maps only the authenticated
+ * principal and private-device binding, never raw assessment identity.
+ */
+export function createHomeAutomationMigrationSelectionInboxPort(
+  runtime: HomeAutomationMigrationSelectionInboxRuntimePort,
+): ProposalInboxMigrationSelectionPort {
+  return {
+    list(actor: InboxReviewActor): readonly ProposalInboxMigrationSelection[] {
+      try {
+        const principal = selectionPrincipalFromInboxActor(actor);
+        return runtime.listMigrationSelections(principal)
+          .map((selection) => projectInboxMigrationSelection(selection, principal.privateDeviceBinding === "verified"))
+          .filter((selection): selection is ProposalInboxMigrationSelection => selection !== undefined);
+      } catch {
+        return [];
+      }
+    },
+    async prepare(input: {
+      readonly selectionToken: string;
+      readonly actor: InboxReviewActor;
+    }): Promise<ProposalInboxMigrationSelectionPrepareResult> {
+      try {
+        const result = await runtime.submitMigrationSelection(
+          input.selectionToken,
+          selectionPrincipalFromInboxActor(input.actor),
+        );
+        if (result.status === "prepared" && isBoundedMigrationProposalId(result.proposalId)) {
+          return { status: "prepared", proposalId: result.proposalId };
+        }
+      } catch {
+        // The Inbox sees one fixed unavailable outcome for malformed or stale
+        // selection claims; Hub keeps the durable reason in its owner store.
+      }
+      return { status: "unavailable" };
+    },
+  };
+}
+
+function selectionPrincipalFromInboxActor(actor: InboxReviewActor): HomeAutomationMigrationSelectionPrincipal {
+  return {
+    principalId: actor.principalId,
+    role: actor.role,
+    privateDeviceBinding: actor.device.kind === "private"
+      && actor.device.boundPrincipalId === actor.principalId
+      ? "verified"
+      : "unverified",
+  };
+}
+
+function projectInboxMigrationSelection(
+  value: HomeAutomationMigrationSelectionProjection,
+  allowToken: boolean,
+): ProposalInboxMigrationSelection | undefined {
+  if (typeof value.name !== "string" || value.name.length === 0 || value.name.length > 200) return undefined;
+  if (value.status === "selectable") {
+    return allowToken && typeof value.token === "string" && /^[a-f0-9]{32}$/u.test(value.token)
+      ? { name: value.name, status: "selectable", token: value.token }
+      : { name: value.name, status: "selectable" };
+  }
+  if (value.status === "prepared" && isBoundedMigrationProposalId(value.proposalId)) {
+    return { name: value.name, status: "prepared", proposalId: value.proposalId };
+  }
+  return { name: value.name, status: "unavailable" };
+}
+
+function isBoundedMigrationProposalId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value);
+}
 
 export interface HomeAgentRuntimeOptions {
   readonly homeWorld: HomeWorldServiceOptions;
@@ -197,6 +293,12 @@ class HomeAgentProductBundleRuntime {
           this.service<HomeWorldService>("homeWorld"),
         ),
       });
+      // Proposal ownership is mounted before restart recovery. Recovery is
+      // lookup-only and bounded by the migration facade; a stale/corrupt row
+      // cannot prevent the product bundle from starting.
+      void this.service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations")
+        .recoverMigrationSelections()
+        .catch(() => undefined);
       await this.mount(HomeArtifactService, { registry: this.artifactRegistry });
       this.artifactPipeline = await createArtifactPipelineComposition({
         context: this.context,
@@ -296,6 +398,9 @@ class HomeAgentProductBundleRuntime {
         preparation: {
           retry: (input: InboxPreparationRetryInput) => this.retryPreparation(input),
         },
+        migrationSelection: createHomeAutomationMigrationSelectionInboxPort(
+          this.service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations"),
+        ),
       });
       if (this.options.inboxHttp !== undefined) {
         await this.mount(ProposalInboxHttpService, {

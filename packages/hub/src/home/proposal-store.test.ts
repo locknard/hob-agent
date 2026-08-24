@@ -235,6 +235,33 @@ test("a selected migration plan reaches ready without spending ordinary proposal
   }
 });
 
+test("finds only the exact migration proposal identity through the narrow owner lookup", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const dedupKey = "ha-migration:exact-identity";
+    const idempotencyKey = "ha-migration-attempt:exact-identity";
+    const created = store.createMigrationGoverned(input({
+      artifactCandidate,
+      dedupKey,
+      idempotencyKey,
+      provenance: { producer: "home-automation-migration" },
+    }));
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected migration proposal");
+
+    assert.deepEqual(store.findMigrationProposalByIdentity({ dedupKey, idempotencyKey }), created.proposal);
+    assert.equal(store.findMigrationProposalByIdentity({ dedupKey, idempotencyKey: `${idempotencyKey}:wrong` }), undefined);
+    assert.equal(store.findMigrationProposalByIdentity({ dedupKey: `${dedupKey}:wrong`, idempotencyKey }), undefined);
+    const standard = store.create(input({ dedupKey: "ordinary-exact-identity", idempotencyKey: "ordinary-exact-identity:v1" }));
+    assert.equal(store.findMigrationProposalByIdentity({
+      dedupKey: standard.dedupKey,
+      idempotencyKey: standard.idempotencyKey,
+    }), undefined);
+  } finally {
+    store.close();
+  }
+});
+
 test("generic proposal admission cannot select the migration lane or masquerade as its producer", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {

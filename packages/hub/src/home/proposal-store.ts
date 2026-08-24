@@ -526,6 +526,12 @@ export interface ProposalListQuery {
   readonly visibleOnly?: boolean;
 }
 
+/** Exact identity used only by Hub-owned migration restart recovery. */
+export interface MigrationProposalIdentity {
+  readonly dedupKey: string;
+  readonly idempotencyKey: string;
+}
+
 export interface ProposalSnoozeInput {
   readonly proposalId: string;
   readonly expectedRevision?: number;
@@ -1008,6 +1014,38 @@ export class SqliteProposalStore {
       FROM proposals WHERE proposal_id = ?`)
       .get(proposalId) as ProposalRow | undefined;
     return row ? fromRow(row) : undefined;
+  }
+
+  /**
+   * Reads one migration proposal by its complete deterministic identity.
+   * This query is intentionally narrower than list() and never creates an
+   * alias, expires a row, merges evidence, or admits a proposal.
+   */
+  findMigrationProposalByIdentity(input: MigrationProposalIdentity): ProposalEnvelope | undefined {
+    if (!input || typeof input !== "object"
+      || Object.keys(input).length !== 2
+      || !Object.prototype.hasOwnProperty.call(input, "dedupKey")
+      || !Object.prototype.hasOwnProperty.call(input, "idempotencyKey")) {
+      throw new TypeError("migration proposal identity is invalid");
+    }
+    validateBoundedKey(input.dedupKey, "migration proposal dedup key");
+    validateBoundedKey(input.idempotencyKey, "migration proposal idempotency key");
+    const row = this.db.prepare(`SELECT
+        proposal_id, producer, idempotency_key, status, revision,
+        created_at, updated_at, payload_json
+      FROM proposals
+      WHERE producer = ? AND idempotency_key = ?`).get(
+      HOME_AUTOMATION_MIGRATION_PRODUCER,
+      input.idempotencyKey,
+    ) as ProposalRow | undefined;
+    if (row === undefined) return undefined;
+    const proposal = fromRow(row);
+    return proposal.provenance.producer === HOME_AUTOMATION_MIGRATION_PRODUCER
+      && proposal.reviewLane === "migration"
+      && proposal.idempotencyKey === input.idempotencyKey
+      && proposal.dedupKey === input.dedupKey
+      ? proposal
+      : undefined;
   }
 
   list(query: ProposalListQuery = {}): readonly ProposalEnvelope[] {

@@ -91,6 +91,31 @@ const PROPOSAL_IDENTITY_VERSION = "home-automation-migration-proposal-v1";
 const SOURCE_FINGERPRINT = /^sha256:[0-9a-f]{64}$/u;
 const MAX_ID_BYTES = 200;
 
+/** Stable proposal identities reused by restart-only selection recovery. */
+export function homeAutomationMigrationProposalIdentity(input: {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly sourceBridgeId: string;
+  readonly sourceEpochId: string;
+  readonly sourceLastSeq: number;
+  readonly sourceFingerprint: string;
+}): { readonly dedupKey: string; readonly idempotencyKey: string } {
+  const material = [
+    PROPOSAL_IDENTITY_VERSION,
+    input.migrationId,
+    input.ruleRef,
+    input.sourceBridgeId,
+    input.sourceEpochId,
+    String(input.sourceLastSeq),
+    input.sourceFingerprint,
+  ].join("\u0000");
+  const identity = createHash("sha256").update(material, "utf8").digest("hex");
+  return {
+    dedupKey: `home-automation-migration:${identity}`,
+    idempotencyKey: `home-automation-migration-attempt:${identity}`,
+  };
+}
+
 /**
  * Creates review drafts from trusted migration candidates.
  *
@@ -233,18 +258,16 @@ function sourceIdentity(
   input: HomeAutomationMigrationPreparationInput,
   sourceRule: EligibleSourceRule,
 ): string {
-  const material = [
-    PROPOSAL_IDENTITY_VERSION,
-    input.migrationId,
-    input.ruleRef,
-    sourceRule.sourceBridgeId,
-    sourceRule.sourceEpochId,
-    String(sourceRule.sourceLastSeq),
-    sourceRule.sourceFingerprint,
-  ].join("\u0000");
   // The source cut is included in both behavior and attempt identity. A
   // changed fingerprint or watermark therefore never reuses an old draft.
-  return createHash("sha256").update(material, "utf8").digest("hex");
+  return homeAutomationMigrationProposalIdentity({
+    migrationId: input.migrationId,
+    ruleRef: input.ruleRef,
+    sourceBridgeId: sourceRule.sourceBridgeId,
+    sourceEpochId: sourceRule.sourceEpochId,
+    sourceLastSeq: sourceRule.sourceLastSeq,
+    sourceFingerprint: sourceRule.sourceFingerprint,
+  }).dedupKey.slice("home-automation-migration:".length);
 }
 
 function eligibleSourceRule(

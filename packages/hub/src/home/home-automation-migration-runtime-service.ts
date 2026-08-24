@@ -22,8 +22,14 @@ import {
 } from "./home-automation-migration-world-translator.js";
 import {
   HomeAutomationMigrationPreparationService,
+  homeAutomationMigrationProposalIdentity,
   type HomeAutomationMigrationPreparationFailureReason,
 } from "./home-automation-migration-preparation.js";
+import {
+  HomeAutomationMigrationSelectionFacade,
+  type HomeAutomationMigrationSelectionPrincipal,
+  type HomeAutomationMigrationSelectionProjection,
+} from "./home-automation-migration-selection.js";
 import {
   HomeAutomationMigrationSimulator,
   computeHomeAutomationMigrationCandidateContentHash,
@@ -194,6 +200,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
 
   private readonly world: HomeWorldMigrationPort;
   private readonly migration: HomeAutomationMigrationService;
+  private readonly selection: HomeAutomationMigrationSelectionFacade;
   private readonly simulator = new HomeAutomationMigrationSimulator();
   private preparation: HomeAutomationMigrationPreparationService | undefined;
   private closed = false;
@@ -213,6 +220,21 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
       ...(options.clock === undefined ? {} : { clock: options.clock }),
       ...(options.migrationIdFactory === undefined ? {} : { migrationIdFactory: options.migrationIdFactory }),
       ...(options.idempotencyKeyFactory === undefined ? {} : { idempotencyKeyFactory: options.idempotencyKeyFactory }),
+    });
+    this.selection = new HomeAutomationMigrationSelectionFacade({
+      store,
+      prepareRule: async (input) => {
+        const result = await this.prepareRuleReview(input);
+        if (result.status === "translated" || result.status === "simulated" || result.status === "ready") {
+          return {
+            status: "prepared",
+            proposalId: result.proposalId,
+            ...(result.status === "ready" ? { proposalRevision: result.reviewProposalRevision } : {}),
+          };
+        }
+        return { status: "unavailable", reason: "prepare_unavailable" };
+      },
+      lookupPreparedRule: (input) => this.lookupPreparedSelection(input),
     });
   }
 
@@ -262,6 +284,36 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   list(): readonly HomeAutomationMigrationAssessment[] {
     try {
       return this.migration.list();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Safe, actor-bound selection projections; internal migration identity stays server-side. */
+  listMigrationSelections(principal: HomeAutomationMigrationSelectionPrincipal): readonly HomeAutomationMigrationSelectionProjection[] {
+    try {
+      return this.selection.list(principal);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Consumes a selection token through the Hub-owned preparation seam. */
+  async submitMigrationSelection(
+    token: string,
+    principal: HomeAutomationMigrationSelectionPrincipal,
+  ): Promise<HomeAutomationMigrationSelectionProjection> {
+    try {
+      return await this.selection.submitSelection(token, principal);
+    } catch {
+      return { name: "Unavailable", status: "unavailable" };
+    }
+  }
+
+  /** Restart reconciliation uses lookup-only Proposal identity recovery. */
+  async recoverMigrationSelections(): Promise<readonly HomeAutomationMigrationSelectionProjection[]> {
+    try {
+      return await this.selection.recover();
     } catch {
       return [];
     }
@@ -635,7 +687,83 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.selection.close();
     this.migration.close();
+  }
+
+  private lookupPreparedSelection(input: {
+    readonly migrationId: string;
+    readonly ruleRef: string;
+    readonly sourceBridgeId: string;
+    readonly sourceEpochId: string;
+    readonly sourceLastSeq: number;
+    readonly sourceFingerprint: string;
+  }): { readonly status: "prepared"; readonly proposalId: string; readonly proposalRevision?: number } | { readonly status: "unavailable"; readonly reason: "prepare_unavailable" } {
+    const assessment = this.migration.get(input.migrationId);
+    if (assessment === undefined || assessment.status !== "assessed"
+      || assessment.sourceBridgeId !== input.sourceBridgeId
+      || assessment.sourceEpochId !== input.sourceEpochId
+      || assessment.sourceLastSeq !== input.sourceLastSeq) {
+      return { status: "unavailable", reason: "prepare_unavailable" };
+    }
+    const rule = assessment.rules.find((candidate) => candidate.ruleRef === input.ruleRef);
+    const workflow = rule?.workflow;
+    if (rule?.disposition !== "eligible" || workflow === undefined || workflow.sourceFingerprint !== input.sourceFingerprint) {
+      return { status: "unavailable", reason: "prepare_unavailable" };
+    }
+    if ((workflow.status === "translated" || workflow.status === "simulated" || workflow.status === "ready")
+      && workflow.proposalId !== undefined) {
+      return {
+        status: "prepared",
+        proposalId: workflow.proposalId,
+        ...(workflow.candidateProposalRevision === undefined ? {} : { proposalRevision: workflow.candidateProposalRevision }),
+      };
+    }
+    // A crash can leave the exact migration Proposal committed while the
+    // assessment workflow is still `assessed`. Recovery performs one exact
+    // owner lookup; it never scans a page or calls the create/preparation ingress.
+    const proposals = readHomeProposals(this.ctx);
+    if (proposals?.findMigrationProposalByIdentity === undefined) {
+      return { status: "unavailable", reason: "prepare_unavailable" };
+    }
+    const identity = homeAutomationMigrationProposalIdentity({
+      migrationId: input.migrationId,
+      ruleRef: input.ruleRef,
+      sourceBridgeId: input.sourceBridgeId,
+      sourceEpochId: input.sourceEpochId,
+      sourceLastSeq: input.sourceLastSeq,
+      sourceFingerprint: input.sourceFingerprint,
+    });
+    const proposal = proposals.findMigrationProposalByIdentity(identity);
+    if (proposal === undefined || proposal.reviewLane !== "migration" || proposal.dedupKey !== identity.dedupKey) {
+      return { status: "unavailable", reason: "prepare_unavailable" };
+    }
+    const proposalRecord = proposal as unknown as Record<string, unknown>;
+    const candidateProposalRevision = candidateRevisionForProposal(proposalRecord);
+    const candidateContentHash = candidateContentHashForProposal(proposalRecord);
+    if (candidateProposalRevision === undefined || candidateContentHash === undefined) {
+      return { status: "unavailable", reason: "prepare_unavailable" };
+    }
+    const linked = this.migration.translateRule({
+      migrationId: input.migrationId,
+      ruleRef: input.ruleRef,
+      from: "assessed",
+      proposalId: proposal.id,
+      candidateProposalRevision,
+      candidateContentHash,
+    });
+    if (linked === undefined) {
+      const converged = this.migration.get(input.migrationId);
+      const convergedRule = eligibleWorkflowRule(converged, input.ruleRef);
+      const convergedWorkflow = convergedRule?.workflow;
+      if (convergedWorkflow?.status !== "translated"
+        || convergedWorkflow.proposalId !== proposal.id
+        || convergedWorkflow.candidateProposalRevision !== candidateProposalRevision
+        || convergedWorkflow.candidateContentHash !== candidateContentHash) {
+        return { status: "unavailable", reason: "prepare_unavailable" };
+      }
+    }
+    return { status: "prepared", proposalId: proposal.id, proposalRevision: candidateProposalRevision };
   }
 
   private preparationService(): HomeAutomationMigrationPreparationService | undefined {
@@ -695,6 +823,11 @@ interface HomeWorldMigrationPort extends HomeAutomationMigrationWorldPort {
 interface HomeAutomationMigrationProposalPort {
   createMigrationDraftGoverned(input: CreateHomeMigrationDraftInput): Promise<ProposalCreationResult> | ProposalCreationResult;
   get(proposalId: string): ProposalEnvelope | undefined;
+  /** Narrow, exact identity lookup used only during restart recovery. */
+  findMigrationProposalByIdentity: (input: {
+    readonly dedupKey: string;
+    readonly idempotencyKey: string;
+  }) => ProposalEnvelope | undefined;
   preparationForProposal(proposalId: string, proposalRevision: number): HomePreparationStatus | undefined;
 }
 
@@ -704,7 +837,8 @@ function readHomeProposals(ctx: Context): HomeAutomationMigrationProposalPort | 
     if (!isRecord(value)
       || typeof value.createMigrationDraftGoverned !== "function"
       || typeof value.get !== "function"
-      || typeof value.preparationForProposal !== "function") return undefined;
+      || typeof value.preparationForProposal !== "function"
+      || typeof value.findMigrationProposalByIdentity !== "function") return undefined;
     return value as unknown as HomeAutomationMigrationProposalPort;
   } catch {
     return undefined;

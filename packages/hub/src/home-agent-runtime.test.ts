@@ -12,11 +12,19 @@ import {
 import { Context } from "@deepseek-ai/cordis";
 
 import { BridgeCatalog } from "./bridge/bridge-catalog.js";
-import { createHomeAgentRuntime, mountHomeAgentProductBundle } from "./home-agent-runtime.js";
+import {
+  createHomeAgentRuntime,
+  createHomeAutomationMigrationSelectionInboxPort,
+  mountHomeAgentProductBundle,
+} from "./home-agent-runtime.js";
 import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home/home-onboarding-store.js";
 import { SyntheticMediaCatalogProvider } from "./media/home-media-services.js";
-import { SqliteProposalStore } from "./home/proposal-store.js";
+import { SqliteProposalStore, type CreateProposalInput } from "./home/proposal-store.js";
 import { HomeAutomationMigrationDeployment } from "./home/home-automation-migration-deployment.js";
+import { homeAutomationMigrationProposalIdentity } from "./home/home-automation-migration-preparation.js";
+import { digestToken } from "./home/home-automation-migration-selection.js";
+import { SqliteHomeAutomationMigrationStore } from "./home/home-automation-migration-store.js";
+import { computeHomeAutomationMigrationCandidateContentHash } from "./home/home-automation-migration-simulator.js";
 import { SqliteProductViewRecipeDraftStore } from "./home/product-view-recipe-draft-store.js";
 import { SyntheticBridge } from "@hob/bridge-contract/testing";
 import { WorldIdentityManager } from "./world/world-identity.js";
@@ -32,6 +40,48 @@ const fixtureReviewPrincipal = {
     boundPrincipalId: "household-member",
   },
 };
+
+test("maps the Hub migration selection runtime to the Inbox structural port without leaking identities", async () => {
+  const calls: unknown[] = [];
+  const port = createHomeAutomationMigrationSelectionInboxPort({
+    listMigrationSelections: (principal) => {
+      calls.push({ kind: "list", principal });
+      return [{ name: "晚间灯光", status: "selectable", token: "a".repeat(32) }];
+    },
+    submitMigrationSelection: (token, principal) => {
+      calls.push({ kind: "prepare", token, principal });
+      return Promise.resolve({ name: "晚间灯光", status: "prepared", proposalId: "proposal-1" });
+    },
+  });
+  const actor = {
+    ...fixtureReviewPrincipal,
+    present: true,
+  };
+  assert.deepEqual(port.list(actor), [{ name: "晚间灯光", status: "selectable", token: "a".repeat(32) }]);
+  assert.deepEqual(await port.prepare!({ selectionToken: "a".repeat(32), actor }), {
+    status: "prepared",
+    proposalId: "proposal-1",
+  });
+  assert.deepEqual(port.list({ ...actor, device: { kind: "shared" } }), [{
+    name: "晚间灯光",
+    status: "selectable",
+  }]);
+  assert.deepEqual(calls, [
+    {
+      kind: "list",
+      principal: { principalId: "household-member", role: "adult_member", privateDeviceBinding: "verified" },
+    },
+    {
+      kind: "prepare",
+      token: "a".repeat(32),
+      principal: { principalId: "household-member", role: "adult_member", privateDeviceBinding: "verified" },
+    },
+    {
+      kind: "list",
+      principal: { principalId: "household-member", role: "adult_member", privateDeviceBinding: "unverified" },
+    },
+  ]);
+});
 
 function launchEnvironment() {
   return createLaunchEnvironmentSnapshot([{
@@ -278,6 +328,151 @@ test("mounts the read-only home automation migration service after HomeWorld and
     rmSync(directory, { recursive: true, force: true });
   }
   assert.equal(runtime.context.homeAutomationMigrations, undefined);
+});
+
+test("runs lookup-only migration selection recovery after the real Proposal owner mounts", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-runtime-migration-recovery-"));
+  const migrationPath = join(directory, "migrations.sqlite");
+  const proposalPath = join(directory, "proposals.sqlite");
+  const now = "2026-08-24T08:00:00.000Z";
+  const migrationId = "1".repeat(32);
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const source = { bridgeId: "bridge-ha", epochId: "epoch-1", lastSeq: 12 } as const;
+  const rule = {
+    ruleRef: "rule-1",
+    name: "Living room light",
+    enabled: true,
+    updatedAt: now,
+    triggerClass: "state" as const,
+    conditionClass: "flat_and" as const,
+    actionClass: "reversible" as const,
+    sourceFingerprint,
+    disposition: "eligible" as const,
+    workflow: { status: "assessed" as const, sourceFingerprint, assessedAt: now },
+  };
+  const candidate = {
+    schemaVersion: "1" as const,
+    content: {
+      trigger: { kind: "capability_changed" as const, source: { hwCapabilityId: "hwc-1" } },
+      conditions: [],
+      actions: [{ kind: "set_boolean" as const, target: { hwCapabilityId: "hwc-1" }, value: false }],
+      rollback: { kind: "restore_previous_state" as const, target: { hwCapabilityId: "hwc-1" }, maxAgeSeconds: 3_600 },
+      postconditions: [{
+        kind: "capability_value" as const,
+        source: { hwCapabilityId: "hwc-1" },
+        operator: "equals" as const,
+        value: false,
+        withinSeconds: 30,
+      }],
+    },
+  };
+  const principal = { principalId: "member-recovery", role: "adult_member" as const, privateDeviceBinding: "verified" as const };
+  const migrationStore = new SqliteHomeAutomationMigrationStore({ path: migrationPath });
+  const proposalStore = new SqliteProposalStore({ path: proposalPath, now: () => now, id: () => "recovered" });
+  let runtime: ReturnType<typeof createHomeAgentRuntime> | undefined;
+  try {
+    migrationStore.discover({
+      migrationId,
+      idempotencyKey: "2".repeat(32),
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      sourceBridgeId: source.bridgeId,
+      sourceEpochId: source.epochId,
+      sourceLastSeq: source.lastSeq,
+      analysisMode: "trusted_neutral",
+      rules: [rule],
+      createdAt: now,
+    });
+    assert.equal(migrationStore.assess({
+      migrationId,
+      status: "assessed",
+      assessedAt: now,
+      rules: [rule],
+    }), true);
+    const identity = homeAutomationMigrationProposalIdentity({
+      migrationId,
+      ruleRef: rule.ruleRef,
+      sourceBridgeId: source.bridgeId,
+      sourceEpochId: source.epochId,
+      sourceLastSeq: source.lastSeq,
+      sourceFingerprint,
+    });
+    const proposalInput: CreateProposalInput = {
+      kind: "automation-draft",
+      title: "Living room light",
+      summary: "Recovered migration candidate",
+      dedupKey: identity.dedupKey,
+      idempotencyKey: identity.idempotencyKey,
+      provenance: { producer: "home-automation-migration" },
+      evidence: {
+        references: [{ bridgeId: source.bridgeId, observedAt: now }],
+        watermarks: [{ bridgeId: source.bridgeId, epochId: source.epochId, lastSeq: source.lastSeq, freshness: "fresh", gapCount: 0 }],
+      },
+      conflictCheck: { status: "checked", existingAutomationCount: 0, matches: [] },
+      dryRun: { status: "not_run", summary: "No automation artifact exists yet; execution simulation was not run." },
+      risk: { level: "low", reasons: [], requiresHumanApproval: true },
+      rationale: { householdValue: "Keep the existing behavior available for review.", whyNow: "The previous process stopped after proposal admission.", uncertainties: ["The household still wants this behavior."] },
+      spaceCoverage: { selectedDevices: 1, devicesWithSingleSpace: 1, devicesWithoutSpace: 0, devicesWithMultipleSpaces: 0 },
+      intent: { type: "automation-draft", description: "Review a recovered draft; do not install it.", rollback: "Reject the draft proposal." },
+      artifactCandidate: candidate,
+    };
+    const created = proposalStore.createMigrationGoverned(proposalInput);
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected recovered migration proposal");
+    assert.equal(created.proposal.id, "proposal-recovered");
+    migrationStore.issueSelection({
+      selectionId: "3".repeat(32),
+      migrationId,
+      ruleRef: rule.ruleRef,
+      principal,
+      sourceBridgeId: source.bridgeId,
+      sourceEpochId: source.epochId,
+      sourceLastSeq: source.lastSeq,
+      sourceFingerprint,
+      tokenDigest: digestToken("e".repeat(32)),
+      generation: "old-generation",
+      issuedAt: now,
+      expiresAt: "2026-08-24T08:05:00.000Z",
+    });
+    assert.equal(migrationStore.claimSelection({
+      selectionId: "3".repeat(32),
+      tokenDigest: digestToken("e".repeat(32)),
+      principal,
+      generation: "old-generation",
+      now,
+    }).outcome, "claimed");
+    migrationStore.close();
+    proposalStore.close();
+
+    runtime = createHomeAgentRuntime({
+      homeWorld: homeWorldOptions(),
+      homeProposals: { path: proposalPath },
+      homeAutomationMigrations: { path: migrationPath },
+      launchEnvironment: launchEnvironment(),
+      agent: { provider: "deepseek", model: "deepseek-v4-flash", sessionId: "migration-recovery-runtime-test" },
+    });
+    await runtime.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const recoveredWorkflow = runtime.context.homeAutomationMigrations.get(migrationId)?.rules[0]?.workflow;
+    assert.equal(recoveredWorkflow?.status, "translated");
+    assert.equal(recoveredWorkflow?.proposalId, "proposal-recovered");
+    assert.equal(recoveredWorkflow?.candidateProposalRevision, 1);
+    assert.equal(recoveredWorkflow?.candidateContentHash, computeHomeAutomationMigrationCandidateContentHash(candidate.content));
+    assert.deepEqual(runtime.context.homeAutomationMigrations.listMigrationSelections(principal), [{
+      name: "Living room light",
+      status: "prepared",
+      proposalId: "proposal-recovered",
+    }]);
+    assert.deepEqual(runtime.context.homeInbox.getProductShellProjection(fixtureReviewPrincipal, undefined, true).migrationSelections, [{
+      name: "Living room light",
+      status: "prepared",
+      proposalId: "proposal-recovered",
+    }]);
+  } finally {
+    await runtime?.stop();
+    try { migrationStore.close(); } catch { /* already closed after setup */ }
+    try { proposalStore.close(); } catch { /* already closed after setup */ }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("wires the HomeWorld action descriptor source into the runtime review center", async () => {

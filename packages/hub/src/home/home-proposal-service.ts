@@ -9,6 +9,7 @@ import {
   type ProposalCreationResult,
   type ProposalCalibrationItem,
   type ProposalListQuery,
+  type MigrationProposalIdentity,
   type ProposalQualitySummary,
   type ProposalRetentionEvidenceReference,
   type ProposalClearDedupLatchInput,
@@ -388,6 +389,11 @@ export class HomeProposalService extends Service {
 
   get(proposalId: string): ProposalEnvelope | undefined {
     return this.store.get(proposalId);
+  }
+
+  /** Narrow read-only identity lookup reserved for migration restart recovery. */
+  findMigrationProposalByIdentity(input: MigrationProposalIdentity): ProposalEnvelope | undefined {
+    return this.store.findMigrationProposalByIdentity(input);
   }
 
   list(query?: ProposalListQuery): readonly ProposalEnvelope[] {

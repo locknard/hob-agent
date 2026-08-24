@@ -11,7 +11,10 @@ import type { ForeignRuleMigrationResult } from "@hob/bridge-contract";
 import {
   HomeAutomationMigrationRuntimeService,
 } from "./home-automation-migration-runtime-service.js";
+import { homeAutomationMigrationProposalIdentity } from "./home-automation-migration-preparation.js";
+import { digestToken } from "./home-automation-migration-selection.js";
 import { SqliteHomeAutomationMigrationStore } from "./home-automation-migration-store.js";
+import { computeHomeAutomationMigrationCandidateContentHash } from "./home-automation-migration-simulator.js";
 import type { HomePreparationStatus } from "./home-proposal-service.js";
 
 const SOURCE = {
@@ -123,6 +126,12 @@ class StubHomeProposals extends Service {
   preparationForProposal(proposalId: string, proposalRevision: number) {
     this.preparationCalls.push({ proposalId, proposalRevision });
     return this.preparation;
+  }
+
+  findMigrationProposalByIdentity(input: { readonly dedupKey: string; readonly idempotencyKey: string }) {
+    return this.proposal?.dedupKey === input.dedupKey && this.proposal?.idempotencyKey === input.idempotencyKey
+      ? this.proposal
+      : undefined;
   }
 }
 
@@ -346,6 +355,84 @@ test("delegates retry/list/close and closes a durable store that can reopen", as
     } finally {
       reopened.close();
     }
+    await worldFiber.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("restart recovery links an exact committed migration Proposal while workflow is still assessed", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hob-home-migration-selection-recovery-"));
+  const path = join(directory, "migrations.sqlite");
+  const { context, worldFiber, migrationFiber, proposalFiber, proposals } = await setup(path, true);
+  try {
+    const assessed = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessed.outcome, "created");
+    const assessment = context.homeAutomationMigrations.get(assessed.assessment.migrationId)!;
+    const rule = assessment.rules[0]!;
+    const candidate = await context.homeAutomationMigrations.createArtifactCandidate({
+      migrationId: assessment.migrationId,
+      ruleRef: rule.ruleRef,
+    });
+    assert.equal(candidate.status, "candidate");
+    if (candidate.status !== "candidate") throw new Error("expected migration candidate");
+    const identity = homeAutomationMigrationProposalIdentity({
+      migrationId: assessment.migrationId,
+      ruleRef: rule.ruleRef,
+      sourceBridgeId: assessment.sourceBridgeId,
+      sourceEpochId: assessment.sourceEpochId,
+      sourceLastSeq: assessment.sourceLastSeq,
+      sourceFingerprint: rule.sourceFingerprint!,
+    });
+    proposals!.proposal = {
+      id: "proposal-recovered",
+      revision: 1,
+      kind: "automation-draft",
+      status: "pending_review",
+      lifecycle: "preparing",
+      reviewLane: "migration",
+      provenance: { producer: "home-automation-migration" },
+      dedupKey: identity.dedupKey,
+      idempotencyKey: identity.idempotencyKey,
+      title: candidate.title,
+      summary: "Recovered migration candidate",
+      artifactCandidate: { schemaVersion: "1", content: candidate.content },
+    };
+    const external = new SqliteHomeAutomationMigrationStore({ path });
+    const issue = external.issueSelection({
+      selectionId: "d".repeat(32),
+      migrationId: assessment.migrationId,
+      ruleRef: rule.ruleRef,
+      principal: { principalId: "member-recovery", role: "adult_member", privateDeviceBinding: "verified" },
+      sourceBridgeId: assessment.sourceBridgeId,
+      sourceEpochId: assessment.sourceEpochId,
+      sourceLastSeq: assessment.sourceLastSeq,
+      sourceFingerprint: rule.sourceFingerprint!,
+      tokenDigest: digestToken("e".repeat(32)),
+      generation: "old-generation",
+      issuedAt: "2026-08-24T08:00:00.000Z",
+      expiresAt: "2026-08-24T08:05:00.000Z",
+    });
+    assert.equal(external.claimSelection({
+      selectionId: issue.selection.selectionId,
+      tokenDigest: issue.selection.tokenDigest,
+      principal: issue.selection.principal,
+      generation: issue.selection.generation,
+      now: "2026-08-24T08:00:00.000Z",
+    }).outcome, "claimed");
+    external.close();
+
+    const recovered = await context.homeAutomationMigrations.recoverMigrationSelections();
+    assert.deepEqual(recovered, [{ name: "Living room light", status: "prepared", proposalId: "proposal-recovered" }]);
+    assert.equal(proposals!.createCalls.length, 0);
+    const recoveredWorkflow = context.homeAutomationMigrations.get(assessment.migrationId)?.rules[0]?.workflow;
+    assert.equal(recoveredWorkflow?.status, "translated");
+    assert.equal(recoveredWorkflow?.proposalId, "proposal-recovered");
+    assert.equal(recoveredWorkflow?.candidateProposalRevision, 1);
+    assert.equal(recoveredWorkflow?.candidateContentHash, computeHomeAutomationMigrationCandidateContentHash(candidate.content));
+    assert.equal(context.homeAutomationMigrations.findWorkflowForProposal("proposal-recovered").status, "governed");
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
     await worldFiber.dispose();
     rmSync(directory, { recursive: true, force: true });
   }
