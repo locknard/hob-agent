@@ -83,6 +83,14 @@ export interface HomeAutomationMigrationDeploymentRuntimePort {
     readonly switchOperationId: string;
     readonly switchActor: string;
   }): boolean;
+  restoreFailedSwitch(input: {
+    readonly migrationId: string;
+    readonly ruleRef: string;
+    readonly expectedApprovedProposalRevision: number;
+    readonly expectedFailureReason: "switch_failed" | "switch_unknown";
+    readonly expectedSwitchOperationId: string;
+    readonly expectedSwitchStartedAt: string;
+  }): boolean;
   resumeRuleRollback(input: {
     readonly migrationId: string;
     readonly ruleRef: string;
@@ -149,6 +157,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     if (lookup.status === "governed") {
       if (lookup.workflowStatus === "verified") {
         return this.verifyVerifiedDeployment(request, lookup);
+      }
+      if (lookup.workflowStatus === "needs_attention"
+        && (lookup.failureReason === "switch_failed" || lookup.failureReason === "switch_unknown")) {
+        return this.recoverFailedSwitchDeployment(request, lookup);
       }
       if ((lookup.workflowStatus === "switching")
         || (lookup.workflowStatus === "needs_attention"
@@ -245,6 +257,157 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return failed(SWITCH_UNKNOWN_REASON);
     }
     return outcome;
+  }
+
+  private async recoverFailedSwitchDeployment(
+    request: Parameters<ProposalDeploymentPort["deploy"]>[0],
+    lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
+  ): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {
+    const semanticPreflight = await this.readSemanticPreflight(request);
+    if (semanticPreflight.status === "blocked") return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
+    const recovery = await this.reconcileFailedSwitch({
+      proposalId: request.proposalId,
+      deploymentId: request.intent.deploymentId,
+      target: request.intent.target,
+      actor: request.actor,
+      lookup,
+    });
+    if (recovery.restored) {
+      return failed(lookup.failureReason === "switch_unknown" ? SWITCH_UNKNOWN_REASON : SWITCH_FAILURE_REASON);
+    }
+    return failed(recovery.reason ?? SWITCH_UNKNOWN_REASON);
+  }
+
+  /**
+   * Reconciles a failed switch using only the approved neutral deployment
+   * identity. It never recreates a target whose identity was not verified.
+   */
+  private async reconcileFailedSwitch(request: FailedSwitchRecoveryRequest): Promise<FailedSwitchRecoveryResult> {
+    if (request.lookup.status !== "governed") {
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
+    const failureReason = request.lookup.failureReason;
+    if (!isFailedSwitchReason(failureReason) || failedSwitchReceipt(request.lookup, failureReason) === undefined) {
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
+
+    let control: ForeignRuleControlHandle | undefined;
+    try {
+      control = this.source.foreignRuleControlFor(request.lookup.sourceBridgeId);
+    } catch {
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
+    if (control === undefined) return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+
+    const source = await this.readSource(control, request.lookup.ruleRef);
+    if (source.status === "unknown") {
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
+    if (source.status === "missing" || source.sourceFingerprint !== request.lookup.sourceFingerprint) {
+      return { restored: false, recoveryRequired: true, reason: "原有规则的来源已经变化，需要人工确认后恢复。" };
+    }
+    const target = await this.readTarget(request.deploymentId, request.target);
+    if (target.status === "unknown") {
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
+    if (target.status === "paused") {
+      return { restored: false, recoveryRequired: true, reason: "迁移自动化的目标当前已暂停，需要人工确认后恢复。" };
+    }
+
+    // An already restored readback can close the durable failure without a new
+    // source command or a replay of the target deployment.
+    if (source.status === "running" && target.status === "missing") {
+      return this.restoreFailedSwitchAfterReadback(request, failureReason);
+    }
+
+    const switchOperationId = operationId(
+      "switch",
+      request.proposalId,
+      `recovery:${request.deploymentId}:${request.target}`,
+      request.lookup,
+    );
+    if (!this.runtime.resumeRuleSwitch({
+      migrationId: request.lookup.migrationId,
+      ruleRef: request.lookup.ruleRef,
+      switchOperationId,
+      switchActor: request.actor,
+    })) {
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
+
+    if (target.status === "running") {
+      let withdrawn: { readonly restored: boolean };
+      try {
+        if (this.base.withdraw === undefined) {
+          this.fail(request.lookup, "switching", failureReason);
+          return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
+        }
+        withdrawn = await this.base.withdraw({
+          proposalId: request.proposalId,
+          deploymentId: request.deploymentId,
+          target: request.target,
+          actor: request.actor,
+        });
+      } catch {
+        this.fail(request.lookup, "switching", "switch_unknown");
+        return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+      }
+      if (!withdrawn.restored) {
+        this.fail(request.lookup, "switching", failureReason);
+        return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
+      }
+      const afterWithdraw = await this.readTarget(request.deploymentId, request.target);
+      if (afterWithdraw.status === "unknown") {
+        this.fail(request.lookup, "switching", "switch_unknown");
+        return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+      }
+      if (afterWithdraw.status !== "missing") {
+        this.fail(request.lookup, "switching", failureReason);
+        return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
+      }
+    }
+
+    if (source.status === "paused") {
+      const restored = await this.setSource(control, request.lookup, true, switchOperationId);
+      if (restored.status === "unknown") {
+        this.fail(request.lookup, "switching", "switch_unknown");
+        return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+      }
+      if (restored.status !== "running" || restored.sourceFingerprint !== request.lookup.sourceFingerprint) {
+        this.fail(request.lookup, "switching", failureReason);
+        return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
+      }
+    }
+
+    const finalSource = await this.readSource(control, request.lookup.ruleRef);
+    const finalTarget = await this.readTarget(request.deploymentId, request.target);
+    if (finalSource.status === "unknown" || finalTarget.status === "unknown") {
+      this.fail(request.lookup, "switching", "switch_unknown");
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
+    if (finalSource.status !== "running" || finalSource.sourceFingerprint !== request.lookup.sourceFingerprint
+      || finalTarget.status !== "missing") {
+      this.fail(request.lookup, "switching", failureReason);
+      return { restored: false, recoveryRequired: true, reason: SWITCH_FAILURE_REASON };
+    }
+    this.fail(request.lookup, "switching", failureReason);
+    return this.restoreFailedSwitchAfterReadback(request, failureReason);
+  }
+
+  private restoreFailedSwitchAfterReadback(
+    request: FailedSwitchRecoveryRequest,
+    failureReason: "switch_failed" | "switch_unknown",
+  ): FailedSwitchRecoveryResult {
+    try {
+      const refreshed = this.runtime.findWorkflowForProposal(request.proposalId);
+      const receipt = refreshed.status === "governed" ? failedSwitchReceipt(refreshed, failureReason) : undefined;
+      if (receipt === undefined || !this.runtime.restoreFailedSwitch(receipt)) {
+        return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+      }
+      return { restored: true };
+    } catch {
+      return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+    }
   }
 
   private async recoverSwitchDeployment(
@@ -529,6 +692,19 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
         target: request.intent.target,
       });
     }
+    if (lookup.status === "governed" && lookup.workflowStatus === "needs_attention"
+      && isFailedSwitchReason(lookup.failureReason)) {
+      if (!hasNonEmptyString(request.intent.deploymentId) || !hasNonEmptyString(request.intent.target)) {
+        return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+      }
+      return this.reconcileFailedSwitch({
+        proposalId: request.proposalId,
+        deploymentId: request.intent.deploymentId,
+        target: request.intent.target,
+        actor: request.actor,
+        lookup,
+      });
+    }
     if (lookup.status !== "governed"
       || (lookup.workflowStatus !== "needs_attention" && lookup.workflowStatus !== "rolling_back")
       || (lookup.workflowStatus !== "rolling_back"
@@ -652,6 +828,19 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return this.verifyRestoredState(lookup, {
         deploymentId: request.deploymentId,
         target: request.target,
+      });
+    }
+    if (lookup.status === "governed" && lookup.workflowStatus === "needs_attention"
+      && isFailedSwitchReason(lookup.failureReason)) {
+      if (!hasNonEmptyString(request.deploymentId) || !hasNonEmptyString(request.target)) {
+        return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
+      }
+      return this.reconcileFailedSwitch({
+        proposalId: request.proposalId,
+        deploymentId: request.deploymentId,
+        target: request.target,
+        actor: request.actor,
+        lookup,
       });
     }
     if (lookup.status !== "governed" || lookup.workflowStatus !== "verified"
@@ -836,7 +1025,27 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       this.fail(lookup, "switching", failure);
       return "known";
     }
+    const finalSource = await this.readSource(control, lookup.ruleRef);
+    const finalTarget = await this.readTarget(request.intent.deploymentId, request.intent.target);
+    if (finalSource.status === "unknown" || finalTarget.status === "unknown") {
+      this.fail(lookup, "switching", "switch_unknown");
+      return "switch_unknown";
+    }
+    if (finalSource.status !== "running" || finalSource.sourceFingerprint !== lookup.sourceFingerprint
+      || finalTarget.status !== "missing") {
+      this.fail(lookup, "switching", failure);
+      return "known";
+    }
     this.fail(lookup, "switching", failure);
+    if (failure !== "verification_failed") {
+      this.restoreFailedSwitchAfterReadback({
+        proposalId: request.proposalId,
+        deploymentId: request.intent.deploymentId,
+        target: request.intent.target,
+        actor: request.actor,
+        lookup,
+      }, failure);
+    }
     return "known";
   }
 
@@ -877,6 +1086,53 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return { status: "unknown" };
     }
   }
+}
+
+type FailedSwitchRecoveryRequest = {
+  readonly proposalId: string;
+  readonly deploymentId: string;
+  readonly target: string;
+  readonly actor: string;
+  readonly lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "ready" | "governed" }>;
+};
+
+type FailedSwitchRecoveryResult =
+  | { readonly restored: true }
+  | { readonly restored: false; readonly recoveryRequired: true; readonly reason: string };
+
+function isFailedSwitchReason(
+  value: HomeAutomationMigrationRuleWorkflowFailureReason | undefined,
+): value is "switch_failed" | "switch_unknown" {
+  return value === "switch_failed" || value === "switch_unknown";
+}
+
+function failedSwitchReceipt(
+  lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
+  failureReason: "switch_failed" | "switch_unknown",
+): Parameters<HomeAutomationMigrationDeploymentRuntimePort["restoreFailedSwitch"]>[0] | undefined {
+  const approvedProposalRevision = lookup.approvedProposalRevision;
+  if (lookup.workflowStatus !== "needs_attention"
+    || lookup.failureReason !== failureReason
+    || typeof approvedProposalRevision !== "number"
+    || !Number.isSafeInteger(approvedProposalRevision)
+    || approvedProposalRevision <= 0
+    || !hasNonEmptyString(lookup.switchOperationId)
+    || !hasNonEmptyString(lookup.switchStartedAt)
+    || !hasNonEmptyString(lookup.switchActor)
+    || lookup.sourceWasEnabled !== true
+    || lookup.deploymentId !== undefined
+    || lookup.deploymentTarget !== undefined
+    || lookup.deploymentConfigFingerprint !== undefined) {
+    return undefined;
+  }
+  return {
+    migrationId: lookup.migrationId,
+    ruleRef: lookup.ruleRef,
+    expectedApprovedProposalRevision: approvedProposalRevision,
+    expectedFailureReason: failureReason,
+    expectedSwitchOperationId: lookup.switchOperationId,
+    expectedSwitchStartedAt: lookup.switchStartedAt,
+  };
 }
 
 function sourceCommandResult(

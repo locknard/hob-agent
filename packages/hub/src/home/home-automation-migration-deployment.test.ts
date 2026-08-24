@@ -104,6 +104,11 @@ function deploymentFixture() {
       workflow = "ready";
       return true;
     },
+    restoreFailedSwitch: () => {
+      events.push("runtime.restoreFailedSwitch");
+      workflow = "verified";
+      return true;
+    },
     resumeRuleRollback: () => {
       events.push("runtime.resumeRollback");
       return true;
@@ -525,7 +530,19 @@ test("requires exact restored readback before converging a close", async () => {
 });
 
 test("records switching failure after a known target deployment failure and restores the source", async () => {
-  const { events, failCalls, base, wrapper } = deploymentFixture();
+  const { events, failCalls, runtime, base, wrapper } = deploymentFixture();
+  const restoreInputs: unknown[] = [];
+  runtime.restoreFailedSwitch = (input: unknown) => {
+    events.push("runtime.restoreFailedSwitch");
+    restoreInputs.push(input);
+    return true;
+  };
+  const initialLookup = runtime.findWorkflowForProposal;
+  let lookupCount = 0;
+  runtime.findWorkflowForProposal = (proposalId: string) => {
+    lookupCount += 1;
+    return lookupCount === 1 ? initialLookup(proposalId) : governedLookup("needs_attention", "switch_failed");
+  };
   base.deploy = async () => {
     events.push("base.deploy");
     return {
@@ -547,7 +564,10 @@ test("records switching failure after a known target deployment failure and rest
     "base.withdraw",
     "base.status",
     "source.set:true",
+    "source.status",
+    "base.status",
     "runtime.fail",
+    "runtime.restoreFailedSwitch",
   ]);
   assert.deepEqual(failCalls, [{
     migrationId: "0123456789abcdef0123456789abcdef",
@@ -555,6 +575,151 @@ test("records switching failure after a known target deployment failure and rest
     from: "switching",
     reason: "switch_failed",
   }]);
+  assert.deepEqual(restoreInputs, [{
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    expectedApprovedProposalRevision: 3,
+    expectedFailureReason: "switch_failed",
+    expectedSwitchOperationId: "11111111111111111111111111111111",
+    expectedSwitchStartedAt: "2026-08-24T00:00:03.000Z",
+  }]);
+});
+
+test("retries a failed switch by withdrawing only the approved target and closes the exact failed receipt", async () => {
+  const { events, runtime, base, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_failed");
+  base.status = async () => {
+    events.push("base.status");
+    return events.includes("base.withdraw") ? { status: "missing" } as const : { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+  base.deploy = async () => {
+    events.push("base.deploy.unexpected");
+    throw new Error("failed-switch recovery must not replay deployment");
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, { status: "failed", reason: "迁移切换没有完成，原有规则保持可恢复状态。" });
+  assert.deepEqual(events, [
+    "source.status",
+    "base.status",
+    "runtime.resumeSwitch",
+    "base.withdraw",
+    "base.status",
+    "source.status",
+    "base.status",
+    "runtime.fail",
+    "runtime.restoreFailedSwitch",
+  ]);
+  assert.equal(events.includes("base.deploy.unexpected"), false);
+});
+
+test("accepts a failed-switch recovery when exact readback is already restored without replaying or writing a new receipt", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_unknown");
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "missing" } as const;
+  };
+  base.deploy = async () => {
+    events.push("base.deploy.unexpected");
+    throw new Error("already restored recovery must not deploy");
+  };
+  base.withdraw = async () => {
+    events.push("base.withdraw.unexpected");
+    return { restored: false };
+  };
+
+  const outcome = await wrapper.recover({
+    proposalId: BASE_REQUEST.proposalId,
+    revision: BASE_REQUEST.revision,
+    actor: BASE_REQUEST.actor,
+    kind: BASE_REQUEST.kind,
+    title: BASE_REQUEST.title,
+    artifactCandidate: BASE_REQUEST.artifactCandidate,
+    intent: BASE_REQUEST.intent,
+  });
+
+  assert.deepEqual(outcome, { restored: true });
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.restoreFailedSwitch"]);
+});
+
+test("withdraws a failed switch with the approved intent identity before closing its exact receipt", async () => {
+  const { events, runtime, base, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_failed");
+  base.status = async () => {
+    events.push("base.status");
+    return events.includes("base.withdraw") ? { status: "missing" } as const : { status: "running" } as const;
+  };
+  base.withdraw = async (request) => {
+    events.push("base.withdraw");
+    assert.deepEqual(request, {
+      proposalId: BASE_REQUEST.proposalId,
+      deploymentId: BASE_REQUEST.intent.deploymentId,
+      target: BASE_REQUEST.intent.target,
+      actor: BASE_REQUEST.actor,
+    });
+    return { restored: true };
+  };
+
+  const outcome = await wrapper.withdraw({
+    proposalId: BASE_REQUEST.proposalId,
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    actor: BASE_REQUEST.actor,
+  });
+
+  assert.deepEqual(outcome, { restored: true });
+  assert.deepEqual(events, [
+    "source.status",
+    "base.status",
+    "runtime.resumeSwitch",
+    "base.withdraw",
+    "base.status",
+    "source.status",
+    "base.status",
+    "runtime.fail",
+    "runtime.restoreFailedSwitch",
+  ]);
+});
+
+test("does not claim a failed-switch recovery after the exact receipt CAS loses a race", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  const first = governedLookup("needs_attention", "switch_failed");
+  runtime.findWorkflowForProposal = () => first;
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "missing" } as const;
+  };
+  runtime.restoreFailedSwitch = () => {
+    events.push("runtime.restoreFailedSwitch");
+    return false;
+  };
+
+  const outcome = await wrapper.recover({
+    proposalId: BASE_REQUEST.proposalId,
+    revision: BASE_REQUEST.revision,
+    actor: BASE_REQUEST.actor,
+    kind: BASE_REQUEST.kind,
+    title: BASE_REQUEST.title,
+    artifactCandidate: BASE_REQUEST.artifactCandidate,
+    intent: BASE_REQUEST.intent,
+  });
+
+  assert.deepEqual(outcome, {
+    restored: false,
+    recoveryRequired: true,
+    reason: "迁移切换结果暂时无法确认，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.restoreFailedSwitch"]);
 });
 
 test("uses the approved intent identity when a verified outcome returns a rogue identity", async () => {
@@ -858,7 +1023,7 @@ test("recovers a paused source with a missing target without redeploying", async
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
   assert.equal(outcome.status, "failed");
-  assert.deepEqual(events, ["source.status", "base.status", "runtime.resumeSwitch", "source.set:true", "source.status", "runtime.fail"]);
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.resumeSwitch", "source.set:true", "source.status", "base.status", "runtime.fail"]);
 });
 
 test("treats a paused target as known but unsafe and performs no recovery write", async () => {
