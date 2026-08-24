@@ -128,6 +128,25 @@ test("retries only restartable enabling migration cutovers with exact system CAS
   assert.deepEqual(fixture.recoveries, []);
 });
 
+test("skips stable enable failures until an explicit household retry", async () => {
+  const automations = [
+    proposal("switch-failed", "enable_failed"),
+    proposal("switch-unknown", "enable_failed"),
+  ];
+  const workflows = new Map<string, MigrationCutoverWorkflowLookup>([
+    ["switch-failed", lookup("governed", { workflowStatus: "needs_attention", failureReason: "switch_failed" })],
+    ["switch-unknown", lookup("governed", { workflowStatus: "needs_attention", failureReason: "switch_unknown" })],
+  ]);
+  // Both source and target bridges are ready; the stable failure lifecycle is the skip gate.
+  const fixture = harness(automations, workflows, { ready: true });
+
+  const result = await new MigrationCutoverRecoveryCoordinator(fixture.options).sweep();
+
+  assert.deepEqual(result, { scanned: 2, retried: 0, recovered: 0, skipped: 2, failed: 0 });
+  assert.deepEqual(fixture.retries, []);
+  assert.deepEqual(fixture.recoveries, []);
+});
+
 test("recovers only governed rolling-back and allowed migration attention states", async () => {
   const automations = [
     proposal("rolling-back", "recovery_required"),
