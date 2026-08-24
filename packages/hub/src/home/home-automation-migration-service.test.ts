@@ -379,6 +379,7 @@ test("an approved ready rule records a durable switch, verification, rollback, a
     migrationId: created.assessment.migrationId,
     ruleRef: "ha-rule-1",
     from: "switching",
+    expectedSwitchOperationId: "a".repeat(32),
     deploymentId: "deployment-1",
     deploymentTarget: "home-assistant",
     deploymentConfigFingerprint: `sha256:${"5".repeat(64)}`,
@@ -399,6 +400,7 @@ test("an approved ready rule records a durable switch, verification, rollback, a
     migrationId: created.assessment.migrationId,
     ruleRef: "ha-rule-1",
     from: "rolling_back",
+    expectedRollbackOperationId: "b".repeat(32),
   });
   assert.equal(restored?.rules[0]?.workflow?.status, "restored");
   assert.equal(restored?.rules[0]?.workflow?.deploymentTarget, "home-assistant");
@@ -425,7 +427,7 @@ test("failed switch and rollback operations can resume with fresh operation rece
   service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-resume", artifactRevision: 1, artifactContentHash: `sha256:${"7".repeat(64)}`, compileResultId: `sha256:${"8".repeat(64)}`, dryRunResultId: `sha256:${"9".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"6".repeat(64)}`, { artifactId: "artifact-resume", artifactRevision: 1, artifactContentHash: `sha256:${"7".repeat(64)}`, compileResultId: `sha256:${"8".repeat(64)}`, dryRunResultId: `sha256:${"9".repeat(64)}` }) });
   service.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
   service.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "1".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
-  const failedSwitch = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_failed" });
+  const failedSwitch = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_failed", expectedSwitchOperationId: "1".repeat(32) });
   assert.equal(failedSwitch?.rules[0]?.workflow?.status, "needs_attention");
   assert.equal(service.resumeRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", switchOperationId: "1".repeat(32), switchActor: "member:alice" }), undefined);
 
@@ -441,15 +443,15 @@ test("failed switch and rollback operations can resume with fresh operation rece
   assert.equal(resumedSwitch?.rules[0]?.workflow?.approvedProposalRevision, 3);
   assert.equal(resumedSwitch?.rules[0]?.workflow?.sourceWasEnabled, true);
 
-  service.verifyRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", deploymentId: "deployment-resume", deploymentTarget: "home-assistant", deploymentConfigFingerprint: `sha256:${"a".repeat(64)}` });
-  const failedVerification = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "verified", reason: "verification_failed" });
+  service.verifyRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", expectedSwitchOperationId: "2".repeat(32), deploymentId: "deployment-resume", deploymentTarget: "home-assistant", deploymentConfigFingerprint: `sha256:${"a".repeat(64)}` });
+  const failedVerification = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "verified", reason: "verification_failed", expectedSwitchOperationId: "2".repeat(32) });
   assert.equal(failedVerification?.rules[0]?.workflow?.status, "needs_attention");
   const resumedRollback = service.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "3".repeat(32), rollbackActor: "member:bob" });
   assert.equal(resumedRollback?.rules[0]?.workflow?.status, "rolling_back");
   assert.equal(resumedRollback?.rules[0]?.workflow?.deploymentId, "deployment-resume");
   assert.equal(resumedRollback?.rules[0]?.workflow?.rollbackOperationId, "3".repeat(32));
 
-  const failedRollback = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "rolling_back", reason: "rollback_unknown" });
+  const failedRollback = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "rolling_back", reason: "rollback_unknown", expectedRollbackOperationId: "3".repeat(32) });
   assert.equal(failedRollback?.rules[0]?.workflow?.status, "needs_attention");
   assert.equal(service.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "3".repeat(32), rollbackActor: "member:bob" }), undefined);
   const resumedAgain = service.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "4".repeat(32), rollbackActor: "member:carol" });
@@ -464,6 +466,63 @@ test("failed switch and rollback operations can resume with fresh operation rece
     rollbackActor: "member:carol",
     nativeBody: "blocked",
   } as never), undefined);
+});
+
+test("terminal workflow operations bind the active switch and rollback receipts", async () => {
+  const migration = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "b".repeat(32),
+    idempotencyKeyFactory: () => "c".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "flat_and" },
+        action: { kind: "reversible" },
+        sourceFingerprint: eligibleFingerprint,
+      }),
+    },
+  });
+  const created = await migration.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  const migrationId = created.assessment.migrationId;
+  const common = { migrationId, ruleRef: "ha-rule-1" };
+  migration.translateRule({ ...common, from: "assessed", proposalId: "proposal-terminal-receipt", candidateProposalRevision: 1, candidateContentHash: `sha256:${"1".repeat(64)}` });
+  migration.simulateRule({ ...common, from: "translated", artifactId: "artifact-terminal-receipt", artifactRevision: 1, artifactContentHash: `sha256:${"2".repeat(64)}`, compileResultId: `sha256:${"3".repeat(64)}`, dryRunResultId: `sha256:${"4".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"1".repeat(64)}`, { artifactId: "artifact-terminal-receipt", artifactRevision: 1, artifactContentHash: `sha256:${"2".repeat(64)}`, compileResultId: `sha256:${"3".repeat(64)}`, dryRunResultId: `sha256:${"4".repeat(64)}` }) });
+  migration.readyRule({ ...common, from: "simulated", reviewProposalRevision: 2 });
+  migration.startRuleSwitch({ ...common, from: "ready", approvedProposalRevision: 3, switchOperationId: "a".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
+
+  const verified = migration.verifyRuleSwitch({
+    ...common,
+    from: "switching",
+    expectedSwitchOperationId: "a".repeat(32),
+    deploymentId: "deployment-terminal-receipt",
+    deploymentTarget: "home-assistant",
+    deploymentConfigFingerprint: `sha256:${"5".repeat(64)}`,
+  });
+  assert.equal(verified?.rules[0]?.workflow?.status, "verified");
+
+  const failedVerification = migration.failRuleWorkflow({
+    ...common,
+    from: "verified",
+    reason: "verification_failed",
+    expectedSwitchOperationId: "a".repeat(32),
+  });
+  assert.equal(failedVerification?.rules[0]?.workflow?.status, "needs_attention");
+  const rollback = migration.resumeRuleRollback({ ...common, from: "needs_attention", rollbackOperationId: "b".repeat(32), rollbackActor: "member:alice" });
+  assert.equal(rollback?.rules[0]?.workflow?.status, "rolling_back");
+
+  const failedRollback = migration.failRuleWorkflow({
+    ...common,
+    from: "rolling_back",
+    reason: "rollback_unknown",
+    expectedRollbackOperationId: "b".repeat(32),
+  });
+  assert.equal(failedRollback?.rules[0]?.workflow?.status, "needs_attention");
+  const resumedRollback = migration.resumeRuleRollback({ ...common, from: "needs_attention", rollbackOperationId: "c".repeat(32), rollbackActor: "member:bob" });
+  assert.equal(resumedRollback?.rules[0]?.workflow?.status, "rolling_back");
+  const restored = migration.restoreRule({ ...common, from: "rolling_back", expectedRollbackOperationId: "c".repeat(32) });
+  assert.equal(restored?.rules[0]?.workflow?.status, "restored");
 });
 
 test("restores a failed switch only with the exact failure receipt and keeps switch evidence", async () => {
@@ -487,7 +546,7 @@ test("restores a failed switch only with the exact failure receipt and keeps swi
   service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-failed-switch", artifactRevision: 1, artifactContentHash: `sha256:${"2".repeat(64)}`, compileResultId: `sha256:${"3".repeat(64)}`, dryRunResultId: `sha256:${"4".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"1".repeat(64)}`, { artifactId: "artifact-failed-switch", artifactRevision: 1, artifactContentHash: `sha256:${"2".repeat(64)}`, compileResultId: `sha256:${"3".repeat(64)}`, dryRunResultId: `sha256:${"4".repeat(64)}` }) });
   service.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
   service.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "5".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
-  const failed = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_failed" });
+  const failed = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_failed", expectedSwitchOperationId: "5".repeat(32) });
   const failedWorkflow = failed?.rules[0]?.workflow;
   assert.equal(failedWorkflow?.status, "needs_attention");
 
@@ -512,6 +571,7 @@ test("restores a failed switch only with the exact failure receipt and keeps swi
     ruleRef: "ha-rule-1",
     from: "switching",
     reason: "switch_failed",
+    expectedSwitchOperationId: "6".repeat(32),
   })?.rules[0]?.workflow?.status, "needs_attention");
   assert.equal(service.restoreFailedSwitch(staleReceipt), undefined);
   const currentFailed = service.get(created.assessment.migrationId)?.rules[0]?.workflow;
@@ -579,7 +639,7 @@ test("switch recovery receipts survive SQLite restart and duplicate resumes do n
     first.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-sqlite-resume", artifactRevision: 1, artifactContentHash: `sha256:${"4".repeat(64)}`, compileResultId: `sha256:${"5".repeat(64)}`, dryRunResultId: `sha256:${"6".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"3".repeat(64)}`, { artifactId: "artifact-sqlite-resume", artifactRevision: 1, artifactContentHash: `sha256:${"4".repeat(64)}`, compileResultId: `sha256:${"5".repeat(64)}`, dryRunResultId: `sha256:${"6".repeat(64)}` }) });
     first.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
     first.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "7".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
-    first.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_unknown" });
+    first.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_unknown", expectedSwitchOperationId: "7".repeat(32) });
     first.close();
 
     const secondStore = new SqliteHomeAutomationMigrationStore({ path });
@@ -591,8 +651,8 @@ test("switch recovery receipts survive SQLite restart and duplicate resumes do n
     assert.equal(second.resumeRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", switchOperationId: "9".repeat(32), switchActor: "member:carol" }), undefined);
     assert.equal(second.get(created.assessment.migrationId)?.rules[0]?.workflow?.status, "switching");
 
-    second.verifyRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", deploymentId: "deployment-sqlite-resume", deploymentTarget: "home-assistant", deploymentConfigFingerprint: `sha256:${"a".repeat(64)}` });
-    second.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "verified", reason: "verification_failed" });
+    second.verifyRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", expectedSwitchOperationId: "8".repeat(32), deploymentId: "deployment-sqlite-resume", deploymentTarget: "home-assistant", deploymentConfigFingerprint: `sha256:${"a".repeat(64)}` });
+    second.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "verified", reason: "verification_failed", expectedSwitchOperationId: "8".repeat(32) });
     const rollback = second.resumeRuleRollback({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", rollbackOperationId: "b".repeat(32), rollbackActor: "member:bob" });
     assert.equal(rollback?.rules[0]?.workflow?.status, "rolling_back");
     assert.equal(rollback?.rules[0]?.workflow?.deploymentId, "deployment-sqlite-resume");

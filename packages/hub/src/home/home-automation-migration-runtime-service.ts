@@ -169,6 +169,9 @@ export type HomeAutomationMigrationRuntimeWorkflowResult =
     readonly writesPerformed: false;
   };
 
+/** Runtime mutation input keeps failure receipt requirements correlated with the workflow stage. */
+export type HomeAutomationMigrationRuntimeFailRuleWorkflowInput = HomeAutomationMigrationFailRuleWorkflowInput;
+
 /** Root-private preparation handoff result; no workflow or provider identity crosses this boundary. */
 export type HomeAutomationMigrationRuntimePreparedWorkflowResult =
   | { readonly status: "ready"; readonly writesPerformed: false }
@@ -518,7 +521,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   }
 
   /** Records one fixed failure reason without exposing store or bridge objects. */
-  failRuleWorkflow(input: Omit<HomeAutomationMigrationFailRuleWorkflowInput, never>): boolean {
+  failRuleWorkflow(input: HomeAutomationMigrationRuntimeFailRuleWorkflowInput): boolean {
     try {
       return this.migration.failRuleWorkflow(input) !== undefined;
     } catch {
@@ -942,17 +945,22 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
     reason: "simulation_failed" | "simulation_unavailable",
   ): HomeAutomationMigrationRuntimeWorkflowResult {
     try {
-      const failed = this.migration.failRuleWorkflow({
-        migrationId: input.migrationId,
-        ruleRef: input.ruleRef,
-        from: workflow.status === "simulated" ? "simulated" : "translated",
-        // A translated rule has not reached the simulation CAS yet. Its
-        // bounded failure is therefore the compile/preparation vocabulary;
-        // simulation failures are durable only after the simulated stage.
-        reason: workflow.status === "translated"
-          ? reason === "simulation_failed" ? "compile_failed" : "compile_unavailable"
-          : reason,
-      });
+      // A translated rule has not reached the simulation CAS yet. Its
+      // bounded failure is therefore the compile/preparation vocabulary;
+      // simulation failures are durable only after the simulated stage.
+      const failed = workflow.status === "translated"
+        ? this.migration.failRuleWorkflow({
+          migrationId: input.migrationId,
+          ruleRef: input.ruleRef,
+          from: "translated",
+          reason: reason === "simulation_failed" ? "compile_failed" : "compile_unavailable",
+        })
+        : this.migration.failRuleWorkflow({
+          migrationId: input.migrationId,
+          ruleRef: input.ruleRef,
+          from: "simulated",
+          reason,
+        });
       const failedRule = eligibleWorkflowRule(failed, input.ruleRef);
       if (failedRule?.workflow?.status === "needs_attention") return workflowFailure(reason);
       const current = this.migration.get(input.migrationId);

@@ -97,6 +97,7 @@ export interface HomeAutomationMigrationVerifyRuleSwitchInput {
   readonly migrationId: string;
   readonly ruleRef: string;
   readonly from: "switching";
+  readonly expectedSwitchOperationId: string;
   readonly deploymentId: string;
   readonly deploymentTarget: string;
   readonly deploymentConfigFingerprint: string;
@@ -142,14 +143,42 @@ export interface HomeAutomationMigrationRestoreRuleInput {
   readonly migrationId: string;
   readonly ruleRef: string;
   readonly from: "rolling_back";
+  readonly expectedRollbackOperationId: string;
 }
 
-export interface HomeAutomationMigrationFailRuleWorkflowInput {
+type HomeAutomationMigrationFailRuleWorkflowBase = {
   readonly migrationId: string;
   readonly ruleRef: string;
-  readonly from: "ready" | "translated" | "simulated" | "switching" | "verified" | "rolling_back";
-  readonly reason: HomeAutomationMigrationRuleWorkflowFailureReason;
-}
+};
+
+export type HomeAutomationMigrationFailRuleWorkflowInput =
+  | (HomeAutomationMigrationFailRuleWorkflowBase & {
+    readonly from: "ready";
+    readonly reason: "source_stale" | "switch_unknown";
+  })
+  | (HomeAutomationMigrationFailRuleWorkflowBase & {
+    readonly from: "translated";
+    readonly reason: "compile_failed" | "compile_unavailable";
+  })
+  | (HomeAutomationMigrationFailRuleWorkflowBase & {
+    readonly from: "simulated";
+    readonly reason: "simulation_failed" | "simulation_unavailable";
+  })
+  | (HomeAutomationMigrationFailRuleWorkflowBase & {
+    readonly from: "switching";
+    readonly reason: "switch_failed" | "switch_unknown" | "verification_failed";
+    readonly expectedSwitchOperationId: string;
+  })
+  | (HomeAutomationMigrationFailRuleWorkflowBase & {
+    readonly from: "verified";
+    readonly reason: "verification_failed";
+    readonly expectedSwitchOperationId: string;
+  })
+  | (HomeAutomationMigrationFailRuleWorkflowBase & {
+    readonly from: "rolling_back";
+    readonly reason: "rollback_failed" | "rollback_unknown";
+    readonly expectedRollbackOperationId: string;
+  });
 
 export interface HomeAutomationMigrationRetryRuleWorkflowInput {
   readonly migrationId: string;
@@ -352,6 +381,26 @@ export class HomeAutomationMigrationService {
   /** Records a fixed compile or simulation failure without storing its payload. */
   failRuleWorkflow(input: HomeAutomationMigrationFailRuleWorkflowInput): HomeAutomationMigrationAssessment | undefined {
     if (!isStrictWorkflowFailureInput(input)) return undefined;
+    if (input.from === "switching" || input.from === "verified") {
+      return this.transitionRuleWorkflow({
+        migrationId: input.migrationId,
+        ruleRef: input.ruleRef,
+        from: input.from,
+        to: "needs_attention",
+        failureReason: input.reason,
+        expectedSwitchOperationId: input.expectedSwitchOperationId,
+      });
+    }
+    if (input.from === "rolling_back") {
+      return this.transitionRuleWorkflow({
+        migrationId: input.migrationId,
+        ruleRef: input.ruleRef,
+        from: input.from,
+        to: "needs_attention",
+        failureReason: input.reason,
+        expectedRollbackOperationId: input.expectedRollbackOperationId,
+      });
+    }
     return this.transitionRuleWorkflow({
       migrationId: input.migrationId,
       ruleRef: input.ruleRef,
@@ -640,11 +689,18 @@ function aggregateStatus(rules: readonly HomeAutomationMigrationRuleAssessment[]
 
 function isStrictWorkflowFailureInput(value: unknown): value is HomeAutomationMigrationFailRuleWorkflowInput {
   try {
-    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "reason"])
-      && isMigrationId(value.migrationId)
-      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
-      && isWorkflowFailureReason(value.reason)
-      && isAllowedWorkflowFailurePair(value.from, value.reason);
+    if (!isRecord(value) || !isMigrationId(value.migrationId)
+      || !isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      || !isWorkflowFailureReason(value.reason) || !isAllowedWorkflowFailurePair(value.from, value.reason)) return false;
+    if (value.from === "switching" || value.from === "verified") {
+      return hasExactKeys(value, ["migrationId", "ruleRef", "from", "reason", "expectedSwitchOperationId"])
+        && is128BitHex(value.expectedSwitchOperationId);
+    }
+    if (value.from === "rolling_back") {
+      return hasExactKeys(value, ["migrationId", "ruleRef", "from", "reason", "expectedRollbackOperationId"])
+        && is128BitHex(value.expectedRollbackOperationId);
+    }
+    return hasExactKeys(value, ["migrationId", "ruleRef", "from", "reason"]);
   } catch {
     return false;
   }
@@ -697,10 +753,11 @@ function isStrictRestoreFailedSwitchInput(value: unknown): value is HomeAutomati
 
 function isStrictVerifyRuleSwitchInput(value: unknown): value is HomeAutomationMigrationVerifyRuleSwitchInput {
   try {
-    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint"])
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "expectedSwitchOperationId", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint"])
       && isMigrationId(value.migrationId)
       && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
       && value.from === "switching"
+      && is128BitHex(value.expectedSwitchOperationId)
       && isBoundedText(value.deploymentId, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentIdLength)
       && isBoundedText(value.deploymentTarget, HOME_AUTOMATION_MIGRATION_LIMITS.maxDeploymentTargetLength)
       && isDigest(value.deploymentConfigFingerprint);
@@ -737,10 +794,11 @@ function isStrictResumeRuleRollbackInput(value: unknown): value is HomeAutomatio
 
 function isStrictRestoreRuleInput(value: unknown): value is HomeAutomationMigrationRestoreRuleInput {
   try {
-    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from"])
+    return isRecord(value) && hasExactKeys(value, ["migrationId", "ruleRef", "from", "expectedRollbackOperationId"])
       && isMigrationId(value.migrationId)
       && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
-      && value.from === "rolling_back";
+      && value.from === "rolling_back"
+      && is128BitHex(value.expectedRollbackOperationId);
   } catch {
     return false;
   }

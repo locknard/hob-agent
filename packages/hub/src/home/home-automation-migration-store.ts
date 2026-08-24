@@ -133,6 +133,7 @@ export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigra
     const currentRule = current.rules[ruleIndex]!;
     if (currentRule.disposition !== "eligible" || currentRule.workflow === undefined
       || currentRule.workflow.status !== input.from) return false;
+    if (!workflowTerminalReceiptMatches(currentRule.workflow, input)) return false;
     if (input.to === "simulated" && !simulationReceiptMatchesAssessment(input.simulationReceipt, current, currentRule, input)) return false;
     if (input.to === "ready" && !simulationReceiptMatchesAssessment(this.getSimulationReceipt(input.migrationId, input.ruleRef), current, currentRule, input)) return false;
     const nextWorkflow = buildWorkflowTransition(currentRule.workflow, input);
@@ -496,6 +497,10 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
       const currentRule = current.rules[ruleIndex]!;
       if (currentRule.disposition !== "eligible" || currentRule.workflow === undefined
         || currentRule.workflow.status !== input.from) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      if (!workflowTerminalReceiptMatches(currentRule.workflow, input)) {
         this.db.exec("ROLLBACK");
         return false;
       }
@@ -1304,6 +1309,7 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
     "candidateContentHash", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulationReceipt", "failureReason",
     "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled",
     "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "rollbackOperationId", "rollbackActor",
+    "expectedSwitchOperationId", "expectedRollbackOperationId",
   ] as const;
   if (!isRecord(input) || !hasOnlyKeys(input, allowedKeys)
     || !isMigrationId(input.migrationId)
@@ -1369,6 +1375,12 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
   if (input.rollbackActor !== undefined && !isBoundedText(input.rollbackActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength)) {
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
+  if (input.expectedSwitchOperationId !== undefined && !is128BitHex(input.expectedSwitchOperationId)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.expectedRollbackOperationId !== undefined && !is128BitHex(input.expectedRollbackOperationId)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
   if (input.failureReason !== undefined && !isWorkflowFailureReason(input.failureReason)) {
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
@@ -1384,7 +1396,7 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.failureReason !== undefined || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined
       || input.switchActor !== undefined || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined
       || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined
-      || input.rollbackActor !== undefined) {
+      || input.rollbackActor !== undefined || input.expectedSwitchOperationId !== undefined || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "simulated") {
@@ -1395,7 +1407,8 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.reviewProposalRevision !== undefined || input.failureReason !== undefined || input.approvedProposalRevision !== undefined
       || input.switchOperationId !== undefined || input.switchActor !== undefined || input.sourceWasEnabled !== undefined
       || input.deploymentId !== undefined || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined
-      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
+      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined || input.expectedSwitchOperationId !== undefined
+      || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "ready") {
@@ -1405,7 +1418,8 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.dryRunResultId !== undefined || input.failureReason !== undefined || input.approvedProposalRevision !== undefined
       || input.switchOperationId !== undefined || input.switchActor !== undefined || input.sourceWasEnabled !== undefined
       || input.deploymentId !== undefined || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined
-      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
+      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined || input.expectedSwitchOperationId !== undefined
+      || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "switching") {
@@ -1417,17 +1431,18 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.artifactId !== undefined || input.artifactRevision !== undefined || input.artifactContentHash !== undefined
       || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
       || input.deploymentId !== undefined || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined
-      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined || input.failureReason !== undefined) {
+      || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined || input.failureReason !== undefined
+      || input.expectedSwitchOperationId !== undefined || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "verified") {
-    if (input.from !== "switching" || input.deploymentId === undefined || input.deploymentTarget === undefined
+    if (input.from !== "switching" || input.expectedSwitchOperationId === undefined || input.deploymentId === undefined || input.deploymentTarget === undefined
       || input.deploymentConfigFingerprint === undefined || input.proposalId !== undefined || input.candidateProposalRevision !== undefined
       || input.candidateContentHash !== undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
       || input.artifactContentHash !== undefined || input.compileResultId !== undefined || input.dryRunResultId !== undefined
       || input.reviewProposalRevision !== undefined || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined
       || input.switchActor !== undefined || input.sourceWasEnabled !== undefined || input.rollbackOperationId !== undefined
-      || input.rollbackActor !== undefined || input.failureReason !== undefined) {
+      || input.rollbackActor !== undefined || input.failureReason !== undefined || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "rolling_back") {
@@ -1437,17 +1452,18 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
       || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
       || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
-      || input.deploymentConfigFingerprint !== undefined || input.failureReason !== undefined) {
+      || input.deploymentConfigFingerprint !== undefined || input.failureReason !== undefined
+      || input.expectedSwitchOperationId !== undefined || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.to === "restored") {
-    if (input.from !== "rolling_back" || input.proposalId !== undefined || input.candidateProposalRevision !== undefined
+    if (input.from !== "rolling_back" || input.expectedRollbackOperationId === undefined || input.proposalId !== undefined || input.candidateProposalRevision !== undefined
       || input.candidateContentHash !== undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
       || input.artifactContentHash !== undefined || input.compileResultId !== undefined || input.dryRunResultId !== undefined
       || input.reviewProposalRevision !== undefined || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined
       || input.switchActor !== undefined || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined
       || input.deploymentTarget !== undefined || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined
-      || input.rollbackActor !== undefined || input.failureReason !== undefined) {
+      || input.rollbackActor !== undefined || input.failureReason !== undefined || input.expectedSwitchOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.from === "translated") {
@@ -1459,7 +1475,8 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
       || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
       || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
-      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
+      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined
+      || input.expectedSwitchOperationId !== undefined || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.from === "simulated") {
@@ -1471,7 +1488,8 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
       || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
       || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
-      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
+      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined
+      || input.expectedSwitchOperationId !== undefined || input.expectedRollbackOperationId !== undefined) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else if (input.from === "ready" || input.from === "switching" || input.from === "verified" || input.from === "rolling_back") {
@@ -1481,7 +1499,11 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
       || input.compileResultId !== undefined || input.dryRunResultId !== undefined || input.reviewProposalRevision !== undefined
       || input.approvedProposalRevision !== undefined || input.switchOperationId !== undefined || input.switchActor !== undefined
       || input.sourceWasEnabled !== undefined || input.deploymentId !== undefined || input.deploymentTarget !== undefined
-      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined) {
+      || input.deploymentConfigFingerprint !== undefined || input.rollbackOperationId !== undefined || input.rollbackActor !== undefined
+      || input.from === "ready" && (input.expectedSwitchOperationId !== undefined || input.expectedRollbackOperationId !== undefined)
+      || input.from === "switching" && (input.expectedSwitchOperationId === undefined || input.expectedRollbackOperationId !== undefined)
+      || input.from === "verified" && (input.expectedSwitchOperationId === undefined || input.expectedRollbackOperationId !== undefined)
+      || input.from === "rolling_back" && (input.expectedSwitchOperationId !== undefined || input.expectedRollbackOperationId === undefined)) {
       throw new TypeError("Home automation migration rule workflow transition is invalid");
     }
   } else {
@@ -1509,6 +1531,9 @@ function buildWorkflowTransition(
   current: HomeAutomationMigrationRuleWorkflow,
   input: HomeAutomationMigrationRuleWorkflowTransition,
 ): HomeAutomationMigrationRuleWorkflow {
+  if (!workflowTerminalReceiptMatches(current, input)) {
+    throw new TypeError("Migration workflow terminal receipt does not match");
+  }
   const currentTime = workflowLastTimestamp(current);
   if (Date.parse(input.transitionedAt) < Date.parse(currentTime)) {
     throw new TypeError("Migration workflow time precedes previous transition");
@@ -1647,6 +1672,21 @@ function buildWorkflowTransition(
     failedAt: input.transitionedAt,
     failureReason: input.failureReason!,
   };
+}
+
+function workflowTerminalReceiptMatches(
+  current: HomeAutomationMigrationRuleWorkflow,
+  input: HomeAutomationMigrationRuleWorkflowTransition,
+): boolean {
+  if (input.to === "verified"
+    || input.to === "needs_attention" && (input.from === "switching" || input.from === "verified")) {
+    return input.expectedSwitchOperationId === current.switchOperationId;
+  }
+  if (input.to === "restored"
+    || input.to === "needs_attention" && input.from === "rolling_back") {
+    return input.expectedRollbackOperationId === current.rollbackOperationId;
+  }
+  return true;
 }
 
 function failedSwitchRestoreMatches(

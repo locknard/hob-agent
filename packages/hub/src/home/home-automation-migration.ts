@@ -161,6 +161,10 @@ export interface HomeAutomationMigrationRuleWorkflowTransition {
   readonly deploymentConfigFingerprint?: string;
   readonly rollbackOperationId?: string;
   readonly rollbackActor?: string;
+  /** Receipt identity required when a terminal transition closes a switch. */
+  readonly expectedSwitchOperationId?: string;
+  /** Receipt identity required when a terminal transition closes a rollback. */
+  readonly expectedRollbackOperationId?: string;
   readonly failureReason?: HomeAutomationMigrationRuleWorkflowFailureReason;
 }
 

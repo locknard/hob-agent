@@ -934,6 +934,7 @@ test("exposes governed workflow state and never re-enters preparation after swit
     assert.equal(context.homeAutomationMigrations.verifyRuleSwitch({
       migrationId: assessment.assessment.migrationId,
       ruleRef: "rule-1",
+      expectedSwitchOperationId: "0123456789abcdef0123456789abcdef",
       deploymentId: "hob_proposal_living_room",
       deploymentTarget: SOURCE.bridgeId,
       deploymentConfigFingerprint: `sha256:${"e".repeat(64)}`,
@@ -951,6 +952,7 @@ test("exposes governed workflow state and never re-enters preparation after swit
     assert.equal(context.homeAutomationMigrations.restoreRule({
       migrationId: assessment.assessment.migrationId,
       ruleRef: "rule-1",
+      expectedRollbackOperationId: "fedcba9876543210fedcba9876543210",
     }), true);
     assert.equal(context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room").status, "governed");
     assert.equal(JSON.stringify(context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room")).includes("nativeId"), false);
@@ -1002,6 +1004,7 @@ test("projects failure reasons and neutral switch recovery refs, then resumes wi
       ruleRef: "rule-1",
       from: "switching",
       reason: "switch_unknown",
+      expectedSwitchOperationId: "0123456789abcdef0123456789abcdef",
     }), true);
     const failed = context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room");
     assert.equal(failed.status, "governed");
@@ -1074,6 +1077,7 @@ test("exposes a failed-switch restore CAS for an externally confirmed source and
       ruleRef: "rule-1",
       from: "switching",
       reason: "switch_unknown",
+      expectedSwitchOperationId: "0123456789abcdef0123456789abcdef",
     }), true);
     const failed = context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room");
     assert.equal(failed.status, "governed");
@@ -1175,6 +1179,7 @@ test("reopens a switching workflow as readable governed state without replaying 
       ruleRef: "rule-1",
       from: "switching",
       reason: "switch_unknown",
+      expectedSwitchOperationId: "0123456789abcdef0123456789abcdef",
     }), true);
     assert.equal(reopened.context.homeAutomationMigrations.resumeRuleSwitch({
       migrationId,
@@ -1185,6 +1190,7 @@ test("reopens a switching workflow as readable governed state without replaying 
     assert.equal(reopened.context.homeAutomationMigrations.verifyRuleSwitch({
       migrationId,
       ruleRef: "rule-1",
+      expectedSwitchOperationId: "fedcba9876543210fedcba9876543210",
       deploymentId: "hob_proposal_living_room",
       deploymentTarget: SOURCE.bridgeId,
       deploymentConfigFingerprint: `sha256:${"e".repeat(64)}`,
@@ -1210,6 +1216,7 @@ test("reopens a switching workflow as readable governed state without replaying 
       ruleRef: "rule-1",
       from: "rolling_back",
       reason: "rollback_unknown",
+      expectedRollbackOperationId: "abcdefabcdefabcdefabcdefabcdefab",
     }), true);
     assert.equal(restarted.context.homeAutomationMigrations.resumeRuleRollback({
       migrationId,

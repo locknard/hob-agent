@@ -301,6 +301,91 @@ test("sqlite rule workflow transition is a strict per-rule CAS", async () => {
   }
 });
 
+test("terminal workflow transitions reject stale operation receipts in memory and after SQLite reopen", async () => {
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const candidateContentHash = `sha256:${"b".repeat(64)}`;
+  const prepareReady = (store: InMemoryHomeAutomationMigrationStore | SqliteHomeAutomationMigrationStore): void => {
+    const eligibleRule = {
+      ruleRef: "ha-rule-1", name: "晚间灯光", enabled: true, updatedAt: createdAt,
+      triggerClass: "state" as const, conditionClass: "flat_and" as const, actionClass: "reversible" as const,
+      sourceFingerprint, disposition: "eligible" as const, workflow: { status: "assessed" as const, sourceFingerprint, assessedAt: createdAt },
+    };
+    store.discover({ ...discovered, analysisMode: "trusted_neutral", rules: [eligibleRule] });
+    assert.equal(store.assess({ migrationId: discovered.migrationId, status: "assessed", assessedAt: createdAt, rules: [eligibleRule] }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "assessed", to: "translated", transitionedAt: createdAt,
+      proposalId: "proposal-terminal-cas", candidateProposalRevision: 1, candidateContentHash,
+    }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "translated", to: "simulated", transitionedAt: createdAt,
+      artifactId: "artifact-terminal-cas", artifactRevision: 1, artifactContentHash: `sha256:${"c".repeat(64)}`,
+      compileResultId: `sha256:${"d".repeat(64)}`, dryRunResultId: `sha256:${"e".repeat(64)}`,
+      simulationReceipt: simulationReceipt(sourceFingerprint, candidateContentHash, {
+        artifactId: "artifact-terminal-cas", artifactRevision: 1, artifactContentHash: `sha256:${"c".repeat(64)}`,
+        compileResultId: `sha256:${"d".repeat(64)}`, dryRunResultId: `sha256:${"e".repeat(64)}`,
+      }),
+    }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "simulated", to: "ready", transitionedAt: createdAt,
+      reviewProposalRevision: 2,
+    }), true);
+  };
+  const startSwitch = (store: InMemoryHomeAutomationMigrationStore | SqliteHomeAutomationMigrationStore, operationId: string): void => {
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "ready", to: "switching", transitionedAt: createdAt,
+      approvedProposalRevision: 3, switchOperationId: operationId, switchActor: "member:alice", sourceWasEnabled: true,
+    }), true);
+  };
+
+  const memory = new InMemoryHomeAutomationMigrationStore();
+  prepareReady(memory);
+  startSwitch(memory, "4".repeat(32));
+  assert.equal(memory.transitionRuleWorkflow({
+    migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "verified", transitionedAt: createdAt,
+    expectedSwitchOperationId: "3".repeat(32), deploymentId: "deployment-terminal-cas", deploymentTarget: "home-assistant",
+    deploymentConfigFingerprint: `sha256:${"f".repeat(64)}`,
+  } as never), false);
+  assert.equal(memory.transitionRuleWorkflow({
+    migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "verified", transitionedAt: createdAt,
+    expectedSwitchOperationId: "4".repeat(32), deploymentId: "deployment-terminal-cas", deploymentTarget: "home-assistant",
+    deploymentConfigFingerprint: `sha256:${"f".repeat(64)}`,
+  } as never), true);
+
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-terminal-cas-"));
+  const path = join(directory, "migrations.sqlite");
+  try {
+    const first = new SqliteHomeAutomationMigrationStore({ path });
+    prepareReady(first);
+    startSwitch(first, "6".repeat(32));
+    assert.equal(first.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "needs_attention", transitionedAt: createdAt,
+      failureReason: "switch_unknown", expectedSwitchOperationId: "5".repeat(32),
+    } as never), false);
+    assert.equal(first.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "needs_attention", transitionedAt: createdAt,
+      failureReason: "switch_unknown", expectedSwitchOperationId: "6".repeat(32),
+    } as never), true);
+    first.close();
+
+    const reopened = new SqliteHomeAutomationMigrationStore({ path });
+    assert.equal(reopened.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", to: "switching", transitionedAt: createdAt,
+      switchOperationId: "7".repeat(32), switchActor: "member:bob",
+    }), true);
+    assert.equal(reopened.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "needs_attention", transitionedAt: createdAt,
+      failureReason: "switch_failed", expectedSwitchOperationId: "6".repeat(32),
+    } as never), false);
+    assert.equal(reopened.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "needs_attention", transitionedAt: createdAt,
+      failureReason: "switch_failed", expectedSwitchOperationId: "7".repeat(32),
+    } as never), true);
+    reopened.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("requires and durably retains a complete dual-run receipt before ready", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-simulation-receipt-"));
   const path = join(directory, "migrations.sqlite");
@@ -632,6 +717,7 @@ test("sqlite persists the complete switch and rollback workflow across restart",
       from: "switching",
       to: "verified",
       transitionedAt: createdAt,
+      expectedSwitchOperationId: "1".repeat(32),
       deploymentId: "deployment-restart",
       deploymentTarget: "home-assistant",
       deploymentConfigFingerprint: `sha256:${"a".repeat(64)}`,
@@ -651,6 +737,7 @@ test("sqlite persists the complete switch and rollback workflow across restart",
       from: "rolling_back",
       to: "restored",
       transitionedAt: createdAt,
+      expectedRollbackOperationId: "2".repeat(32),
     }), true);
     first.close();
 
@@ -806,6 +893,7 @@ test("sqlite workflow CAS rejects duplicate and competing switch starts without 
       from: "switching",
       to: "verified",
       transitionedAt: createdAt,
+      expectedSwitchOperationId: "4".repeat(32),
       deploymentId: "deployment-cas",
       deploymentTarget: "home-assistant",
       deploymentConfigFingerprint: `sha256:${"2".repeat(64)}`,
@@ -876,7 +964,7 @@ test("failed-switch restore is an exact failure CAS and persists without deploym
     }), true);
     assert.equal(store.transitionRuleWorkflow({
       migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "needs_attention", transitionedAt: createdAt,
-      failureReason: "switch_failed",
+      failureReason: "switch_failed", expectedSwitchOperationId: "f".repeat(32),
     }), true);
   };
 
