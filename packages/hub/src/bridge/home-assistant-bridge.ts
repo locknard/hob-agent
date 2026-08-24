@@ -92,6 +92,8 @@ const MAX_HOME_ASSISTANT_IDENTITY_CLAIMS = 16;
 const MAX_HOME_ASSISTANT_IDENTITY_CANDIDATES = 64;
 const MAX_HOME_ASSISTANT_IDENTITY_VALUE_LENGTH = 256;
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES = 256 * 1024;
+/** Foreign-rule toggle operation entries retained for this adapter instance. */
+export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS = 128;
 
 export interface HomeAssistantState {
   entity_id: string;
@@ -888,6 +890,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private foreignRuleCatalog: ForeignRuleCatalog | undefined;
   private foreignRuleConfigIdsByRef = new Map<string, string>();
   private foreignRuleTitlesByRef = new Map<string, string>();
+  private foreignRuleControlOperations = new Map<string, ForeignRuleControlOperationEntry>();
   private resyncInFlight = false;
 
   constructor(
@@ -1044,15 +1047,70 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     }
   }
 
-  private async setForeignRuleEnabled(
+  private setForeignRuleEnabled(
     requestValue: unknown,
     signal: AbortSignal,
   ): Promise<ForeignRuleControlSetEnabledResult> {
     const parsed = foreignRuleControlSetEnabledRequestSchema.safeParse(requestValue);
-    if (!parsed.success) return { status: "rejected", reason: "failed" };
-    if (signal.aborted) return { status: "unknown", reason: "cancelled" };
-    if (this.lifecycle !== "running" || this.bridge === undefined) return { status: "rejected", reason: "unavailable" };
-    const nativeConfigId = this.foreignRuleConfigIdsByRef.get(parsed.data.ruleRef);
+    if (!parsed.success) return Promise.resolve({ status: "rejected", reason: "failed" });
+    if (signal.aborted) return Promise.resolve({ status: "unknown", reason: "cancelled" });
+    if (this.lifecycle !== "running" || this.bridge === undefined) {
+      return Promise.resolve({ status: "rejected", reason: "unavailable" });
+    }
+
+    const request = parsed.data;
+    const requestKey = foreignRuleControlRequestKey(request);
+    const existing = this.foreignRuleControlOperations.get(request.operationId);
+    if (existing !== undefined) {
+      return existing.requestKey === requestKey
+        ? existing.result
+        : Promise.resolve({ status: "rejected", reason: "failed" });
+    }
+
+    if (!this.reserveForeignRuleControlOperation(request.operationId)) {
+      return Promise.resolve({ status: "rejected", reason: "unavailable" });
+    }
+
+    const result = this.performForeignRuleEnabled(request, signal).catch(() => (
+      signal.aborted
+        ? { status: "unknown", reason: "cancelled" } as const
+        : { status: "unknown", reason: "upstream_unavailable" } as const
+    ));
+    const entry: ForeignRuleControlOperationEntry = {
+      requestKey,
+      result,
+      settled: false,
+    };
+    this.foreignRuleControlOperations.set(request.operationId, entry);
+    void result.then(
+      () => { entry.settled = true; },
+      () => { entry.settled = true; },
+    );
+    return result;
+  }
+
+  private reserveForeignRuleControlOperation(operationId: string): boolean {
+    if (this.foreignRuleControlOperations.size >= MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS) {
+      const evictable = [...this.foreignRuleControlOperations.entries()]
+        .find(([, entry]) => entry.settled)?.[0];
+      if (evictable === undefined) return false;
+      this.foreignRuleControlOperations.delete(evictable);
+    }
+    return true;
+  }
+
+  private async performForeignRuleEnabled(
+    request: {
+      readonly ruleRef: string;
+      readonly expectedSourceFingerprint: string;
+      readonly enabled: boolean;
+      readonly operationId: string;
+    },
+    signal: AbortSignal,
+  ): Promise<ForeignRuleControlSetEnabledResult> {
+    const bridge = this.bridge;
+    if (this.lifecycle !== "running" || bridge === undefined) return { status: "rejected", reason: "unavailable" };
+    const nativeConfigId = this.foreignRuleConfigIdsByRef.get(request.ruleRef);
     if (nativeConfigId === undefined) return { status: "rejected", reason: "not_found" };
 
     let preflight: ForeignRuleControlConfigRead;
@@ -1064,14 +1122,14 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     if (preflight.status === "missing") return { status: "rejected", reason: "not_found" };
     if (preflight.status === "unavailable") return { status: "rejected", reason: "unavailable" };
     if (preflight.status === "invalid") return { status: "rejected", reason: "failed" };
-    if (preflight.sourceFingerprint !== parsed.data.expectedSourceFingerprint) {
+    if (preflight.sourceFingerprint !== request.expectedSourceFingerprint) {
       return { status: "rejected", reason: "stale_source" };
     }
 
     try {
-      await this.bridge.callService({
+      await bridge.callService({
         domain: "automation",
-        service: parsed.data.enabled ? "turn_on" : "turn_off",
+        service: request.enabled ? "turn_on" : "turn_off",
         entityId: `automation.${nativeConfigId}`,
       }, signal);
     } catch {
@@ -1082,9 +1140,9 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
 
     try {
       const observed = await this.readForeignRuleControlState(nativeConfigId, signal);
-      const expectedStatus = parsed.data.enabled ? "running" : "paused";
+      const expectedStatus = request.enabled ? "running" : "paused";
       if (observed.status === expectedStatus
-        && observed.sourceFingerprint === parsed.data.expectedSourceFingerprint) {
+        && observed.sourceFingerprint === request.expectedSourceFingerprint) {
         return observed;
       }
       return signal.aborted
@@ -1725,6 +1783,12 @@ type ForeignRuleControlConfigRead =
   | { readonly status: "missing" }
   | { readonly status: "unavailable" }
   | { readonly status: "invalid" };
+
+interface ForeignRuleControlOperationEntry {
+  readonly requestKey: string;
+  readonly result: Promise<ForeignRuleControlSetEnabledResult>;
+  settled: boolean;
+}
 
 const HOME_ASSISTANT_WEEKDAY_TO_NUMBER: Readonly<Record<string, number>> = Object.freeze({
   sun: 0,
@@ -2638,6 +2702,14 @@ function sourceAutomationFingerprint(value: unknown): string | undefined {
   const canonical = canonicalNativeJson(value);
   if (canonical === undefined || Buffer.byteLength(canonical, "utf8") > MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES) return undefined;
   return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+}
+
+function foreignRuleControlRequestKey(request: {
+  readonly ruleRef: string;
+  readonly expectedSourceFingerprint: string;
+  readonly enabled: boolean;
+}): string {
+  return JSON.stringify([request.ruleRef, request.expectedSourceFingerprint, request.enabled]);
 }
 
 /** Deep equality on the behavioral fields; storage may add bookkeeping keys. */

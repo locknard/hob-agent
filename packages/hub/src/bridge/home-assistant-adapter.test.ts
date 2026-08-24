@@ -19,6 +19,7 @@ import {
   HOME_ASSISTANT_COVER_SCHEMA_CANONICAL_HASH,
   HOME_ASSISTANT_ENTITY_SCHEMA_CANONICAL_HASH,
   MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES,
+  MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS,
   HomeAssistantBridgeAdapter,
   createHomeAssistantBridgeAdapter,
   deriveHomeAssistantRemoteInstanceId,
@@ -1378,6 +1379,13 @@ function foreignRuleControlFetchFake(config: unknown, initialState: "on" | "off"
   };
 }
 
+async function waitForForeignRuleServiceCommands(socket: FakeSocket, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (socket.sent.filter((message) => message.type === "call_service").length >= count) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 const automationTarget = {
   hwCapabilityId: "cap-light",
   binding: { bridgeId: "bridge-ha", nativeId: "device-1", nativeInstanceId: "entity-stable-1" },
@@ -1916,6 +1924,148 @@ test("sets a foreign rule and verifies target state and source fingerprint after
   assert.deepEqual(result, { status: "paused", sourceFingerprint: observed.sourceFingerprint });
   assert.equal(JSON.stringify(result).includes("arrival_light"), false);
   await adapter.control.dispose();
+  void first;
+});
+
+test("shares one foreign rule toggle result for concurrent and sequential operation replays", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
+  if (observed.status !== "running") assert.fail("expected a running foreign rule");
+  const request = {
+    ruleRef,
+    expectedSourceFingerprint: observed.sourceFingerprint,
+    enabled: false,
+    operationId: "abcdefabcdefabcdefabcdefabcdefab",
+  } as const;
+
+  const concurrent = [
+    handle.setEnabled(request, { signal: new AbortController().signal }),
+    handle.setEnabled(request, { signal: new AbortController().signal }),
+  ];
+  await waitForForeignRuleServiceCommands(socket, 1);
+  const serviceCommands = socket.sent.filter((message) => message.type === "call_service");
+  fake.setState("off");
+  for (const command of serviceCommands) {
+    socket.receive({ id: command.id, type: "result", success: true, result: null });
+  }
+
+  const concurrentResults = await Promise.all(concurrent);
+  assert.deepEqual(concurrentResults[0], { status: "paused", sourceFingerprint: observed.sourceFingerprint });
+  assert.deepEqual(concurrentResults[1], concurrentResults[0]);
+  const replay = handle.setEnabled(request, { signal: new AbortController().signal });
+  await waitForForeignRuleServiceCommands(socket, serviceCommands.length + 1);
+  const replayCommands = socket.sent.filter((message) => message.type === "call_service");
+  fake.setState("off");
+  for (const command of replayCommands.slice(serviceCommands.length)) {
+    socket.receive({ id: command.id, type: "result", success: true, result: null });
+  }
+  assert.deepEqual(await replay, concurrentResults[0]);
+  await adapter.control.dispose();
+  assert.equal(serviceCommands.length, 1, "one operation id has one remote write");
+  assert.equal(replayCommands.length, 1, "a sequential replay has no additional remote write");
+  void first;
+});
+
+test("rejects an operation id collision before any remote read or write", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
+  if (observed.status !== "running") assert.fail("expected a running foreign rule");
+  const operationId = "0123456789abcdef0123456789abcdef";
+  const request = {
+    ruleRef,
+    expectedSourceFingerprint: observed.sourceFingerprint,
+    enabled: false,
+    operationId,
+  } as const;
+  const pending = handle.setEnabled(request, { signal: new AbortController().signal });
+  await waitForForeignRuleServiceCommands(socket, 1);
+  const command = socket.sent.filter((message) => message.type === "call_service").at(-1);
+  assert.notEqual(command, undefined);
+  fake.setState("off");
+  socket.receive({ id: command!.id, type: "result", success: true, result: null });
+  const result = await pending;
+  assert.deepEqual(result, { status: "paused", sourceFingerprint: observed.sourceFingerprint });
+  const requestsBeforeCollision = fake.requests.length;
+  const writesBeforeCollision = socket.sent.filter((message) => message.type === "call_service").length;
+
+  const collision = await handle.setEnabled({
+    ...request,
+    enabled: true,
+  }, { signal: new AbortController().signal });
+  assert.deepEqual(collision, { status: "rejected", reason: "failed" });
+  assert.equal(fake.requests.length, requestsBeforeCollision, "a collision performs no remote read");
+  assert.equal(socket.sent.filter((message) => message.type === "call_service").length, writesBeforeCollision, "a collision performs no remote write");
+  await adapter.control.dispose();
+  void first;
+});
+
+test("bounds concurrent foreign rule operations at the fixed ledger capacity", async () => {
+  const socket = new FakeSocket();
+  const fake = foreignRuleControlFetchFake({
+    alias: "到家灯光",
+    mode: "single",
+    trigger: [{ platform: "state", entity_id: "light.kitchen" }],
+    condition: [],
+    action: [{ service: "homeassistant.turn_on", target: { entity_id: "light.kitchen" } }],
+  });
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToForeignRuleBootstrap(socket);
+  while ((await iterator.next()).value?.event.kind !== "sync-complete") continue;
+  const ruleRef = (await (adapter.extension("foreignRules@2") as ForeignRulesHandle).catalog())!.rules[0]!.ruleRef;
+  const handle = adapter.extension("foreignRuleControl@1") as ForeignRuleControlHandle;
+  const observed = await handle.status({ ruleRef }, { signal: new AbortController().signal });
+  if (observed.status !== "running") assert.fail("expected a running foreign rule");
+  const ledgerLimit = MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS;
+  const operations = Array.from({ length: ledgerLimit + 1 }, (_, index) => handle.setEnabled({
+    ruleRef,
+    expectedSourceFingerprint: observed.sourceFingerprint,
+    enabled: false,
+    operationId: index.toString(16).padStart(32, "0"),
+  }, { signal: new AbortController().signal }));
+  await waitForForeignRuleServiceCommands(socket, ledgerLimit + 1);
+  fake.setState("off");
+  for (const command of socket.sent.filter((message) => message.type === "call_service")) {
+    socket.receive({ id: command.id, type: "result", success: true, result: null });
+  }
+  const overflowResult = await operations[ledgerLimit]!;
+  const remoteWrites = socket.sent.filter((message) => message.type === "call_service").length;
+  await adapter.control.dispose();
+  await Promise.all(operations);
+  assert.equal(remoteWrites, ledgerLimit, "the adapter retains at most the fixed number of in-flight operations");
+  assert.deepEqual(overflowResult, { status: "rejected", reason: "unavailable" });
   void first;
 });
 
