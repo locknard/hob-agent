@@ -310,10 +310,12 @@ function createHarness(
     window,
     sessionStorage: options.sessionStorage ?? storage,
     Date: { now: options.now ?? (() => 0) },
-    setTimeout: (handler: Handler) => options.setTimeout?.(handler) ?? (() => {
-      timers.push(handler);
-      return timers.length;
-    })(),
+    setTimeout: (handler: Handler) => options.setTimeout !== undefined
+      ? options.setTimeout(handler)
+      : (() => {
+          timers.push(handler);
+          return timers.length;
+        })(),
     clearTimeout: () => {},
   });
   return {
@@ -350,10 +352,12 @@ test("pauses private voice for ten minutes after three consecutive no-input turn
     assert.equal(h.root.dataset.voiceState, "no_input");
   };
   await noInput();
+  assert.equal(h.detail.textContent, "没有听清。再说一次就好。");
   h.restart.click();
   await flush();
   h.stop.click();
   await flush();
+  assert.equal(h.detail.textContent, "可以说‘客厅现在怎么样’，也可以改用文字。");
   h.restart.click();
   await flush();
   h.stop.click();
@@ -482,6 +486,23 @@ test("fails open to text and a recoverable voice retry when session backoff pers
   assert.equal(timerFailure.start.disabled, false);
   assert.equal(timerFailure.restart.disabled, false);
   assert.equal(timerFailure.recovery.href, "/conversation");
+});
+
+test("fails open when the no-input recovery timer does not return a handle", async () => {
+  const h = createHarness({ setTimeout: () => undefined });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    h.start.click();
+    await flush();
+    h.stop.click();
+    await flush();
+    if (attempt < 2) h.restart.click();
+  }
+
+  assert.equal(h.root.dataset.voiceState, "no_input");
+  assert.equal(h.start.disabled, false);
+  assert.equal(h.restart.disabled, false);
+  assert.equal(h.recovery.href, "/conversation");
+  assert.match(h.detail.textContent, /可以再试一次|改用文字/);
 });
 
 function deferred<T>(): {

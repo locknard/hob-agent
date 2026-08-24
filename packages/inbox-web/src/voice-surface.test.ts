@@ -265,7 +265,7 @@ test("provides permission, no-input, and text recovery exits", async () => {
     renderVoiceSurface("permission_denied") ?? "",
     /打开麦克风权限|浏览器设置/,
   );
-  assert.match(renderVoiceSurface("no_input") ?? "", /没有听到|再试一次/);
+  assert.match(renderVoiceSurface("no_input") ?? "", /没有听清。再说一次就好。/);
   assert.match(renderVoiceSurface("partial_transcript") ?? "", /正在听|继续说/);
   assert.match(renderVoiceSurface("text_mode") ?? "", /用文字继续/);
 });

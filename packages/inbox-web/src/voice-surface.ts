@@ -80,7 +80,7 @@ const STATE_COPY: Readonly<Record<VoiceSurfaceState, StateCopy>> =
       eyebrow: "这次很安静",
       heading: "刚才没有听到清楚的内容",
       status: "等待下一步",
-      detail: "你可以再试一次，也可以直接输入文字。",
+      detail: "没有听清。再说一次就好。",
       recovery: { href: "/voice", label: "再试一次" },
     },
     partial_transcript: {
@@ -230,6 +230,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const noInputBackoffStorageKey = "hob.private-voice.no-input.v1";
   const noInputBackoffMs = 10 * 60 * 1000;
   let noInputBackoffTimer;
+  let noInputAttempt = 0;
   const copy = {
     idle: ["等待开始", "开始后只会采集这一次要说的话。"],
     requesting_permission: [
@@ -243,7 +244,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     listening: ["麦克风正在聆听", "说完按停止；最长 15 秒。"],
     no_input: [
       "等待下一步",
-      "刚才没有听到清楚的内容。可以再试一次，或改用文字。",
+      "没有听清。再说一次就好。",
     ],
     transcribing: ["转成文字", "正在使用私人的语音服务确认这一次请求。"],
     thinking: ["正在处理", "正在查看家里的信息；你可以取消等待。"],
@@ -314,21 +315,31 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
       try { clearTimeout(noInputBackoffTimer); } catch {}
       noInputBackoffTimer = undefined;
     }
+    noInputAttempt = 0;
     const store = noInputStore();
     try { store?.removeItem(noInputBackoffStorageKey); } catch {}
   };
   const backoffDetail = () => "连续三次没有听到内容，语音已暂停 10 分钟。你可以改用文字。";
+  const noInputDetail = (record) => {
+    if (record?.attempt === 1) return "没有听清。再说一次就好。";
+    if (record?.attempt === 2) return "可以说‘客厅现在怎么样’，也可以改用文字。";
+    if (record?.attempt === 3 && record.paused) return backoffDetail();
+    if (record?.attempt === 3) return "这次仍然没有听清。可以再试一次，也可以改用文字。";
+    return copy.no_input[1];
+  };
   const scheduleNoInputRecovery = (until) => {
     try {
       const delay = until - Date.now();
       if (!Number.isSafeInteger(delay) || delay < 1 || delay > noInputBackoffMs) return false;
       if (noInputBackoffTimer !== undefined) clearTimeout(noInputBackoffTimer);
-      noInputBackoffTimer = setTimeout(() => {
+      const scheduledTimer = setTimeout(() => {
         noInputBackoffTimer = undefined;
         const backoff = readNoInputBackoff();
         if (backoff?.until !== undefined) return;
         if (!disposed && state === "no_input") setState("idle", "语音现在可以再次开始。", { href: "/conversation", label: "改用文字" });
       }, delay);
+      if (scheduledTimer === undefined || scheduledTimer === null) return false;
+      noInputBackoffTimer = scheduledTimer;
       return true;
     } catch {
       return false;
@@ -337,20 +348,21 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
   const recordNoInput = () => {
     const store = noInputStore();
     const current = readNoInputBackoff();
-    if (!store || !current) return undefined;
-    const count = Math.min(current.count + 1, 3);
+    const count = Math.min((current?.count ?? noInputAttempt) + 1, 3);
+    noInputAttempt = count;
+    if (!store || !current) return { attempt: count, paused: false };
     try {
       if (count < 3) {
         store.setItem(noInputBackoffStorageKey, JSON.stringify({ count }));
-        return undefined;
+        return { attempt: count, paused: false };
       }
       const until = Date.now() + noInputBackoffMs;
       store.setItem(noInputBackoffStorageKey, JSON.stringify({ count, until }));
-      if (scheduleNoInputRecovery(until)) return until;
+      if (scheduleNoInputRecovery(until)) return { attempt: count, paused: true };
       clearNoInputBackoff();
-      return undefined;
+      return { attempt: count, paused: false };
     } catch {
-      return undefined;
+      return { attempt: count, paused: false };
     }
   };
   const setText = (node, value) => {
@@ -685,7 +697,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
     if (!body || body.size === 0) {
       discardAudio();
       releaseLease();
-      setState("no_input", recordNoInput() === undefined ? undefined : backoffDetail());
+      setState("no_input", noInputDetail(recordNoInput()));
       return;
     }
     setState("transcribing");
@@ -739,7 +751,7 @@ export const VOICE_INTERACTION_JS = String.raw`for (const voiceRoot of document.
         beginEvents(result.adviceId, turnGeneration);
       else if (result.status === "no_input") {
         releaseLease();
-        setState("no_input", recordNoInput() === undefined ? undefined : backoffDetail());
+        setState("no_input", noInputDetail(recordNoInput()));
       } else if (result.status === "unavailable") {
         releaseLease();
         setState("text_mode", "私人语音暂时不可用；可以直接改用文字。");
