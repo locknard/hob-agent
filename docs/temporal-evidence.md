@@ -65,8 +65,11 @@ stays explicit and never becomes a guessed explanation.
 ## Proposal relationship
 
 This slice makes evidence inspectable; it does not make approval equivalent to
-application. Proposal creation remains review-only and dry-run remains
-`not_run` until a Hub-owned artifact compiler and simulator exist. Hub-created
-proposals may attach exact bounded event references by selecting current hub
-capability IDs and a lookback window. The Hub re-runs this query; the model
-never supplies journal provenance. See `docs/proposal-evidence-binding.md`.
+application. Proposal admission remains review-only and initializes the raw
+Proposal `dryRun` field to `not_run`. After an exact Artifact preparation, the
+Hub reports compiler and simulator facts separately through the exact
+`ArtifactReviewSnapshot`; that attestation does not rewrite the raw Proposal
+field. Hub-created proposals may attach exact bounded event references by
+selecting current hub capability IDs and a lookback window. The Hub re-runs
+this query; the model never supplies journal provenance. See
+`docs/proposal-evidence-binding.md`.

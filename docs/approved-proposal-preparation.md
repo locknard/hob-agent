@@ -1,22 +1,27 @@
-# Approved-proposal preparation pipeline
+# Proposal preparation pipeline
 
 Status: accepted and implemented for the non-applying Hub runtime slice.
-The production composition now owns the durable stores and wakes preparation
-only for a qualifying approval committed during that running process. Inbox
-job projection and explicit retry controls remain follow-up review work.
+The production composition owns the durable stores and wakes preparation after
+admission of a qualifying automation Proposal during that running process.
+Preparation is prepare-first: the Proposal remains pending review while the
+Hub builds and checks its exact Artifact. A household decision opens only after
+the exact preparation succeeds and the Proposal is promoted to `ready`.
+The raw Proposal envelope keeps its admission-time `dryRun: not_run` value;
+the exact compiler and simulator facts live in the separate read-only
+`ArtifactReviewSnapshot`.
 
 ## Decision
 
-Approving a qualifying automation Proposal does exactly one new thing: it
-durably enqueues one Hub-private preparation job for that exact approved
-Proposal revision. Approval does not synchronously create an Artifact, collect
-fresh evidence, resolve authority, assess risk, compile, or run a simulation.
-It also does not install, enable, execute, or roll back anything.
+A qualifying automation Proposal admission with a valid neutral
+`artifactCandidate` durably enqueues exactly one Hub-private preparation job
+for that admitted Proposal revision. Admission does not approve, enable,
+install, execute, or roll back anything. It records the raw Proposal with
+`dryRun.status: "not_run"` and starts the preparation lifecycle.
 
-A Hub-private background worker may execute the job in this fixed order:
+The root-private background worker executes the job in this fixed order:
 
 ```text
-approved Proposal revision
+admitted Proposal revision (`lifecycle: preparing`)
   -> Artifact
   -> evidence
   -> authority
@@ -32,54 +37,62 @@ pipeline stages. The final result remains a neutral, durable review record.
 There is no device write, remote rule installation, action ticket, executor,
 `actions@1`, or `artifactHost@1` in this slice.
 
+The worker records prepared Artifact, assessment, compile, and dry-run
+references on the exact Proposal revision. The Proposal Store promotes that
+revision to `ready` only after compile and dry-run persistence succeeds. Only a
+`ready` Proposal can spend household attention on a review or enablement
+decision. The raw Proposal `dryRun` field is not rewritten by this promotion;
+`HomeArtifactService` reads the independent ArtifactReview attestation by
+exact `proposalId + proposalRevision`.
+
 This decision extends the review-only boundary described by
 [`proposal-review-loop.md`](proposal-review-loop.md),
 [`artifact-proposal-candidate.md`](artifact-proposal-candidate.md), and
 [`neutral-artifact-contract.md`](neutral-artifact-contract.md). It does not
 turn Proposal approval into Artifact approval or execution approval.
 
-## Approval and enqueue boundary
+## Admission and preparation boundary
 
-Only an approved `automation-draft` with a valid neutral `artifactCandidate`
-qualifies for this preparation job. Approving an insight, identity proposal,
-or another non-automation kind remains review metadata and does not create an
-Artifact job.
+Only an admitted `automation-draft` with a valid neutral `artifactCandidate`
+qualifies for this preparation job. Insights, identity proposals, and other
+non-automation kinds remain review metadata and do not create an Artifact job.
 
-The Hub review boundary must:
+The Hub admission boundary must:
 
-1. validate the optimistic Proposal revision and the existing terminal review
-   rules;
-2. append the human approval and its audit event;
-3. append exactly one job keyed by the approved `(proposalId,
-   proposalRevision)`; and
-4. return the approved Proposal review result, not a compiler or dry-run
-   result.
+1. validate the bounded Proposal, candidate, evidence, conflict, and human
+   approval requirements;
+2. persist the pending Proposal and exactly one job keyed by its admitted
+   `(proposalId, proposalRevision)` in the Proposal Store transaction;
+3. return the pending Proposal with `lifecycle: preparing` and raw
+   `dryRun.status: "not_run"`; and
+4. wake the private worker after the durable admission commits.
 
-The review and enqueue writes share one Hub-owned durable transaction boundary
-so a successful approval cannot be observed without its durable job. If that
-boundary cannot commit, the approval fails closed before it becomes visible;
-the Hub does not commit an approval and later pretend that an in-memory queue
-is sufficient. This is a local review/job durability guarantee, not a claim of
-one transaction across the Proposal database and Artifact Registry.
+The admission and enqueue writes share one Hub-owned Proposal Store transaction
+so a successful admission cannot be observed without its durable job. If that
+boundary cannot commit, the Proposal fails closed before it becomes visible.
+The wake is best effort after the durable write; an explicit retry handles a
+failed job, and startup does not claim old queued jobs.
 
-After the approval and enqueue commit, the Proposal is not rolled back when a
-job stage fails. Its `status` remains the terminal `approved` state and its
-`applicationStatus` remains `not_available`. A failed preparation attempt does
-not reject, expire, or rewrite the Proposal; it does not delete, supersede, or
-compensate an already persisted Artifact or assessment row. The rollback field
-inside the reviewed neutral Artifact candidate is intent for a future action
-plane and is never executed by preparation.
+While preparation runs, the Proposal remains `pending_review` with
+`lifecycle: preparing`. A failed preparation attempt leaves that state and
+records only the bounded job stage and error code. It does not approve, reject,
+expire, or rewrite the Proposal; it does not delete, supersede, or compensate
+an already persisted Artifact or assessment row. The rollback field inside the
+reviewed neutral Artifact candidate is intent for the governed action plane
+and is never executed by preparation.
 
-Repeated delivery of the approval request is handled by the existing Proposal
-revision/terminal checks and the same enqueue identity. It must return the
-existing durable result or a bounded conflict; it must never create a second
-job for the same approved revision.
+Repeated admission delivery is handled by the existing Proposal
+idempotency/dedup checks and the same enqueue identity. It returns the existing
+durable result or a bounded conflict; it never creates a second job for the
+same admitted revision. A household decision is accepted only after the exact
+revision is `ready`; automation enablement then uses its separate governed
+deployment boundary.
 
 ## Durable job contract
 
 The job queue is Hub-private durable state. It stores references and bounded
 lifecycle metadata, not a copy of the Proposal, model output, raw bridge data,
-native identifiers, credentials, or arbitrary exception text. The approved
+native identifiers, credentials, or arbitrary exception text. The admitted
 Proposal remains the exact source read by the Artifact producer.
 
 The minimum v1 shape is conceptually:
@@ -124,8 +137,8 @@ and error values are closed enums such as `not_found`, `unavailable`,
 `attempt_exhausted`. Raw provider, bridge, filesystem, or model errors do not
 cross the job or Inbox projection.
 
-The queue may be physically co-located with the Proposal store to provide the
-approval/enqueue transaction. It is not an Artifact Registry and is not a
+The queue is physically co-located with the Proposal store to provide the
+admission/enqueue transaction. It is not an Artifact Registry and is not a
 second source of Artifact truth. Its only mutation responsibility is job
 lifecycle and bounded job audit.
 
@@ -139,24 +152,24 @@ the Hub-owned `ArtifactRegistry`.
 
 | Stage | Hub-private work | Durable output | Forbidden effect |
 | --- | --- | --- | --- |
-| `artifact` | Re-read `withApprovedProposalAtRevision`; copy the exact reviewed title, summary, and candidate; let Hub generate the Artifact identity | Artifact revision 1 / `draft` | No candidate reinterpretation, bridge call, or device write |
-| `evidence` | Re-read the exact Artifact and approved Proposal; query a fresh bounded HomeWorld/evidence cut | Immutable `evidence-attestation` | No Agent-authored watermark or raw event copy |
+| `artifact` | Re-read the exact admitted Proposal through the Hub source gate; copy its reviewed title, summary, and candidate; let Hub generate the Artifact identity | Artifact revision 1 / `draft` | No candidate reinterpretation, bridge call, or device write |
+| `evidence` | Re-read the exact Artifact and admitted Proposal source; query a fresh bounded HomeWorld/evidence cut | Immutable `evidence-attestation` | No Agent-authored watermark or raw event copy |
 | `authority` | Build a fresh opaque Hub-private binding input; resolve exactly one candidate per device-action capability through `AuthorityCandidateRegistry` | Immutable `authority-assessment` | No route, native ID, credential, or fallback authority in neutral output |
 | `risk` | Re-check exact evidence and authority identities; run the fixed Hub policy and bounded conflict source | Immutable `risk-assessment` | No model risk label or missing-conflict-as-zero inference |
 | `compile` | Re-read exact dependencies, capture the current conflict cut, create a stable neutral world cut, and run the pure compiler | Immutable `compile-attestation` | No provider payload, action ticket, or remote call |
 | `dry-run` | Run the pure neutral simulator against that compile result | Immutable `dry-run-attestation` | No bridge control/events write, credential resolve, executor, or artifact host |
 
-The causal production order is fixed even though a compiler coordinator may
-read already persisted dependencies in its own validation order. In
+The causal production order is fixed even though the compiler coordinator
+reads already persisted dependencies in its own validation order. In
 particular, risk cannot be produced without the exact evidence and authority
 rows, and compile cannot run without all three assessments and its fresh
 read-only conflict/world inputs. Missing, stale, malformed, or mismatched
 inputs fail the job at the owning stage.
 
 `ArtifactRegistry` is the sole owner of Artifact revision, evidence,
-authority, risk, compile, and dry-run records. The preparation worker may
-compose calls to that Registry; it may not maintain a shadow Artifact map or
-let Proposal, Agent, Inbox, plugin, authority configuration, or bridge code
+authority, risk, compile, and dry-run records. The preparation worker composes
+calls to that Registry; it does not maintain a shadow Artifact map, and
+Proposal, Agent, Inbox, plugin, authority configuration, and bridge code do not
 write those records. `AuthorityCandidateRegistry` remains a separate
 Hub-private opaque candidate store as defined by
 [`authority-candidate-registry.md`](authority-candidate-registry.md); its
@@ -166,15 +179,16 @@ candidate rows never become Artifact ownership or an execution route.
 
 There are two distinct idempotency layers:
 
-- **Enqueue identity:** the Hub derives a stable key from
-  `approved-proposal-preparation-v1`, `proposalId`, and the exact approved
-  Proposal revision. A replay returns the existing job and does not append a
-  second queue row.
+- **Enqueue identity:** the Hub derives a stable key from the existing
+  `approved-proposal-preparation-v1` job identity material, `proposalId`, and
+  the exact admitted Proposal revision. The persisted kind/key name remains
+  stable while the admission boundary owns when the job is created. A replay
+  returns the existing job and does not append a second queue row.
 - **Stage identity:** Artifact Registry writes use the existing deterministic
   keys for the exact ArtifactRef and assessment/result input identities. A
-  retry may re-read fresh HomeWorld inputs and therefore produce a new
-  immutable assessment/result identity, but replaying the same input returns
-  the original row without duplicate audit.
+  retry re-reads fresh HomeWorld inputs and therefore produces a new immutable
+  assessment/result identity when those inputs change; replaying the same input
+  returns the original row without duplicate audit.
 
 Retry is an explicit Hub-private command, never an automatic timer or
 backoff. It requires the expected job state/version and a deterministic retry
@@ -197,7 +211,7 @@ complete audit trail.
 Process startup only opens and validates durable stores and reports bounded
 diagnostics. It does not scan for queued jobs, claim running jobs, resume a
 stage, or invoke a producer. A job enqueued during an already running process
-may wake that process's explicitly mounted worker; that event is not startup
+wakes that process's explicitly mounted worker; that event is not startup
 replay. Jobs left `queued` or `running` by shutdown remain so until an
 explicit, operator-authorized command handles them.
 
@@ -215,15 +229,15 @@ The queue, preparation worker, `ArtifactRegistry`,
 `AuthorityCandidateRegistry`, and their writable ports are not Cordis
 `Context` services. No `Context` augmentation such as
 `homeArtifactRegistry`, `homePreparationPipeline`, or
-`homePreparationJobs` is permitted. The production root may construct the
-private worker and pass narrow dependencies to it, but no child service can
+`homePreparationJobs` is permitted. The production root constructs the private
+worker and passes narrow dependencies to it, while no child service can
 discover a writable registry or invoke preparation by name.
 
 The Agent receives only the existing governed proposal tool and bounded
 read-only home context. It cannot enqueue, claim, retry, compile, dry-run,
 inspect Registry rows directly, choose an authority candidate, or obtain a
-job token. An approved Proposal source is re-read by Hub code, never supplied
-as a model-controlled callback payload.
+job token. The exact admitted Proposal source is re-read by Hub code, never
+supplied as a model-controlled callback payload.
 
 The bridge adapter remains a neutral observation provider. The preparation
 worker consumes typed HomeWorld snapshots, evidence, and foreign-rule
@@ -232,10 +246,16 @@ native identity, or remote route. Preparation has no device-write port at all.
 
 `HomeArtifactService` remains the only read projection into the review layer.
 It must query by the exact `proposalId + proposalRevision`/`ArtifactRef` and
-return bounded neutral metadata. It may expose job status, ArtifactRef,
+return bounded neutral metadata. It exposes job status, ArtifactRef,
 assessment/result identities, closed reasons, neutral diff/conflict, and the
 dry-run fact `writesPerformed: false`; it must not expose writable Registry
 objects, provider payloads, raw errors, or a route to the worker.
+
+The Proposal envelope's raw `dryRun` field and the ArtifactReview attestation
+are separate facts. The raw field remains `not_run` as the admission-time
+Proposal fact. ArtifactReview reports compile and dry-run status only when its
+exact Artifact revision and attestation rows exist; it returns `not_run` when
+that exact review does not exist.
 
 The Inbox receives a read-only preparation projection. It receives no worker,
 bridge, Agent, authority resolver, compiler, dry-run producer, queue writer, or
@@ -244,7 +264,7 @@ Reading preparation state after a process restart causes no pipeline work.
 
 ### Inbox status and explicit retry boundary
 
-The Proposal review projection may expose one exact preparation summary for
+The Proposal review projection exposes one exact preparation summary for
 `proposalId + proposalRevision`: `status`, `attempt`, optimistic `version`, and
 the closed `stage + error code` when failed, plus bounded created/updated time.
 It does not expose `jobId`, the job idempotency key, arbitrary error text, or queue enumeration.
@@ -269,9 +289,9 @@ contain the literal boolean `writesPerformed: false`. The Inbox projection
 also includes `writesPerformed: false` for `not_run`, so absence of a result is
 not mistaken for an applied or successful simulation.
 
-The dry-run path is pure and repeatable. It may read only Hub-owned neutral
-world cuts, journal evidence, foreign-rule metadata, assessments, and compiler
-inputs. It must not invoke:
+The dry-run path is pure and repeatable. It reads only Hub-owned neutral world
+cuts, journal evidence, foreign-rule metadata, assessments, and compiler
+inputs. It does not invoke:
 
 - a bridge `control` or remote events-write path;
 - an action executor, approval-ticket claim, or artifact host;
@@ -287,12 +307,15 @@ before persistence. No job status can imply that a device action occurred.
 
 Focused tests and crash/concurrency tests must prove:
 
-- approval of one exact automation Proposal revision creates one durable
+- admission of one exact automation Proposal revision creates one durable
   queued job and performs zero Artifact Registry, compiler, dry-run, bridge,
   credential, or device writes;
+- a Proposal remains pending/preparing until the exact Artifact, evidence,
+  authority, risk, compile, and dry-run stages succeed; only its promoted
+  `ready` revision accepts the household decision;
 - the worker invokes the six stages in the fixed order and every produced row
   binds to the exact ArtifactRef and dependency identities;
-- a stage failure leaves prior immutable rows and the approved Proposal
+- a stage failure leaves prior immutable rows and the admitted Proposal
   untouched, records only a bounded error, and never invokes rollback;
 - duplicate enqueue and duplicate retry requests are idempotent, concurrent
   claims produce at most one running attempt, and the finite attempt limit is
@@ -303,6 +326,8 @@ Focused tests and crash/concurrency tests must prove:
   output, Inbox mutation routes, or bridge adapter inputs;
 - all dry-run statuses, including failed and unavailable, carry
   `writesPerformed: false`, and spies observe no device/remote write path; and
+- the raw Proposal `dryRun:not_run` value remains distinct from the exact
+  ArtifactReview compile/dry-run attestation; and
 - Inbox inspection is read-only for jobs and Artifact results and starts no
   preparation work.
 

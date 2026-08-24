@@ -12,7 +12,8 @@
 > 测试。生产 root 独占 Proposal store、Artifact Registry、AuthorityCandidateRegistry、
 > preparation runner 与完整 pipeline；Context 只挂载 HomeArtifactService 只读投影。
 > fresh current-catalog capture、稳定 world cut、纯 neutral compiler 与无写入 dry-run 已由
-> 审批后的 durable job 调用并持久化。startup 不扫描或重放旧 job；显式 retry UI、
+> Proposal admission 后唤醒的 durable preparation job 调用并持久化。Proposal 在这些阶段
+> 成功前保持 `pending_review + preparing`；startup 不扫描或重放旧 job；显式 retry UI、
 > approval ticket 与执行器仍未实现。
 >
 > 本文定义 M3b 之后第一版（下文称 Artifact Phase 1）的最小、可持久化、不可执行 artifact
@@ -537,6 +538,11 @@ native binding、provider error 或任意 payload JSON。`HomeArtifactService` �
 `proposalId + proposalRevision` 查询；没有精确匹配时返回 `not_run`，不能用另一个 proposal、
 旧 revision 或 latest 全局结果替代。
 
+Proposal envelope 中的原始 `dryRun.status: "not_run"` 是 admission-time source metadata；它
+不随 Artifact preparation 改写。`ArtifactReviewSnapshot` 是独立的 Hub-owned attestation
+projection，只有 exact Artifact revision 的 compile/dry-run rows 才能让它报告 `passed`、
+`failed` 或 `unavailable`。
+
 该 projection 只包含 artifact ref/hash、compile/dry-run status 与 identities、compiler metadata、
 semantic watermarks、closed blocking reasons、neutral diff/conflict、opaque authority candidate 和
 固定的 `writesPerformed:false`。家庭可读摘要与技术字段分层：主视图说明“通过/发现问题/资料
@@ -666,8 +672,9 @@ type NeutralDryRunState =
   | NeutralDryRunAttestation;
 ```
 
-M3b 的 `not_run` 是没有该 row，而不是伪造一个通过的结果；registry 查询应明确返回
-`not_run`。`NeutralDryRunAttestation` 的每一行都有自己的 `resultId`/`inputIdentity`，并
+ArtifactReview 中的 `not_run` 是没有 exact compile/dry-run row，而不是伪造一个通过的结果；
+Registry 查询应明确返回 `not_run`。Proposal envelope 的 raw `dryRun` 字段不是这个
+`NeutralDryRunState`。`NeutralDryRunAttestation` 的每一行都有自己的 `resultId`/`inputIdentity`，并
 精确绑定 compile、evidence、risk、authority 和 artifact ref。`passed` 表示所有目标、
 schema/action semantics、risk、rollback、watermark、authority candidate、conflict 和
 postcondition 检查在**该次输入**下通过；只说明“此输入下可以生成审查 diff”，不代表 approve

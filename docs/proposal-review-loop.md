@@ -88,10 +88,12 @@ The code is persisted in the review and append-only audit event. Older v1 rows
 without structured feedback remain readable. Feedback never changes household
 knowledge, prompts, policy, or device authority automatically.
 
-M3a does not yet have an automation artifact to simulate. Hub-created drafts
-therefore report dry-run status `not_run`; “nothing was applied” must never be
-misreported as a passed simulation. Only a later Hub-owned artifact compiler
-and simulator may emit `passed` or `failed`.
+The M3a Proposal envelope keeps its raw dry-run field at `not_run` as source
+metadata; “nothing was applied” is never misreported as a passed simulation.
+The shipped prepare-first M3b/M3c path produces an independent Hub-owned
+`ArtifactReviewSnapshot` after admission when exact preparation succeeds. Only
+that exact Artifact compile/dry-run attestation reports `passed`, `failed`, or
+`unavailable`; it does not rewrite the raw Proposal field.
 
 `toolCallId` stores DSH's `rootCallId` for exact trace correlation. Early local
 v1 rows mislabeled that value as `turnId`; readers retain that optional legacy
