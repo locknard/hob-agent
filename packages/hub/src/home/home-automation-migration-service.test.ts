@@ -466,6 +466,86 @@ test("failed switch and rollback operations can resume with fresh operation rece
   } as never), undefined);
 });
 
+test("restores a failed switch only with the exact failure receipt and keeps switch evidence", async () => {
+  const service = new HomeAutomationMigrationService({
+    store: new InMemoryHomeAutomationMigrationStore(),
+    clock: () => now,
+    migrationIdFactory: () => "9".repeat(32),
+    idempotencyKeyFactory: () => "a".repeat(32),
+    translator: {
+      assess: async (request) => ({
+        ruleRef: request.ruleRef,
+        trigger: { kind: "state" },
+        condition: { kind: "flat_and" },
+        action: { kind: "reversible" },
+        sourceFingerprint: eligibleFingerprint,
+      }),
+    },
+  });
+  const created = await service.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
+  service.translateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "assessed", proposalId: "proposal-failed-switch", candidateProposalRevision: 1, candidateContentHash: `sha256:${"1".repeat(64)}` });
+  service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-failed-switch", artifactRevision: 1, artifactContentHash: `sha256:${"2".repeat(64)}`, compileResultId: `sha256:${"3".repeat(64)}`, dryRunResultId: `sha256:${"4".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"1".repeat(64)}`, { artifactId: "artifact-failed-switch", artifactRevision: 1, artifactContentHash: `sha256:${"2".repeat(64)}`, compileResultId: `sha256:${"3".repeat(64)}`, dryRunResultId: `sha256:${"4".repeat(64)}` }) });
+  service.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
+  service.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "5".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
+  const failed = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_failed" });
+  const failedWorkflow = failed?.rules[0]?.workflow;
+  assert.equal(failedWorkflow?.status, "needs_attention");
+
+  const staleReceipt = {
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "needs_attention" as const,
+    expectedApprovedProposalRevision: failedWorkflow?.approvedProposalRevision,
+    expectedFailureReason: failedWorkflow?.failureReason,
+    expectedSwitchOperationId: failedWorkflow?.switchOperationId,
+    expectedSwitchStartedAt: failedWorkflow?.switchStartedAt,
+  };
+  assert.equal(service.resumeRuleSwitch({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "needs_attention",
+    switchOperationId: "6".repeat(32),
+    switchActor: "member:bob",
+  })?.rules[0]?.workflow?.status, "switching");
+  assert.equal(service.failRuleWorkflow({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "switching",
+    reason: "switch_failed",
+  })?.rules[0]?.workflow?.status, "needs_attention");
+  assert.equal(service.restoreFailedSwitch(staleReceipt), undefined);
+  const currentFailed = service.get(created.assessment.migrationId)?.rules[0]?.workflow;
+  assert.equal(currentFailed?.switchOperationId, "6".repeat(32));
+  const restored = service.restoreFailedSwitch({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "needs_attention",
+    expectedApprovedProposalRevision: currentFailed!.approvedProposalRevision!,
+    expectedFailureReason: currentFailed!.failureReason as "switch_failed" | "switch_unknown",
+    expectedSwitchOperationId: currentFailed!.switchOperationId!,
+    expectedSwitchStartedAt: currentFailed!.switchStartedAt!,
+  });
+  const restoredWorkflow = restored?.rules[0]?.workflow;
+  assert.equal(restoredWorkflow?.status, "restored");
+  assert.equal(restoredWorkflow?.failureReason, "switch_failed");
+  assert.equal(restoredWorkflow?.switchOperationId, "6".repeat(32));
+  assert.equal(restoredWorkflow?.switchActor, "member:bob");
+  assert.equal(restoredWorkflow?.deploymentId, undefined);
+  assert.equal(restoredWorkflow?.deploymentTarget, undefined);
+  assert.equal(restoredWorkflow?.deploymentConfigFingerprint, undefined);
+  assert.equal(typeof restoredWorkflow?.restoredAt, "string");
+
+  assert.equal(service.restoreFailedSwitch({
+    migrationId: created.assessment.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "needs_attention",
+    expectedApprovedProposalRevision: currentFailed!.approvedProposalRevision!,
+    expectedFailureReason: currentFailed!.failureReason as "switch_failed" | "switch_unknown",
+    expectedSwitchOperationId: currentFailed!.switchOperationId!,
+    expectedSwitchStartedAt: currentFailed!.switchStartedAt!,
+  }), undefined);
+});
+
 test("source-stale preflight and unrelated failure reasons cannot resume switching", async () => {
   const service = new HomeAutomationMigrationService({
     store: new InMemoryHomeAutomationMigrationStore(),

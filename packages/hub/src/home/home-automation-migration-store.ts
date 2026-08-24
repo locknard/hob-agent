@@ -45,6 +45,7 @@ export interface HomeAutomationMigrationStore extends HomeAutomationMigrationSel
   discover(input: HomeAutomationMigrationDiscovery): HomeAutomationMigrationStoreBeginResult;
   assess(input: HomeAutomationMigrationAssessmentTransition): boolean;
   transitionRuleWorkflow(input: HomeAutomationMigrationRuleWorkflowTransition): boolean;
+  restoreFailedSwitch(input: HomeAutomationMigrationRestoreFailedSwitchCommand): boolean;
   getSimulationReceipt(migrationId: string, ruleRef: string): HomeAutomationMigrationSimulationReceipt | undefined;
   get(migrationId: string): HomeAutomationMigrationAssessment | undefined;
   list(): readonly HomeAutomationMigrationAssessment[];
@@ -57,6 +58,18 @@ export interface HomeAutomationMigrationStore extends HomeAutomationMigrationSel
 export interface HomeAutomationMigrationStoreBeginResult {
   readonly outcome: "created" | "existing";
   readonly assessment: HomeAutomationMigrationAssessment;
+}
+
+/** Exact CAS command for closing a failed switch before any target deployment identity exists. */
+export interface HomeAutomationMigrationRestoreFailedSwitchCommand {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "needs_attention";
+  readonly expectedApprovedProposalRevision: number;
+  readonly expectedFailureReason: "switch_failed" | "switch_unknown";
+  readonly expectedSwitchOperationId: string;
+  readonly expectedSwitchStartedAt: string;
+  readonly restoredAt: string;
 }
 
 /** Deterministic store for service and domain tests. */
@@ -128,6 +141,21 @@ export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigra
     if (input.to === "simulated") {
       this.simulationReceipts.set(simulationReceiptKey(input.migrationId, input.ruleRef), cloneSimulationReceipt(input.simulationReceipt!));
     }
+    return true;
+  }
+
+  restoreFailedSwitch(input: HomeAutomationMigrationRestoreFailedSwitchCommand): boolean {
+    this.assertOpen();
+    validateRestoreFailedSwitchCommand(input);
+    const current = this.records.get(input.migrationId);
+    if (current === undefined || current.status !== "assessed") return false;
+    const ruleIndex = current.rules.findIndex((rule) => rule.ruleRef === input.ruleRef);
+    if (ruleIndex < 0) return false;
+    const currentRule = current.rules[ruleIndex]!;
+    if (currentRule.workflow === undefined || !failedSwitchRestoreMatches(currentRule.workflow, input)) return false;
+    const nextWorkflow = buildFailedSwitchRestoredWorkflow(currentRule.workflow, input);
+    const rules = current.rules.map((rule, index) => index === ruleIndex ? { ...rule, workflow: nextWorkflow } : { ...rule });
+    this.records.set(current.migrationId, { ...current, rules });
     return true;
   }
 
@@ -494,6 +522,51 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
           VALUES (?, ?, ?)
           ON CONFLICT (migration_id, rule_ref) DO UPDATE SET receipt_json = excluded.receipt_json`)
           .run(input.migrationId, input.ruleRef, JSON.stringify(input.simulationReceipt));
+      }
+      this.db.exec("COMMIT");
+      this.ensurePrivateFiles();
+      return true;
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
+  }
+
+  restoreFailedSwitch(input: HomeAutomationMigrationRestoreFailedSwitchCommand): boolean {
+    this.assertOpen();
+    validateRestoreFailedSwitchCommand(input);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`SELECT migration_id, idempotency_key, input_digest, source_bridge_id, source_epoch_id,
+          source_last_seq, analysis_mode, rules_json, status, created_at, assessed_at, closed_at, closed_from, close_reason
+        FROM home_automation_migrations WHERE migration_id = ?`).get(input.migrationId) as Row | undefined;
+      if (row === undefined || typeof row.rules_json !== "string") {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const current = fromRow(row);
+      if (current.status !== "assessed") {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const ruleIndex = current.rules.findIndex((rule) => rule.ruleRef === input.ruleRef);
+      if (ruleIndex < 0) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const currentRule = current.rules[ruleIndex]!;
+      if (currentRule.workflow === undefined || !failedSwitchRestoreMatches(currentRule.workflow, input)) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const nextWorkflow = buildFailedSwitchRestoredWorkflow(currentRule.workflow, input);
+      const nextRules = current.rules.map((rule, index) => index === ruleIndex ? { ...rule, workflow: nextWorkflow } : { ...rule });
+      const result = this.db.prepare(`UPDATE home_automation_migrations
+        SET rules_json = ? WHERE migration_id = ? AND rules_json = ?`)
+        .run(serializeRules(nextRules), input.migrationId, row.rules_json);
+      if (Number(result.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
       }
       this.db.exec("COMMIT");
       this.ensurePrivateFiles();
@@ -1416,6 +1489,22 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
   }
 }
 
+function validateRestoreFailedSwitchCommand(input: HomeAutomationMigrationRestoreFailedSwitchCommand): void {
+  if (!isRecord(input) || !hasExactKeys(input, [
+    "migrationId", "ruleRef", "from", "expectedApprovedProposalRevision", "expectedFailureReason", "expectedSwitchOperationId", "expectedSwitchStartedAt", "restoredAt",
+  ])
+    || !isMigrationId(input.migrationId)
+    || !isBoundedText(input.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+    || input.from !== "needs_attention"
+    || !isPositiveSafeInteger(input.expectedApprovedProposalRevision)
+    || (input.expectedFailureReason !== "switch_failed" && input.expectedFailureReason !== "switch_unknown")
+    || !is128BitHex(input.expectedSwitchOperationId)
+    || !isIsoTimestamp(input.expectedSwitchStartedAt)
+    || !isIsoTimestamp(input.restoredAt)) {
+    throw new TypeError("Home automation migration failed-switch restore command is invalid");
+  }
+}
+
 function buildWorkflowTransition(
   current: HomeAutomationMigrationRuleWorkflow,
   input: HomeAutomationMigrationRuleWorkflowTransition,
@@ -1557,6 +1646,44 @@ function buildWorkflowTransition(
     status: "needs_attention",
     failedAt: input.transitionedAt,
     failureReason: input.failureReason!,
+  };
+}
+
+function failedSwitchRestoreMatches(
+  workflow: HomeAutomationMigrationRuleWorkflow,
+  input: HomeAutomationMigrationRestoreFailedSwitchCommand,
+): boolean {
+  return workflow.status === "needs_attention"
+    && workflow.failureReason === input.expectedFailureReason
+    && workflow.approvedProposalRevision === input.expectedApprovedProposalRevision
+    && workflow.switchOperationId === input.expectedSwitchOperationId
+    && workflow.switchStartedAt === input.expectedSwitchStartedAt
+    && workflow.sourceWasEnabled === true
+    && workflow.switchActor !== undefined
+    && workflow.failedAt !== undefined
+    && workflow.deploymentId === undefined
+    && workflow.deploymentTarget === undefined
+    && workflow.deploymentConfigFingerprint === undefined
+    && workflow.verifiedAt === undefined
+    && workflow.rollbackOperationId === undefined
+    && workflow.rollbackActor === undefined
+    && workflow.rollbackStartedAt === undefined;
+}
+
+function buildFailedSwitchRestoredWorkflow(
+  current: HomeAutomationMigrationRuleWorkflow,
+  input: HomeAutomationMigrationRestoreFailedSwitchCommand,
+): HomeAutomationMigrationRuleWorkflow {
+  if (!failedSwitchRestoreMatches(current, input)) {
+    throw new TypeError("Migration workflow failed-switch restore receipt does not match");
+  }
+  if (Date.parse(input.restoredAt) < Date.parse(current.failedAt!)) {
+    throw new TypeError("Migration workflow restore time precedes failure");
+  }
+  return {
+    ...current,
+    status: "restored",
+    restoredAt: input.restoredAt,
   };
 }
 
@@ -1788,23 +1915,36 @@ function validateWorkflow(value: unknown, parentSourceFingerprint: unknown): Hom
     };
   }
   if (value.status === "restored") {
-    if (!hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt", "rollbackOperationId", "rollbackActor", "rollbackStartedAt", "restoredAt"])
-      || !isRestoredWorkflowFields(value)) {
-      throw new Error("Stored home automation migration is corrupt");
+    if (hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "verifiedAt", "rollbackOperationId", "rollbackActor", "rollbackStartedAt", "restoredAt"])
+      && isRestoredWorkflowFields(value)) {
+      return {
+        status: "restored", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+        candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+        artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+        compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+        readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+        approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+        switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+        deploymentId: value.deploymentId, deploymentTarget: value.deploymentTarget,
+        deploymentConfigFingerprint: value.deploymentConfigFingerprint, verifiedAt: value.verifiedAt,
+        rollbackOperationId: value.rollbackOperationId, rollbackActor: value.rollbackActor,
+        rollbackStartedAt: value.rollbackStartedAt, restoredAt: value.restoredAt,
+      };
     }
-    return {
-      status: "restored", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
-      candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
-      artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
-      compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
-      readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
-      approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
-      switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
-      deploymentId: value.deploymentId, deploymentTarget: value.deploymentTarget,
-      deploymentConfigFingerprint: value.deploymentConfigFingerprint, verifiedAt: value.verifiedAt,
-      rollbackOperationId: value.rollbackOperationId, rollbackActor: value.rollbackActor,
-      rollbackStartedAt: value.rollbackStartedAt, restoredAt: value.restoredAt,
-    };
+    if (hasExactKeys(value, ["status", "sourceFingerprint", "assessedAt", "proposalId", "candidateProposalRevision", "candidateContentHash", "translatedAt", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulatedAt", "readyAt", "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled", "switchStartedAt", "failedAt", "failureReason", "restoredAt"])
+      && isFailedSwitchRestoredWorkflowFields(value)) {
+      return {
+        status: "restored", ...base, proposalId: value.proposalId, candidateProposalRevision: value.candidateProposalRevision,
+        candidateContentHash: value.candidateContentHash, translatedAt: value.translatedAt,
+        artifactId: value.artifactId, artifactRevision: value.artifactRevision, artifactContentHash: value.artifactContentHash,
+        compileResultId: value.compileResultId, dryRunResultId: value.dryRunResultId, simulatedAt: value.simulatedAt,
+        readyAt: value.readyAt, reviewProposalRevision: value.reviewProposalRevision,
+        approvedProposalRevision: value.approvedProposalRevision, switchOperationId: value.switchOperationId,
+        switchActor: value.switchActor, sourceWasEnabled: true, switchStartedAt: value.switchStartedAt,
+        failedAt: value.failedAt, failureReason: value.failureReason, restoredAt: value.restoredAt,
+      };
+    }
+    throw new Error("Stored home automation migration is corrupt");
   }
   const failureReason = value.failureReason;
   if (!isWorkflowFailureReason(failureReason) || !isIsoTimestamp(value.failedAt)) {
@@ -1949,6 +2089,12 @@ interface RestoredWorkflowFields extends RollingBackWorkflowFields {
   readonly restoredAt: string;
 }
 
+interface FailedSwitchRestoredWorkflowFields extends SwitchingWorkflowFields {
+  readonly failedAt: string;
+  readonly failureReason: "switch_failed" | "switch_unknown";
+  readonly restoredAt: string;
+}
+
 function isReadyWorkflowFields(value: Record<string, unknown>): value is Record<string, unknown> & ReadyWorkflowFields {
   return isBoundedText(value.proposalId, HOME_AUTOMATION_MIGRATION_LIMITS.maxProposalIdLength)
     && isPositiveSafeInteger(value.candidateProposalRevision) && value.candidateProposalRevision < Number.MAX_SAFE_INTEGER
@@ -1997,6 +2143,15 @@ function isRestoredWorkflowFields(value: Record<string, unknown>): value is Reco
   return isRollingBackWorkflowFields(value)
     && isIsoTimestamp(value.restoredAt)
     && Date.parse(value.restoredAt) >= Date.parse(value.rollbackStartedAt as string);
+}
+
+function isFailedSwitchRestoredWorkflowFields(value: Record<string, unknown>): value is Record<string, unknown> & FailedSwitchRestoredWorkflowFields {
+  return isSwitchingWorkflowFields(value)
+    && (value.failureReason === "switch_failed" || value.failureReason === "switch_unknown")
+    && isIsoTimestamp(value.failedAt)
+    && isIsoTimestamp(value.restoredAt)
+    && Date.parse(value.failedAt) >= Date.parse(value.switchStartedAt as string)
+    && Date.parse(value.restoredAt) >= Date.parse(value.failedAt);
 }
 
 function assertStableRuleMetadata(

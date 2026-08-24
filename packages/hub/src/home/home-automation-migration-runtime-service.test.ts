@@ -1033,6 +1033,71 @@ test("projects failure reasons and neutral switch recovery refs, then resumes wi
   }
 });
 
+test("exposes a failed-switch restore CAS for an externally confirmed source and target readback", async () => {
+  const { context, proposals, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true);
+  try {
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    const prepared = await context.homeAutomationMigrations.prepareRuleReview({ migrationId: assessment.assessment.migrationId, ruleRef: "rule-1" });
+    assert.equal(prepared.status, "translated");
+    proposals!.proposal = {
+      ...proposals!.proposal!,
+      revision: 2,
+      lifecycle: "ready",
+      preparedContentHash: preparedContentHash(proposals!.proposal!),
+      preparedArtifact: {
+        artifactId: "artifact-living-room",
+        revision: 1,
+        contentHash: `sha256:${"b".repeat(64)}`,
+        compileResultId: `sha256:${"c".repeat(64)}`,
+        dryRunResultId: `sha256:${"d".repeat(64)}`,
+      },
+    };
+    proposals!.preparation = {
+      proposalId: "proposal-living-room",
+      proposalRevision: 1,
+      status: "succeeded",
+      attempt: 1,
+      version: 2,
+      createdAt: "2026-08-24T00:00:02.000Z",
+      updatedAt: "2026-08-24T00:00:03.000Z",
+    };
+    assert.equal((await context.homeAutomationMigrations.refreshRuleWorkflow({ migrationId: assessment.assessment.migrationId, ruleRef: "rule-1" })).status, "ready");
+    assert.equal(context.homeAutomationMigrations.startRuleSwitch({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+      approvedProposalRevision: 3,
+      switchOperationId: "0123456789abcdef0123456789abcdef",
+      switchActor: "household-owner",
+    }), true);
+    assert.equal(context.homeAutomationMigrations.failRuleWorkflow({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+      from: "switching",
+      reason: "switch_unknown",
+    }), true);
+    const failed = context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room");
+    assert.equal(failed.status, "governed");
+    if (failed.status !== "governed") return;
+
+    assert.equal(context.homeAutomationMigrations.restoreFailedSwitch({
+      migrationId: failed.migrationId,
+      ruleRef: failed.ruleRef,
+      expectedApprovedProposalRevision: failed.approvedProposalRevision!,
+      expectedFailureReason: failed.failureReason as "switch_failed" | "switch_unknown",
+      expectedSwitchOperationId: failed.switchOperationId!,
+      expectedSwitchStartedAt: failed.switchStartedAt!,
+    }), true);
+    const restored = context.homeAutomationMigrations.get(failed.migrationId)?.rules[0]?.workflow;
+    assert.equal(restored?.status, "restored");
+    assert.equal(restored?.failureReason, "switch_unknown");
+    assert.equal(restored?.switchOperationId, "0123456789abcdef0123456789abcdef");
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
 test("reopens a switching workflow as readable governed state without replaying preparation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-home-migration-switch-restart-"));
   const path = join(directory, "migrations.sqlite");

@@ -67,6 +67,7 @@ import type {
   HomeAutomationMigrationFailRuleWorkflowInput,
   HomeAutomationMigrationResumeRuleRollbackInput,
   HomeAutomationMigrationResumeRuleSwitchInput,
+  HomeAutomationMigrationRestoreFailedSwitchInput,
   HomeAutomationMigrationStartRuleRollbackInput,
   HomeAutomationMigrationStartRuleSwitchInput,
   HomeAutomationMigrationRestoreRuleInput,
@@ -484,6 +485,15 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   resumeRuleSwitch(input: Omit<HomeAutomationMigrationResumeRuleSwitchInput, "from">): boolean {
     try {
       return this.migration.resumeRuleSwitch({ ...input, from: "needs_attention" }) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Closes a failed switch after the decorator has read back source-running and target-missing. */
+  restoreFailedSwitch(input: Omit<HomeAutomationMigrationRestoreFailedSwitchInput, "from">): boolean {
+    try {
+      return this.migration.restoreFailedSwitch({ ...input, from: "needs_attention" }) !== undefined;
     } catch {
       return false;
     }

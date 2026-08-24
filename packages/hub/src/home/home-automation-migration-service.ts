@@ -118,6 +118,18 @@ export interface HomeAutomationMigrationResumeRuleSwitchInput {
   readonly switchActor: string;
 }
 
+/** Closes a failed switch only after an external readback proves source-running and target-missing. */
+export interface HomeAutomationMigrationRestoreFailedSwitchInput {
+  readonly migrationId: string;
+  readonly ruleRef: string;
+  readonly from: "needs_attention";
+  /** The approved proposal revision that owns the failed switch receipt. */
+  readonly expectedApprovedProposalRevision: number;
+  readonly expectedFailureReason: "switch_failed" | "switch_unknown";
+  readonly expectedSwitchOperationId: string;
+  readonly expectedSwitchStartedAt: string;
+}
+
 export interface HomeAutomationMigrationResumeRuleRollbackInput {
   readonly migrationId: string;
   readonly ruleRef: string;
@@ -284,6 +296,19 @@ export class HomeAutomationMigrationService {
       || workflow.failureReason === "verification_failed" && workflow.deploymentId !== undefined
       || workflow.switchOperationId === input.switchOperationId) return undefined;
     return this.transitionRuleWorkflow({ ...input, to: "switching" });
+  }
+
+  /**
+   * Terminates a known failed switch after the caller has externally confirmed
+   * the source is running and the target is missing. The store performs the
+   * exact failure-receipt CAS and retains the original switch audit fields.
+   */
+  restoreFailedSwitch(input: HomeAutomationMigrationRestoreFailedSwitchInput): HomeAutomationMigrationAssessment | undefined {
+    if (!isStrictRestoreFailedSwitchInput(input)) return undefined;
+    const restoredAt = this.clock();
+    assertTimestamp(restoredAt, "migration failed-switch restore time");
+    if (!this.store.restoreFailedSwitch({ ...input, restoredAt })) return undefined;
+    return this.store.get(input.migrationId);
   }
 
   /** Records neutral deployment evidence after the switch has been externally verified. */
@@ -648,6 +673,23 @@ function isStrictResumeRuleSwitchInput(value: unknown): value is HomeAutomationM
       && value.from === "needs_attention"
       && is128BitHex(value.switchOperationId)
       && isBoundedText(value.switchActor, HOME_AUTOMATION_MIGRATION_LIMITS.maxOperationActorLength);
+  } catch {
+    return false;
+  }
+}
+
+function isStrictRestoreFailedSwitchInput(value: unknown): value is HomeAutomationMigrationRestoreFailedSwitchInput {
+  try {
+    return isRecord(value) && hasExactKeys(value, [
+      "migrationId", "ruleRef", "from", "expectedApprovedProposalRevision", "expectedFailureReason", "expectedSwitchOperationId", "expectedSwitchStartedAt",
+    ])
+      && isMigrationId(value.migrationId)
+      && isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)
+      && value.from === "needs_attention"
+      && isPositiveSafeInteger(value.expectedApprovedProposalRevision)
+      && (value.expectedFailureReason === "switch_failed" || value.expectedFailureReason === "switch_unknown")
+      && is128BitHex(value.expectedSwitchOperationId)
+      && isTimestamp(value.expectedSwitchStartedAt);
   } catch {
     return false;
   }

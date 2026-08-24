@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   InMemoryHomeAutomationMigrationStore,
   SqliteHomeAutomationMigrationStore,
+  type HomeAutomationMigrationRestoreFailedSwitchCommand,
 } from "./home-automation-migration-store.js";
 import { computeHomeAutomationMigrationSimulationDigest } from "./home-automation-migration-simulation.js";
 
@@ -811,6 +812,115 @@ test("sqlite workflow CAS rejects duplicate and competing switch starts without 
     }), false);
     assert.equal(raced.get(discovered.migrationId)?.rules[0]?.workflow?.status, "switching");
     raced.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed-switch restore is an exact failure CAS and persists without deployment identity", async () => {
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const candidateContentHash = `sha256:${"b".repeat(64)}`;
+  const restoreInput = (store: InMemoryHomeAutomationMigrationStore | SqliteHomeAutomationMigrationStore): HomeAutomationMigrationRestoreFailedSwitchCommand => {
+    const workflow = store.get(discovered.migrationId)?.rules[0]?.workflow;
+    if (workflow === undefined || workflow.failureReason === undefined || workflow.switchOperationId === undefined
+      || workflow.switchStartedAt === undefined || workflow.approvedProposalRevision === undefined) {
+      throw new Error("failed-switch fixture is incomplete");
+    }
+    return {
+      migrationId: discovered.migrationId,
+      ruleRef: "ha-rule-1",
+      from: "needs_attention" as const,
+      expectedApprovedProposalRevision: workflow.approvedProposalRevision,
+      expectedFailureReason: workflow.failureReason as "switch_failed" | "switch_unknown",
+      expectedSwitchOperationId: workflow.switchOperationId,
+      expectedSwitchStartedAt: workflow.switchStartedAt,
+      restoredAt: createdAt,
+    };
+  };
+  const prepareFailedSwitch = (store: InMemoryHomeAutomationMigrationStore | SqliteHomeAutomationMigrationStore): void => {
+    store.discover({
+      ...discovered,
+      analysisMode: "trusted_neutral",
+      rules: [{ ruleRef: "ha-rule-1", name: "晚间灯光", enabled: true, updatedAt: createdAt, triggerClass: "state", conditionClass: "flat_and", actionClass: "reversible", sourceFingerprint, disposition: "eligible", workflow: { status: "assessed", sourceFingerprint, assessedAt: createdAt } }],
+    });
+    assert.equal(store.assess({
+      migrationId: discovered.migrationId,
+      status: "assessed",
+      assessedAt: createdAt,
+      rules: [{
+        ruleRef: "ha-rule-1", name: "晚间灯光", enabled: true, updatedAt: createdAt,
+        triggerClass: "state", conditionClass: "flat_and", actionClass: "reversible", sourceFingerprint, disposition: "eligible",
+        workflow: { status: "assessed", sourceFingerprint, assessedAt: createdAt },
+      }],
+    }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "assessed", to: "translated", transitionedAt: createdAt,
+      proposalId: "proposal-failed-switch-cas", candidateProposalRevision: 1, candidateContentHash,
+    }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "translated", to: "simulated", transitionedAt: createdAt,
+      artifactId: "artifact-failed-switch-cas", artifactRevision: 1, artifactContentHash: `sha256:${"c".repeat(64)}`,
+      compileResultId: `sha256:${"d".repeat(64)}`, dryRunResultId: `sha256:${"e".repeat(64)}`,
+      simulationReceipt: simulationReceipt(sourceFingerprint, candidateContentHash, {
+        artifactId: "artifact-failed-switch-cas", artifactRevision: 1, artifactContentHash: `sha256:${"c".repeat(64)}`,
+        compileResultId: `sha256:${"d".repeat(64)}`, dryRunResultId: `sha256:${"e".repeat(64)}`,
+      }),
+    }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "simulated", to: "ready", transitionedAt: createdAt,
+      reviewProposalRevision: 2,
+    }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "ready", to: "switching", transitionedAt: createdAt,
+      approvedProposalRevision: 3, switchOperationId: "f".repeat(32), switchActor: "member:alice", sourceWasEnabled: true,
+    }), true);
+    assert.equal(store.transitionRuleWorkflow({
+      migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "switching", to: "needs_attention", transitionedAt: createdAt,
+      failureReason: "switch_failed",
+    }), true);
+  };
+
+  const memory = new InMemoryHomeAutomationMigrationStore();
+  prepareFailedSwitch(memory);
+  assert.equal(memory.restoreFailedSwitch(restoreInput(memory)), true);
+  const memoryWorkflow = memory.get(discovered.migrationId)?.rules[0]?.workflow;
+  assert.equal(memoryWorkflow?.status, "restored");
+  assert.equal(memoryWorkflow?.failureReason, "switch_failed");
+  assert.equal(memoryWorkflow?.switchOperationId, "f".repeat(32));
+  assert.equal(memoryWorkflow?.deploymentId, undefined);
+  assert.equal(memory.restoreFailedSwitch(restoreInput(memory)), false);
+
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-failed-switch-restore-"));
+  const path = join(directory, "migrations.sqlite");
+  try {
+    const sqlite = new SqliteHomeAutomationMigrationStore({ path });
+    prepareFailedSwitch(sqlite);
+    const staleWriter = new DatabaseSync(path);
+    staleWriter.exec(`CREATE TRIGGER migration_failed_switch_restore_cas_loser
+      BEFORE UPDATE OF rules_json ON home_automation_migrations
+      WHEN OLD.migration_id = '${discovered.migrationId}'
+      BEGIN SELECT RAISE(IGNORE); END;`);
+    staleWriter.close();
+    assert.equal(sqlite.restoreFailedSwitch(restoreInput(sqlite)), false);
+    assert.equal(sqlite.get(discovered.migrationId)?.rules[0]?.workflow?.status, "needs_attention");
+    sqlite.close();
+
+    const persisted = new SqliteHomeAutomationMigrationStore({ path });
+    const raw = persisted.get(discovered.migrationId)?.rules[0]?.workflow;
+    assert.equal(raw?.status, "needs_attention");
+    const dropTrigger = new DatabaseSync(path);
+    dropTrigger.exec("DROP TRIGGER migration_failed_switch_restore_cas_loser");
+    dropTrigger.close();
+    assert.equal(persisted.restoreFailedSwitch(restoreInput(persisted)), true);
+    persisted.close();
+
+    const reopened = new SqliteHomeAutomationMigrationStore({ path });
+    const restored = reopened.get(discovered.migrationId)?.rules[0]?.workflow;
+    assert.equal(restored?.status, "restored");
+    assert.equal(restored?.failureReason, "switch_failed");
+    assert.equal(restored?.switchOperationId, "f".repeat(32));
+    assert.equal(restored?.deploymentId, undefined);
+    reopened.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
