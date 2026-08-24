@@ -1463,6 +1463,63 @@ test("does not overwrite an external automation that reuses the Hub id", async (
   await adapter.control.dispose();
 });
 
+test("does not post when the deterministic config preflight returns an HTTP failure", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  fake.fetchImpl = async (input, init) => {
+    if (String(input).endsWith("/api/config/automation/config/hob_preflight_500") && (init?.method ?? "GET") === "GET") {
+      return new Response("{}", { status: 500 });
+    }
+    return delegate(input, init);
+  };
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.deploy(hubAutomationSpec("hob_preflight_500"), { signal: new AbortController().signal });
+
+  assert.equal(result.status, "rejected");
+  assert.equal((result as { reason?: string }).reason, "unavailable");
+  assert.equal(fake.requests.some((request) => request.method === "POST"), false);
+  await adapter.control.dispose();
+});
+
+test("does not post when the deterministic config preflight throws", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  fake.fetchImpl = async (input, init) => {
+    if (String(input).endsWith("/api/config/automation/config/hob_preflight_throw") && (init?.method ?? "GET") === "GET") {
+      throw new Error("configuration request timed out");
+    }
+    return delegate(input, init);
+  };
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.deploy(hubAutomationSpec("hob_preflight_throw"), { signal: new AbortController().signal });
+
+  assert.equal(result.status, "rejected");
+  assert.equal((result as { reason?: string }).reason, "unavailable");
+  assert.equal(fake.requests.some((request) => request.method === "POST"), false);
+  await adapter.control.dispose();
+});
+
+test("does not post when the deterministic config preflight body is invalid", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  fake.fetchImpl = async (input, init) => {
+    if (String(input).endsWith("/api/config/automation/config/hob_preflight_invalid") && (init?.method ?? "GET") === "GET") {
+      return new Response("not-json", { status: 200 });
+    }
+    return delegate(input, init);
+  };
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.deploy(hubAutomationSpec("hob_preflight_invalid"), { signal: new AbortController().signal });
+
+  assert.equal(result.status, "rejected");
+  assert.equal((result as { reason?: string }).reason, "failed");
+  assert.equal(fake.requests.some((request) => request.method === "POST"), false);
+  await adapter.control.dispose();
+});
+
 test("treats an owned unchanged automation as an idempotent deployment", async () => {
   const fake = automationFetchFake();
   const { adapter, handle } = await readyAutomationAdapter(fake);
@@ -1574,6 +1631,75 @@ test("withdrawal refuses an automation without the Hub ownership marker", async 
   );
 
   assert.equal(result.status, "rejected");
+  assert.equal(fake.requests.some((request) => request.method === "DELETE"), false);
+  await adapter.control.dispose();
+});
+
+test("withdrawal deletes an automation only after confirming its Hub ownership marker", async () => {
+  const fake = automationFetchFake();
+  fake.stored.set("hob_owned_withdraw", {
+    id: "hob_owned_withdraw",
+    alias: "hob_owned_withdraw",
+    description: "hob:owned rule",
+    trigger: [],
+    condition: [],
+    action: [],
+    mode: "single",
+  });
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.withdraw(
+    { nativeAutomationId: "hob_owned_withdraw" },
+    { signal: new AbortController().signal },
+  );
+
+  assert.deepEqual(result, { status: "acknowledged" });
+  assert.equal(fake.requests.filter((request) => request.method === "GET").length, 1);
+  assert.equal(fake.requests.filter((request) => request.method === "DELETE").length, 1);
+  assert.equal(fake.stored.has("hob_owned_withdraw"), false);
+  await adapter.control.dispose();
+});
+
+test("withdrawal does not delete when its config preflight returns an HTTP failure", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  fake.fetchImpl = async (input, init) => {
+    if (String(input).endsWith("/api/config/automation/config/hob_withdraw_500") && (init?.method ?? "GET") === "GET") {
+      return new Response("{}", { status: 500 });
+    }
+    return delegate(input, init);
+  };
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.withdraw(
+    { nativeAutomationId: "hob_withdraw_500" },
+    { signal: new AbortController().signal },
+  );
+
+  assert.equal(result.status, "rejected");
+  assert.equal((result as { reason?: string }).reason, "unavailable");
+  assert.equal(fake.requests.some((request) => request.method === "DELETE"), false);
+  await adapter.control.dispose();
+});
+
+test("withdrawal does not delete when its config preflight throws", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  fake.fetchImpl = async (input, init) => {
+    if (String(input).endsWith("/api/config/automation/config/hob_withdraw_throw") && (init?.method ?? "GET") === "GET") {
+      throw new Error("configuration request timed out");
+    }
+    return delegate(input, init);
+  };
+  const { adapter, handle } = await readyAutomationAdapter(fake);
+
+  const result = await handle.withdraw(
+    { nativeAutomationId: "hob_withdraw_throw" },
+    { signal: new AbortController().signal },
+  );
+
+  assert.equal(result.status, "rejected");
+  assert.equal((result as { reason?: string }).reason, "unavailable");
   assert.equal(fake.requests.some((request) => request.method === "DELETE"), false);
   await adapter.control.dispose();
 });
