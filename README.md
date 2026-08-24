@@ -176,6 +176,11 @@ Missing, invalid, unavailable, and unconfigured-bridge cases use fixed exit
 codes and direct repair text without echoing paths, endpoints, bridge ids, or
 secrets.
 
+To print the closed Phase 0.5 fault-acceptance policy without reading household
+configuration, use `pnpm matrix:home-migration`. It performs no fault injection,
+runtime start, credential read, or local/remote write; exit code `0` means only
+that the policy matrix was readable.
+
 The command waits for that bridge's ready cut, reads its bounded
 `foreignRules@2` catalog, runs the existing neutral migration assessment, and
 stores the durable assessment under `HOB_DATA_DIR`. It prints only an opaque
