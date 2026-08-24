@@ -47,6 +47,17 @@ import type {
   ProposalCreationResult,
   ProposalEnvelope,
 } from "./proposal-store.js";
+import type {
+  HomeAutomationMigrationDeploymentLookup,
+  HomeAutomationMigrationDeploymentRuntimePort,
+} from "./home-automation-migration-deployment.js";
+import type {
+  HomeAutomationMigrationFailRuleWorkflowInput,
+  HomeAutomationMigrationStartRuleRollbackInput,
+  HomeAutomationMigrationStartRuleSwitchInput,
+  HomeAutomationMigrationRestoreRuleInput,
+  HomeAutomationMigrationVerifyRuleSwitchInput,
+} from "./home-automation-migration-service.js";
 
 declare module "@deepseek-ai/cordis" {
   interface Context {
@@ -176,7 +187,7 @@ export interface HomeAutomationMigrationRuntimeWorkflowInput {
  * It owns the SQLite store and closes it with the mounted service. It never
  * persists an Artifact and never sends a bridge command.
  */
-export class HomeAutomationMigrationRuntimeService extends Service {
+export class HomeAutomationMigrationRuntimeService extends Service implements HomeAutomationMigrationDeploymentRuntimePort {
   readonly path: string;
 
   private readonly world: HomeWorldMigrationPort;
@@ -251,6 +262,91 @@ export class HomeAutomationMigrationRuntimeService extends Service {
       return this.migration.list();
     } catch {
       return [];
+    }
+  }
+
+  /** Returns one exact neutral workflow link for a proposal, including governed restart states. */
+  findWorkflowForProposal(proposalId: string): HomeAutomationMigrationDeploymentLookup {
+    try {
+      if (!isBoundedId(proposalId)) return { status: "not_migration" };
+      const matches = this.migration.list().flatMap((assessment) => assessment.rules.flatMap((rule) => {
+        const workflow = rule.workflow;
+        return workflow?.proposalId === proposalId
+          ? [{ assessment, ruleRef: rule.ruleRef, workflow }]
+          : [];
+      }));
+      if (matches.length === 0) return { status: "not_migration" };
+      if (matches.length !== 1) return { status: "ambiguous" };
+      const match = matches[0]!;
+      const workflow = match.workflow;
+      const common = {
+        migrationId: match.assessment.migrationId,
+        ruleRef: match.ruleRef,
+        sourceBridgeId: match.assessment.sourceBridgeId,
+        sourceFingerprint: workflow.sourceFingerprint,
+      } as const;
+      if (workflow.status === "ready") {
+        return workflow.reviewProposalRevision === undefined
+          ? { status: "ambiguous" }
+          : { status: "ready", ...common, reviewProposalRevision: workflow.reviewProposalRevision };
+      }
+      return {
+        status: "governed",
+        ...common,
+        workflowStatus: workflow.status,
+        ...(workflow.reviewProposalRevision === undefined ? {} : { reviewProposalRevision: workflow.reviewProposalRevision }),
+        ...(workflow.approvedProposalRevision === undefined ? {} : { approvedProposalRevision: workflow.approvedProposalRevision }),
+        ...(workflow.deploymentId === undefined ? {} : { deploymentId: workflow.deploymentId }),
+        ...(workflow.deploymentTarget === undefined ? {} : { deploymentTarget: workflow.deploymentTarget }),
+        ...(workflow.deploymentConfigFingerprint === undefined ? {} : { deploymentConfigFingerprint: workflow.deploymentConfigFingerprint }),
+      };
+    } catch {
+      return { status: "ambiguous" };
+    }
+  }
+
+  /** Records switching CAS state; bridge commands stay in the deployment decorator. */
+  startRuleSwitch(input: Omit<HomeAutomationMigrationStartRuleSwitchInput, "from" | "sourceWasEnabled">): boolean {
+    try {
+      return this.migration.startRuleSwitch({ ...input, from: "ready", sourceWasEnabled: true }) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Records neutral target deployment evidence after the decorator read-back. */
+  verifyRuleSwitch(input: Omit<HomeAutomationMigrationVerifyRuleSwitchInput, "from">): boolean {
+    try {
+      return this.migration.verifyRuleSwitch({ ...input, from: "switching" }) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Records rollback CAS state; bridge commands stay in the deployment decorator. */
+  startRuleRollback(input: Omit<HomeAutomationMigrationStartRuleRollbackInput, "from">): boolean {
+    try {
+      return this.migration.startRuleRollback({ ...input, from: "verified" }) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Records that the source was read back running after target withdrawal. */
+  restoreRule(input: Omit<HomeAutomationMigrationRestoreRuleInput, "from">): boolean {
+    try {
+      return this.migration.restoreRule({ ...input, from: "rolling_back" }) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Records one fixed failure reason without exposing store or bridge objects. */
+  failRuleWorkflow(input: Omit<HomeAutomationMigrationFailRuleWorkflowInput, never>): boolean {
+    try {
+      return this.migration.failRuleWorkflow(input) !== undefined;
+    } catch {
+      return false;
     }
   }
 
@@ -343,6 +439,10 @@ export class HomeAutomationMigrationRuntimeService extends Service {
         return workflowFailure("assessment_not_eligible");
       }
       const workflow = rule.workflow;
+      if (workflow.status === "switching" || workflow.status === "verified"
+        || workflow.status === "rolling_back" || workflow.status === "restored") {
+        return workflowFailure("workflow_not_recoverable");
+      }
       if (workflow.status === "translated" || workflow.status === "simulated" || workflow.status === "ready") {
         return workflowResult(parsedInput.ruleRef, workflow);
       }
@@ -410,6 +510,10 @@ export class HomeAutomationMigrationRuntimeService extends Service {
         return workflowFailure("assessment_not_eligible");
       }
       if (rule.workflow.status === "ready") return workflowResult(parsedInput.ruleRef, rule.workflow);
+      if (rule.workflow.status === "switching" || rule.workflow.status === "verified"
+        || rule.workflow.status === "rolling_back" || rule.workflow.status === "restored") {
+        return workflowFailure("workflow_not_recoverable");
+      }
       if (rule.workflow.status === "assessed") return workflowFailure("workflow_not_recoverable");
       if (rule.workflow.status === "needs_attention") return workflowFailure("workflow_not_recoverable");
       const workflow = rule.workflow;

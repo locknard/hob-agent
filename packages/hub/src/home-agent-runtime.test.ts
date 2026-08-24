@@ -16,6 +16,7 @@ import { createHomeAgentRuntime, mountHomeAgentProductBundle } from "./home-agen
 import { initialHomeOnboardingState, InMemoryHomeOnboardingStore } from "./home/home-onboarding-store.js";
 import { SyntheticMediaCatalogProvider } from "./media/home-media-services.js";
 import { SqliteProposalStore } from "./home/proposal-store.js";
+import { HomeAutomationMigrationDeployment } from "./home/home-automation-migration-deployment.js";
 import { SqliteProductViewRecipeDraftStore } from "./home/product-view-recipe-draft-store.js";
 import { SyntheticBridge } from "@hob/bridge-contract/testing";
 import { WorldIdentityManager } from "./world/world-identity.js";
@@ -220,6 +221,11 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "search_home_media"), false);
   assert.equal(runtime.context.tools.schemas().some((schema) => schema.name === "prepare_home_media_playback"), false);
   assert.equal(runtime.context.homeProposals.name, "homeProposals");
+  assert.equal(
+    (runtime.context.homeProposals as unknown as { deployment: unknown }).deployment instanceof HomeAutomationMigrationDeployment,
+    true,
+    "the single proposal deployment seam is migration-aware",
+  );
   assert.equal(runtime.context.homeObservationAudit.name, "homeObservationAudit");
   assert.equal(runtime.context.homeArtifacts.capabilities().canExecute, false);
   assert.equal(runtime.context.homeAdvice.name, "homeAdvice");

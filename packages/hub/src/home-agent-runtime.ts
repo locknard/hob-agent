@@ -9,6 +9,7 @@ import {
   type HomeWorldServiceOptions,
 } from "./world/home-world-service.js";
 import { BridgeAutomationDeployment } from "./home/bridge-automation-deployment.js";
+import { HomeAutomationMigrationDeployment } from "./home/home-automation-migration-deployment.js";
 import { HomeProposalService } from "./home/home-proposal-service.js";
 import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {
@@ -190,7 +191,11 @@ class HomeAgentProductBundleRuntime {
           const runner = this.preparationRunner;
           if (runner !== undefined) void runner.run(job.jobId, job.version).catch(() => undefined);
         },
-        deployment: new BridgeAutomationDeployment(this.service<HomeWorldService>("homeWorld")),
+        deployment: new HomeAutomationMigrationDeployment(
+          new BridgeAutomationDeployment(this.service<HomeWorldService>("homeWorld")),
+          this.service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations"),
+          this.service<HomeWorldService>("homeWorld"),
+        ),
       });
       await this.mount(HomeArtifactService, { registry: this.artifactRegistry });
       this.artifactPipeline = await createArtifactPipelineComposition({
