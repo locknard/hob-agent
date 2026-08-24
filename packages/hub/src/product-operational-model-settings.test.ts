@@ -87,20 +87,12 @@ test("switches a probed operational model through ledger, CAS, synchronous activ
     assert.equal(vault.values.get(oldRef), "old-secret");
     assert.deepEqual((await new ProductModelCleanupLedger(directory).load()).entries.map((entry) => entry.phase), ["active", "active"]);
     resolver.finishDrain();
-    await waitFor(() => vault.values.has(oldRef) === false);
+    await settings.drainMaintenance();
     assert.equal(vault.values.has(oldRef), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
-
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  assert.fail("condition did not settle");
-}
 
 test("reuses only the exact active credential for a blank same-provider canonical endpoint request", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-operational-model-reuse-"));
