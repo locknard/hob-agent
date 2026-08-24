@@ -7,8 +7,14 @@ import type { ZodType } from "zod";
 import {
   foreignRuleCatalogSchema,
   foreignRuleMigrationBindingSchema,
+  foreignRuleMigrationRequestSchema,
+  foreignRuleMigrationResultSchema,
   type ForeignRuleMigrationBinding,
+  type ForeignRuleMigrationHandle,
+  type ForeignRuleMigrationPlan,
+  type ForeignRuleMigrationUnsupportedReason,
   type ForeignRuleSummary,
+  type ForeignRulesHandle,
 } from "@hob/bridge-contract";
 import { orgHintPayloadSchema } from "@hob/bridge-contract";
 import {
@@ -205,6 +211,27 @@ export interface HomeWorldForeignRuleCatalog {
   readonly lastSeq?: number;
   readonly rules: readonly ForeignRuleSummary[];
 }
+
+export interface HomeWorldForeignRuleMigrationInput {
+  readonly bridgeId: string;
+  readonly epochId: string;
+  readonly lastSeq: number;
+  readonly ruleRef: string;
+  readonly signal: AbortSignal;
+}
+
+/** Hub-owned, provider-detail-free result for one read-only rule translation. */
+export type HomeWorldForeignRuleMigrationResult =
+  | {
+    readonly status: "translated";
+    readonly ruleRef: string;
+    readonly sourceFingerprint: string;
+    readonly title: string;
+    readonly plan: ForeignRuleMigrationPlan;
+  }
+  | { readonly status: "unsupported"; readonly reason: ForeignRuleMigrationUnsupportedReason }
+  | { readonly status: "unavailable" }
+  | { readonly status: "stale_source" };
 
 export interface HomeWorldDeviceSnapshot {
   bridgeId: string;
@@ -599,6 +626,85 @@ export class HomeWorldService extends Service {
       }
     }
     return catalogs;
+  }
+
+  /**
+   * Reads and validates one foreign rule against a committed catalog fence,
+   * then asks the negotiated migration extension for a neutral translation.
+   * This seam never writes to a bridge and never returns provider-shaped data.
+   */
+  async translateForeignRule(
+    input: HomeWorldForeignRuleMigrationInput,
+  ): Promise<HomeWorldForeignRuleMigrationResult> {
+    try {
+      const request = parseHomeWorldForeignRuleMigrationInput(input);
+      if (request === undefined || request.signal.aborted) return { status: "unavailable" };
+
+      const runtime = this.runtimesById.get(request.bridgeId);
+      if (!migrationRuntimeReady(runtime)) return { status: "unavailable" };
+
+      const initialWatermark = committedMigrationWatermark(runtime);
+      if (initialWatermark === undefined) return { status: "unavailable" };
+      if (!migrationWatermarkMatches(initialWatermark, request)) return { status: "stale_source" };
+
+      let catalog: ReturnType<typeof foreignRuleCatalogSchema.parse>;
+      try {
+        const handle = runtime.adapter.extension("foreignRules@2") as ForeignRulesHandle | undefined;
+        if (handle === undefined || typeof handle.catalog !== "function") return { status: "unavailable" };
+        const catalogRead = await awaitMigrationRead(
+          () => handle.catalog(),
+          request.signal,
+        );
+        if (catalogRead.status !== "fulfilled" || request.signal.aborted) return { status: "unavailable" };
+        const parsed = foreignRuleCatalogSchema.safeParse(catalogRead.value);
+        if (!parsed.success) return { status: "unavailable" };
+        catalog = parsed.data;
+      } catch {
+        return { status: "unavailable" };
+      }
+
+      if (!catalog.complete) return { status: "unavailable" };
+      if (catalog.epochId !== request.epochId || catalog.lastSeq !== request.lastSeq) {
+        return { status: "stale_source" };
+      }
+      const matchingRules = catalog.rules.filter((rule) => rule.ruleRef === request.ruleRef);
+      if (matchingRules.length === 0) return { status: "stale_source" };
+      if (matchingRules.length !== 1) return { status: "unavailable" };
+
+      const preTranslateWatermark = committedMigrationWatermark(runtime);
+      if (preTranslateWatermark === undefined) return { status: "unavailable" };
+      if (!migrationWatermarkMatches(preTranslateWatermark, request)) return { status: "stale_source" };
+      if (request.signal.aborted || !migrationRuntimeReady(runtime)) return { status: "unavailable" };
+
+      let translation: AwaitMigrationReadResult<unknown>;
+      try {
+        const handle = runtime.adapter.extension("foreignRuleMigration@1") as ForeignRuleMigrationHandle | undefined;
+        if (handle === undefined || typeof handle.translate !== "function") return { status: "unavailable" };
+        translation = await awaitMigrationRead(
+          () => handle.translate(
+            { ruleRef: request.ruleRef },
+            { signal: request.signal },
+          ),
+          request.signal,
+        );
+      } catch {
+        translation = { status: "rejected" };
+      }
+
+      const postTranslateWatermark = committedMigrationWatermark(runtime);
+      if (postTranslateWatermark === undefined) return { status: "unavailable" };
+      if (!migrationWatermarkMatches(postTranslateWatermark, request)) return { status: "stale_source" };
+      if (request.signal.aborted || !migrationRuntimeReady(runtime)) return { status: "unavailable" };
+      if (translation.status !== "fulfilled") return { status: "unavailable" };
+
+      return normalizeHomeWorldForeignRuleMigrationResult(
+        translation.value,
+        request.ruleRef,
+        request.bridgeId,
+      );
+    } catch {
+      return { status: "unavailable" };
+    }
   }
 
   /**
@@ -1960,6 +2066,183 @@ function parseForeignRuleMigrationBinding(input: unknown): ForeignRuleMigrationB
   } catch {
     return undefined;
   }
+}
+
+function parseHomeWorldForeignRuleMigrationInput(input: unknown): HomeWorldForeignRuleMigrationInput | undefined {
+  try {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined;
+    const value = input as Record<string, unknown>;
+    if (!hasExactKeys(value, ["bridgeId", "epochId", "lastSeq", "ruleRef", "signal"])) return undefined;
+    if (!boundedMigrationText(value.bridgeId, 256) || !boundedMigrationText(value.epochId, 256)) return undefined;
+    if (typeof value.lastSeq !== "number" || !Number.isSafeInteger(value.lastSeq) || value.lastSeq <= 0) return undefined;
+    const parsedRuleRef = foreignRuleMigrationRequestSchema.safeParse({ ruleRef: value.ruleRef });
+    if (!parsedRuleRef.success || parsedRuleRef.data.ruleRef !== value.ruleRef) return undefined;
+    if (!isAbortSignalLike(value.signal)) return undefined;
+    return {
+      bridgeId: value.bridgeId,
+      epochId: value.epochId,
+      lastSeq: value.lastSeq,
+      ruleRef: parsedRuleRef.data.ruleRef,
+      signal: value.signal,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function migrationRuntimeReady(
+  runtime: HomeWorldBridgeRuntime | undefined,
+): runtime is HomeWorldBridgeRuntime {
+  return runtime !== undefined
+    && runtime.ingest.diagnostics().connectionState === "ready"
+    && runtime.extensionAvailability["foreignRules@2"] === "available"
+    && runtime.extensionAvailability["foreignRuleMigration@1"] === "available";
+}
+
+function committedMigrationWatermark(runtime: HomeWorldBridgeRuntime): JournalWatermark | undefined {
+  try {
+    const watermark = runtime.journal.consistentWatermark?.(runtime.bridgeId);
+    return watermark === undefined ? undefined : { ...watermark };
+  } catch {
+    return undefined;
+  }
+}
+
+function migrationWatermarkMatches(
+  watermark: JournalWatermark,
+  request: Pick<HomeWorldForeignRuleMigrationInput, "epochId" | "lastSeq">,
+): boolean {
+  return watermark.epochId === request.epochId && watermark.lastSeq === request.lastSeq;
+}
+
+function normalizeHomeWorldForeignRuleMigrationResult(
+  value: unknown,
+  ruleRef: string,
+  bridgeId: string,
+): HomeWorldForeignRuleMigrationResult {
+  const parsed = foreignRuleMigrationResultSchema.safeParse(value);
+  if (!parsed.success) return { status: "unavailable" };
+  if (parsed.data.status === "unsupported") {
+    return { status: "unsupported", reason: parsed.data.reason };
+  }
+  if (parsed.data.status === "unavailable") return { status: "unavailable" };
+  if (parsed.data.ruleRef !== ruleRef || !migrationPlanBindingsStayOnBridge(parsed.data.plan, bridgeId)) {
+    return { status: "unavailable" };
+  }
+  return {
+    status: "translated",
+    ruleRef: parsed.data.ruleRef,
+    sourceFingerprint: parsed.data.sourceFingerprint,
+    title: parsed.data.title,
+    plan: cloneForeignRuleMigrationPlan(parsed.data.plan),
+  };
+}
+
+function migrationPlanBindingsStayOnBridge(plan: ForeignRuleMigrationPlan, bridgeId: string): boolean {
+  const bindings: ForeignRuleMigrationBinding[] = [];
+  if (plan.trigger.kind === "capability_changed") bindings.push(plan.trigger.source);
+  for (const condition of plan.conditions) bindings.push(condition.source);
+  for (const action of plan.actions) {
+    if (action.kind === "set_boolean" || action.kind === "set_level") bindings.push(action.target);
+  }
+  return bindings.every((binding) => binding.bridgeId === bridgeId);
+}
+
+function cloneForeignRuleMigrationPlan(plan: ForeignRuleMigrationPlan): ForeignRuleMigrationPlan {
+  const trigger = plan.trigger.kind === "schedule"
+    ? {
+      kind: "schedule" as const,
+      timezone: plan.trigger.timezone,
+      daysOfWeek: [...plan.trigger.daysOfWeek],
+      at: plan.trigger.at,
+    }
+    : {
+      kind: "capability_changed" as const,
+      source: { ...plan.trigger.source },
+    };
+  const conditions = plan.conditions.map((condition) => ({
+    kind: "capability_value" as const,
+    source: { ...condition.source },
+    operator: condition.operator,
+    value: condition.value,
+  }));
+  const actions = plan.actions.map((action) => action.kind === "set_boolean"
+    ? { kind: "set_boolean" as const, target: { ...action.target }, value: action.value }
+    : action.kind === "set_level"
+      ? { kind: "set_level" as const, target: { ...action.target }, level: action.level }
+      : { kind: "notify_local" as const, message: action.message });
+  return { trigger, conditions, actions };
+}
+
+type AwaitMigrationReadResult<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "rejected" }
+  | { readonly status: "aborted" };
+
+function awaitMigrationRead<T>(
+  read: () => PromiseLike<T> | T,
+  signal: AbortSignal,
+): Promise<AwaitMigrationReadResult<T>> {
+  if (signal.aborted) return Promise.resolve({ status: "aborted" });
+  return new Promise<AwaitMigrationReadResult<T>>((resolve) => {
+    let settled = false;
+    const cleanup = (): void => {
+      try {
+        signal.removeEventListener("abort", onAbort);
+      } catch {
+        // A malformed signal remains a closed unavailable result.
+      }
+    };
+    const finish = (result: AwaitMigrationReadResult<T>): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    function onAbort(): void {
+      finish({ status: "aborted" });
+    }
+    try {
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      Promise.resolve().then(() => {
+        if (signal.aborted) {
+          finish({ status: "aborted" });
+          return undefined;
+        }
+        return read();
+      }).then(
+        (value) => { if (!settled) finish({ status: "fulfilled", value: value as T }); },
+        () => finish({ status: "rejected" }),
+      );
+    } catch {
+      finish({ status: "rejected" });
+    }
+  });
+}
+
+function boundedMigrationText(value: unknown, maximumBytes: number): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.trim() === value
+    && Buffer.byteLength(value, "utf8") <= maximumBytes
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function isAbortSignalLike(value: unknown): value is AbortSignal {
+  if (value === null || typeof value !== "object") return false;
+  const signal = value as Partial<AbortSignal>;
+  return typeof signal.aborted === "boolean"
+    && typeof signal.addEventListener === "function"
+    && typeof signal.removeEventListener === "function";
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
 }
 
 function exactBinding(
