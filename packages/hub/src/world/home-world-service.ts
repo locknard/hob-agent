@@ -6,6 +6,8 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import type { ZodType } from "zod";
 import {
   foreignRuleCatalogSchema,
+  foreignRuleMigrationBindingSchema,
+  type ForeignRuleMigrationBinding,
   type ForeignRuleSummary,
 } from "@hob/bridge-contract";
 import { orgHintPayloadSchema } from "@hob/bridge-contract";
@@ -998,6 +1000,43 @@ export class HomeWorldService extends Service {
     return { bridgeId, automations: handle, resolveTarget: this.automationTargetResolver(bridgeId) };
   }
 
+  /**
+   * Resolves one bridge-local migration binding against both authority and the
+   * current runtime snapshot. The returned target contains only neutral Hub
+   * identity and a fresh copy of the exact binding; provider-shaped fields
+   * never cross this boundary.
+   */
+  resolveBridgeActionTargetForBinding(input: unknown): BridgeActionTarget | undefined {
+    const binding = parseForeignRuleMigrationBinding(input);
+    if (binding === undefined) return undefined;
+    const runtime = this.runtimesById.get(binding.bridgeId);
+    if (runtime === undefined || runtime.ingest.diagnostics().connectionState !== "ready") return undefined;
+
+    const matches = this.authority.capabilitiesSnapshot().flatMap((capability) => capability.bindings
+      .filter((candidate) => exactBinding(candidate, binding))
+      .map(() => capability.hwCapabilityId));
+    const capabilityIds = [...new Set(matches)];
+    if (capabilityIds.length !== 1) return undefined;
+    const hwCapabilityId = capabilityIds[0];
+    if (hwCapabilityId === undefined) return undefined;
+
+    const device = runtime.ingest.worldSnapshot().get(binding.nativeId);
+    if (device === undefined
+      || device.validity !== "valid"
+      || device.descriptor.nativeId !== binding.nativeId
+      || !device.descriptor.capabilities.some((capability) => capability.nativeInstanceId === binding.nativeInstanceId)) {
+      return undefined;
+    }
+    return {
+      hwCapabilityId,
+      binding: {
+        bridgeId: binding.bridgeId,
+        nativeId: binding.nativeId,
+        nativeInstanceId: binding.nativeInstanceId,
+      },
+    };
+  }
+
   private automationTargetResolver(bridgeId: string): (hwCapabilityId: string) => BridgeActionTarget | undefined {
     return (hwCapabilityId: string): BridgeActionTarget | undefined => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(hwCapabilityId)) return undefined;
@@ -1904,6 +1943,32 @@ function applyCommittedOrgHints(
     && device.bindings.every((binding) => binding.hwSpaceId === undefined)
     ? { ...device, spatialDisposition: "non_spatial" }
     : device);
+}
+
+function parseForeignRuleMigrationBinding(input: unknown): ForeignRuleMigrationBinding | undefined {
+  try {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined;
+    const value = input as Record<string, unknown>;
+    const raw = {
+      bridgeId: value.bridgeId,
+      nativeId: value.nativeId,
+      nativeInstanceId: value.nativeInstanceId,
+    };
+    if (Object.values(raw).some((item) => typeof item !== "string" || item !== item.trim())) return undefined;
+    const parsed = foreignRuleMigrationBindingSchema.safeParse(raw);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function exactBinding(
+  left: { readonly bridgeId: string; readonly nativeId: string; readonly nativeInstanceId: string },
+  right: ForeignRuleMigrationBinding,
+): boolean {
+  return left.bridgeId === right.bridgeId
+    && left.nativeId === right.nativeId
+    && left.nativeInstanceId === right.nativeInstanceId;
 }
 
 function readCommittedOrgHints(
