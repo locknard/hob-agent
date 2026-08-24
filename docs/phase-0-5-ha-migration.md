@@ -16,7 +16,7 @@ Phase 0.5 的产品目标是让家庭成员选择迁移范围，并完整看到�
 - 组合根收到 `bridge-ready` 后触发有界、single-flight 的 migration cutover sweep。
 - sweep 只续接已批准、生命周期为 `enabling` 或 `recovery_required`，且 source 与 target 均 ready 的 migration。
 - Proposal owner 统一持有迁移写入；所有写入复用 migration readback、source/target fingerprint 与 receipt CAS。
-- 稳定的 `needs_attention` 保持原 migration intent；只有显式 recovery 才能推进它，sweep 不创建新的 intent。
+- `needs_attention` 保持原 migration intent；sweep 只收敛 `enabling` 或 `recovery_required` 已承载的既有决定，不创建新的启用 intent。
 - 每次 recovery 的 `operationId` 都绑定上一条 durable receipt；receipt 不匹配时保持 `recovery_required`。
 
 ## 迁移状态机
