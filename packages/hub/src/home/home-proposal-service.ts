@@ -68,8 +68,19 @@ export interface ProposalDeploymentPort {
   pause?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
   resume?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
   withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string }):
-    | Promise<{ readonly restored: boolean }>
-    | { readonly restored: boolean };
+    | Promise<{ readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string }>
+    | { readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string };
+  /** Readback-driven restoration for a migration already projected as recovery_required. */
+  recover?(request: {
+    readonly proposalId: string;
+    readonly revision: number;
+    readonly actor: string;
+    readonly kind: CreateProposalInput["kind"];
+    readonly title: string;
+    readonly artifactCandidate?: CreateProposalInput["artifactCandidate"];
+    readonly intent: ProposalDeploymentIntent;
+  }): Promise<{ readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string }>
+    | { readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string };
 }
 
 export interface BorrowedHomeProposalServiceOptions {
@@ -456,6 +467,22 @@ export class HomeProposalService extends Service {
   /** Retries a failed enablement through the same governed deployment seam and intent. */
   async retryEnable(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
     const current = this.store.get(input.proposalId);
+    // A process can restart after approval has persisted `enabling` but before
+    // the migration decorator records its switching outcome. Only the
+    // Hub-owned migration lane may resume that exact pending decision here;
+    // ordinary enabling rows still require the existing failed-enable retry.
+    if (current?.lifecycle === "enabling" && current.reviewLane === "migration") {
+      if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
+        throw new ProposalStoreError("revision_conflict", "Proposal revision has changed");
+      }
+      const outcome = await this.deploy(current, input.actor ?? "household-owner");
+      return this.store.recordProposalDeployment({
+        proposalId: current.id,
+        expectedRevision: current.revision,
+        ...(input.actor === undefined ? {} : { actor: input.actor }),
+        outcome,
+      });
+    }
     const backfill = current !== undefined
       && current.deployment?.deploymentId === undefined
       && this.deployment !== undefined
@@ -616,6 +643,9 @@ export class HomeProposalService extends Service {
   /** Closing withdraws the automation and restores the configuration it replaced. */
   async closeAutomation(input: ProposalLifecycleInput): Promise<ProposalEnvelope> {
     const current = this.requireDeployed(input.proposalId);
+    if (current.lifecycle === "recovery_required") {
+      throw new ProposalStoreError("lifecycle_invalid", "This migration requires recovery before it can close");
+    }
     let restored = false;
     if (this.deployment?.withdraw !== undefined && current.deployment?.deploymentId !== undefined) {
       const result = await this.deployment.withdraw({
@@ -624,20 +654,79 @@ export class HomeProposalService extends Service {
         target: current.deployment.target,
         actor: input.actor ?? "household-owner",
       });
+      if (result?.recoveryRequired === true) {
+        return this.store.markRecoveryRequired({
+          ...input,
+          actor: input.actor ?? "household-owner",
+          reason: result.reason ?? "自动化回退结果暂时无法确认，等待继续恢复。",
+        });
+      }
       restored = result?.restored === true;
     }
     const closeInput: ProposalCloseInput = { ...input, restored };
     return this.store.closeAutomation(closeInput);
   }
 
+  /** Continues one already-decided migration recovery; it never creates a new review decision. */
+  async recoverAutomation(input: ProposalLifecycleInput & { readonly actor: string }): Promise<ProposalEnvelope> {
+    const current = this.store.get(input.proposalId);
+    if (current === undefined) throw new ProposalStoreError("not_found", "Proposal was not found");
+    const started = this.store.beginRecoveryAttempt(input);
+    const intent = this.deploymentIntentOf(current);
+    if (this.deployment?.recover === undefined || intent === undefined) {
+      return this.store.recordRecoveryFailure({
+        proposalId: started.id,
+        expectedRevision: started.revision,
+        actor: input.actor,
+        reason: "迁移恢复通道不可用，等待继续恢复。",
+      });
+    }
+    let result: Awaited<ReturnType<NonNullable<ProposalDeploymentPort["recover"]>>>;
+    try {
+      result = await this.deployment.recover({
+        proposalId: current.id,
+        revision: started.revision,
+        actor: input.actor,
+        kind: current.kind,
+        title: current.title,
+        ...(current.artifactCandidate === undefined ? {} : { artifactCandidate: current.artifactCandidate }),
+        intent,
+      });
+    } catch {
+      return this.store.recordRecoveryFailure({
+        proposalId: started.id,
+        expectedRevision: started.revision,
+        actor: input.actor,
+        reason: "迁移恢复结果暂时无法确认，等待继续恢复。",
+      });
+    }
+    if (result.restored !== true) {
+      const reason = typeof result.reason === "string" && result.reason.trim().length > 0 && result.reason.trim().length <= 1_000
+        ? result.reason.trim()
+        : "迁移恢复没有完成，等待继续恢复。";
+      return this.store.recordRecoveryFailure({
+        proposalId: started.id,
+        expectedRevision: started.revision,
+        actor: input.actor,
+        reason,
+      });
+    }
+    return this.store.completeRecovery({
+      proposalId: started.id,
+      expectedRevision: started.revision,
+      actor: input.actor,
+    });
+  }
+
   /** The household's deployed automations, most recent first. */
   listAutomations(): readonly ProposalEnvelope[] {
     return this.store.list({ status: "approved", limit: 100 })
       .filter((proposal) => proposal.lifecycle === "enabling"
-        || proposal.lifecycle === "active"
-        || proposal.lifecycle === "paused"
-        || proposal.lifecycle === "enable_failed"
-        || proposal.lifecycle === "closed")
+      || proposal.lifecycle === "active"
+      || proposal.lifecycle === "paused"
+      || proposal.lifecycle === "enable_failed"
+      || proposal.lifecycle === "recovery_required"
+      || proposal.lifecycle === "closed")
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   }
 

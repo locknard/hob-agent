@@ -441,6 +441,20 @@ class ProposalEnableInbox extends StubInbox {
   }
 }
 
+class RecoveryAutomationInbox extends StubInbox {
+  readonly recoveries: unknown[] = [];
+  recoveryAvailable = true;
+  lifecycle: "recovery_required" | "active" = "recovery_required";
+
+  canRecoverAutomation(proposalId: string) {
+    return this.recoveryAvailable && proposalId === "automation-recovery" && this.lifecycle === "recovery_required";
+  }
+
+  recoverAutomation(input: unknown) {
+    this.recoveries.push(input);
+  }
+}
+
 class StubRetryableInbox extends StubInbox {
   readonly retries: unknown[] = [];
   retryFailure: Error & { code?: string } | undefined;
@@ -4387,6 +4401,65 @@ test("controls a deployed automation including an enable retry", async () => {
       redirect: "manual",
     });
     assert.equal(foreign.status, 403);
+
+    const unavailable = await fetch(`${ctx.homeInboxHttp.origin}/automations/proposal-enable/recover`, {
+      method: "POST",
+      headers,
+      redirect: "manual",
+    });
+    assert.equal(unavailable.status, 404, "recovery is unavailable without a recovery capability");
+  } finally {
+    await fiber.dispose();
+    await inboxFiber.dispose();
+    await ctx.fiber.dispose();
+  }
+});
+
+test("routes only a recovery_required automation to the recovery capability with the authenticated actor", async () => {
+  const ctx = new Context();
+  const inboxFiber = await ctx.plugin(RecoveryAutomationInbox);
+  const fiber = await ctx.plugin(ProposalInboxHttpService, {
+    port: 0,
+    authenticate: createInboxBasicAuthenticator(token),
+    principal: adultAdminPrincipal,
+    reviewer: "adult-2",
+  });
+  const headers = {
+    authorization,
+    origin: ctx.homeInboxHttp.origin,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  try {
+    const recovered = await fetch(`${ctx.homeInboxHttp.origin}/automations/automation-recovery/recover`, {
+      method: "POST",
+      headers,
+      redirect: "manual",
+    });
+    assert.equal(recovered.status, 303);
+    assert.equal(recovered.headers.get("location"), "/automations");
+    assert.deepEqual((ctx.homeInbox as unknown as RecoveryAutomationInbox).recoveries, [{
+      proposalId: "automation-recovery",
+      actor: "adult-2",
+    }]);
+
+    (ctx.homeInbox as unknown as RecoveryAutomationInbox).lifecycle = "active";
+    const notRecovery = await fetch(`${ctx.homeInboxHttp.origin}/automations/automation-recovery/recover`, {
+      method: "POST",
+      headers,
+      redirect: "manual",
+    });
+    assert.equal(notRecovery.status, 404, "a non-recovery projection fails closed");
+    assert.equal((ctx.homeInbox as unknown as RecoveryAutomationInbox).recoveries.length, 1);
+
+    (ctx.homeInbox as unknown as RecoveryAutomationInbox).lifecycle = "recovery_required";
+    (ctx.homeInbox as unknown as RecoveryAutomationInbox).recoveryAvailable = false;
+    const unavailable = await fetch(`${ctx.homeInboxHttp.origin}/automations/automation-recovery/recover`, {
+      method: "POST",
+      headers,
+      redirect: "manual",
+    });
+    assert.equal(unavailable.status, 404, "a missing recovery capability fails closed");
+    assert.equal((ctx.homeInbox as unknown as RecoveryAutomationInbox).recoveries.length, 1);
   } finally {
     await fiber.dispose();
     await inboxFiber.dispose();

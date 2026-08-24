@@ -812,7 +812,9 @@ function buildWorkflowTransition(
         || input.approvedProposalRevision !== current.reviewProposalRevision! + 1) {
         throw new TypeError("Migration workflow approved proposal revision must immediately follow the review revision");
       }
-    } else if (current.failureReason !== "switch_failed" && current.failureReason !== "switch_unknown") {
+    } else if (input.from === "needs_attention"
+      && current.failureReason !== "switch_failed" && current.failureReason !== "switch_unknown"
+      && current.failureReason !== "verification_failed") {
       throw new TypeError("Migration workflow switch recovery requires a switch failure");
     } else if (current.approvedProposalRevision === undefined || current.switchOperationId === undefined
       || current.switchActor === undefined || current.sourceWasEnabled !== true || current.switchStartedAt === undefined

@@ -1409,6 +1409,136 @@ test("passes the authenticated reviewer and bounded retry actor to deployment", 
   }
 });
 
+test("resumes a migration that crashed while enabling without a second decision", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:00:00.000Z" });
+  const ctx = new Context();
+  const intent = {
+    deploymentId: "hob_migration_pending",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-1", nativeInstanceId: "ent-hwc-1" } }],
+  } as const;
+  const actors: string[] = [];
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => intent,
+        deploy: async (request: { readonly actor: string }) => {
+          actors.push(request.actor);
+          return { status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target, configFingerprint: `sha256:${"c".repeat(64)}` };
+        },
+      },
+    } as never);
+    const created = store.createMigrationGoverned({
+      ...candidate,
+      kind: "automation-draft",
+      artifactCandidate: automationCandidate,
+      dedupKey: "migration-pending-resume",
+      idempotencyKey: "migration-pending-resume:v1",
+      provenance: { producer: "home-automation-migration" },
+      intent: { ...candidate.intent, type: "automation-draft" },
+    });
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected migration proposal");
+    const ready = prepareToReady(store, created.proposal.id);
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "member:reviewer",
+      deploymentIntent: intent,
+    });
+    assert.equal(enabling.lifecycle, "enabling");
+    const active = await ctx.homeProposals.retryEnable({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      actor: "member:recovery",
+    });
+    assert.equal(active.lifecycle, "active");
+    assert.deepEqual(actors, ["member:recovery"]);
+    assert.equal(active.review?.decision, "approved");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
+test("keeps a migration close failure recovery_required and recovers without a second decision", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T03:30:00.000Z" });
+  const ctx = new Context();
+  const intent = {
+    deploymentId: "hob_migration_recovery",
+    target: "ha-main",
+    targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-1", nativeInstanceId: "ent-hwc-1" } }],
+  } as const;
+  let recoverRestored = false;
+  const recoveryRequests: unknown[] = [];
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, {
+      store,
+      deployment: {
+        resolveIntent: () => intent,
+        deploy: async () => ({ status: "verified" as const, deploymentId: intent.deploymentId, target: intent.target, configFingerprint: `sha256:${"b".repeat(64)}` }),
+        withdraw: async () => ({ restored: false, recoveryRequired: true, reason: "rollback_unknown" } as never),
+        recover: async (request: unknown) => {
+          recoveryRequests.push(request);
+          return {
+            restored: recoverRestored,
+            recoveryRequired: !recoverRestored,
+            ...(recoverRestored ? {} : { reason: "rollback_unknown" }),
+          } as never;
+        },
+      } as never,
+    } as never);
+
+    const created = store.createMigrationGoverned({
+      ...candidate,
+      kind: "automation-draft",
+      artifactCandidate: automationCandidate,
+      dedupKey: "migration-recovery-service",
+      idempotencyKey: "migration-recovery-service:v1",
+      provenance: { producer: "home-automation-migration" },
+      intent: { ...candidate.intent, type: "automation-draft" },
+    });
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected migration proposal");
+    completePreparation(store, created.proposal.id);
+    const ready = ctx.homeProposals.markProposalReady({ proposalId: created.proposal.id });
+    const active = await ctx.homeProposals.enableProposal({ proposalId: ready.id, reviewer: "member:alice" });
+
+    const required = await ctx.homeProposals.closeAutomation({ proposalId: active.id, actor: "member:alice" });
+    assert.equal(required.lifecycle, "recovery_required");
+    assert.equal(required.applicationStatus, "failed");
+    assert.equal(required.status, "approved");
+    await assert.rejects(
+      ctx.homeProposals.closeAutomation({ proposalId: required.id, actor: "member:alice" }),
+      /requires recovery/,
+    );
+
+    const stillRequired = await ctx.homeProposals.recoverAutomation({ proposalId: required.id, actor: "member:bob" });
+    assert.equal(stillRequired.lifecycle, "recovery_required");
+    assert.equal(stillRequired.recoveryAttempts?.length, 1);
+    assert.equal(stillRequired.recoveryAttempts?.[0]?.reason, "rollback_unknown");
+    assert.equal(stillRequired.deployment?.reason, "rollback_unknown");
+    assert.equal(stillRequired.audit.at(-1)?.action, "recovery_failed");
+
+    recoverRestored = true;
+    const closed = await ctx.homeProposals.recoverAutomation({ proposalId: stillRequired.id, actor: "member:carol" });
+    assert.equal(closed.lifecycle, "closed");
+    assert.equal(closed.applicationStatus, "withdrawn");
+    assert.equal(closed.recoveryAttempts, undefined);
+    assert.deepEqual(recoveryRequests.map((request) => (request as { actor: string }).actor), ["member:bob", "member:carol"]);
+    assert.equal(closed.review?.decision, "approved", "recovery reuses the original decision");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
 test("a configuration gap blocks visibly and the settings recheck re-enables the same card", async () => {
   const ctx = new Context();
   await ctx.plugin(StubHomeWorld);

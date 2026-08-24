@@ -271,9 +271,11 @@ export class HomeAutomationMigrationService {
     if (!isStrictResumeRuleSwitchInput(input)) return undefined;
     const workflow = this.store.get(input.migrationId)?.rules.find((rule) => rule.ruleRef === input.ruleRef)?.workflow;
     if (workflow?.status !== "needs_attention"
-      || (workflow.failureReason !== "switch_failed" && workflow.failureReason !== "switch_unknown")
+      || (workflow.failureReason !== "switch_failed" && workflow.failureReason !== "switch_unknown"
+        && workflow.failureReason !== "verification_failed")
       || workflow.approvedProposalRevision === undefined || workflow.switchOperationId === undefined
       || workflow.switchActor === undefined || workflow.sourceWasEnabled !== true || workflow.switchStartedAt === undefined
+      || workflow.failureReason === "verification_failed" && workflow.deploymentId !== undefined
       || workflow.switchOperationId === input.switchOperationId) return undefined;
     return this.transitionRuleWorkflow({ ...input, to: "switching" });
   }

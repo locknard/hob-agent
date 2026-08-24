@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ProposalDeploymentPort } from "./home-proposal-service.js";
-import { HomeAutomationMigrationDeployment } from "./home-automation-migration-deployment.js";
+import {
+  HomeAutomationMigrationDeployment,
+  type HomeAutomationMigrationDeploymentLookup,
+} from "./home-automation-migration-deployment.js";
 
 const SOURCE_FINGERPRINT = `sha256:${"a".repeat(64)}`;
 const DEPLOYMENT_FINGERPRINT = `sha256:${"b".repeat(64)}`;
@@ -42,7 +45,9 @@ function deploymentFixture() {
     },
     status: async () => {
       events.push("base.status");
-      return { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT };
+      return events.includes("base.withdraw")
+        ? { status: "missing" }
+        : { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT };
     },
     pause: async () => {
       events.push("base.pause");
@@ -93,6 +98,15 @@ function deploymentFixture() {
       events.push("runtime.startRollback");
       return true;
     },
+    resumeRuleSwitch: () => {
+      events.push("runtime.resumeSwitch");
+      workflow = "ready";
+      return true;
+    },
+    resumeRuleRollback: () => {
+      events.push("runtime.resumeRollback");
+      return true;
+    },
     restoreRule: () => {
       events.push("runtime.restore");
       workflow = "verified";
@@ -122,6 +136,47 @@ function deploymentFixture() {
     return true;
   };
   return { events, failCalls, withdrawRequests, runtime, base, control, sourcePort, wrapper };
+}
+
+function governedLookup(
+  workflowStatus: "switching" | "needs_attention" | "rolling_back",
+  failureReason?: "switch_failed" | "switch_unknown" | "verification_failed" | "rollback_failed" | "rollback_unknown",
+): HomeAutomationMigrationDeploymentLookup {
+  const base = {
+    status: "governed",
+    workflowStatus,
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    sourceBridgeId: "bridge-ha",
+    sourceFingerprint: SOURCE_FINGERPRINT,
+  } as const;
+  const switching = {
+    reviewProposalRevision: 2,
+    approvedProposalRevision: 3,
+    switchOperationId: "11111111111111111111111111111111",
+    switchActor: "member:alice",
+    sourceWasEnabled: true,
+    switchStartedAt: "2026-08-24T00:00:03.000Z",
+  } as const;
+  const deployment = {
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    deploymentTarget: BASE_REQUEST.intent.target,
+    deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT,
+  } as const;
+  const rollback = {
+    rollbackOperationId: "22222222222222222222222222222222",
+    rollbackActor: "member:alice",
+    rollbackStartedAt: "2026-08-24T00:00:05.000Z",
+  } as const;
+  if (workflowStatus === "switching") return { ...base, ...switching };
+  if (workflowStatus === "rolling_back") return { ...base, ...switching, ...deployment, ...rollback };
+  if (failureReason === "rollback_failed" || failureReason === "rollback_unknown") {
+    return { ...base, ...switching, ...deployment, ...rollback, failureReason };
+  }
+  if (failureReason === "verification_failed") {
+    return { ...base, ...switching, ...deployment, failureReason };
+  }
+  return { ...base, ...switching, ...(failureReason === undefined ? {} : { failureReason }) };
 }
 
 test("switches one ready migration only after CAS and verifies both neutral deployments", async () => {
@@ -158,10 +213,15 @@ test("rolls a verified migration back in target-first order", async () => {
   });
 
   assert.deepEqual(outcome, { restored: true });
-  assert.deepEqual(events.slice(-4), [
+  assert.deepEqual(events.slice(-9), [
+    "source.status",
+    "base.status",
     "runtime.startRollback",
     "base.withdraw",
+    "base.status",
     "source.set:true",
+    "source.status",
+    "base.status",
     "runtime.restore",
   ]);
 });
@@ -187,6 +247,7 @@ test("records switching failure after a known target deployment failure and rest
     "source.set:false",
     "base.deploy",
     "base.withdraw",
+    "base.status",
     "source.set:true",
     "runtime.fail",
   ]);
@@ -230,12 +291,41 @@ test("records rolling-back failure when the Hob target cannot be withdrawn", asy
     actor: BASE_REQUEST.actor,
   });
 
-  assert.deepEqual(outcome, { restored: false });
+  assert.deepEqual(outcome, { restored: false, recoveryRequired: true, reason: "迁移回退没有完成，原有规则状态需要处理。" });
   assert.deepEqual(failCalls.at(-1), {
     migrationId: "0123456789abcdef0123456789abcdef",
     ruleRef: "opaque-rule-ref",
     from: "rolling_back",
     reason: "rollback_failed",
+  });
+});
+
+test("projects a rollback CAS loss as recovery-required and leaves the target untouched", async () => {
+  const { events, failCalls, runtime, wrapper } = deploymentFixture();
+  await wrapper.deploy(BASE_REQUEST);
+  runtime.startRuleRollback = () => {
+    events.push("runtime.startRollback");
+    return false;
+  };
+
+  const outcome = await wrapper.withdraw({
+    proposalId: BASE_REQUEST.proposalId,
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    actor: BASE_REQUEST.actor,
+  });
+
+  assert.deepEqual(outcome, {
+    restored: false,
+    recoveryRequired: true,
+    reason: "迁移回退结果暂时无法确认，已停止后续写入。",
+  });
+  assert.deepEqual(events.slice(-2), ["runtime.startRollback", "runtime.fail"]);
+  assert.deepEqual(failCalls.at(-1), {
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    from: "verified",
+    reason: "verification_failed",
   });
 });
 
@@ -377,7 +467,7 @@ test("records rollback unknown when restore CAS loses a race", async () => {
     actor: BASE_REQUEST.actor,
   });
 
-  assert.deepEqual(outcome, { restored: false });
+  assert.deepEqual(outcome, { restored: false, recoveryRequired: true, reason: "迁移回退结果暂时无法确认，已停止后续写入。" });
   assert.deepEqual(failCalls.at(-1), {
     migrationId: "0123456789abcdef0123456789abcdef",
     ruleRef: "opaque-rule-ref",
@@ -398,13 +488,46 @@ test("records rollback unknown after CAS when the source control disappears", as
     actor: BASE_REQUEST.actor,
   });
 
-  assert.deepEqual(outcome, { restored: false });
-  assert.deepEqual(events.slice(-2), ["runtime.startRollback", "runtime.fail"]);
+  assert.deepEqual(outcome, { restored: false, recoveryRequired: true, reason: "迁移回退结果暂时无法确认，已停止后续写入。" });
+  assert.deepEqual(events.slice(-2), ["runtime.verifySwitch", "runtime.fail"]);
   assert.deepEqual(failCalls.at(-1), {
     migrationId: "0123456789abcdef0123456789abcdef",
     ruleRef: "opaque-rule-ref",
-    from: "rolling_back",
-    reason: "rollback_unknown",
+    from: "verified",
+    reason: "verification_failed",
+  });
+});
+
+test("does not start rollback when verified source or target preflight is unknown", async () => {
+  const { events, failCalls, control, base, wrapper } = deploymentFixture();
+  await wrapper.deploy(BASE_REQUEST);
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "unknown", reason: "unavailable" } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "unknown" } as const;
+  };
+
+  const outcome = await wrapper.withdraw({
+    proposalId: BASE_REQUEST.proposalId,
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    actor: BASE_REQUEST.actor,
+  });
+
+  assert.deepEqual(outcome, {
+    restored: false,
+    recoveryRequired: true,
+    reason: "迁移回退结果暂时无法确认，已停止后续写入。",
+  });
+  assert.deepEqual(events.slice(-3), ["source.status", "base.status", "runtime.fail"]);
+  assert.deepEqual(failCalls.at(-1), {
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    from: "verified",
+    reason: "verification_failed",
   });
 });
 
@@ -420,4 +543,173 @@ test("closes a throwing deployment request without traversing provider fields", 
 
   assert.equal(outcome.status, "failed");
   assert.deepEqual(events, []);
+});
+
+test("recovers a paused source with a missing target without redeploying", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_failed");
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "missing" } as const;
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.equal(outcome.status, "failed");
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.resumeSwitch", "source.set:true", "source.status", "runtime.fail"]);
+});
+
+test("treats a paused target as known but unsafe and performs no recovery write", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_unknown");
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.equal(outcome.status, "failed");
+  assert.deepEqual(events, ["source.status", "base.status"]);
+});
+
+test("cleans up a running target when switching recovery has no persisted target fingerprint", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_unknown");
+  control.status = async () => {
+    events.push("source.status");
+    return { status: events.filter((event) => event === "source.set:false").length > 0 ? "paused" : "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.equal(outcome.status, "failed");
+  assert.deepEqual(events, [
+    "source.status",
+    "base.status",
+    "runtime.resumeSwitch",
+    "base.withdraw",
+    "base.status",
+    "runtime.fail",
+  ]);
+});
+
+test("does not write when recovery preflight is unknown", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_unknown");
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "unknown", reason: "unavailable" } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "unknown" } as const;
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.equal(outcome.status, "failed");
+  assert.deepEqual(events, ["source.status"]);
+});
+
+test("does not verify an un-fingerprinted running target during switching recovery", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("switching");
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return events.filter((event) => event === "base.withdraw").length > 0
+      ? { status: "missing" } as const
+      : { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.equal(outcome.status, "failed");
+  assert.deepEqual(events, [
+    "source.status",
+    "base.status",
+    "runtime.fail",
+    "runtime.resumeSwitch",
+    "base.withdraw",
+    "base.status",
+    "source.status",
+    "runtime.fail",
+  ]);
+});
+
+test("records a known switching failure when target cleanup is unavailable", async () => {
+  const { events, runtime, base, control, failCalls, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("switching");
+  base.withdraw = undefined;
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, { status: "failed", reason: "迁移切换没有完成，原有规则保持可恢复状态。" });
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.fail", "runtime.resumeSwitch", "runtime.fail"]);
+  assert.deepEqual(failCalls, [
+    {
+      migrationId: "0123456789abcdef0123456789abcdef",
+      ruleRef: "opaque-rule-ref",
+      from: "switching",
+      reason: "switch_unknown",
+    },
+    {
+      migrationId: "0123456789abcdef0123456789abcdef",
+      ruleRef: "opaque-rule-ref",
+      from: "switching",
+      reason: "switch_failed",
+    },
+  ]);
+});
+
+test("rollback recovery withdraws the approved target, confirms missing, then restores source", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "rollback_unknown");
+  control.status = async () => {
+    events.push("source.status");
+    return { status: events.filter((event) => event === "source.set:true").length > 0 ? "running" : "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return events.filter((event) => event === "base.withdraw").length > 0
+      ? { status: "missing" } as const
+      : { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+
+  const outcome = await wrapper.recover({
+    proposalId: BASE_REQUEST.proposalId,
+    revision: BASE_REQUEST.revision,
+    actor: BASE_REQUEST.actor,
+    kind: BASE_REQUEST.kind,
+    title: BASE_REQUEST.title,
+    artifactCandidate: BASE_REQUEST.artifactCandidate,
+    intent: BASE_REQUEST.intent,
+  });
+
+  assert.deepEqual(outcome, { restored: true });
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.resumeRollback", "base.withdraw", "base.status", "source.set:true", "source.status", "base.status", "runtime.restore"]);
 });

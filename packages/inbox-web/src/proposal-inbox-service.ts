@@ -299,6 +299,7 @@ export interface ProposalInboxSafetyPort {
 }
 
 export type ProposalInboxSnoozeTarget = "tomorrow" | "weekend" | "next_week";
+export type ProposalInboxAutomationCommand = "pause" | "resume" | "close" | "retry" | "recover";
 
 /** Proposal-owner commands used by the review surface. */
 export interface ProposalInboxProposalGovernancePort {
@@ -319,6 +320,7 @@ export interface ProposalInboxProposalGovernancePort {
   resumeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
   closeAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
   retryEnable?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
+  recoverAutomation?(input: { readonly proposalId: string; readonly actor: string }): void | Promise<void>;
   listAutomations?(): readonly unknown[];
   reconcileAutomations?(): Promise<void>;
 }
@@ -577,6 +579,26 @@ export class ProposalInboxService extends Service {
       ...(mediaActionCompletionNotification === undefined ? {} : { mediaActionCompletionNotification }),
       ...(batchControl === undefined ? {} : { batchControl }),
     };
+  }
+
+  private projectedAutomationLifecycle(proposalId: string): string | undefined {
+    const governance = this.proposalGovernance;
+    if (governance?.listAutomations === undefined || typeof proposalId !== "string") return undefined;
+    let records: readonly unknown[];
+    try {
+      records = governance.listAutomations();
+    } catch {
+      return undefined;
+    }
+    if (!Array.isArray(records)) return undefined;
+    for (const value of records.slice(0, 50)) {
+      const record = productRecord(value);
+      const id = productText(record?.id, 256);
+      const title = productText(record?.title, 512);
+      const lifecycle = productText(record?.lifecycle, 32);
+      if (id === proposalId && title !== undefined && lifecycle !== undefined) return lifecycle;
+    }
+    return undefined;
   }
 
   /** Deployed automations from the governance owner; the bridge read-back converges in the background. */
@@ -869,10 +891,14 @@ export class ProposalInboxService extends Service {
 
   async controlAutomation(input: {
     readonly proposalId: string;
-    readonly command: "pause" | "resume" | "close" | "retry";
+    readonly command: ProposalInboxAutomationCommand;
     readonly actor: string;
   }): Promise<void> {
     const governance = this.proposalGovernance;
+    if (input.command === "recover") {
+      await this.recoverAutomation({ proposalId: input.proposalId, actor: input.actor });
+      return;
+    }
     const handler = input.command === "pause"
       ? governance?.pauseAutomation
       : input.command === "resume"
@@ -880,6 +906,19 @@ export class ProposalInboxService extends Service {
         : input.command === "retry" ? governance?.retryEnable : governance?.closeAutomation;
     if (handler === undefined) throw new Error("automation_control_unavailable");
     await handler.call(governance, { proposalId: input.proposalId, actor: input.actor });
+  }
+
+  canRecoverAutomation(proposalId: string): boolean {
+    return typeof this.proposalGovernance?.recoverAutomation === "function"
+      && this.projectedAutomationLifecycle(proposalId) === "recovery_required";
+  }
+
+  async recoverAutomation(input: { readonly proposalId: string; readonly actor: string }): Promise<void> {
+    const recover = this.proposalGovernance?.recoverAutomation;
+    if (recover === undefined || !this.canRecoverAutomation(input.proposalId)) {
+      throw Object.assign(new Error("automation_recovery_unavailable"), { code: "automation_recovery_unavailable" });
+    }
+    await recover.call(this.proposalGovernance, input);
   }
 
   async latchProposal(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): Promise<void> {
@@ -1468,6 +1507,7 @@ function optionalGovernancePort(source: unknown): ProposalInboxProposalGovernanc
   return typeof port.snoozeProposal === "function"
     || typeof port.decideProposal === "function"
     || typeof port.enableProposal === "function"
+    || typeof port.recoverAutomation === "function"
     || typeof port.proposalCapacity === "function"
     ? port
     : undefined;

@@ -112,7 +112,13 @@ class StubMigrationReviewedProposals extends StubReviewedProposals {
 }
 
 class StubMigrationAutomationProposals extends StubReviewedProposals {
+  readonly recoveries: unknown[] = [];
+
   enableProposal() {}
+
+  recoverAutomation(input: unknown) {
+    this.recoveries.push(input);
+  }
 
   listAutomations() {
     return [
@@ -830,6 +836,32 @@ test("projects the migration lane onto automation outcomes without native payloa
   assert.equal("deployment" in (automations[0] ?? {}), false);
 
   await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("only forwards automation recovery for a projected recovery_required lifecycle", async () => {
+  const ctx = new Context();
+  const proposalsFiber = await ctx.plugin(StubMigrationAutomationProposals);
+  const fiber = await ctx.plugin(ProposalInboxService);
+  const proposals = ctx.homeProposals as unknown as StubMigrationAutomationProposals;
+  const inbox = ctx.homeInbox as unknown as {
+    canRecoverAutomation(proposalId: string): boolean;
+    recoverAutomation(input: { readonly proposalId: string; readonly actor: string }): Promise<void>;
+  };
+
+  assert.equal(inbox.canRecoverAutomation("automation-migration-recovery"), true);
+  assert.equal(inbox.canRecoverAutomation("automation-migration-active"), false);
+  assert.equal(inbox.canRecoverAutomation("automation-missing"), false);
+  await inbox.recoverAutomation({ proposalId: "automation-migration-recovery", actor: "adult-2" });
+  assert.deepEqual(proposals.recoveries, [{ proposalId: "automation-migration-recovery", actor: "adult-2" }]);
+  await assert.rejects(
+    () => inbox.recoverAutomation({ proposalId: "automation-migration-active", actor: "adult-2" }),
+    /automation_recovery_unavailable/,
+  );
+  assert.deepEqual(proposals.recoveries, [{ proposalId: "automation-migration-recovery", actor: "adult-2" }]);
+
+  await fiber.dispose();
+  await proposalsFiber.dispose();
   await ctx.fiber.dispose();
 });
 

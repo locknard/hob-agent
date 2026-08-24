@@ -562,6 +562,78 @@ test("exposes governed workflow state and never re-enters preparation after swit
   }
 });
 
+test("projects failure reasons and neutral switch recovery refs, then resumes with a fresh CAS receipt", async () => {
+  const { context, proposals, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true);
+  try {
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    const prepared = await context.homeAutomationMigrations.prepareRuleReview({ migrationId: assessment.assessment.migrationId, ruleRef: "rule-1" });
+    assert.equal(prepared.status, "translated");
+    proposals!.proposal = {
+      ...proposals!.proposal!,
+      revision: 2,
+      lifecycle: "ready",
+      preparedContentHash: preparedContentHash(proposals!.proposal!),
+      preparedArtifact: {
+        artifactId: "artifact-living-room",
+        revision: 1,
+        contentHash: `sha256:${"b".repeat(64)}`,
+        compileResultId: `sha256:${"c".repeat(64)}`,
+        dryRunResultId: `sha256:${"d".repeat(64)}`,
+      },
+    };
+    proposals!.preparation = {
+      proposalId: "proposal-living-room",
+      proposalRevision: 1,
+      status: "succeeded",
+      attempt: 1,
+      version: 2,
+      createdAt: "2026-08-24T00:00:02.000Z",
+      updatedAt: "2026-08-24T00:00:03.000Z",
+    };
+    assert.equal((await context.homeAutomationMigrations.refreshRuleWorkflow({ migrationId: assessment.assessment.migrationId, ruleRef: "rule-1" })).status, "ready");
+    assert.equal(context.homeAutomationMigrations.startRuleSwitch({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+      approvedProposalRevision: 3,
+      switchOperationId: "0123456789abcdef0123456789abcdef",
+      switchActor: "household-owner",
+    }), true);
+    assert.equal(context.homeAutomationMigrations.failRuleWorkflow({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+      from: "switching",
+      reason: "switch_unknown",
+    }), true);
+    const failed = context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room");
+    assert.equal(failed.status, "governed");
+    if (failed.status === "governed") {
+      assert.equal(failed.workflowStatus, "needs_attention");
+      assert.equal(failed.migrationId, assessment.assessment.migrationId);
+      assert.equal(failed.ruleRef, "rule-1");
+      assert.equal(failed.sourceBridgeId, SOURCE.bridgeId);
+      assert.equal(failed.sourceFingerprint, translatedRule.sourceFingerprint);
+      assert.equal(failed.reviewProposalRevision, 2);
+      assert.equal(failed.approvedProposalRevision, 3);
+      assert.equal(failed.switchOperationId, "0123456789abcdef0123456789abcdef");
+      assert.equal(failed.switchActor, "household-owner");
+      assert.equal(failed.sourceWasEnabled, true);
+      assert.equal(typeof failed.switchStartedAt, "string");
+      assert.equal(failed.failureReason, "switch_unknown");
+    }
+    assert.equal(context.homeAutomationMigrations.resumeRuleSwitch({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+      switchOperationId: "fedcba9876543210fedcba9876543210",
+      switchActor: "member:alice",
+    }), true);
+    assert.equal(context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room").workflowStatus, "switching");
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
 test("reopens a switching workflow as readable governed state without replaying preparation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-home-migration-switch-restart-"));
   const path = join(directory, "migrations.sqlite");
@@ -611,24 +683,85 @@ test("reopens a switching workflow as readable governed state without replaying 
 
   const reopened = await setup(path);
   try {
-    assert.deepEqual(reopened.context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room"), {
-      status: "governed",
-      workflowStatus: "switching",
-      migrationId,
-      ruleRef: "rule-1",
-      sourceBridgeId: SOURCE.bridgeId,
-      sourceFingerprint: translatedRule.sourceFingerprint,
-      reviewProposalRevision: 2,
-      approvedProposalRevision: 3,
-    });
+    const governed = reopened.context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room");
+    assert.equal(governed.status, "governed");
+    if (governed.status === "governed") {
+      assert.equal(governed.workflowStatus, "switching");
+      assert.equal(governed.migrationId, migrationId);
+      assert.equal(governed.ruleRef, "rule-1");
+      assert.equal(governed.sourceBridgeId, SOURCE.bridgeId);
+      assert.equal(governed.sourceFingerprint, translatedRule.sourceFingerprint);
+      assert.equal(governed.reviewProposalRevision, 2);
+      assert.equal(governed.approvedProposalRevision, 3);
+      assert.equal(governed.switchOperationId, "0123456789abcdef0123456789abcdef");
+      assert.equal(governed.switchActor, "household-owner");
+      assert.equal(governed.sourceWasEnabled, true);
+    }
     assert.deepEqual(await reopened.context.homeAutomationMigrations.prepareRuleReview({ migrationId, ruleRef: "rule-1" }), {
       status: "needs_attention",
       reason: "workflow_not_recoverable",
       writesPerformed: false,
     });
+
+    // The active switching receipt is closed with a strict failure CAS before
+    // a fresh resume receipt is accepted; no persisted target fingerprint is
+    // invented for this crash window.
+    assert.equal(reopened.context.homeAutomationMigrations.failRuleWorkflow({
+      migrationId,
+      ruleRef: "rule-1",
+      from: "switching",
+      reason: "switch_unknown",
+    }), true);
+    assert.equal(reopened.context.homeAutomationMigrations.resumeRuleSwitch({
+      migrationId,
+      ruleRef: "rule-1",
+      switchOperationId: "fedcba9876543210fedcba9876543210",
+      switchActor: "member:recovery",
+    }), true);
+    assert.equal(reopened.context.homeAutomationMigrations.verifyRuleSwitch({
+      migrationId,
+      ruleRef: "rule-1",
+      deploymentId: "hob_proposal_living_room",
+      deploymentTarget: SOURCE.bridgeId,
+      deploymentConfigFingerprint: `sha256:${"e".repeat(64)}`,
+    }), true);
+    assert.equal(reopened.context.homeAutomationMigrations.startRuleRollback({
+      migrationId,
+      ruleRef: "rule-1",
+      rollbackOperationId: "abcdefabcdefabcdefabcdefabcdefab",
+      rollbackActor: "member:recovery",
+    }), true);
   } finally {
     await reopened.migrationFiber.dispose();
     await reopened.worldFiber.dispose();
+  }
+
+  const restarted = await setup(path);
+  try {
+    const activeRollback = restarted.context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room");
+    assert.equal(activeRollback.status, "governed");
+    if (activeRollback.status === "governed") assert.equal(activeRollback.workflowStatus, "rolling_back");
+    assert.equal(restarted.context.homeAutomationMigrations.failRuleWorkflow({
+      migrationId,
+      ruleRef: "rule-1",
+      from: "rolling_back",
+      reason: "rollback_unknown",
+    }), true);
+    assert.equal(restarted.context.homeAutomationMigrations.resumeRuleRollback({
+      migrationId,
+      ruleRef: "rule-1",
+      rollbackOperationId: "badc0ffee0badc0ffee0badc0ffee0ba",
+      rollbackActor: "member:restart",
+    }), true);
+    const resumed = restarted.context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room");
+    assert.equal(resumed.status, "governed");
+    if (resumed.status === "governed") {
+      assert.equal(resumed.workflowStatus, "rolling_back");
+      assert.equal(resumed.rollbackOperationId, "badc0ffee0badc0ffee0badc0ffee0ba");
+    }
+  } finally {
+    await restarted.migrationFiber.dispose();
+    await restarted.worldFiber.dispose();
     rmSync(directory, { recursive: true, force: true });
   }
 });

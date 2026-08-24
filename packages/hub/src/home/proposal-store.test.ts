@@ -795,6 +795,121 @@ test("reports an explicit failure instead of a running automation when deploymen
   }
 });
 
+test("projects a migration withdrawal failure into recovery_required and records bounded recovery attempts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposals-recovery-required-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const created = store.createMigrationGoverned(input({
+      artifactCandidate,
+      dedupKey: "recovery-required",
+      idempotencyKey: "recovery-required:v1",
+      provenance: { producer: "home-automation-migration" },
+    }));
+    assert.equal(created.kind, "created");
+    if (created.kind !== "created") throw new Error("expected migration proposal");
+    const ready = prepareToReady(store, created.proposal.id);
+    const enabling = store.decideProposal({
+      proposalId: ready.id,
+      expectedRevision: ready.revision,
+      decision: "approve",
+      reviewer: "household-owner",
+      deploymentIntent: {
+        deploymentId: "hob_recovery_required",
+        target: "ha-main",
+        targets: [{ hwCapabilityId: "hwc-4", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-4", nativeInstanceId: "ent-hwc-4" } }],
+      },
+    });
+    const active = store.recordProposalDeployment({
+      proposalId: enabling.id,
+      expectedRevision: enabling.revision,
+      outcome: {
+        status: "verified",
+        deploymentId: "hob_recovery_required",
+        target: "ha-main",
+        configFingerprint: `sha256:${"b".repeat(64)}`,
+      },
+    });
+    const required = store.markRecoveryRequired({
+      proposalId: active.id,
+      expectedRevision: active.revision,
+      actor: "system",
+      reason: "原有规则的恢复结果暂时无法确认。",
+    });
+    assert.equal(required.lifecycle, "recovery_required");
+    assert.equal(required.status, "approved");
+    assert.equal(required.applicationStatus, "failed");
+    assert.equal(required.deployment?.status, "failed");
+    assert.equal(required.audit.at(-1)?.action, "recovery_required");
+
+    const started = store.beginRecoveryAttempt({
+      proposalId: required.id,
+      expectedRevision: required.revision,
+      actor: "member:alice",
+    });
+    assert.equal(started.lifecycle, "recovery_required");
+    assert.equal(started.recoveryAttempts?.length, 1);
+    assert.deepEqual(started.recoveryAttempts?.[0], {
+      id: started.recoveryAttempts?.[0]?.id,
+      actor: "member:alice",
+      revision: started.revision,
+      startedAt: createdAt,
+    });
+
+    assert.throws(() => store.markRecoveryRequired({
+      proposalId: started.id,
+      expectedRevision: started.revision,
+      actor: "member:alice",
+      reason: "重复恢复请求",
+    }), /already requires recovery/);
+
+    const closed = store.completeRecovery({
+      proposalId: started.id,
+      expectedRevision: started.revision,
+      actor: "member:alice",
+    });
+    assert.equal(closed.lifecycle, "closed");
+    assert.equal(closed.applicationStatus, "withdrawn");
+    assert.equal(closed.recoveryAttempts, undefined);
+
+    store.close();
+    const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+    try {
+      assert.equal(reopened.get(required.id)?.lifecycle, "closed");
+      assert.equal(reopened.get(required.id)?.recoveryAttempts, undefined);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { store.close(); } catch { /* closed before restart assertion */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects a persisted recovery_required row without approved recovery evidence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposals-recovery-corrupt-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  try {
+    const proposal = store.create(input({ dedupKey: "recovery-corrupt", idempotencyKey: "recovery-corrupt:v1" }));
+    const raw = (store as unknown as { db: DatabaseSync }).db;
+    const row = raw.prepare("SELECT payload_json FROM proposals WHERE proposal_id = ?").get(proposal.id) as { payload_json: string };
+    raw.prepare("UPDATE proposals SET payload_json = ? WHERE proposal_id = ?")
+      .run(JSON.stringify({ ...JSON.parse(row.payload_json), lifecycle: "recovery_required" }), proposal.id);
+    store.close();
+
+    const reopened = new SqliteProposalStore({ path, now: () => createdAt });
+    try {
+      assert.throws(() => reopened.get(proposal.id), /persisted proposal state is invalid/i);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { store.close(); } catch { /* already closed */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("retries a failed enablement without asking for a second decision", () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
   try {

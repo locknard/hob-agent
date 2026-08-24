@@ -53,6 +53,8 @@ import type {
 } from "./home-automation-migration-deployment.js";
 import type {
   HomeAutomationMigrationFailRuleWorkflowInput,
+  HomeAutomationMigrationResumeRuleRollbackInput,
+  HomeAutomationMigrationResumeRuleSwitchInput,
   HomeAutomationMigrationStartRuleRollbackInput,
   HomeAutomationMigrationStartRuleSwitchInput,
   HomeAutomationMigrationRestoreRuleInput,
@@ -296,9 +298,17 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
         workflowStatus: workflow.status,
         ...(workflow.reviewProposalRevision === undefined ? {} : { reviewProposalRevision: workflow.reviewProposalRevision }),
         ...(workflow.approvedProposalRevision === undefined ? {} : { approvedProposalRevision: workflow.approvedProposalRevision }),
+        ...(workflow.switchOperationId === undefined ? {} : { switchOperationId: workflow.switchOperationId }),
+        ...(workflow.switchActor === undefined ? {} : { switchActor: workflow.switchActor }),
+        ...(workflow.sourceWasEnabled === undefined ? {} : { sourceWasEnabled: workflow.sourceWasEnabled }),
+        ...(workflow.switchStartedAt === undefined ? {} : { switchStartedAt: workflow.switchStartedAt }),
         ...(workflow.deploymentId === undefined ? {} : { deploymentId: workflow.deploymentId }),
         ...(workflow.deploymentTarget === undefined ? {} : { deploymentTarget: workflow.deploymentTarget }),
         ...(workflow.deploymentConfigFingerprint === undefined ? {} : { deploymentConfigFingerprint: workflow.deploymentConfigFingerprint }),
+        ...(workflow.rollbackOperationId === undefined ? {} : { rollbackOperationId: workflow.rollbackOperationId }),
+        ...(workflow.rollbackActor === undefined ? {} : { rollbackActor: workflow.rollbackActor }),
+        ...(workflow.rollbackStartedAt === undefined ? {} : { rollbackStartedAt: workflow.rollbackStartedAt }),
+        ...(workflow.failureReason === undefined ? {} : { failureReason: workflow.failureReason }),
       };
     } catch {
       return { status: "ambiguous" };
@@ -327,6 +337,24 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   startRuleRollback(input: Omit<HomeAutomationMigrationStartRuleRollbackInput, "from">): boolean {
     try {
       return this.migration.startRuleRollback({ ...input, from: "verified" }) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Records a fresh neutral switch recovery receipt after a readback decision. */
+  resumeRuleSwitch(input: Omit<HomeAutomationMigrationResumeRuleSwitchInput, "from">): boolean {
+    try {
+      return this.migration.resumeRuleSwitch({ ...input, from: "needs_attention" }) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Records a fresh neutral rollback recovery receipt after a readback decision. */
+  resumeRuleRollback(input: Omit<HomeAutomationMigrationResumeRuleRollbackInput, "from">): boolean {
+    try {
+      return this.migration.resumeRuleRollback({ ...input, from: "needs_attention" }) !== undefined;
     } catch {
       return false;
     }

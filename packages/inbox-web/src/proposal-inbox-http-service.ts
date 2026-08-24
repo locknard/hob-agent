@@ -78,6 +78,7 @@ import type {
   InboxReviewActor,
   InboxRuntimeDecisionRequest,
   ProposalInboxSnoozeTarget,
+  ProposalInboxAutomationCommand,
   InboxConversationCorrectionResult,
   InboxConversationCorrectionType,
   ProposalInboxBatchActionResult,
@@ -668,7 +669,9 @@ interface InboxHttpPort {
   recheckBlockedProposals?(): { readonly rechecked: number; readonly cleared: number };
   enableProposal?(input: { readonly proposalId: string; readonly expectedRevision: number; readonly reviewer: string }): unknown | Promise<unknown>;
   canControlAutomation?(): boolean;
-  controlAutomation?(input: { readonly proposalId: string; readonly command: "pause" | "resume" | "close" | "retry"; readonly actor: string }): unknown | Promise<unknown>;
+  controlAutomation?(input: { readonly proposalId: string; readonly command: ProposalInboxAutomationCommand; readonly actor: string }): unknown | Promise<unknown>;
+  canRecoverAutomation?(proposalId: string): boolean;
+  recoverAutomation?(input: { readonly proposalId: string; readonly actor: string }): unknown | Promise<unknown>;
 }
 
 declare module "@deepseek-ai/cordis" {
@@ -1769,21 +1772,32 @@ export class ProposalInboxHttpService extends Service {
         }
         return redirect(response, `/review-center/proposals/${encodeURIComponent(proposalId)}`);
       }
-      const automationControl = /^\/automations\/([^/]+)\/(pause|resume|close|retry)$/.exec(url.pathname);
+      const automationControl = /^\/automations\/([^/]+)\/(pause|resume|close|retry|recover)$/.exec(url.pathname);
       if (method === "POST" && automationControl) {
         const proposalId = safeDecode(automationControl[1]!);
-        const command = automationControl[2] as "pause" | "resume" | "close" | "retry";
-        if (proposalId === undefined) return send(response, 400, "Invalid automation command");
+        const command = parseAutomationCommand(automationControl[2]);
+        if (proposalId === undefined || command === undefined) return send(response, 400, "Invalid automation command");
         if (this.principal === undefined || !canUsePrivateProposalReviewPrincipal(this.principal)) {
           return send(response, 403, "Automation control needs a bound private device");
         }
-        if (!(this.inbox.canControlAutomation?.() ?? false) || this.inbox.controlAutomation === undefined) {
-          return send(response, 404, "Automation control unavailable");
-        }
-        try {
-          await this.inbox.controlAutomation({ proposalId, command, actor: this.reviewer });
-        } catch (error) {
-          return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
+        if (command === "recover") {
+          if (!(this.inbox.canRecoverAutomation?.(proposalId) ?? false) || this.inbox.recoverAutomation === undefined) {
+            return send(response, 404, "Automation recovery unavailable");
+          }
+          try {
+            await this.inbox.recoverAutomation({ proposalId, actor: this.reviewer });
+          } catch (error) {
+            return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
+          }
+        } else {
+          if (!(this.inbox.canControlAutomation?.() ?? false) || this.inbox.controlAutomation === undefined) {
+            return send(response, 404, "Automation control unavailable");
+          }
+          try {
+            await this.inbox.controlAutomation({ proposalId, command, actor: this.reviewer });
+          } catch (error) {
+            return send(response, proposalMutationErrorStatus(error), proposalMutationErrorText(error));
+          }
         }
         return redirect(response, "/automations");
       }
@@ -2686,6 +2700,12 @@ function productRouteForPath(path: string): ProductRoute | undefined {
   return undefined;
 }
 
+function parseAutomationCommand(value: string | undefined): ProposalInboxAutomationCommand | undefined {
+  return value === "pause" || value === "resume" || value === "close" || value === "retry" || value === "recover"
+    ? value
+    : undefined;
+}
+
 function configurationStatusTaskQueryValid(url: URL): boolean {
   const entries = [...url.searchParams.entries()];
   if (entries.length !== 1) return false;
@@ -3294,7 +3314,7 @@ function runtimeDecisionErrorText(error: unknown): string {
 
 function proposalMutationErrorStatus(error: unknown): number {
   const code = errorCode(error);
-  return code === "unauthorized" ? 403 : code === "not_found" || code === "proposal_snooze_unavailable" || code === "proposal_reject_unavailable" || code === "proposal_latch_unavailable" || code === "proposal_enable_unavailable"
+  return code === "unauthorized" ? 403 : code === "not_found" || code === "proposal_snooze_unavailable" || code === "proposal_reject_unavailable" || code === "proposal_latch_unavailable" || code === "proposal_enable_unavailable" || code === "automation_recovery_unavailable"
     ? 404
     : code === "enable_temporarily_unavailable"
       ? 503
@@ -3317,7 +3337,9 @@ function proposalMutationErrorText(error: unknown): string {
               ? "Proposal latch unavailable"
               : code === "proposal_enable_unavailable"
                 ? "Proposal enablement unavailable"
-              : "Proposal mutation failed";
+                : code === "automation_recovery_unavailable"
+                  ? "Automation recovery unavailable"
+                  : "Proposal mutation failed";
 }
 
 function productDocument(content: string, current: ProductRoute): string {

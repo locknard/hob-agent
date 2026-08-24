@@ -227,7 +227,8 @@ export type ProposalLifecycle =
   | "active"
   | "paused"
   | "closed"
-  | "enable_failed";
+  | "enable_failed"
+  | "recovery_required";
 
 /** Only a verified deployment reports a running automation. */
 export interface ProposalDeployment {
@@ -252,6 +253,14 @@ export interface ProposalEnablement {
   readonly enabledAt: string;
   readonly reviewer: string;
   readonly note?: string;
+}
+
+export interface ProposalRecoveryAttempt {
+  readonly id: string;
+  readonly actor: string;
+  readonly revision: number;
+  readonly startedAt: string;
+  readonly reason?: string;
 }
 
 /** The household inbox holds prepared plans; preparation holds its own small budget. */
@@ -323,6 +332,9 @@ export interface ProposalAuditEvent {
     | "deployment_retried"
     | "deployment_verified"
     | "deployment_failed"
+    | "recovery_required"
+    | "recovery_started"
+    | "recovery_failed"
     | "drift_detected"
     | "drift_restored"
     | "paused"
@@ -379,6 +391,8 @@ export interface ProposalEnvelope extends CreateProposalInput {
   };
   readonly deployment?: ProposalDeployment;
   readonly enablement?: ProposalEnablement;
+  /** Durable, bounded attempts to restore a migration after a failed decision. */
+  readonly recoveryAttempts?: readonly ProposalRecoveryAttempt[];
   /** Present while preparation waits for one household answer. */
   readonly openQuestion?: string;
   /** The world no longer allows this plan to enable; the card says so instead of looping. */
@@ -396,6 +410,7 @@ const proposalAuditEventSchema = z.object({
   action: z.enum([
     "created", "approved", "rejected", "expired", "evidence_merged", "snoozed", "snooze_elapsed",
     "prepared", "info_requested", "revalidation_required", "enable_unblocked", "deployment_retried",
+    "recovery_required", "recovery_started", "recovery_failed",
     "deployment_verified", "deployment_failed", "drift_detected", "drift_restored", "paused", "resumed", "closed",
   ]),
   actor: boundedId,
@@ -434,7 +449,7 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
   snoozedUntil: isoTimestamp.optional(),
   newEvidence: z.boolean().optional(),
   lifecycle: z.enum([
-    "preparing", "needs_info", "ready", "enabling", "active", "paused", "closed", "enable_failed",
+    "preparing", "needs_info", "ready", "enabling", "active", "paused", "closed", "enable_failed", "recovery_required",
   ]).optional(),
   deployment: z.object({
     status: z.enum(["pending", "verified", "failed", "rolled_back"]),
@@ -472,6 +487,13 @@ const proposalEnvelopeSchema = createProposalInputSchema.extend({
     reviewer: boundedId,
     note: z.string().trim().min(1).max(1_000).optional(),
   }).strict().optional(),
+  recoveryAttempts: z.array(z.object({
+    id: boundedId,
+    actor: boundedId,
+    revision: z.number().int().positive(),
+    startedAt: isoTimestamp,
+    reason: boundedText.optional(),
+  }).strict()).max(50).optional(),
   decision: proposalGovernanceDecisionSchema.optional(),
   review: proposalReviewSchema.optional(),
   audit: z.array(proposalAuditEventSchema).min(1).max(100),
@@ -598,6 +620,23 @@ export interface ProposalDeploymentRecordInput extends ProposalLifecycleInput {
 
 export interface ProposalCloseInput extends ProposalLifecycleInput {
   readonly restored: boolean;
+}
+
+export interface ProposalRecoveryRequiredInput extends ProposalLifecycleInput {
+  readonly reason: string;
+}
+
+export interface ProposalRecoveryAttemptInput extends ProposalLifecycleInput {
+  readonly actor: string;
+}
+
+export interface ProposalRecoveryFailureInput extends ProposalLifecycleInput {
+  readonly actor: string;
+  readonly reason: string;
+}
+
+export interface ProposalRecoveryCompleteInput extends ProposalLifecycleInput {
+  readonly actor: string;
 }
 
 export type ProposalCreationResult =
@@ -1380,6 +1419,135 @@ export class SqliteProposalStore {
           },
         }),
         audit: [...current.audit, this.auditEvent(at, "closed", input.actor ?? "household-owner", revision)],
+      };
+    });
+  }
+
+  /** Records a migration-side effect that needs an explicit, non-approval recovery. */
+  markRecoveryRequired(input: ProposalRecoveryRequiredInput): ProposalEnvelope {
+    const reason = input?.reason?.trim();
+    if (typeof reason !== "string" || reason.length === 0 || reason.length > 1_000) {
+      throw new TypeError("proposal recovery reason is invalid");
+    }
+    return this.transition(input, "recovery required", (current, at, revision) => {
+      if (current.lifecycle === "recovery_required") {
+        throw new ProposalStoreError("lifecycle_invalid", "The migration already requires recovery");
+      }
+      if (current.reviewLane !== "migration"
+        || (current.lifecycle !== "active" && current.lifecycle !== "paused" && current.lifecycle !== "enable_failed")
+        || current.deployment === undefined) {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a deployed migration can require recovery");
+      }
+      return {
+        ...current,
+        revision,
+        lifecycle: "recovery_required",
+        applicationStatus: "failed",
+        deployment: {
+          ...current.deployment,
+          status: "failed",
+          failedAt: at,
+          reason,
+        },
+        updatedAt: at,
+        audit: [...current.audit, {
+          ...this.auditEvent(at, "recovery_required", input.actor ?? "system", revision),
+          note: reason,
+        }],
+      };
+    });
+  }
+
+  /** Atomically records one bounded recovery attempt before external writes begin. */
+  beginRecoveryAttempt(input: ProposalRecoveryAttemptInput): ProposalEnvelope {
+    if (typeof input?.actor !== "string" || input.actor.trim().length === 0 || input.actor.length > 200) {
+      throw new TypeError("proposal recovery actor is invalid");
+    }
+    return this.transition(input, "recovery attempt", (current, at, revision) => {
+      if (current.lifecycle !== "recovery_required" || current.reviewLane !== "migration") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a migration requiring recovery can start an attempt");
+      }
+      const previous = current.recoveryAttempts ?? [];
+      if (previous.length >= 50) throw new ProposalStoreError("lifecycle_invalid", "Recovery attempt limit reached");
+      const actor = input.actor.trim();
+      return {
+        ...current,
+        revision,
+        recoveryAttempts: [...previous, {
+          id: `recovery-${this.id()}`,
+          actor,
+          revision,
+          startedAt: at,
+        }],
+        updatedAt: at,
+        audit: [...current.audit, this.auditEvent(at, "recovery_started", actor, revision)],
+      };
+    });
+  }
+
+  /** Records a bounded, known recovery failure without leaving recovery_required. */
+  recordRecoveryFailure(input: ProposalRecoveryFailureInput): ProposalEnvelope {
+    const reason = input?.reason?.trim();
+    if (typeof reason !== "string" || reason.length === 0 || reason.length > 1_000) {
+      throw new TypeError("proposal recovery failure reason is invalid");
+    }
+    if (typeof input?.actor !== "string" || input.actor.trim().length === 0 || input.actor.length > 200) {
+      throw new TypeError("proposal recovery failure actor is invalid");
+    }
+    return this.transition(input, "recovery failure", (current, at, revision) => {
+      if (current.lifecycle !== "recovery_required" || current.reviewLane !== "migration") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a migration requiring recovery can record a failure");
+      }
+      const attempts = current.recoveryAttempts ?? [];
+      if (attempts.length === 0) {
+        throw new ProposalStoreError("lifecycle_invalid", "A recovery failure requires an active attempt");
+      }
+      const last = attempts.at(-1)!;
+      return {
+        ...current,
+        revision,
+        updatedAt: at,
+        recoveryAttempts: [...attempts.slice(0, -1), { ...last, reason }],
+        ...(current.deployment === undefined ? {} : {
+          deployment: {
+            ...current.deployment,
+            status: "failed",
+            failedAt: at,
+            reason,
+          },
+        }),
+        audit: [...current.audit, {
+          ...this.auditEvent(at, "recovery_failed", input.actor, revision),
+          note: reason,
+        }],
+      };
+    });
+  }
+
+  /** Closes a migration only after the deployment seam has verified restoration. */
+  completeRecovery(input: ProposalRecoveryCompleteInput): ProposalEnvelope {
+    if (typeof input?.actor !== "string" || input.actor.trim().length === 0 || input.actor.length > 200) {
+      throw new TypeError("proposal recovery actor is invalid");
+    }
+    return this.transition(input, "recovery complete", (current, at, revision) => {
+      if (current.lifecycle !== "recovery_required" || current.reviewLane !== "migration") {
+        throw new ProposalStoreError("lifecycle_invalid", "Only a migration requiring recovery can close");
+      }
+      const { recoveryAttempts: _attempts, ...withoutRecoveryAttempts } = current;
+      return {
+        ...withoutRecoveryAttempts,
+        revision,
+        lifecycle: "closed",
+        applicationStatus: "withdrawn",
+        updatedAt: at,
+        ...(current.deployment === undefined ? {} : {
+          deployment: {
+            ...current.deployment,
+            status: "rolled_back",
+            restoredAt: at,
+          },
+        }),
+        audit: [...current.audit, this.auditEvent(at, "closed", input.actor, revision)],
       };
     });
   }
@@ -2577,9 +2745,10 @@ const PENDING_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
   "prepared", "info_requested", "revalidation_required", "enable_unblocked", "deployment_retried",
 ];
 const APPROVED_TAIL_AUDIT_ACTIONS: readonly ProposalAuditEvent["action"][] = [
-  "approved", "deployment_verified", "deployment_failed", "deployment_retried", "drift_detected", "drift_restored", "paused", "resumed", "closed",
+  "approved", "deployment_verified", "deployment_failed", "deployment_retried", "recovery_required", "recovery_started", "recovery_failed",
+  "drift_detected", "drift_restored", "paused", "resumed", "closed",
 ];
-const DEPLOYED_LIFECYCLES: readonly ProposalLifecycle[] = ["enabling", "active", "paused", "enable_failed", "closed"];
+const DEPLOYED_LIFECYCLES: readonly ProposalLifecycle[] = ["enabling", "active", "paused", "enable_failed", "recovery_required", "closed"];
 
 function fromDedupLatchAuditRow(row: Record<string, unknown>): ProposalDedupLatchAuditEvent {
   if (typeof row.event_id !== "string"
@@ -2956,6 +3125,17 @@ function fromRow(row: ProposalRow): ProposalEnvelope {
     }
     if (proposal.applicationStatus === "running" && proposal.lifecycle !== "active" && proposal.lifecycle !== "paused") {
       throw new Error("application status contradicts the lifecycle");
+    }
+    if (proposal.lifecycle === "recovery_required") {
+      if (proposal.reviewLane !== "migration"
+        || proposal.status !== "approved"
+        || proposal.applicationStatus !== "failed"
+        || proposal.deployment?.status !== "failed"
+        || proposal.recoveryAttempts !== undefined && proposal.recoveryAttempts.length > 50) {
+        throw new Error("recovery-required proposal state is invalid");
+      }
+    } else if (proposal.recoveryAttempts !== undefined) {
+      throw new Error("recovery attempts require a recovery-required proposal");
     }
     if (proposal.lifecycle === "ready" && proposal.kind === "automation-draft"
       && proposal.artifactCandidate !== undefined && proposal.preparedArtifact === undefined) {
