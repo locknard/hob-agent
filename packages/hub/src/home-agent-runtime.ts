@@ -11,6 +11,7 @@ import {
 import { BridgeAutomationDeployment } from "./home/bridge-automation-deployment.js";
 import { HomeAutomationMigrationDeployment } from "./home/home-automation-migration-deployment.js";
 import { HomeAutomationMigrationSimulationEvidenceSource } from "./home/home-automation-migration-evidence-source.js";
+import { recoverMigrationPreparationHandoffs } from "./home/migration-preparation-recovery.js";
 import { HomeProposalService } from "./home/home-proposal-service.js";
 import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {
@@ -245,6 +246,7 @@ class HomeAgentProductBundleRuntime {
   private authorityCandidates: AuthorityCandidateRegistry | undefined;
   private artifactPipeline: ArtifactPipelineComposition | undefined;
   private preparationRunner: ArtifactPreparationJobRunner | undefined;
+  private migrationRecoveryTask: Promise<void> | undefined;
   private viewRecipeDraftStore: SqliteProductViewRecipeDraftStore | undefined;
 
   constructor(
@@ -301,12 +303,6 @@ class HomeAgentProductBundleRuntime {
           this.service<HomeWorldService>("homeWorld"),
         ),
       });
-      // Proposal ownership is mounted before restart recovery. Recovery is
-      // lookup-only and bounded by the migration facade; a stale/corrupt row
-      // cannot prevent the product bundle from starting.
-      void this.service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations")
-        .recoverMigrationSelections()
-        .catch(() => undefined);
       await this.mount(HomeArtifactService, { registry: this.artifactRegistry });
       this.artifactPipeline = await createArtifactPipelineComposition({
         context: this.context,
@@ -318,8 +314,21 @@ class HomeAgentProductBundleRuntime {
       this.preparationRunner = new ArtifactPreparationJobRunner({
         jobs: this.proposalStore,
         preparation: this.artifactPipeline,
+        onPreparationCompleted: async ({ proposalId }) => {
+          await this
+            .service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations")
+            .refreshPreparedWorkflowForProposal(proposalId);
+        },
       });
       await this.preparationRunner.start();
+      // Selection recovery can link a Proposal that committed just before a
+      // crash. Run that bounded lookup first, then replay the bounded durable
+      // preparation-success set so the completion handoff cannot race the
+      // recovered workflow link. Neither recovery path creates a new Proposal.
+      this.migrationRecoveryTask = recoverMigrationPreparationHandoffs({
+        jobs: this.proposalStore,
+        migrations: this.service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations"),
+      });
       void this.service<HomeProposalService>("homeProposals").reconcileAutomations().catch(() => undefined);
       await this.mount(HomeRetentionService);
       if (this.options.mediaCatalog !== undefined) {
@@ -449,6 +458,7 @@ class HomeAgentProductBundleRuntime {
     let failure: unknown;
     try {
       await this.preparationRunner?.stop();
+      await this.migrationRecoveryTask;
       await this.artifactPipeline?.stop();
       if (disposeContext) {
         await this.context.fiber.dispose();

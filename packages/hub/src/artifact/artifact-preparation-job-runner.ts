@@ -9,15 +9,25 @@ import type {
   ArtifactPreparationJobStage,
 } from "./preparation-job-port.js";
 
+export interface ArtifactPreparationJobCompletionNotice {
+  readonly jobId: string;
+  readonly proposalId: string;
+  readonly proposalRevision: number;
+}
+
 export interface ArtifactPreparationJobRunnerOptions {
   readonly jobs: ArtifactPreparationJobPort;
   readonly preparation: Pick<ArtifactPreparationService, "prepare">;
+  readonly onPreparationCompleted?: (
+    notice: ArtifactPreparationJobCompletionNotice,
+  ) => void | Promise<void>;
 }
 
 /** Root-private durable-job executor. Construction and start never replay jobs. */
 export class ArtifactPreparationJobRunner {
   private readonly jobs: ArtifactPreparationJobPort;
   private readonly preparation: ArtifactPreparationJobRunnerOptions["preparation"];
+  private readonly onPreparationCompleted: ArtifactPreparationJobRunnerOptions["onPreparationCompleted"];
   private readonly inFlight = new Map<string, Promise<void>>();
   private stopping = false;
   private stopTask: Promise<void> | undefined;
@@ -25,6 +35,7 @@ export class ArtifactPreparationJobRunner {
   constructor(options: ArtifactPreparationJobRunnerOptions) {
     this.jobs = options.jobs;
     this.preparation = options.preparation;
+    this.onPreparationCompleted = options.onPreparationCompleted;
   }
 
   async start(): Promise<void> {
@@ -79,6 +90,11 @@ export class ArtifactPreparationJobRunner {
         // The preparation itself is durable; a full inbox or a superseded
         // revision defers promotion to the store's lazy sweep.
       }
+      await this.notifyPreparationCompleted({
+        jobId: claimed.jobId,
+        proposalId: claimed.proposalId,
+        proposalRevision: claimed.proposalRevision,
+      });
     } catch (error) {
       const failure = boundedFailure(error);
       this.failClaimedJob(claimed, failure.stage, failure.code);
@@ -97,6 +113,18 @@ export class ArtifactPreparationJobRunner {
       stage,
       code,
     });
+  }
+
+  private async notifyPreparationCompleted(
+    notice: ArtifactPreparationJobCompletionNotice,
+  ): Promise<void> {
+    if (this.onPreparationCompleted === undefined) return;
+    try {
+      await this.onPreparationCompleted(notice);
+    } catch {
+      // Completion notification is an optional observer; durable preparation
+      // remains successful when the observer cannot accept the notice.
+    }
   }
 }
 

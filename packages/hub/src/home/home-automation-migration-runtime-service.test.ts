@@ -68,6 +68,7 @@ class StubHomeWorld extends Service {
     rules: [{ ruleRef: "rule-1", name: "Living room light", enabled: true }],
   }];
   translation: unknown = translatedRule;
+  translationByRuleRef: Record<string, unknown> = {};
   translateCalls = 0;
   translateInputs: unknown[] = [];
   writeCalls = 0;
@@ -96,8 +97,8 @@ class StubHomeWorld extends Service {
     assert.equal(input.bridgeId, SOURCE.bridgeId);
     assert.equal(input.epochId, SOURCE.epochId);
     assert.equal(input.lastSeq, SOURCE.lastSeq);
-    assert.equal(input.ruleRef, "rule-1");
-    return this.translation;
+    assert.ok(input.ruleRef === "rule-1" || input.ruleRef === "rule-2");
+    return this.translationByRuleRef[input.ruleRef] ?? this.translation;
   }
 
   resolveBridgeActionTargetForBinding(input: typeof BINDING) {
@@ -585,6 +586,127 @@ test("refreshes a ready proposal with the candidate revision, then CASes simulat
   }
 });
 
+test("refreshes one unique translated proposal through its exact identity", async () => {
+  const { context, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true);
+  try {
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessment.outcome, "created");
+    const prepared = await context.homeAutomationMigrations.prepareRuleReview({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+    });
+    assert.equal(prepared.status, "translated");
+
+    const translated = await context.homeAutomationMigrations.refreshPreparedWorkflowForProposal("proposal-living-room");
+    assert.deepEqual(translated, { status: "pending", writesPerformed: false });
+    assert.doesNotMatch(JSON.stringify(translated), /proposal-living-room|rule-1|migration|source|artifact|native/u);
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
+test("returns one neutral success when an exact proposal refresh is already ready", async () => {
+  const { context, proposals, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true);
+  try {
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessment.outcome, "created");
+    const prepared = await context.homeAutomationMigrations.prepareRuleReview({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+    });
+    assert.equal(prepared.status, "translated");
+    const current = proposals!.proposal!;
+    proposals!.proposal = {
+      ...current,
+      revision: 2,
+      lifecycle: "ready",
+      preparedContentHash: preparedContentHash(current),
+      preparedArtifact: {
+        artifactId: "artifact-living-room",
+        revision: 1,
+        contentHash: `sha256:${"b".repeat(64)}`,
+        compileResultId: `sha256:${"c".repeat(64)}`,
+        dryRunResultId: `sha256:${"d".repeat(64)}`,
+      },
+    };
+    proposals!.preparation = {
+      proposalId: "proposal-living-room",
+      proposalRevision: 1,
+      status: "succeeded",
+      attempt: 1,
+      version: 2,
+      createdAt: "2026-08-24T00:00:02.000Z",
+      updatedAt: "2026-08-24T00:00:03.000Z",
+    };
+
+    const first = await context.homeAutomationMigrations.refreshPreparedWorkflowForProposal("proposal-living-room");
+    const replay = await context.homeAutomationMigrations.refreshPreparedWorkflowForProposal("proposal-living-room");
+    assert.deepEqual(first, { status: "ready", writesPerformed: false });
+    assert.deepEqual(replay, first);
+    assert.doesNotMatch(JSON.stringify(replay), /proposal-living-room|rule-1|migration|source|artifact|native/u);
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
+test("fails closed for a non-migration or malformed proposal identity", async () => {
+  const { context, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true);
+  try {
+    const closed = { status: "not_applicable", writesPerformed: false } as const;
+    assert.deepEqual(
+      await context.homeAutomationMigrations.refreshPreparedWorkflowForProposal("ordinary-proposal"),
+      closed,
+    );
+    assert.deepEqual(
+      await (context.homeAutomationMigrations.refreshPreparedWorkflowForProposal as unknown as (value: unknown) => Promise<unknown>)(" "),
+      closed,
+    );
+    assert.deepEqual(
+      await (context.homeAutomationMigrations.refreshPreparedWorkflowForProposal as unknown as (value: unknown) => Promise<unknown>)(undefined),
+      closed,
+    );
+    assert.equal(JSON.stringify(closed).includes("native"), false);
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
+test("fails closed when one proposal identity matches multiple migration workflows", async () => {
+  const { context, proposals, world, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true);
+  try {
+    world.catalogs[0]!.rules.push({ ruleRef: "rule-2", name: "Another living room light", enabled: true });
+    world.translationByRuleRef["rule-2"] = { ...translatedRule, ruleRef: "rule-2" };
+    const assessment = await context.homeAutomationMigrations.assessBridgeCatalog(SOURCE.bridgeId);
+    assert.equal(assessment.outcome, "created");
+    const first = await context.homeAutomationMigrations.prepareRuleReview({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-1",
+    });
+    const second = await context.homeAutomationMigrations.prepareRuleReview({
+      migrationId: assessment.assessment.migrationId,
+      ruleRef: "rule-2",
+    });
+    assert.equal(first.status, "translated");
+    assert.equal(second.status, "translated");
+
+    assert.deepEqual(
+      await context.homeAutomationMigrations.refreshPreparedWorkflowForProposal("proposal-living-room"),
+      { status: "not_applicable", writesPerformed: false },
+    );
+    assert.equal(proposals!.preparationCalls.length, 0);
+  } finally {
+    await proposalFiber?.dispose();
+    await migrationFiber.dispose();
+    await worldFiber.dispose();
+  }
+});
+
 test("does not simulate or enter ready when the server-owned evidence port is absent", async () => {
   const { context, proposals, worldFiber, migrationFiber, proposalFiber } = await setup(":memory:", true, false);
   try {
@@ -742,6 +864,10 @@ test("exposes governed workflow state and never re-enters preparation after swit
       switchActor: "household-owner",
     }), true);
     assert.equal(context.homeAutomationMigrations.findWorkflowForProposal("proposal-living-room").status, "governed");
+    assert.deepEqual(await context.homeAutomationMigrations.refreshPreparedWorkflowForProposal("proposal-living-room"), {
+      status: "needs_attention",
+      writesPerformed: false,
+    });
     assert.deepEqual(await context.homeAutomationMigrations.prepareRuleReview({
       migrationId: assessment.assessment.migrationId,
       ruleRef: "rule-1",

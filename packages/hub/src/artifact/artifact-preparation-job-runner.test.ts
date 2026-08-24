@@ -174,6 +174,84 @@ test("claims the queued job first, prepares its exact proposal revision, then co
   }
 });
 
+test("notifies after durable completion and the promotion attempt with only neutral identities", async () => {
+  const { store, job } = approvedJob("runner:completion-notice");
+  const spies: JobStoreSpies = { claims: 0, completes: 0, failures: 0, scans: 0 };
+  const order: string[] = [];
+  const notices: unknown[] = [];
+  const baseJobs = jobPort(store, spies);
+  const runner = new ArtifactPreparationJobRunner({
+    jobs: {
+      ...baseJobs,
+      completePreparationJob(input) {
+        order.push("complete");
+        return baseJobs.completePreparationJob(input);
+      },
+      markProposalReady() {
+        order.push("promotion");
+        throw new Error("promotion deferred");
+      },
+    },
+    preparation: preparation(async () => {
+      order.push("prepare");
+      return preparationReceipt;
+    }),
+    onPreparationCompleted: async (notice) => {
+      order.push("notify");
+      notices.push(notice);
+    },
+  });
+
+  try {
+    await runner.run(job.jobId, job.version);
+    assert.deepEqual(order, ["prepare", "complete", "promotion", "notify"]);
+    assert.deepEqual(notices, [{
+      jobId: job.jobId,
+      proposalId: job.proposalId,
+      proposalRevision: job.proposalRevision,
+    }]);
+    assert.equal(spies.failures, 0);
+    assert.equal(store.getPreparationJob(job.jobId)?.status, "succeeded");
+  } finally {
+    await runner.stop();
+    store.close();
+  }
+});
+
+test("waits for a failed completion notice without failing the persisted preparation", async () => {
+  const { store, job } = approvedJob("runner:completion-notice-failure");
+  const spies: JobStoreSpies = { claims: 0, completes: 0, failures: 0, scans: 0 };
+  const started = deferred<void>();
+  const release = deferred<void>();
+  const runner = new ArtifactPreparationJobRunner({
+    jobs: jobPort(store, spies),
+    preparation: preparation(async () => preparationReceipt),
+    onPreparationCompleted: async () => {
+      started.resolve();
+      await release.promise;
+      throw new Error("completion consumer unavailable");
+    },
+  });
+
+  try {
+    const running = runner.run(job.jobId, job.version);
+    await started.promise;
+    assert.equal(store.getPreparationJob(job.jobId)?.status, "succeeded");
+    let settled = false;
+    void running.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    release.resolve();
+    await running;
+    assert.equal(spies.failures, 0);
+    assert.equal(store.getPreparationJob(job.jobId)?.status, "succeeded");
+  } finally {
+    release.resolve();
+    await runner.stop();
+    store.close();
+  }
+});
+
 test("maps a bounded preparation failure to closed job stage/code without persisting its message", async () => {
   const { store, job } = approvedJob("runner:failure");
   const spies: JobStoreSpies = { claims: 0, completes: 0, failures: 0, scans: 0 };

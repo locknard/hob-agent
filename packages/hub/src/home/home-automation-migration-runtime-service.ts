@@ -168,6 +168,13 @@ export type HomeAutomationMigrationRuntimeWorkflowResult =
     readonly writesPerformed: false;
   };
 
+/** Root-private preparation handoff result; no workflow or provider identity crosses this boundary. */
+export type HomeAutomationMigrationRuntimePreparedWorkflowResult =
+  | { readonly status: "ready"; readonly writesPerformed: false }
+  | { readonly status: "pending"; readonly writesPerformed: false }
+  | { readonly status: "not_applicable"; readonly writesPerformed: false }
+  | { readonly status: "needs_attention"; readonly writesPerformed: false };
+
 interface HomeAutomationMigrationPreparedArtifact {
   readonly artifactId: string;
   readonly revision: number;
@@ -373,6 +380,36 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
       };
     } catch {
       return { status: "ambiguous" };
+    }
+  }
+
+  /** Root-private exact preparation completion hook; migration identity stays inside the Hub. */
+  async refreshPreparedWorkflowForProposal(
+    proposalId: string,
+  ): Promise<HomeAutomationMigrationRuntimePreparedWorkflowResult> {
+    try {
+      const lookup = this.findWorkflowForProposal(proposalId);
+      if (lookup.status === "not_migration" || lookup.status === "ambiguous") {
+        return preparedWorkflowResult("not_applicable");
+      }
+      if (lookup.status === "ready") {
+        const assessment = this.migration.get(lookup.migrationId);
+        const rule = eligibleWorkflowRule(assessment, lookup.ruleRef);
+        if (rule?.workflow === undefined) return preparedWorkflowResult("needs_attention");
+        return workflowResult(lookup.ruleRef, rule.workflow).status === "ready"
+          ? preparedWorkflowResult("ready")
+          : preparedWorkflowResult("needs_attention");
+      }
+      if (lookup.status !== "governed"
+        || (lookup.workflowStatus !== "translated" && lookup.workflowStatus !== "simulated")) {
+        return preparedWorkflowResult("needs_attention");
+      }
+      return preparedWorkflowResult(await this.refreshRuleWorkflow({
+        migrationId: lookup.migrationId,
+        ruleRef: lookup.ruleRef,
+      }));
+    } catch {
+      return preparedWorkflowResult("needs_attention");
     }
   }
 
@@ -1224,6 +1261,25 @@ function workflowResult(
     // Fall through to the fixed closed result.
   }
   return workflowFailure("workflow_unavailable");
+}
+
+type HomeAutomationMigrationRuntimePreparedWorkflowStatus =
+  | "ready"
+  | "pending"
+  | "not_applicable"
+  | "needs_attention";
+
+function preparedWorkflowResult(
+  result: HomeAutomationMigrationRuntimeWorkflowResult | HomeAutomationMigrationRuntimePreparedWorkflowStatus,
+): HomeAutomationMigrationRuntimePreparedWorkflowResult {
+  const status = typeof result === "string"
+    ? result
+    : result.status === "ready"
+      ? "ready"
+      : result.status === "translated" || result.status === "simulated"
+        ? "pending"
+        : "needs_attention";
+  return Object.freeze({ status, writesPerformed: false as const });
 }
 
 function mapPreparationReason(
