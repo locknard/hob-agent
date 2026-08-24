@@ -216,6 +216,28 @@ for (const scenario of [
   });
 }
 
+test("records an unknown ready workflow when source control lookup throws", async () => {
+  const { events, failCalls, sourcePort, wrapper } = deploymentFixture();
+  sourcePort.foreignRuleControlFor = () => {
+    events.push("source.control");
+    throw new Error("source control unavailable");
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移切换结果暂时无法确认，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.control", "runtime.fail"]);
+  assert.deepEqual(failCalls, [{
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    from: "ready",
+    reason: "switch_unknown",
+  }]);
+});
+
 function governedLookup(
   workflowStatus: "switching" | "needs_attention" | "rolling_back",
   failureReason?: "switch_failed" | "switch_unknown" | "verification_failed" | "rollback_failed" | "rollback_unknown",

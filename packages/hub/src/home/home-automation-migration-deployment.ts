@@ -307,7 +307,13 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return failed(FOREIGN_RULE_CATALOG_PREFLIGHT_FAILURE_REASON);
     }
 
-    const control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
+    let control: ForeignRuleControlHandle | undefined;
+    try {
+      control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
+    } catch {
+      this.fail(lookup, "ready", "switch_unknown");
+      return failed(SWITCH_UNKNOWN_REASON);
+    }
     if (control === undefined) {
       this.fail(lookup, "ready", "switch_unknown");
       return failed(SWITCH_UNKNOWN_REASON);
