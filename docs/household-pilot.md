@@ -152,13 +152,22 @@ This is the expected fail-closed result: recorder/history remains valid evidence
 for what and when, while a missing stable automation identity keeps why at
 rule-only or unknown coverage.
 
+A later same-day read-only validation used the corrected state-derived
+denominator and registry join. It reported 15 automation entities and 15 stable
+trace identities, with aggregate coverage `complete`. This supersedes the
+earlier coverage-planning assumption without rewriting that historical
+checkpoint. Stable identity is no longer the household blocker; the remaining
+M2 proof is a naturally occurring automation event whose exact context remains
+retained long enough for the governed causality-to-trace path.
+
 The next M2 acceptance run keeps one ready epoch open until ordinary household
 activity produces a `foreign_rule` causality event for an automation with a
 stable ID. It then follows the exact evidence provenance through
 `get_home_causality` and `automationTrace@1`. The operator first reviews the
-read-only stable-ID coverage in the aggregate `pnpm validate:home` report and
-adds IDs in Home Assistant through an explicit
-household maintenance decision when broader explanation coverage is desired.
+read-only stable-ID coverage in the aggregate `pnpm validate:home` report. If a
+later validation becomes partial, the household may add IDs in Home Assistant
+through an explicit maintenance decision when broader explanation coverage is
+desired.
 The pilot never triggers an automation merely to manufacture evidence.
 
 Run the bounded model-free listener with the same private bridge configuration:
