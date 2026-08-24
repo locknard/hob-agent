@@ -517,6 +517,19 @@ export interface ProductPrivateVoiceRecoveryPending {
   readonly startedAt: number;
 }
 
+export interface ProductPrivateVoiceHealthTrack {
+  readonly sampleCount: number;
+  readonly successCount: number;
+  readonly lastLatencyMs?: number;
+  readonly lastMeasuredAt?: number;
+}
+
+export interface ProductPrivateVoiceHealth {
+  readonly scope: "current_process";
+  readonly asr: ProductPrivateVoiceHealthTrack;
+  readonly tts: ProductPrivateVoiceHealthTrack;
+}
+
 interface ProductPrivateVoiceBase {
   readonly generation: number;
   /** One redirect-scoped, household-readable outcome. */
@@ -538,6 +551,7 @@ export type ProductPrivateVoice =
     readonly configured: true;
     readonly asr: ProductPrivateVoiceAsr;
     readonly tts: ProductPrivateVoiceTts;
+    readonly health?: ProductPrivateVoiceHealth;
   });
 
 export interface ProductShellModel {
@@ -1736,6 +1750,29 @@ function renderPrivateVoiceConfiguration(voice: ProductPrivateVoice, open: boole
   return `<details class="product-private-voice-configuration"${open ? " open" : ""}><summary>${summary}</summary><form class="product-private-voice-form" method="post" action="/settings/private-voice/configure" data-private-voice-form><input type="hidden" name="expectedGeneration" value="${voice.generation}"><fieldset><legend>语音识别</legend><label for="private-voice-asr-transport">服务类型<select id="private-voice-asr-transport" name="asrTransport" required>${privateVoiceTransportOptions(asr?.transport)}</select></label><label for="private-voice-asr-endpoint">服务地址<input id="private-voice-asr-endpoint" name="asrEndpoint" type="url" value="${escapeHtml(asr?.endpoint ?? "")}" autocomplete="url" required></label><label for="private-voice-asr-model">模型（可选）<input id="private-voice-asr-model" name="asrModel" value="${escapeHtml(asr?.model ?? "")}" autocomplete="off"></label><label for="private-voice-asr-credential">访问凭据（可选）<input id="private-voice-asr-credential" name="asrCredential" type="password" autocomplete="new-password"><small>${asrCredentialHint}</small></label></fieldset><fieldset><legend>语音回复</legend><label for="private-voice-tts-transport">服务类型<select id="private-voice-tts-transport" name="ttsTransport" required>${privateVoiceTransportOptions(tts?.transport)}</select></label><label for="private-voice-tts-endpoint">服务地址<input id="private-voice-tts-endpoint" name="ttsEndpoint" type="url" value="${escapeHtml(tts?.endpoint ?? "")}" autocomplete="url" required></label><label for="private-voice-tts-model">模型（可选）<input id="private-voice-tts-model" name="ttsModel" value="${escapeHtml(tts?.model ?? "")}" autocomplete="off"></label><label for="private-voice-tts-locale">语言<input id="private-voice-tts-locale" name="ttsLocale" value="${escapeHtml(tts?.locale ?? "")}" autocomplete="language" required></label><label for="private-voice-tts-voice">声音（可选）<input id="private-voice-tts-voice" name="ttsVoice" value="${escapeHtml(tts?.voice ?? "")}" autocomplete="off"></label><label for="private-voice-tts-credential">访问凭据（可选）<input id="private-voice-tts-credential" name="ttsCredential" type="password" autocomplete="new-password"><small>${ttsCredentialHint}</small></label></fieldset><p class="product-private-voice-form-status" role="status" aria-live="polite" data-private-voice-form-status></p><button class="product-primary-action" type="submit">检查并保存</button></form></details>`;
 }
 
+function renderPrivateVoiceHealth(
+  health: Extract<ProductPrivateVoice, { readonly configured: true }>["health"],
+): string {
+  if (health === undefined || health.scope !== "current_process") return "";
+  const renderTrack = (label: string, track: ProductPrivateVoiceHealthTrack): string => {
+    const sampleCount = Number.isSafeInteger(track.sampleCount) && track.sampleCount >= 0 && track.sampleCount <= 20
+      ? track.sampleCount
+      : 0;
+    const successCount = Number.isSafeInteger(track.successCount) && track.successCount >= 0
+      ? Math.min(sampleCount, track.successCount)
+      : 0;
+    const lastLatencyMs = track.lastLatencyMs;
+    const latencyMs = typeof lastLatencyMs === "number" && Number.isSafeInteger(lastLatencyMs) && lastLatencyMs >= 0
+      ? lastLatencyMs
+      : undefined;
+    const latency = sampleCount > 0 && latencyMs !== undefined
+      ? `${latencyMs} ms`
+      : "—";
+    return `<article class="product-private-voice-health-track"><h4>${label}</h4><dl><div><dt>样本</dt><dd>${sampleCount === 0 ? "0" : `${successCount}/${sampleCount} 成功`}</dd></div><div><dt>最近耗时</dt><dd>${latency}</dd></div></dl>${sampleCount === 0 ? `<p class="product-muted product-private-voice-health-empty">尚无实际请求</p>` : ""}</article>`;
+  };
+  return `<section class="product-private-voice-health" data-private-voice-health aria-labelledby="private-voice-health-heading"><h3 id="private-voice-health-heading">本次运行测量</h3><p class="product-muted">只统计当前进程里的真实语音请求，不保留转写内容或音频。</p><div class="product-private-voice-health-grid">${renderTrack("语音识别", health.asr)}${renderTrack("语音播报", health.tts)}</div></section>`;
+}
+
 function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string {
   const voice = model.privateVoice;
   if (voice === undefined) return "";
@@ -1758,6 +1795,7 @@ function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string 
     return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="disabled" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}<p class="product-muted">语音暂未开启，文字对话始终可用。</p>${configuration}<div class="product-private-voice-actions">${textExit}</div></div></section>`;
   }
   const configuration = renderPrivateVoiceConfiguration(voice, voice.status === "degraded", voice.status === "degraded" ? "编辑设置" : undefined);
+  const health = renderPrivateVoiceHealth(voice.health);
   const serviceRows = [
     `<li><span>语音识别</span><strong>${privateVoiceTransportLabel(voice.asr.transport)}</strong></li>`,
     `<li><span>语音回复</span><strong>${privateVoiceTransportLabel(voice.tts.transport)}</strong></li>`,
@@ -1772,7 +1810,7 @@ function renderPrivateVoiceSettings(model: NormalizedProductShellModel): string 
         : voice.status === "retrying"
           ? `<p class="product-private-voice-state" role="progressbar" aria-label="语音连接进度" aria-valuetext="正在重新连接语音">正在重新连接语音</p><div class="product-private-voice-actions">${cancel}${textExit}</div>`
           : `<p class="product-private-voice-state" role="progressbar" aria-label="语音设置进度" aria-valuetext="正在应用新的语音设置" aria-live="polite">正在应用新的语音设置</p><div class="product-private-voice-actions">${textExit}</div>`;
-  return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}${content}</div></section>`;
+  return `<section class="product-settings-section product-private-voice" id="private-voice" data-private-voice-status="${voice.status}" aria-labelledby="private-voice-heading"><div><h2 id="private-voice-heading">私有语音</h2><p class="product-muted">由你选择的私有服务处理，随时可以回到文字对话。</p></div><div>${notice}${content}${health}</div></section>`;
 }
 
 export type ProductOperationalModelStatus = "active" | "degraded" | "retrying" | "switching";

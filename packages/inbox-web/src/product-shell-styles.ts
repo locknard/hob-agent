@@ -520,6 +520,17 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .product-private-voice-actions { display: flex; flex-wrap: wrap; gap: .55rem; align-items: center; margin-block: .85rem; }
 .product-private-voice-actions form { margin: 0; }
 .product-private-voice-pending-exit { margin: .2rem 0; color: var(--shell-muted); font-size: .88rem; }
+.product-private-voice-health { margin-block-start: 1rem; padding-block-start: 1rem; border-block-start: 1px solid var(--shell-rule); }
+.product-private-voice-health h3 { margin: 0 0 .25rem; font-size: 1rem; }
+.product-private-voice-health > p { margin-block-end: .8rem; }
+.product-private-voice-health-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.product-private-voice-health-track { min-width: 0; padding: .8rem; border: 1px solid var(--shell-rule); border-radius: var(--shell-radius-md); background: var(--shell-bg); }
+.product-private-voice-health-track h4 { margin: 0 0 .55rem; font-size: .9rem; }
+.product-private-voice-health-track dl { display: grid; gap: .45rem; margin: 0; }
+.product-private-voice-health-track dl div { display: flex; justify-content: space-between; gap: .75rem; }
+.product-private-voice-health-track dt { color: var(--shell-muted); }
+.product-private-voice-health-track dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 720; }
+.product-private-voice-health-empty { margin: .65rem 0 0; font-size: .82rem; }
 .product-private-voice-configuration { margin-block-start: .8rem; border-block-start: 1px solid var(--shell-rule); }
 .product-private-voice-configuration summary { min-height: 2.75rem; display: flex; align-items: center; padding: .5rem 0; color: var(--shell-blue); cursor: pointer; font-weight: 720; }
 .product-private-voice-configuration[open] summary { margin-block-end: .55rem; }
@@ -706,6 +717,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .product-private-voice-form fieldset { grid-template-columns: minmax(0, 1fr); }
   .product-private-voice-actions { align-items: stretch; }
   .product-private-voice-actions > *, .product-private-voice-actions form, .product-private-voice-actions a, .product-private-voice-actions button { width: 100%; }
+  .product-private-voice-health-grid { grid-template-columns: minmax(0, 1fr); }
   .product-layout-workspace-grid { grid-template-columns: minmax(0, 1fr); }
   .product-layout-preview > header { flex-direction: column; }
   .product-layout-publish, .product-layout-publication-list > li { align-items: stretch; flex-direction: column; }

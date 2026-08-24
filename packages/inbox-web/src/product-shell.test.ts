@@ -1486,6 +1486,51 @@ test("renders configured private voice service state, change controls, and an ex
   assert.match(html, /语音服务已准备好。/);
 });
 
+test("renders current-process voice health with honest zero-sample copy", () => {
+  const measured = renderProductShell(model({
+    route: "settings",
+    privateVoice: {
+      status: "active",
+      generation: 12,
+      configured: true,
+      asr: { transport: "openai_http", endpoint: "http://voice.local/asr", credentialConfigured: false },
+      tts: { transport: "wyoming", endpoint: "http://voice.local/tts", locale: "zh-CN", credentialConfigured: false },
+      health: {
+        scope: "current_process",
+        asr: { sampleCount: 2, successCount: 1, lastLatencyMs: 37, lastMeasuredAt: 1_700_000_000_037 },
+        tts: { sampleCount: 1, successCount: 1, lastLatencyMs: 19, lastMeasuredAt: 1_700_000_000_019 },
+      },
+    } as unknown as ProductShellModel["privateVoice"],
+  }));
+  assert.match(measured, /本次运行测量/);
+  assert.match(measured, /语音识别/);
+  assert.match(measured, /语音播报/);
+  assert.match(measured, /1\/2 成功/);
+  assert.match(measured, /37 ms/);
+  assert.match(measured, /1\/1 成功/);
+  assert.match(measured, /19 ms/);
+  assert.doesNotMatch(measured, /1_700_000_000/);
+
+  const empty = renderProductShell(model({
+    route: "settings",
+    privateVoice: {
+      status: "active",
+      generation: 12,
+      configured: true,
+      asr: { transport: "openai_http", endpoint: "http://voice.local/asr", credentialConfigured: false },
+      tts: { transport: "wyoming", endpoint: "http://voice.local/tts", locale: "zh-CN", credentialConfigured: false },
+      health: {
+        scope: "current_process",
+        asr: { sampleCount: 0, successCount: 0 },
+        tts: { sampleCount: 0, successCount: 0 },
+      },
+    } as unknown as ProductShellModel["privateVoice"],
+  }));
+  assert.match(empty, /本次运行测量/);
+  assert.equal((empty.match(/尚无实际请求/g) ?? []).length, 2);
+  assert.match(empty, /<dt>最近耗时<\/dt><dd>—<\/dd>/);
+});
+
 test("renders private voice recovery states with an immediate text exit", () => {
   const degraded = renderProductShell(model({
     route: "settings",

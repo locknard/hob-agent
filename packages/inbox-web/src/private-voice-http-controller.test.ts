@@ -89,6 +89,251 @@ test("owns its contracts without importing the proposal inbox HTTP service", () 
   assert.doesNotMatch(source, /proposal-inbox-http-service/);
 });
 
+test("projects current-process ASR and TTS health from real calls without retaining payloads", async () => {
+  let now = 1_000;
+  let transcribeCalls = 0;
+  let synthesizeCalls = 0;
+  let adviceCalls = 0;
+  const token = "h".repeat(43);
+  const controller = new PrivateVoiceHttpController({
+    privateVoice: {
+      status: "active",
+      beginTurn() {
+        return {
+          captureMode: "encoded_audio" as const,
+          async transcribe() {
+            transcribeCalls += 1;
+            now += [37, 11, 23][transcribeCalls - 1] ?? 5;
+            return transcribeCalls === 2
+              ? { status: "failed" as const, reason: "incompatible" as const }
+              : { status: "transcribed" as const, text: "客厅现在怎么样" };
+          },
+          async synthesize() {
+            synthesizeCalls += 1;
+            now += synthesizeCalls === 1 ? 19 : 29;
+            return synthesizeCalls === 1
+              ? { status: "synthesized" as const, mimeType: "audio/wav", audio: new Uint8Array([1, 2]) }
+              : { status: "failed" as const, reason: "incompatible" as const };
+          },
+          async release() {},
+        };
+      },
+    },
+    voiceSettings: {
+      async projection() {
+        return {
+          status: "active" as const,
+          generation: 1,
+          configured: true as const,
+          asr: { transport: "wyoming" as const, endpoint: "tcp://asr.local", credentialConfigured: false },
+          tts: { transport: "wyoming" as const, endpoint: "tcp://tts.local", locale: "zh-CN", credentialConfigured: false },
+        };
+      },
+      async configure() { return { status: "unavailable" as const }; },
+      async disable() { return { status: "unavailable" as const }; },
+      async retry() { return "active" as const; },
+      cancelRetry() {},
+    },
+    clock: () => now,
+    adviceAvailability: async () => ({ status: "ready" as const }),
+    startAdvice: async () => ({ id: `advice-${++adviceCalls}` }),
+    productAdviceTurn: async () => ({
+      kind: "advice" as const,
+      id: "advice",
+      question: "客厅现在怎么样",
+      status: "completed" as const,
+      answer: "客厅很安静。",
+    }),
+    privateVoiceTurnToken: () => token,
+  });
+  const server = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/voice/turns")
+      return void controller.handleVoiceTurnStart(request, response);
+    if (request.method === "POST" && request.url === `/voice/turns/${token}/transcribe`)
+      return void controller.handleVoiceTranscription(request, response, token);
+    if (request.method === "POST" && request.url === `/voice/turns/${token}/speech`)
+      return void controller.handleVoiceSpeech(request, response, token);
+    if (request.method === "POST" && request.url === `/voice/turns/${token}/release`)
+      return void controller.handleVoiceTurnRelease(request, response, token);
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const start = () => fetch(`${origin}/voice/turns`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "",
+  });
+  const transcribe = () => fetch(`${origin}/voice/turns/${token}/transcribe`, {
+    method: "POST",
+    headers: { "content-type": "audio/wav" },
+    body: new Uint8Array([1, 2]),
+  });
+  try {
+    const initial = await controller.settingsContext();
+    assert.deepEqual(initial?.health, {
+      scope: "current_process",
+      asr: { sampleCount: 0, successCount: 0 },
+      tts: { sampleCount: 0, successCount: 0 },
+    });
+
+    assert.equal((await start()).status, 201);
+    assert.equal((await transcribe()).status, 202);
+    const speech = await fetch(`${origin}/voice/turns/${token}/speech`, { method: "POST" });
+    assert.equal(speech.status, 200);
+    assert.equal((await fetch(`${origin}/voice/turns/${token}/release`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    })).status, 204);
+
+    assert.equal((await start()).status, 201);
+    assert.equal((await transcribe()).status, 502);
+    assert.equal((await start()).status, 201);
+    assert.equal((await transcribe()).status, 202);
+    assert.equal((await fetch(`${origin}/voice/turns/${token}/speech`, { method: "POST" })).status, 502);
+
+    const projection = await controller.settingsContext();
+    assert.deepEqual(projection?.health, {
+      scope: "current_process",
+      asr: { sampleCount: 3, successCount: 2, lastLatencyMs: 23, lastMeasuredAt: 1_090 },
+      tts: { sampleCount: 2, successCount: 1, lastLatencyMs: 29, lastMeasuredAt: 1_119 },
+    });
+    const healthJson = JSON.stringify(projection?.health);
+    assert.doesNotMatch(healthJson, /客厅|audio|advice|tcp|wyoming|credential/iu);
+  } finally {
+    await controller.dispose();
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
+test("keeps the health window at twenty samples and ignores a late provider settlement after dispose", async () => {
+  let now = 2_000;
+  let resolveTranscription!: (value: { readonly status: "failed"; readonly reason: "incompatible" }) => void;
+  let transcribing = false;
+  const token = "i".repeat(43);
+  let calls = 0;
+  const controller = new PrivateVoiceHttpController({
+    privateVoice: {
+      status: "active",
+      beginTurn() {
+        return {
+          captureMode: "encoded_audio" as const,
+          async transcribe() {
+            calls += 1;
+            now += 1;
+            if (transcribing) return new Promise((resolve) => { resolveTranscription = resolve; });
+            return { status: "failed" as const, reason: "incompatible" as const };
+          },
+          async synthesize() { return { status: "failed" as const, reason: "incompatible" as const }; },
+          async release() {},
+        };
+      },
+    },
+    voiceSettings: new VoiceSettings(),
+    clock: () => now,
+    adviceAvailability: async () => ({ status: "ready" as const }),
+    startAdvice: async () => ({ id: "unused" }),
+    productAdviceTurn: async () => undefined,
+    privateVoiceTurnToken: () => token,
+  });
+  const server = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/voice/turns")
+      return void controller.handleVoiceTurnStart(request, response);
+    if (request.method === "POST" && request.url === `/voice/turns/${token}/transcribe`)
+      return void controller.handleVoiceTranscription(request, response, token);
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const start = () => fetch(`${origin}/voice/turns`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "",
+  });
+  try {
+    for (let index = 0; index < 21; index += 1) {
+      now += 30_001;
+      assert.equal((await start()).status, 201);
+      const response = await fetch(`${origin}/voice/turns/${token}/transcribe`, {
+        method: "POST",
+        headers: { "content-type": "audio/wav" },
+        body: new Uint8Array([1, 2]),
+      });
+      assert.equal(response.status, 502);
+    }
+    const rolling = await controller.settingsContext();
+    assert.deepEqual(rolling?.health?.asr, {
+      sampleCount: 20,
+      successCount: 0,
+      lastLatencyMs: 1,
+      lastMeasuredAt: 632_042,
+    });
+
+    transcribing = true;
+    assert.equal((await start()).status, 201);
+    const pending = fetch(`${origin}/voice/turns/${token}/transcribe`, {
+      method: "POST",
+      headers: { "content-type": "audio/wav" },
+      body: new Uint8Array([1, 2]),
+    });
+    while (!resolveTranscription) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await controller.dispose();
+    resolveTranscription({ status: "failed", reason: "incompatible" });
+    assert.equal((await pending).status, 409);
+    const afterDispose = await controller.settingsContext();
+    assert.equal(afterDispose?.health?.asr.sampleCount, 20);
+  } finally {
+    await controller.dispose();
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
+test("owns the health projection instead of accepting health fields from settings", async () => {
+  const settings = {
+    async projection() {
+      return {
+        status: "active" as const,
+        generation: 8,
+        configured: true as const,
+        asr: { transport: "wyoming" as const, endpoint: "tcp://asr.local", credentialConfigured: false },
+        tts: { transport: "wyoming" as const, endpoint: "tcp://tts.local", locale: "zh-CN", credentialConfigured: false },
+        health: {
+          scope: "all_time",
+          asr: { sampleCount: 999, successCount: 999, lastLatencyMs: -1, lastMeasuredAt: Number.NaN },
+          tts: { sampleCount: 999, successCount: 999, lastLatencyMs: Number.POSITIVE_INFINITY, lastMeasuredAt: Number.MAX_VALUE },
+        },
+      };
+    },
+    async configure() { return { status: "unavailable" as const }; },
+    async disable() { return { status: "unavailable" as const }; },
+    async retry() { return "active" as const; },
+    cancelRetry() {},
+  };
+  const controller = new PrivateVoiceHttpController({
+    voiceSettings: settings,
+    clock: () => 3_000,
+    adviceAvailability: async () => ({ status: "ready" as const }),
+    startAdvice: async () => ({ id: "unused" }),
+    productAdviceTurn: async () => undefined,
+  });
+  try {
+    assert.deepEqual((await controller.settingsContext())?.health, {
+      scope: "current_process",
+      asr: { sampleCount: 0, successCount: 0 },
+      tts: { sampleCount: 0, successCount: 0 },
+    });
+  } finally {
+    await controller.dispose();
+  }
+});
+
 test("leases an active private voice browser turn through the controller", async () => {
   const controller = new PrivateVoiceHttpController({
     privateVoice: {

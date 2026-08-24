@@ -2,7 +2,12 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { InboxReviewActor } from "./proposal-inbox-service.js";
-import type { ProductPrivateVoice, ProductTurn } from "./product-shell.js";
+import type {
+  ProductPrivateVoice,
+  ProductPrivateVoiceHealth,
+  ProductPrivateVoiceHealthTrack,
+  ProductTurn,
+} from "./product-shell.js";
 
 export type PrivateVoiceCaptureMode = "encoded_audio" | "pcm_s16le";
 
@@ -201,6 +206,8 @@ const PRIVATE_VOICE_SPEECH_WINDOW_MS = 30_000;
 const MAX_PRIVATE_VOICE_SYNTHESIS_PER_WINDOW = 6;
 const PRIVATE_VOICE_SPEECH_CACHE_MS = 30_000;
 const MAX_PRIVATE_VOICE_SPEECH_CACHE_ENTRIES = 8;
+const MAX_PRIVATE_VOICE_HEALTH_SAMPLES = 20;
+const MAX_PRIVATE_VOICE_HEALTH_LATENCY_MS = 24 * 60 * 60 * 1_000;
 const SETTINGS_RECEIPT_TTL_MS = 300_000;
 const MAX_SETTINGS_COMPLETIONS = 32;
 const SECURITY_HEADERS = Object.freeze({
@@ -264,6 +271,11 @@ type PrivateVoiceHttpTurn = {
   adviceId: string | undefined;
   expiresAt: number;
 };
+type PrivateVoiceHealthSample = {
+  readonly success: boolean;
+  readonly latencyMs: number;
+  readonly measuredAt: number;
+};
 
 /** The private-voice HTTP boundary owns request parsing, ephemeral browser capability state, and provider calls. */
 export interface PrivateVoiceHttpControllerOptions {
@@ -273,6 +285,7 @@ export interface PrivateVoiceHttpControllerOptions {
   readonly origin?: () => string;
   readonly privateVoiceReadDeadlineMs?: number;
   readonly privateVoiceTurnToken?: () => string;
+  readonly clock?: () => number;
   readonly adviceAvailability: () => Promise<AdviceAvailability>;
   readonly startAdvice: (question: string) => Promise<AdviceStartResult>;
   readonly productAdviceTurn: (id: string) => Promise<ProductTurn | undefined>;
@@ -312,6 +325,9 @@ export class PrivateVoiceHttpController {
   private disposed = false;
   private readonly readDeadlineMs: number;
   private readonly turnToken: () => string;
+  private readonly clock: () => number;
+  private readonly asrHealth: PrivateVoiceHealthSample[] = [];
+  private readonly ttsHealth: PrivateVoiceHealthSample[] = [];
 
   constructor(private readonly options: PrivateVoiceHttpControllerOptions) {
     this.readDeadlineMs = boundedReadDeadline(
@@ -324,6 +340,10 @@ export class PrivateVoiceHttpController {
       throw new TypeError("Private voice turn token source is invalid");
     }
     this.turnToken = options.privateVoiceTurnToken ?? privateVoiceTurnToken;
+    if (options.clock !== undefined && typeof options.clock !== "function") {
+      throw new TypeError("Private voice clock source is invalid");
+    }
+    this.clock = options.clock ?? Date.now;
   }
 
   static settingsAction(
@@ -367,12 +387,16 @@ export class PrivateVoiceHttpController {
     try {
       const projection = normalizeProjection(await settings.projection());
       if (projection === undefined) return undefined;
+      const health = projection.configured
+        ? { health: this.healthProjection() }
+        : {};
       const settledNotice =
         notice ?? this.consumeConfigurationCompletion() ?? this.consumeRecoveryCompletion();
       const task = this.configurationTask;
       const recovery = this.recoveryTask;
       return {
         ...projection,
+        ...health,
         ...(settledNotice === undefined ? {} : { notice: settledNotice }),
         ...(task === undefined
           ? {}
@@ -703,6 +727,7 @@ export class PrivateVoiceHttpController {
       if (!this.isLiveTranscribingTurn(turn))
         return sendVoiceJson(response, 409, { status: "unavailable" });
       const cancellation = abortOnDisconnect(request, response);
+      const healthStartedAt = this.healthNow();
       let transcription: Awaited<
         ReturnType<PrivateVoiceTurnLease["transcribe"]>
       >;
@@ -714,10 +739,16 @@ export class PrivateVoiceHttpController {
           signal: cancellation.signal,
         });
       } catch {
+        this.recordHealth("asr", false, healthStartedAt);
         return sendVoiceJson(response, 502, { status: "failed" });
       } finally {
         cancellation.cleanup();
       }
+      this.recordHealth(
+        "asr",
+        transcription.status === "transcribed",
+        healthStartedAt,
+      );
       if (!this.isLiveTranscribingTurn(turn))
         return sendVoiceJson(response, 409, { status: "unavailable" });
       if (transcription.status !== "transcribed")
@@ -961,7 +992,33 @@ export class PrivateVoiceHttpController {
       ? voice
       : undefined;
   }
-  private reserveTranscription(now = Date.now()): number | undefined {
+  private healthNow(): number {
+    const value = this.clock();
+    return Number.isSafeInteger(value) && value >= 0 ? value : Date.now();
+  }
+  private recordHealth(
+    track: "asr" | "tts",
+    success: boolean,
+    startedAt: number,
+  ): void {
+    if (this.disposed) return;
+    const measuredAt = this.healthNow();
+    const target = track === "asr" ? this.asrHealth : this.ttsHealth;
+    target.push({
+      success,
+      latencyMs: boundedHealthLatency(measuredAt - startedAt),
+      measuredAt,
+    });
+    while (target.length > MAX_PRIVATE_VOICE_HEALTH_SAMPLES) target.shift();
+  }
+  private healthProjection(): ProductPrivateVoiceHealth {
+    return {
+      scope: "current_process",
+      asr: projectHealthTrack(this.asrHealth),
+      tts: projectHealthTrack(this.ttsHealth),
+    };
+  }
+  private reserveTranscription(now = this.healthNow()): number | undefined {
     if (this.transcriptionInFlight) return 1;
     trimAttempts(
       this.transcriptionAttempts,
@@ -1062,7 +1119,7 @@ export class PrivateVoiceHttpController {
     }
     return cached.audio;
   }
-  private reserveSpeech(now = Date.now()): number | undefined {
+  private reserveSpeech(now = this.healthNow()): number | undefined {
     trimAttempts(this.speechAttempts, PRIVATE_VOICE_SPEECH_WINDOW_MS, now);
     if (this.speechAttempts.length >= MAX_PRIVATE_VOICE_SYNTHESIS_PER_WINDOW)
       return retryAfter(
@@ -1134,22 +1191,30 @@ export class PrivateVoiceHttpController {
     answer: string,
     signal: AbortSignal,
   ): Promise<VoiceSpeechResult> {
+    const healthStartedAt = this.healthNow();
     let result: Awaited<ReturnType<PrivateVoiceTurnLease["synthesize"]>>;
     try {
       result = await voice.synthesize({ text: answer, signal });
     } catch {
+      this.recordHealth("tts", false, healthStartedAt);
       return undefined;
     }
-    if (result.status !== "synthesized")
+    if (result.status !== "synthesized") {
+      this.recordHealth("tts", false, healthStartedAt);
       return unavailable(result.reason) ? "unavailable" : undefined;
+    }
     if (
       !isOutputMimeType(result.mimeType) ||
       !(result.audio instanceof Uint8Array) ||
       result.audio.byteLength === 0 ||
       result.audio.byteLength > MAX_PRIVATE_VOICE_AUDIO_BYTES
-    )
+    ) {
+      this.recordHealth("tts", false, healthStartedAt);
       return undefined;
-    return browserAudio(result);
+    }
+    const audio = browserAudio(result);
+    this.recordHealth("tts", audio !== undefined, healthStartedAt);
+    return audio;
   }
   private startConfiguration(
     settings: OperationalPrivateVoiceSettingsPort,
@@ -1532,6 +1597,35 @@ function boundedText(value: unknown, maximum: number): string | undefined {
   return text.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(text)
     ? text
     : undefined;
+}
+function boundedHealthLatency(value: number): number {
+  return Number.isFinite(value) && value >= 0
+    ? Math.min(MAX_PRIVATE_VOICE_HEALTH_LATENCY_MS, Math.floor(value))
+    : 0;
+}
+function projectHealthTrack(
+  samples: readonly PrivateVoiceHealthSample[],
+): ProductPrivateVoiceHealthTrack {
+  const bounded = samples.slice(-MAX_PRIVATE_VOICE_HEALTH_SAMPLES);
+  const last = bounded.at(-1);
+  const sampleCount = Math.min(MAX_PRIVATE_VOICE_HEALTH_SAMPLES, bounded.length);
+  const successCount = Math.min(
+    sampleCount,
+    bounded.reduce((count, sample) => count + (sample.success ? 1 : 0), 0),
+  );
+  return {
+    sampleCount,
+    successCount,
+    ...(last === undefined
+      ? {}
+      : {
+          lastLatencyMs: boundedHealthLatency(last.latencyMs),
+          lastMeasuredAt:
+            Number.isSafeInteger(last.measuredAt) && last.measuredAt >= 0
+              ? last.measuredAt
+              : 0,
+        }),
+  };
 }
 function unavailable(reason: unknown): boolean {
   return (
