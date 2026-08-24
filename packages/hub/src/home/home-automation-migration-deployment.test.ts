@@ -191,6 +191,29 @@ function governedLookup(
   return { ...base, ...switching, ...(failureReason === undefined ? {} : { failureReason }) };
 }
 
+function governedVerifiedLookup(): Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }> {
+  return {
+    status: "governed",
+    workflowStatus: "verified",
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    sourceBridgeId: "bridge-ha",
+    sourceFingerprint: SOURCE_FINGERPRINT,
+    reviewProposalRevision: 2,
+    approvedProposalRevision: BASE_REQUEST.revision,
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    deploymentTarget: BASE_REQUEST.intent.target,
+    deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT,
+  };
+}
+
+function governedRestoredLookup(): Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }> {
+  return {
+    ...governedVerifiedLookup(),
+    workflowStatus: "restored",
+  };
+}
+
 test("defers generic reconciliation for every migration workflow, including restored cross-store windows", () => {
   const { runtime, wrapper } = deploymentFixture();
   const guard = (lifecycle: "enabling" | "active" | "paused") =>
@@ -278,6 +301,227 @@ test("rolls a verified migration back in target-first order", async () => {
     "base.status",
     "runtime.restore",
   ]);
+});
+
+test("replays a verified migration from exact readback without redeploying or writing CAS state", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedVerifiedLookup();
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+  base.deploy = async () => {
+    events.push("base.deploy.unexpected");
+    throw new Error("verified replay must not deploy");
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "verified",
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    configFingerprint: DEPLOYMENT_FINGERPRINT,
+  });
+  assert.deepEqual(events, ["source.status", "base.status"]);
+});
+
+test("rejects a verified replay when its persisted identity or approved revision disagrees", async () => {
+  for (const lookup of [
+    { ...governedVerifiedLookup(), approvedProposalRevision: BASE_REQUEST.revision + 1 },
+    { ...governedVerifiedLookup(), deploymentId: "other-deployment" },
+    { ...governedVerifiedLookup(), deploymentTarget: "other-target" },
+    { ...governedVerifiedLookup(), deploymentConfigFingerprint: undefined },
+  ]) {
+    const { events, runtime, wrapper } = deploymentFixture();
+    runtime.findWorkflowForProposal = () => lookup;
+
+    const outcome = await wrapper.deploy(BASE_REQUEST);
+
+    assert.equal(outcome.status, "failed");
+    assert.deepEqual(events, []);
+  }
+});
+
+test("converges a restored migration withdrawal from exact readback without any write", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedRestoredLookup();
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "missing" } as const;
+  };
+  base.withdraw = async () => {
+    events.push("base.withdraw.unexpected");
+    throw new Error("restored withdrawal must not write");
+  };
+
+  const outcome = await wrapper.withdraw({
+    proposalId: BASE_REQUEST.proposalId,
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    actor: BASE_REQUEST.actor,
+  });
+
+  assert.deepEqual(outcome, { restored: true });
+  assert.deepEqual(events, ["source.status", "base.status"]);
+});
+
+test("converges restored migration recovery from exact readback without any write", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => governedRestoredLookup();
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "missing" } as const;
+  };
+  base.withdraw = async () => {
+    events.push("base.withdraw.unexpected");
+    throw new Error("restored recovery must not write");
+  };
+
+  const outcome = await wrapper.recover({
+    proposalId: BASE_REQUEST.proposalId,
+    revision: BASE_REQUEST.revision + 1,
+    actor: BASE_REQUEST.actor,
+    kind: BASE_REQUEST.kind,
+    title: BASE_REQUEST.title,
+    artifactCandidate: BASE_REQUEST.artifactCandidate,
+    intent: BASE_REQUEST.intent,
+  });
+
+  assert.deepEqual(outcome, { restored: true });
+  assert.deepEqual(events, ["source.status", "base.status"]);
+});
+
+test("rejects restored convergence when the deployment identity is missing or inconsistent", async () => {
+  for (const request of [
+    { ...BASE_REQUEST, intent: { ...BASE_REQUEST.intent, deploymentId: "other-deployment" } },
+    { ...BASE_REQUEST, intent: { ...BASE_REQUEST.intent, target: "other-target" } },
+  ]) {
+    const { events, runtime, wrapper } = deploymentFixture();
+    runtime.findWorkflowForProposal = () => governedRestoredLookup();
+
+    const outcome = await wrapper.withdraw({
+      proposalId: request.proposalId,
+      deploymentId: request.intent.deploymentId,
+      target: request.intent.target,
+      actor: request.actor,
+    });
+
+    assert.equal(outcome.restored, false);
+    assert.equal(outcome.recoveryRequired, true);
+    assert.deepEqual(events, []);
+  }
+});
+
+test("fails closed when verified readback does not match the persisted source or target", async () => {
+  for (const mismatch of [
+    {
+      name: "source status",
+      source: { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const,
+      target: { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+    },
+    {
+      name: "source fingerprint",
+      source: { status: "paused", sourceFingerprint: `sha256:${"c".repeat(64)}` } as const,
+      target: { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+    },
+    {
+      name: "target status",
+      source: { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const,
+      target: { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+    },
+    {
+      name: "target fingerprint",
+      source: { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const,
+      target: { status: "running", configFingerprint: `sha256:${"c".repeat(64)}` } as const,
+    },
+  ]) {
+    const { events, runtime, base, control, wrapper } = deploymentFixture();
+    runtime.findWorkflowForProposal = () => governedVerifiedLookup();
+    control.status = async () => {
+      events.push("source.status");
+      return mismatch.source;
+    };
+    base.status = async () => {
+      events.push("base.status");
+      return mismatch.target;
+    };
+    base.deploy = async () => {
+      events.push("base.deploy.unexpected");
+      throw new Error(`${mismatch.name} must not deploy`);
+    };
+    control.setEnabled = async () => {
+      events.push("source.set.unexpected");
+      throw new Error(`${mismatch.name} must not change the source`);
+    };
+
+    const outcome = await wrapper.deploy(BASE_REQUEST);
+
+    assert.equal(outcome.status, "failed", mismatch.name);
+    assert.deepEqual(events, ["source.status", "base.status"], mismatch.name);
+  }
+});
+
+test("requires exact restored readback before converging a close", async () => {
+  for (const mismatch of [
+    {
+      name: "source status",
+      source: { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const,
+      target: { status: "missing" } as const,
+    },
+    {
+      name: "source fingerprint",
+      source: { status: "running", sourceFingerprint: `sha256:${"c".repeat(64)}` } as const,
+      target: { status: "missing" } as const,
+    },
+    {
+      name: "target status",
+      source: { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const,
+      target: { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+    },
+  ]) {
+    const { events, runtime, base, control, wrapper } = deploymentFixture();
+    runtime.findWorkflowForProposal = () => governedRestoredLookup();
+    control.status = async () => {
+      events.push("source.status");
+      return mismatch.source;
+    };
+    base.status = async () => {
+      events.push("base.status");
+      return mismatch.target;
+    };
+    base.withdraw = async () => {
+      events.push("base.withdraw.unexpected");
+      throw new Error(`${mismatch.name} must not withdraw`);
+    };
+    control.setEnabled = async () => {
+      events.push("source.set.unexpected");
+      throw new Error(`${mismatch.name} must not change the source`);
+    };
+
+    const outcome = await wrapper.withdraw({
+      proposalId: BASE_REQUEST.proposalId,
+      deploymentId: BASE_REQUEST.intent.deploymentId,
+      target: BASE_REQUEST.intent.target,
+      actor: BASE_REQUEST.actor,
+    });
+
+    assert.equal(outcome.restored, false, mismatch.name);
+    assert.equal(outcome.recoveryRequired, true, mismatch.name);
+    assert.deepEqual(events, ["source.status", "base.status"], mismatch.name);
+  }
 });
 
 test("records switching failure after a known target deployment failure and restores the source", async () => {

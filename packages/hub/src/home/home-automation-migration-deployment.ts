@@ -147,6 +147,9 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     }
     if (lookup.status === "not_migration") return this.base.deploy(request);
     if (lookup.status === "governed") {
+      if (lookup.workflowStatus === "verified") {
+        return this.verifyVerifiedDeployment(request, lookup);
+      }
       if ((lookup.workflowStatus === "switching")
         || (lookup.workflowStatus === "needs_attention"
           && (lookup.failureReason === "switch_failed"
@@ -440,6 +443,49 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     return outcome;
   }
 
+  private async verifyVerifiedDeployment(
+    request: Parameters<ProposalDeploymentPort["deploy"]>[0],
+    lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
+  ): Promise<Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>> {
+    if (lookup.approvedProposalRevision === undefined
+      || request.revision !== lookup.approvedProposalRevision
+      || !sameDeploymentIdentity(request.intent.deploymentId, lookup.deploymentId)
+      || !sameDeploymentIdentity(request.intent.target, lookup.deploymentTarget)
+      || !hasNonEmptyString(lookup.sourceBridgeId)
+      || !hasNonEmptyString(lookup.ruleRef)
+      || !hasNonEmptyString(lookup.sourceFingerprint)
+      || typeof lookup.deploymentConfigFingerprint !== "string"
+      || lookup.deploymentConfigFingerprint.length === 0) {
+      return failed("迁移方案当前处于受管状态，不能重复启用。");
+    }
+
+    let control: ForeignRuleControlHandle | undefined;
+    try {
+      control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
+    } catch {
+      return failed(SWITCH_UNKNOWN_REASON);
+    }
+    if (control === undefined) return failed(SWITCH_UNKNOWN_REASON);
+
+    const source = await this.readSource(control, lookup.ruleRef);
+    const target = await this.readTarget(request.intent.deploymentId, request.intent.target);
+    if (source.status === "unknown" || target.status === "unknown") {
+      return failed(SWITCH_UNKNOWN_REASON);
+    }
+    if (source.status !== "paused"
+      || source.sourceFingerprint !== lookup.sourceFingerprint
+      || target.status !== "running"
+      || target.configFingerprint !== lookup.deploymentConfigFingerprint) {
+      return failed("迁移自动化的运行状态无法验证，已停止后续写入。");
+    }
+    return {
+      status: "verified",
+      deploymentId: lookup.deploymentId!,
+      target: lookup.deploymentTarget!,
+      configFingerprint: lookup.deploymentConfigFingerprint,
+    };
+  }
+
   /** Readback-driven recovery for an already-decided migration withdrawal. */
   async recover(request: Parameters<NonNullable<ProposalDeploymentPort["recover"]>>[0]): Promise<Awaited<ReturnType<NonNullable<ProposalDeploymentPort["recover"]>>>> {
     let lookup: HomeAutomationMigrationDeploymentLookup;
@@ -456,6 +502,12 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
         actor: request.actor,
       });
       return withdrawn ?? { restored: false };
+    }
+    if (lookup.status === "governed" && lookup.workflowStatus === "restored") {
+      return this.verifyRestoredState(lookup, {
+        deploymentId: request.intent.deploymentId,
+        target: request.intent.target,
+      });
     }
     if (lookup.status !== "governed"
       || (lookup.workflowStatus !== "needs_attention" && lookup.workflowStatus !== "rolling_back")
@@ -576,6 +628,12 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     if (lookup.status === "not_migration") {
       return this.base.withdraw?.(request) ?? { restored: false };
     }
+    if (lookup.status === "governed" && lookup.workflowStatus === "restored") {
+      return this.verifyRestoredState(lookup, {
+        deploymentId: request.deploymentId,
+        target: request.target,
+      });
+    }
     if (lookup.status !== "governed" || lookup.workflowStatus !== "verified"
       || lookup.deploymentId !== request.deploymentId || lookup.deploymentTarget !== request.target) {
       return { restored: false, recoveryRequired: true, reason: "迁移回退当前没有可恢复的中立状态。" };
@@ -665,6 +723,39 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     if (!this.runtime.restoreRule({ migrationId: lookup.migrationId, ruleRef: lookup.ruleRef })) {
       this.fail(lookup, "rolling_back", "rollback_unknown");
       return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
+    }
+    return { restored: true };
+  }
+
+  private async verifyRestoredState(
+    lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
+    request: { readonly deploymentId?: string; readonly target?: string },
+  ): Promise<{ readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string }> {
+    if (!sameDeploymentIdentity(request.deploymentId, lookup.deploymentId)
+      || !sameDeploymentIdentity(request.target, lookup.deploymentTarget)
+      || !hasNonEmptyString(lookup.sourceBridgeId)
+      || !hasNonEmptyString(lookup.ruleRef)
+      || !hasNonEmptyString(lookup.sourceFingerprint)) {
+      return { restored: false, recoveryRequired: true, reason: "迁移回退当前没有可恢复的中立状态。" };
+    }
+
+    let control: ForeignRuleControlHandle | undefined;
+    try {
+      control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
+    } catch {
+      return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
+    }
+    if (control === undefined) {
+      return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
+    }
+
+    const source = await this.readSource(control, lookup.ruleRef);
+    const target = await this.readTarget(request.deploymentId!, request.target!);
+    if (source.status === "unknown" || target.status === "unknown") {
+      return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
+    }
+    if (source.status !== "running" || source.sourceFingerprint !== lookup.sourceFingerprint || target.status !== "missing") {
+      return { restored: false, recoveryRequired: true, reason: "迁移回退的最终状态无法验证。" };
     }
     return { restored: true };
   }
@@ -780,6 +871,16 @@ function sourceCommandResult(
 
 function failed(reason: string): { readonly status: "failed"; readonly reason: string } {
   return { status: "failed", reason };
+}
+
+function hasNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function sameDeploymentIdentity(requested: unknown, persisted: unknown): boolean {
+  return hasNonEmptyString(requested)
+    && hasNonEmptyString(persisted)
+    && requested === persisted;
 }
 
 function operationId(
