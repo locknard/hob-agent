@@ -72,6 +72,36 @@ verified → rolling_back → restored
 
 迁移在一次决定之后发生的切换或回退失败，向 Proposal 产品面投影为 `recovery_required`，不会投影为“运行中”或“已关闭”。家庭成员选择“继续恢复”时沿用已经批准的 Artifact 与部署意图，Hub 先读取原规则和 Hob 自动化的当前状态，再为恢复动作签发新的操作幂等键；该动作不是第二次批准。只有源规则恢复且 Hob 自动化已经撤下时，Proposal 才进入 `closed`；任何一侧状态未知时保持 `recovery_required`，不盲目重放写命令。
 
+### 家庭选择入口
+
+Hub 在迁移 runtime 与 Inbox 之间提供独立的 assessment facade。该 facade
+读取同一进程中已经挂载的 migration runtime，向已认证产品面投影 assessment
+状态、家庭可读的规则名称和闭合的选择状态。Raw assessment、`ruleRef`、source
+fingerprint、bridge watermark、原生 identity 和 provider payload 保持在 Hub
+边界内；Inbox、HTML、URL、日志与浏览器提交均不包含这些字段。
+
+每个可选择规则由服务端签发短期 opaque `selectionToken`。Hub 把 token 绑定到
+当前产品 principal、精确 assessment/source cut、`migrationId + ruleRef` 和运行时
+generation，并在服务端保留映射。Token 有界、不可跨 principal 重放，进程重启、
+过期、source cut 变化或完成一次提交后即失效；页面重新读取 projection 可取得新的
+token。浏览器表单只提交 token，actor 由已认证产品 session 注入。
+
+选择状态使用闭集：
+
+- `selectable`：aggregate 为 `assessed`，规则为 `eligible`，workflow 为初始
+  assessed 状态；家庭成员可选择“准备迁移建议”。
+- `prepared`：规则已经进入 `translated`、`simulated` 或 `ready`；产品链接到现有
+  migration Proposal，并保持幂等。
+- `unavailable`：aggregate、rule disposition、workflow、source cut 或 token 不满足
+  当前准备条件；产品显示固定恢复说明，不创建 Proposal。
+
+读取列表需要已认证产品 session；提交选择需要绑定的私人设备，并复用现有
+same-origin mutation gate。提交只调用 `prepareRuleReview`，创建本地 migration review
+draft 并进入既有 Artifact、compile、dry-run 和一次决定管线。该入口不挂载第二个
+runtime，不向 Agent 注册选择工具，也不调用 `foreignRuleControl@1`、
+`automations@1` 或 `actions@1`。HA 写入能力只在家庭成员随后批准精确 `ready`
+Proposal 后进入既有 deployment seam。
+
 ## Phase 1 原生适配器进入门槛
 
 原生 Matter、Zigbee、BLE、ESPHome 或其他协议适配器在 Phase 0.5 的迁移证据达到以下门槛后进入评审：
