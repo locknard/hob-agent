@@ -1757,6 +1757,129 @@ test("presents a prepared plan as one decision with three honest choices", () =>
   assert.doesNotMatch(html, /修改…|试运行|两次确认|同意方向|确认方向/);
 });
 
+test("presents a Home Assistant migration as one recoverable household decision", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    proposals: [{
+      id: "migration-ready",
+      revision: 4,
+      title: "晚间灯光自动化",
+      reviewLane: "migration",
+      lifecycle: "ready",
+      summary: "已准备好迁移到家里的新规则。",
+    }],
+    selectedProposalId: "migration-ready",
+    selectedProposal: {
+      id: "migration-ready",
+      revision: 4,
+      title: "晚间灯光自动化",
+      reviewLane: "migration",
+      lifecycle: "ready",
+      summary: "已准备好迁移到家里的新规则。",
+    },
+    proposalCapacityUsed: 1,
+  }));
+
+  assert.match(html, /从 Home Assistant 搬来/);
+  assert.match(html, /先暂停原来的规则，再核验新的规则/);
+  assert.match(html, /出了问题可以恢复/);
+  assert.equal((html.match(/action="\/review-center\/proposals\/migration-ready\/enable"/g) ?? []).length, 1);
+  assert.match(html, /data-count="0\/5"/);
+  assert.match(html, /data-review-lane="migration"/);
+});
+
+test("keeps migration cards out of the ordinary count while keeping both lanes reachable", () => {
+  const html = renderProductShell(model({
+    route: "reviews",
+    proposals: [
+      { id: "standard-1", revision: 1, title: "普通建议", lifecycle: "ready" },
+      { id: "migration-1", revision: 1, title: "从旧规则搬来的建议", reviewLane: "migration", lifecycle: "ready" },
+    ],
+    proposalCapacityUsed: 2,
+  }));
+
+  assert.match(html, /data-count="1\/5"/);
+  assert.match(html, /data-review-id="standard-1"/);
+  assert.match(html, /data-review-id="migration-1"/);
+  assert.match(html, /从 Home Assistant 搬来的规则/);
+});
+
+test("keeps migration summaries out of the ordinary overview section", () => {
+  const html = renderProductShell(model({
+    proposals: [
+      { id: "standard-overview", revision: 1, title: "普通建议", lifecycle: "ready" },
+      { id: "migration-overview", revision: 1, title: "迁移来的规则", reviewLane: "migration", lifecycle: "ready" },
+    ],
+  }));
+  const summary = html.slice(html.indexOf("product-review-summary"), html.indexOf("</section></main>"));
+  const standardSection = summary.slice(summary.indexOf("给家的建议"), summary.indexOf("给家的建议") + 250);
+  assert.match(standardSection, /普通建议/);
+  assert.doesNotMatch(standardSection, /迁移来的规则/);
+  assert.match(summary, /待迁移规则/);
+  assert.match(summary, /href="\/review-center\?proposal=migration-overview"/);
+});
+
+test("makes migration automation recovery outcomes explicit", () => {
+  const active = renderProductShell(model({
+    route: "automations",
+    automations: [{
+      id: "migration-active",
+      title: "晚间灯光自动化",
+      lifecycle: "active",
+      reviewLane: "migration",
+    }],
+  }));
+  assert.match(active, /已核验/);
+  assert.match(active, /暂停/);
+  assert.match(active, /恢复原规则/);
+
+  const failed = renderProductShell(model({
+    route: "automations",
+    automations: [{
+      id: "migration-failed",
+      title: "晚间灯光自动化",
+      lifecycle: "enable_failed",
+      reviewLane: "migration",
+      failureReason: "新的规则没有完成核验。",
+    }],
+  }));
+  assert.match(failed, /需要核对/);
+  assert.match(failed, /迁移没有完成，系统已停止后续操作/);
+  assert.match(failed, /重试迁移/);
+  assert.match(failed, /恢复原规则/);
+  assert.doesNotMatch(failed, /运行中/);
+});
+
+test("keeps an unknown migration outcome honest and offers the recovery lifecycle", () => {
+  const unknown = renderProductShell(model({
+    route: "automations",
+    automations: [{
+      id: "migration-unknown",
+      title: "晚间灯光自动化",
+      lifecycle: "enable_failed",
+      reviewLane: "migration",
+      failureReason: "switch_unknown",
+    }],
+  }));
+  assert.match(unknown, /迁移没有完成，系统已停止后续操作/);
+  assert.match(unknown, /继续前会先核对两条规则/);
+  assert.doesNotMatch(unknown, /新的规则没有开始运行|原来的规则保持不变|未运行/);
+
+  const recovery = renderProductShell(model({
+    route: "automations",
+    automations: [{
+      id: "migration-recovery",
+      title: "晚间灯光自动化",
+      lifecycle: "recovery_required",
+      reviewLane: "migration",
+    }],
+  }));
+  assert.match(recovery, /需要恢复/);
+  assert.match(recovery, /action="\/automations\/migration-recovery\/recover"/);
+  assert.match(recovery, /继续恢复/);
+  assert.doesNotMatch(recovery, /运行中|已关闭|暂停|关闭并恢复/);
+});
+
 test("a blocked plan stops honestly with only the revise and decline exits", () => {
   const html = renderProductShell(model({
     route: "reviews",

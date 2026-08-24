@@ -79,12 +79,16 @@ export type ProductProposalKind = "automation-draft" | "household-insight";
 
 export type ProductProposalLifecycle = "preparing" | "needs_info" | "ready";
 
+export type ProductProposalReviewLane = "standard" | "migration";
+
 /** A prepared plan the household decides on once. */
 export interface ProductProposal {
   readonly id: string;
   readonly revision: number;
   readonly title: string;
   readonly kind?: ProductProposalKind;
+  /** Hub-owned neutral lane; provider payloads never cross into the shell. */
+  readonly reviewLane?: ProductProposalReviewLane;
   readonly lifecycle?: ProductProposalLifecycle;
   readonly summary?: string;
   /** What preparation already settled, shown before the decision. */
@@ -112,13 +116,15 @@ export interface ProductProposal {
   readonly trace?: AgentLoopTrace;
 }
 
-export type ProductAutomationLifecycle = "enabling" | "active" | "paused" | "closed" | "enable_failed";
+export type ProductAutomationLifecycle = "enabling" | "active" | "paused" | "closed" | "enable_failed" | "recovery_required";
 
 /** A household automation after the decision. Running means a verified deployment. */
 export interface ProductAutomation {
   readonly id: string;
   readonly title: string;
   readonly lifecycle: ProductAutomationLifecycle;
+  /** Hub-owned neutral lane for automation history and recovery copy. */
+  readonly reviewLane?: ProductProposalReviewLane;
   readonly version?: number;
   readonly lastResult?: string;
   readonly failureReason?: string;
@@ -534,6 +540,9 @@ export interface ProductShellModel {
   readonly proposals?: readonly ProductProposal[];
   readonly selectedProposal?: ProductProposal;
   readonly automations?: readonly ProductAutomation[];
+  /** Counts for the ordinary and migration review lanes. */
+  readonly standardProposalCount?: number;
+  readonly migrationProposalCount?: number;
   readonly proposalCapacityUsed?: number;
   readonly proposalCapacity?: number;
   readonly expiredSummary?: string;
@@ -806,6 +815,11 @@ function normalizedModel(source: ProductShellModel): NormalizedProductShellModel
   const energy = source.energy;
   const proposalCapacity = source.proposalCapacity ?? 5;
   const proposalCapacityUsed = source.proposalCapacityUsed ?? proposals.length;
+  const migrationProposalCount = source.migrationProposalCount ?? proposals.filter(isMigrationProposal).length;
+  const standardProposalCount = source.standardProposalCount
+    ?? (proposals.some(isMigrationProposal)
+      ? proposals.filter((proposal) => !isMigrationProposal(proposal)).length
+      : proposalCapacityUsed);
   const safetyAlert = source.safetyAlerts?.find((alert) => alert.status !== "resolved");
   return {
     ...source,
@@ -820,6 +834,8 @@ function normalizedModel(source: ProductShellModel): NormalizedProductShellModel
     energy,
     proposalCapacity,
     proposalCapacityUsed,
+    standardProposalCount,
+    migrationProposalCount,
     safetyAlert,
     expiredSummary: source.expiredSummary,
   };
@@ -837,7 +853,13 @@ interface NormalizedProductShellModel extends ProductShellModel {
   readonly energy?: ProductEnergySummary;
   readonly proposalCapacity: number;
   readonly proposalCapacityUsed: number;
+  readonly standardProposalCount: number;
+  readonly migrationProposalCount: number;
   readonly safetyAlert?: ProductSafetyAlert;
+}
+
+function isMigrationProposal(proposal: Pick<ProductProposal, "reviewLane">): boolean {
+  return proposal.reviewLane === "migration";
 }
 
 function connectionLabel(connection: ProductShellConnection): string {
@@ -861,7 +883,7 @@ function navigationLink(route: ProductShellRoute, current: ProductShellRoute, mo
   const label = mobile ? MOBILE_ROUTE_LABELS[route] : ROUTE_LABELS[route];
   const mobileRouteAttribute = mobile ? ` data-mobile-route="${escapeHtml(route)}"` : "";
   const badges = route === "reviews"
-    ? `<span class="${mobile ? "product-mobile-nav-badges" : "product-nav-badges"}" aria-label="${model.runtimeConfirmationCount} 项等待你放行，${model.proposalCapacityUsed}/${model.proposalCapacity} 条建议"><span class="product-badge product-badge--runtime" data-badge="runtime" data-count="${model.runtimeConfirmationCount}">${model.runtimeConfirmationCount}</span><span class="product-badge product-badge--proposal" data-badge="proposal" data-count="${model.proposalCapacityUsed}/${model.proposalCapacity}">${model.proposalCapacityUsed}</span></span>`
+    ? `<span class="${mobile ? "product-mobile-nav-badges" : "product-nav-badges"}" aria-label="${model.runtimeConfirmationCount} 项等待你放行，${model.standardProposalCount}/${model.proposalCapacity} 条建议"><span class="product-badge product-badge--runtime" data-badge="runtime" data-count="${model.runtimeConfirmationCount}">${model.runtimeConfirmationCount}</span><span class="product-badge product-badge--proposal" data-badge="proposal" data-count="${model.standardProposalCount}/${model.proposalCapacity}">${model.standardProposalCount}</span></span>`
     : "";
   return `<a class="${className}"${mobileRouteAttribute} href="${routeHref(route, options)}"${currentAttribute}><span class="${mobile ? "" : "product-nav-label"}">${label}</span>${badges}</a>`;
 }
@@ -977,8 +999,12 @@ function renderOverviewConcern(concern: ProductConcern | undefined): string {
 
 function renderOverviewReviewSummary(model: NormalizedProductShellModel, options: ProductShellRenderOptions): string {
   const reviewItems = model.runtimeConfirmations.map((item) => `<li><span>${escapeHtml(item.title)}</span><span>${escapeHtml(item.expiresIn ?? "有时限")}</span></li>`).join("");
-  const proposalItems = model.proposals.slice(0, 3).map((item) => `<li><span>${escapeHtml(item.title)}</span><span>${item.status === "snoozed" ? "已暂缓" : escapeHtml(item.expiresAt ?? "不着急")}</span></li>`).join("");
-  return `<section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div></section>`;
+  const standardProposals = model.proposals.filter((proposal) => !isMigrationProposal(proposal));
+  const migrationProposals = model.proposals.filter(isMigrationProposal);
+  const proposalItems = standardProposals.slice(0, 3).map((item) => `<li><span>${escapeHtml(item.title)}</span><span>${item.status === "snoozed" ? "已暂缓" : escapeHtml(item.expiresAt ?? "不着急")}</span></li>`).join("");
+  const migrationItems = migrationProposals.slice(0, 3).map((item) => `<li><a href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(item.id)}`)}">${escapeHtml(item.title)}</a><span>待迁移</span></li>`).join("");
+  const migrationSummary = migrationItems === "" ? "" : `<div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">待迁移规则 · ${model.migrationProposalCount} 条</p><ul class="product-summary-list">${migrationItems}</ul></div>`;
+  return `<section class="product-card product-review-summary" aria-labelledby="overview-review-heading"><h2 id="overview-review-heading">需要你决定 <a href="${routeHref("reviews", options)}">查看处理中心</a></h2><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--amber">等待你放行 · 有时限</p><ul class="product-summary-list">${reviewItems || `<li><span class="product-review-empty">当前没有等待你放行的动作</span></li>`}</ul></div><div class="product-summary-section"><p class="product-summary-heading product-summary-heading--blue">给家的建议 · ${model.standardProposalCount}/${model.proposalCapacity} · 不着急</p><ul class="product-summary-list">${proposalItems || `<li><span class="product-review-empty">新的建议会显示在这里</span></li>`}</ul></div>${migrationSummary}</section>`;
 }
 
 function renderOverviewAgentNote(model: NormalizedProductShellModel): string {
@@ -1205,7 +1231,12 @@ function renderReviews(model: NormalizedProductShellModel, options: ProductShell
     ? model.selectedProposal
     : model.selectedProposalId === undefined ? undefined : model.proposals.find((proposal) => proposal.id === model.selectedProposalId);
   const selected = detail === undefined && model.selectedProposalId !== undefined ? model.proposals[0] : detail;
-  return `<header class="product-page-header"><div><p class="product-kicker">处理中心</p><h1>需要你决定的事</h1><p class="product-muted">有时限的动作会先提醒你；其他建议可以稍后决定。</p></div><a class="product-view-switcher" href="${routeHref("automations", options)}">它替你做的事</a></header>${model.expiredSummary === undefined ? "" : `<p class="product-card product-card--flat product-muted">${escapeHtml(model.expiredSummary)}</p>`}<div class="product-review-page"><div class="product-review-list"><section aria-labelledby="runtime-heading"><div class="product-review-list-heading"><h2 id="runtime-heading">等待你放行</h2><p>有时限 · 到期自动取消</p></div><div class="product-review-list">${model.runtimeConfirmations.length === 0 ? `<p class="product-card product-review-empty">当前没有等待你放行的动作。</p>` : model.runtimeConfirmations.map(renderRuntimeCard).join("")}</div></section><section aria-labelledby="proposal-heading"><div class="product-review-list-heading"><h2 id="proposal-heading">给家的建议</h2><p>${model.proposalCapacityUsed}/${model.proposalCapacity} · 不着急</p></div><div class="product-review-list">${model.proposals.length === 0 ? `<p class="product-card product-review-empty">新的建议会显示在这里。</p>` : model.proposals.map((proposal) => renderProposalCard(proposal, selected?.id === proposal.id, options)).join("")}</div><p class="product-muted">先放一放的建议会在过期前回来一次；有新证据也会叫醒它。</p></section></div><section class="product-proposal-detail" aria-labelledby="proposal-detail-heading">${model.proposalNotice === undefined ? "" : `<p class="product-enable-notice" role="status" data-one-shot-notice>${escapeHtml(model.proposalNotice)}</p>`}${selected === undefined ? `<div class="product-card"><h2 id="proposal-detail-heading">先选一条建议</h2><p class="product-muted">查看证据、仍待确认的事和一次决定。</p></div>` : renderProposalDetail(selected)}</section></div>`;
+  const standardProposals = model.proposals.filter((proposal) => !isMigrationProposal(proposal));
+  const migrationProposals = model.proposals.filter(isMigrationProposal);
+  const migrationSection = migrationProposals.length === 0
+    ? ""
+    : `<section aria-labelledby="migration-proposal-heading"><div class="product-review-list-heading"><h2 id="migration-proposal-heading">从 Home Assistant 搬来的规则</h2><p>${model.migrationProposalCount} 条 · 可恢复</p></div><div class="product-review-list">${migrationProposals.map((proposal) => renderProposalCard(proposal, selected?.id === proposal.id, options)).join("")}</div><p class="product-muted">批准后先暂停原来的规则，再核验新的规则；出了问题可以恢复。</p></section>`;
+  return `<header class="product-page-header"><div><p class="product-kicker">处理中心</p><h1>需要你决定的事</h1><p class="product-muted">有时限的动作会先提醒你；其他建议可以稍后决定。</p></div><a class="product-view-switcher" href="${routeHref("automations", options)}">它替你做的事</a></header>${model.expiredSummary === undefined ? "" : `<p class="product-card product-card--flat product-muted">${escapeHtml(model.expiredSummary)}</p>`}<div class="product-review-page"><div class="product-review-list"><section aria-labelledby="runtime-heading"><div class="product-review-list-heading"><h2 id="runtime-heading">等待你放行</h2><p>有时限 · 到期自动取消</p></div><div class="product-review-list">${model.runtimeConfirmations.length === 0 ? `<p class="product-card product-review-empty">当前没有等待你放行的动作。</p>` : model.runtimeConfirmations.map(renderRuntimeCard).join("")}</div></section><section aria-labelledby="proposal-heading"><div class="product-review-list-heading"><h2 id="proposal-heading">给家的建议</h2><p>${model.standardProposalCount}/${model.proposalCapacity} · 不着急</p></div><div class="product-review-list">${standardProposals.length === 0 ? `<p class="product-card product-review-empty">新的建议会显示在这里。</p>` : standardProposals.map((proposal) => renderProposalCard(proposal, selected?.id === proposal.id, options)).join("")}</div><p class="product-muted">先放一放的建议会在过期前回来一次；有新证据也会叫醒它。</p></section>${migrationSection}</div><section class="product-proposal-detail" aria-labelledby="proposal-detail-heading">${model.proposalNotice === undefined ? "" : `<p class="product-enable-notice" role="status" data-one-shot-notice>${escapeHtml(model.proposalNotice)}</p>`}${selected === undefined ? `<div class="product-card"><h2 id="proposal-detail-heading">先选一条建议</h2><p class="product-muted">查看证据、仍待确认的事和一次决定。</p></div>` : renderProposalDetail(selected)}</section></div>`;
 }
 
 function renderRuntimeCard(item: ProductRuntimeConfirmation): string {
@@ -1248,10 +1279,13 @@ function renderRuntimeWindow(item: ProductRuntimeConfirmation): string {
 }
 
 function renderProposalCard(proposal: ProductProposal, selected: boolean, options: ProductShellRenderOptions): string {
+  const migration = isMigrationProposal(proposal);
   const blocked = proposal.kind !== "household-insight" && proposal.enableBlockedReason !== undefined;
   const preparing = proposal.lifecycle === "preparing" || proposal.lifecycle === "needs_info";
   const statusLabel = blocked ? "暂时无法启用" : preparing ? "正在准备" : proposal.newEvidence ? "新证据" : proposal.status === "snoozed" ? "已暂缓" : proposal.kind === "household-insight" ? "家庭洞察" : "方案已备好";
-  return `<article class="product-card product-review-card${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"><div class="product-card-tags"><span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${blocked || preparing ? "" : renderLaterForm(proposal)}</div></article>`;
+  const lane = migration ? `<span class="product-tag product-tag--pending">从 Home Assistant 搬来</span>` : "";
+  const reviewLane = migration ? ` data-review-lane="${escapeHtml(proposal.reviewLane)}"` : "";
+  return `<article class="product-card product-review-card${migration ? " product-review-card--migration" : ""}${selected ? " product-card--selected" : ""}" data-review-kind="proposal" data-review-id="${escapeHtml(proposal.id)}"${reviewLane}><div class="product-card-tags">${lane}<span class="product-tag">${statusLabel}</span></div><h3>${escapeHtml(proposal.title)}</h3>${proposal.summary === undefined ? "" : `<p class="product-muted">${escapeHtml(proposal.summary)}</p>`}<div class="product-card-actions"><a class="product-primary-action" href="${escapeHtml(`${localHref(options.hrefs?.reviews, DEFAULT_HREFS.reviews)}?proposal=${encodeURIComponent(proposal.id)}`)}">${proposal.kind === "household-insight" ? "查看" : "查看方案"}</a>${proposal.kind === "household-insight" ? renderInsightCardActions(proposal) : ""}${blocked || preparing ? "" : renderLaterForm(proposal)}</div></article>`;
 }
 
 function renderInsightCardActions(proposal: ProductProposal): string {
@@ -1260,6 +1294,7 @@ function renderInsightCardActions(proposal: ProductProposal): string {
 
 function renderProposalDetail(proposal: ProductProposal): string {
   const insight = proposal.kind === "household-insight";
+  const migration = isMigrationProposal(proposal);
   const readiness = proposal.readiness?.length
     ? `<ul class="product-readiness" aria-label="方案已备好">${proposal.readiness.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
     : "";
@@ -1281,7 +1316,7 @@ function renderProposalDetail(proposal: ProductProposal): string {
   const dependency = proposal.dependency === undefined
     ? ""
     : `<p class="product-dependency">需要：${escapeHtml(proposal.dependency)}。</p>`;
-  const after = `<p class="product-detail-after">启用后：${escapeHtml(proposal.afterEnable ?? "随时可以暂停，或关闭并移除；它从不改动你原有的规则。")}</p>`;
+  const after = `<p class="product-detail-after">启用后：${escapeHtml(migration ? "先暂停原来的规则，再核验新的规则；出了问题可以恢复。原来的规则不会丢失。" : proposal.afterEnable ?? "随时可以暂停，或关闭并移除；它从不改动你原有的规则。")}</p>`;
   const journey = proposal.trace === undefined
     ? ""
     : `<details class="product-agent-journey"><summary>这条建议怎么得来的</summary>${renderAgentLoopTimeline(proposal.trace)}</details>`;
@@ -1291,8 +1326,8 @@ function renderProposalDetail(proposal: ProductProposal): string {
       ? `<p class="product-muted">正在后台准备：核对证据、检查冲突、确认权限。备好后它会来找你，现在不用做任何决定。</p>`
       : blocked
         ? `<p class="product-blocked-reason">${escapeHtml(proposal.enableBlockedReason)}</p><div class="product-card-actions">${proposal.enableBlockedKind === "not_configured" || proposal.enableBlockedKind === "not_approved" ? `<a class="product-secondary-action" href="/settings#action-policy">去设置确认方式</a>` : ""}${conversationEntry(proposal)}${declineDisclosure(proposal)}</div>`
-        : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停，或关闭并移除；它从不改动你原有的规则。</p>`;
-  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : blocked ? "暂时无法启用" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">建议 · 不着急</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight || blocked ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
+        : `<div class="product-card-actions">${enableForm(proposal)}${renderLaterForm(proposal)}${declineDisclosure(proposal)}</div><div class="product-card-actions">${conversationEntry(proposal)}</div><p>${migration ? "这是唯一一次点头：批准后先暂停原来的规则，再核验新的规则；出了问题可以恢复。" : "这是唯一一次点头：启用后自动化立刻开始真实运行，随时可以暂停，或关闭并移除；它从不改动你原有的规则。"}</p>`;
+  return `<article class="product-card product-card--flat"><div class="product-detail-header"><div><p class="product-kicker">${insight ? "家庭洞察" : blocked ? "暂时无法启用" : migration ? "从 Home Assistant 搬来" : "方案已备好"}</p><h2 id="proposal-detail-heading">${escapeHtml(proposal.title)}</h2></div><span class="product-tag">${migration ? "迁移建议 · 不着急" : "建议 · 不着急"}</span></div>${readiness}<div class="product-detail-columns">${sections}</div>${risk}${gateDisclosure}${dependency}${insight || blocked ? "" : after}${journey}<div class="product-review-boundary">${decide}</div></article>`;
 }
 
 function enableForm(proposal: ProductProposal): string {
@@ -1326,6 +1361,7 @@ const AUTOMATION_PRESENTATION = {
   paused: { label: "已暂停", tone: "pending" },
   closed: { label: "已关闭", tone: "neutral" },
   enable_failed: { label: "没能启用", tone: "failed" },
+  recovery_required: { label: "需要恢复", tone: "failed" },
 } as const satisfies Readonly<Record<ProductAutomationLifecycle, { readonly label: string; readonly tone: string }>>;
 
 function renderAutomations(model: NormalizedProductShellModel): string {
@@ -1333,30 +1369,54 @@ function renderAutomations(model: NormalizedProductShellModel): string {
   const cards = automations.length === 0
     ? `<section class="product-card product-review-empty"><h2>还没有运行中的自动化</h2><p class="product-muted">你在处理中心启用的自动化会出现在这里。</p></section>`
     : automations.map(renderAutomationCard).join("");
-  return `<header class="product-page-header"><div><p class="product-kicker">自动化</p><h1>它替你做的事</h1><p class="product-muted">每一条都可以暂停或移除；它们从不改动你原有的规则。</p></div></header><div class="product-automation-list">${cards}</div>`;
+  const migration = automations.some((automation) => automation.reviewLane === "migration");
+  const migrationNeedsRecovery = automations.some((automation) => automation.reviewLane === "migration" && automation.lifecycle === "recovery_required");
+  const migrationFailed = automations.some((automation) => automation.reviewLane === "migration" && automation.lifecycle === "enable_failed");
+  const description = migrationNeedsRecovery
+    ? "有一条迁移规则需要恢复；继续前会先核对两条规则。"
+    : migrationFailed
+    ? "迁移没有完成；继续前会先核对两条规则。"
+    : migration
+      ? "已核验的迁移规则可以暂停；关闭会恢复原来的规则。"
+    : "每一条都可以暂停或移除；它们从不改动你原有的规则。";
+  return `<header class="product-page-header"><div><p class="product-kicker">自动化</p><h1>它替你做的事</h1><p class="product-muted">${description}</p></div></header><div class="product-automation-list">${cards}</div>`;
 }
 
 function renderAutomationCard(automation: ProductAutomation): string {
+  const migration = automation.reviewLane === "migration";
   const presentation = AUTOMATION_PRESENTATION[automation.lifecycle];
   const version = automation.version === undefined ? "" : `<span class="product-subtle">版本 v${escapeHtml(automation.version)}</span>`;
   const drift = automation.drifted === true
     ? `<span class="product-tag product-tag--pending">已在原生系统被改动</span>`
     : "";
   const detail = automation.lifecycle === "enable_failed"
-    ? `<p class="product-automation-failure">${escapeHtml(automation.failureReason ?? "启用没有完成，家里的设置保持原样。")}</p>`
+    ? `<p class="product-automation-failure">${escapeHtml(migration ? "迁移没有完成，系统已停止后续操作；继续前会先核对两条规则。" : automation.failureReason ?? "启用没有完成，家里的设置保持原样。")}</p>${automation.failureReason === undefined || !migration ? "" : `<p class="product-automation-failure">${escapeHtml(automation.failureReason)}</p>`}`
+    : automation.lifecycle === "recovery_required"
+      ? `<p class="product-automation-failure">${escapeHtml(migration ? "迁移结果待确认，系统已停止后续操作；继续恢复前会先核对两条规则。" : "需要恢复；继续前会先核对当前状态。")}</p>`
+    : migration && automation.lifecycle === "active"
+      ? `<p class="product-muted">已核验${automation.lastResult === undefined ? "，正在运行" : ` · ${escapeHtml(automation.lastResult)}`}</p>`
     : automation.lastResult === undefined ? "" : `<p class="product-muted">最近一次：${escapeHtml(automation.lastResult)}</p>`;
   const activity = automation.recentActivity?.length
     ? `<ul class="product-automation-activity">${automation.recentActivity.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
     : "";
+  const migrationTag = migration && automation.lifecycle === "active"
+    ? `<span class="product-tag product-tag--verified">已核验</span>`
+    : migration && automation.lifecycle === "enable_failed"
+      ? `<span class="product-tag product-tag--failed">需要核对</span>`
+      : "";
+  const closeLabel = migration ? "关闭并恢复原规则" : "关闭并移除";
   const control = (action: string, label: string, className: string) => `<form class="product-action-form" method="post" action="/automations/${encodedPathSegment(automation.id)}/${action}"><button class="${className}" type="submit">${label}</button></form>`;
-  const actions = automation.lifecycle === "active"
-    ? `${control("pause", "暂停", "product-secondary-action")}${control("close", "关闭并移除", "product-danger-action")}`
+  const actions = automation.lifecycle === "recovery_required"
+    ? control("recover", "继续恢复", "product-primary-action")
+    : automation.lifecycle === "active"
+    ? `${control("pause", "暂停", "product-secondary-action")}${control("close", closeLabel, "product-danger-action")}`
     : automation.lifecycle === "paused"
-      ? `${control("resume", "继续运行", "product-primary-action")}${control("close", "关闭并移除", "product-danger-action")}`
+      ? `${control("resume", "继续运行", "product-primary-action")}${control("close", closeLabel, "product-danger-action")}`
       : automation.lifecycle === "enable_failed"
-        ? `${control("retry", "重试启用", "product-primary-action")}${control("close", "关闭并移除", "product-secondary-action")}`
+        ? `${control("retry", migration ? "重试迁移" : "重试启用", "product-primary-action")}${control("close", closeLabel, "product-secondary-action")}`
         : "";
-  return `<article class="product-card product-automation-card" data-automation-id="${escapeHtml(automation.id)}" data-automation-state="${escapeHtml(automation.lifecycle)}"><div class="product-card-tags"><span class="product-tag product-tag--${presentation.tone}">${presentation.label}</span>${drift}${version}</div><h2>${escapeHtml(automation.title)}</h2>${detail}${activity}${actions === "" ? "" : `<div class="product-card-actions">${actions}</div>`}</article>`;
+  const reviewLane = migration ? ` data-review-lane="${escapeHtml(automation.reviewLane)}"` : "";
+  return `<article class="product-card product-automation-card${migration ? " product-automation-card--migration" : ""}" data-automation-id="${escapeHtml(automation.id)}" data-automation-state="${escapeHtml(automation.lifecycle)}"${reviewLane}><div class="product-card-tags"><span class="product-tag product-tag--${presentation.tone}">${presentation.label}</span>${migrationTag}${drift}${version}</div><h2>${escapeHtml(automation.title)}</h2>${detail}${activity}${actions === "" ? "" : `<div class="product-card-actions">${actions}</div>`}</article>`;
 }
 
 function renderActivity(model: NormalizedProductShellModel): string {

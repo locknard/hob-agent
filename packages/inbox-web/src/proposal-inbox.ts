@@ -216,6 +216,8 @@ export interface InboxProposal {
   readonly id: string;
   readonly revision: number;
   readonly status: InboxProposalStatus;
+  /** Hub-owned neutral review lane; provider payloads never cross this seam. */
+  readonly reviewLane?: "standard" | "migration";
   readonly applicationStatus: "not_available" | "deploying" | "running" | "failed" | "withdrawn";
   readonly kind: string;
   readonly title: string;
@@ -309,6 +311,7 @@ export interface InboxProposalSummary {
   readonly id: string;
   readonly revision: number;
   readonly status: InboxProposalStatus;
+  readonly reviewLane?: "standard" | "migration";
   readonly kind: string;
   readonly title: string;
   readonly summary: string;
@@ -482,6 +485,7 @@ export class ProposalInboxController {
       id: proposal.id,
       revision: proposal.revision,
       status: proposal.status,
+      ...(proposal.reviewLane === undefined ? {} : { reviewLane: proposal.reviewLane }),
       kind: proposal.kind,
       title: proposal.title,
       summary: proposal.summary,

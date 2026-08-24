@@ -97,6 +97,52 @@ class StubReviewedProposals extends Service {
   }
 }
 
+class StubMigrationReviewedProposals extends StubReviewedProposals {
+  private readonly migrationProposal = {
+    ...reviewProposal,
+    id: "proposal-migration",
+    reviewLane: "migration" as const,
+    title: "搬来一条家庭规则",
+  };
+
+  override list() { return [reviewProposal, this.migrationProposal]; }
+  override get(id: string) {
+    return id === this.migrationProposal.id ? this.migrationProposal : super.get(id);
+  }
+}
+
+class StubMigrationAutomationProposals extends StubReviewedProposals {
+  enableProposal() {}
+
+  listAutomations() {
+    return [
+      {
+        id: "automation-migration-active",
+        title: "搬来的晚间灯光规则",
+        lifecycle: "active",
+        reviewLane: "migration",
+        revision: 3,
+        deployment: { verifiedAt: "2026-08-24T09:00:00.000Z" },
+      },
+      {
+        id: "automation-migration-failed",
+        title: "搬来的起床灯规则",
+        lifecycle: "enable_failed",
+        reviewLane: "migration",
+        revision: 4,
+        deployment: { reason: "核验没有完成" },
+      },
+      {
+        id: "automation-migration-recovery",
+        title: "搬来的客厅灯规则",
+        lifecycle: "recovery_required",
+        reviewLane: "migration",
+        revision: 5,
+      },
+    ];
+  }
+}
+
 class StubGovernedReviewedProposals extends StubReviewedProposals {
   readonly decisions: unknown[] = [];
   readonly snoozes: unknown[] = [];
@@ -747,6 +793,41 @@ test("composes the product review projection from the runtime center and pending
   assert.equal(projection.proposals[0]?.title, reviewProposal.title);
   assert.equal(projection.proposalCapacityUsed, 1);
   assert.equal(projection.proposalCapacity, 5);
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("retains the Hub-owned migration lane and separates its review count", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubMigrationReviewedProposals);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const projection = ctx.homeInbox.getProductReviewProjection(runtimeAdminActor);
+  assert.equal(projection.proposals.find((proposal) => proposal.id === "proposal-migration")?.reviewLane, "migration");
+  assert.equal(projection.standardProposalCount, 1);
+  assert.equal(projection.migrationProposalCount, 1);
+  assert.deepEqual(ctx.homeInbox.getProductReviewCounts(), {
+    runtimeConfirmations: 0,
+    persistentProposals: 1,
+  });
+
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("projects the migration lane onto automation outcomes without native payloads", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubMigrationAutomationProposals);
+  const fiber = await ctx.plugin(ProposalInboxService);
+
+  const automations = ctx.homeInbox.getProductShellProjection(runtimeAdminActor).automations ?? [];
+  assert.equal(automations[0]?.reviewLane, "migration");
+  assert.equal(automations[0]?.lifecycle, "active");
+  assert.equal(automations[1]?.lifecycle, "enable_failed");
+  assert.equal(automations[1]?.failureReason, "核验没有完成");
+  assert.equal(automations[2]?.lifecycle, "recovery_required");
+  assert.equal("deployment" in (automations[0] ?? {}), false);
 
   await fiber.dispose();
   await ctx.fiber.dispose();

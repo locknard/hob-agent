@@ -327,6 +327,8 @@ export interface InboxProductReviewProjection {
   readonly runtimeConfirmations: readonly ProductRuntimeConfirmation[];
   readonly proposals: readonly ProductProposal[];
   readonly selectedProposal?: ProductProposal;
+  readonly standardProposalCount?: number;
+  readonly migrationProposalCount?: number;
   readonly proposalCapacityUsed: number;
   readonly proposalCapacity: number;
   readonly expiredSummary?: string;
@@ -502,7 +504,7 @@ export class ProposalInboxService extends Service {
   getProductReviewCounts(): { readonly runtimeConfirmations: number; readonly persistentProposals: number } {
     return {
       runtimeConfirmations: this.runtime?.listRuntimeConfirmations().length ?? 0,
-      persistentProposals: this.pendingProductProposals().length,
+      persistentProposals: this.pendingProductProposals().filter((proposal) => proposal.reviewLane !== "migration").length,
     };
   }
 
@@ -516,6 +518,8 @@ export class ProposalInboxService extends Service {
     const runtimeConfirmations = this.runtime?.listRuntimeConfirmations() ?? [];
     const expiredSummary = this.runtime?.snapshot?.().expiredRuntimeSummary;
     const proposals = this.pendingProductProposals();
+    const standardProposalCount = proposals.filter((proposal) => proposal.reviewLane !== "migration").length;
+    const migrationProposalCount = proposals.length - standardProposalCount;
     const proposalCapacity = this.proposalGovernance?.proposalCapacity?.();
     const selectedProposal = selectedProposalId === undefined
       ? undefined
@@ -531,7 +535,9 @@ export class ProposalInboxService extends Service {
       ...(selectedProposal === undefined
         ? {}
         : { selectedProposal: projectProductProposal(selectedProposal, selectedDetail?.trace) }),
-      proposalCapacityUsed: proposalCapacity?.used ?? proposals.length,
+      standardProposalCount,
+      migrationProposalCount,
+      proposalCapacityUsed: proposalCapacity?.used ?? standardProposalCount,
       proposalCapacity: proposalCapacity?.max ?? 5,
       ...(expiredSummary === undefined || expiredSummary.count < 1
         ? {}
@@ -592,8 +598,11 @@ export class ProposalInboxService extends Service {
       const lifecycle = productText(record?.lifecycle, 32);
       if (id === undefined || title === undefined
         || (lifecycle !== "enabling" && lifecycle !== "active" && lifecycle !== "paused"
-          && lifecycle !== "closed" && lifecycle !== "enable_failed")) continue;
+          && lifecycle !== "closed" && lifecycle !== "enable_failed" && lifecycle !== "recovery_required")) continue;
       const deployment = productRecord(record?.deployment);
+      const reviewLane = record?.reviewLane === "standard" || record?.reviewLane === "migration"
+        ? record.reviewLane
+        : undefined;
       const verifiedAt = productText(deployment?.verifiedAt, 64);
       const reason = productText(deployment?.reason, 1_000);
       const revision = typeof record?.revision === "number" ? record.revision : undefined;
@@ -601,6 +610,7 @@ export class ProposalInboxService extends Service {
         id,
         title,
         lifecycle,
+        ...(reviewLane === undefined ? {} : { reviewLane }),
         ...(revision === undefined ? {} : { version: revision }),
         ...(lifecycle === "active" && verifiedAt !== undefined
           ? { lastResult: `已部署并读回核对 · ${verifiedAt.slice(0, 10)}` }
@@ -1541,6 +1551,9 @@ function projectProductProposal(proposal: InboxProposal, trace?: InboxProposalDe
       : proposal.status === "expired" ? "expired" : proposal.status,
     ...(proposal.kind === "automation-draft" || proposal.kind === "household-insight"
       ? { kind: proposal.kind }
+      : {}),
+    ...(proposal.reviewLane === "standard" || proposal.reviewLane === "migration"
+      ? { reviewLane: proposal.reviewLane }
       : {}),
     ...(Array.isArray(proposal.actionPolicyClasses) && proposal.actionPolicyClasses.includes("confirmation")
       ? {
