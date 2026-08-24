@@ -28,6 +28,13 @@ verified → rolling_back → restored
 - `switching`：家庭成员已经作出一次启用决定，Hub 以精确 Artifact revision 部署并等待 HA 读回。
 - `verified`：HA 返回 Hub 创建的自动化身份和配置指纹，Hub 验证运行状态、目标和审计记录。
 - `needs_attention`：任一阶段的证据、能力、策略、桥连接、编译、模拟、部署或读回结果需要家庭成员处理；修复后重新评估并保留原始失败证据。
+
+双跑输入由 Hub 服务端的只读证据端口提供，端口回传与请求完全一致的
+`bridgeId + epochId + lastSeq + configFingerprint`。模拟 receipt 同时绑定中立候选内容、
+Artifact id/revision/content hash、compile result 和 dry-run result；Store 在进入
+`simulated` 以及进入 `ready` 时都重新校验这些绑定。进入 `ready` 前，runtime 再次通过
+受信 HomeWorld 翻译路径复查候选和来源指纹。任何 source cut 漂移、证据缺失、制品版本
+变化或 receipt 不一致都会停在固定的 needs-attention 状态，且不会执行远端写入。
 - `rolling_back`：家庭成员或 Hub 按明确回退条件请求恢复；Hub 先停止 HobAgent 创建的自动化，再恢复原配置并等待读回。
 - `restored`：回退后的 HA 状态与切换前快照一致，Hub 写入完成审计；回退失败继续进入 `needs_attention`。
 
@@ -176,5 +183,30 @@ pnpm preview:home-migration -- --assessment-id <assessment-id>
 candidate / needs-attention 聚合、固定原因计数和 `remoteWritesPerformed: false`。
 它不创建 Proposal/Artifact，不调用 prepare、refresh、deploy、control 或 actions，
 同一 assessment 可安全重跑。
+
+完成评估、选择或后续工作流步骤后，操作员可以查询同一个 opaque assessment id 的
+耐久证据聚合：
+
+```sh
+pnpm status:home-migration -- --assessment-id <assessment-id>
+```
+
+status 命令是独立的只读证据面。它只对已经存在的
+`home-automation-migrations.sqlite` 和（存在 workflow Proposal link 时）
+`proposals.sqlite` 做 `readOnly` 打开，并在打开前用 `lstat` 拒绝 symlink 和非普通文件；
+它不执行 schema setup、schema migration、`PRAGMA` 写入、过期清理、recovery、prepare、
+deploy、control 或任何桥/设备调用。输出固定为 assessment 状态和 disposition/workflow/
+failure 聚合、selection status 聚合，以及 linked migration Proposal 的 review/lifecycle/
+application/deployment 聚合，并明确
+`readMode: "durable_only"`、`remoteWritesPerformed: false`、
+`localWritesPerformed: false`。输出不包含家庭名称、`ruleRef`、principal、token digest、
+source cut/fingerprint、Proposal/Artifact id、native id 或 provider payload。
+
+status 只接受一个明确的 32 位小写十六进制 assessment id。assessment 缺失、SQLite 文件
+缺失/损坏、Proposal payload 超出有界读取上限、Proposal row 与 payload 元数据不一致，或
+workflow 与 Proposal 跨库不一致时，命令固定返回 `outcome: "needs_attention"` 及有限 reason，
+并保持 fail-closed。没有 linked workflow 的 assessment 直接报告零 Proposal 聚合，因此不
+要求尚未创建的 Proposal 数据库；存在 link 时缺少 Proposal 数据库或 Proposal row 则返回
+固定的 unavailable/inconsistent reason。status 从不创建缺失文件。
 
 每一步都以确定性测试、`pnpm test`、`pnpm check`、`git diff --check` 和真实浏览器双视口证据交付。任何实现都以本决议的状态机、权限边界、首期子集和 fail-closed 规则为验收依据。

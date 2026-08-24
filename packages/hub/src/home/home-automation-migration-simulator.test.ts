@@ -5,8 +5,10 @@ import test from "node:test";
 import {
   HomeAutomationMigrationSimulator,
   computeHomeAutomationMigrationCandidateContentHash,
+  type HomeAutomationMigrationDualRunInput,
   type HomeAutomationMigrationSimulatorInput,
 } from "./home-automation-migration-simulator.js";
+import { parseHomeAutomationMigrationSimulationReceipt } from "./home-automation-migration-simulation.js";
 
 const SOURCE_FINGERPRINT = `sha256:${"a".repeat(64)}`;
 const NOW = "2026-08-24T08:00:00.000Z";
@@ -111,6 +113,161 @@ function input(overrides: Partial<HomeAutomationMigrationSimulatorInput> = {}): 
 }
 
 const simulator = new HomeAutomationMigrationSimulator();
+
+const DUAL_RUN_CANDIDATE = {
+  status: "candidate",
+  ruleRef: RULE_REF,
+  sourceFingerprint: SOURCE_FINGERPRINT,
+  title: "Turn on the evening light",
+  content: {
+    trigger: { kind: "capability_changed", source: { hwCapabilityId: "hwc-trigger" } },
+    conditions: [],
+    actions: [{ kind: "set_boolean", target: { hwCapabilityId: "hwc-light" }, value: true }],
+    rollback: { kind: "restore_previous_state", target: { hwCapabilityId: "hwc-light" }, maxAgeSeconds: 900 },
+    postconditions: [{ kind: "capability_value", source: { hwCapabilityId: "hwc-light" }, operator: "equals", value: true, withinSeconds: 60 }],
+  },
+} as const;
+
+const DUAL_RUN_INPUT: HomeAutomationMigrationDualRunInput = {
+  sourceCut: {
+    bridgeId: "bridge-ha",
+    epochId: "epoch-1",
+    lastSeq: 12,
+    configFingerprint: SOURCE_FINGERPRINT,
+  },
+  candidate: DUAL_RUN_CANDIDATE,
+  preparation: {
+    artifactId: "artifact-living-room",
+    artifactRevision: 1,
+    artifactContentHash: `sha256:${"b".repeat(64)}`,
+    compileResultId: `sha256:${"c".repeat(64)}`,
+    dryRunResultId: `sha256:${"d".repeat(64)}`,
+  },
+  eventSamples: [{
+    eventId: "event-trigger-1",
+    kind: "capability_changed",
+    occurredAt: NOW,
+    capabilityId: "hwc-trigger",
+    values: [{ capabilityId: "hwc-trigger", value: true }],
+  }],
+  existingRuleSummaries: [{
+    ruleRef: "ha-rule-existing",
+    enabled: true,
+    trigger: { kind: "capability_changed", sourceCapabilityId: "hwc-trigger" },
+    actions: [{ kind: "set_boolean", targetCapabilityId: "hwc-light", value: false }],
+  }],
+};
+
+test("runs a bounded neutral capability dual-run and records deterministic interference", () => {
+  const first = simulator.simulate(DUAL_RUN_INPUT);
+  const second = simulator.simulate(structuredClone(DUAL_RUN_INPUT));
+
+  assert.deepEqual(first, second);
+  assert.equal(first.status, "simulated");
+  if (first.status !== "simulated") return;
+  assert.equal(first.writesPerformed, false);
+  assert.equal(first.receipt.writesPerformed, false);
+  assert.deepEqual(first.receipt.sourceCut, DUAL_RUN_INPUT.sourceCut);
+  assert.equal(first.receipt.sourceFingerprint, SOURCE_FINGERPRINT);
+  assert.match(first.receipt.candidateContentHash, /^sha256:[a-f0-9]{64}$/u);
+  assert.deepEqual(first.receipt.preparation, DUAL_RUN_INPUT.preparation);
+  assert.deepEqual(first.receipt.expectedTriggers, [{
+    eventId: "event-trigger-1",
+    triggered: true,
+    conditionsSatisfied: true,
+  }]);
+  assert.deepEqual(first.receipt.expectedActions, [{
+    eventId: "event-trigger-1",
+    actionOrder: 1,
+    kind: "set_boolean",
+    targetCapabilityId: "hwc-light",
+    value: true,
+  }]);
+  assert.deepEqual(first.receipt.existingRuleInterference, [{
+    eventId: "event-trigger-1",
+    ruleRef: "ha-rule-existing",
+    reason: "same_trigger_and_shared_target",
+    sharedCapabilityIds: ["hwc-light"],
+    existingActionKinds: ["set_boolean"],
+  }]);
+  assert.match(first.receipt.simulationDigest, /^sha256:[a-f0-9]{64}$/u);
+});
+
+test("fails closed for stale, ambiguous, unsupported, and over-limit neutral inputs", () => {
+  const stale = simulator.simulate({
+    ...DUAL_RUN_INPUT,
+    sourceCut: { ...DUAL_RUN_INPUT.sourceCut, configFingerprint: `sha256:${"e".repeat(64)}` },
+  });
+  assert.deepEqual(stale, { status: "needs_attention", reason: "stale", writesPerformed: false });
+
+  const ambiguous = simulator.simulate({
+    ...DUAL_RUN_INPUT,
+    candidate: {
+      ...DUAL_RUN_CANDIDATE,
+      content: {
+        ...DUAL_RUN_CANDIDATE.content,
+        conditions: [{
+          kind: "capability_value",
+          source: { hwCapabilityId: "hwc-condition" },
+          operator: "equals",
+          value: true,
+        }],
+      },
+    },
+  });
+  assert.deepEqual(ambiguous, { status: "needs_attention", reason: "ambiguous", writesPerformed: false });
+
+  const unsupported = simulator.simulate({
+    ...DUAL_RUN_INPUT,
+    candidate: {
+      ...DUAL_RUN_CANDIDATE,
+      content: {
+        ...DUAL_RUN_CANDIDATE.content,
+        actions: [
+          ...DUAL_RUN_CANDIDATE.content.actions,
+          { kind: "set_boolean", target: { hwCapabilityId: "hwc-other" }, value: false },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(unsupported, { status: "needs_attention", reason: "unsupported", writesPerformed: false });
+
+  const overLimit = simulator.simulate({
+    ...DUAL_RUN_INPUT,
+    eventSamples: Array.from({ length: 33 }, (_, index) => ({
+      ...DUAL_RUN_INPUT.eventSamples[0]!,
+      eventId: `event-${index}`,
+    })),
+  });
+  assert.deepEqual(overLimit, { status: "needs_attention", reason: "over_limit", writesPerformed: false });
+
+  const oversizedScalar = simulator.simulate({
+    ...DUAL_RUN_INPUT,
+    eventSamples: [{
+      ...DUAL_RUN_INPUT.eventSamples[0]!,
+      values: [{ capabilityId: "hwc-trigger", value: "x".repeat(1025) }],
+    }],
+  });
+  assert.deepEqual(oversizedScalar, { status: "needs_attention", reason: "invalid_input", writesPerformed: false });
+});
+
+test("receipt verification rejects provider fields and a tampered simulation digest", () => {
+  const result = simulator.simulate(DUAL_RUN_INPUT);
+  assert.equal(result.status, "simulated");
+  if (result.status !== "simulated") return;
+  assert.throws(() => parseHomeAutomationMigrationSimulationReceipt({
+    ...result.receipt,
+    nativePayload: "blocked",
+  }), /receipt is invalid/);
+  assert.throws(() => parseHomeAutomationMigrationSimulationReceipt({
+    ...result.receipt,
+    simulationDigest: `sha256:${"0".repeat(64)}`,
+  }), /receipt is invalid/);
+  assert.throws(() => parseHomeAutomationMigrationSimulationReceipt({
+    ...result.receipt,
+    candidateContentHash: undefined,
+  }), /receipt is invalid/);
+});
 
 test("projects an exact review-only candidate before preparation as translated", () => {
   const result = simulator.project(input());

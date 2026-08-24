@@ -14,6 +14,7 @@ import {
   InMemoryHomeAutomationMigrationStore,
   SqliteHomeAutomationMigrationStore,
 } from "./home-automation-migration-store.js";
+import { computeHomeAutomationMigrationSimulationDigest } from "./home-automation-migration-simulation.js";
 
 const now = "2026-08-24T08:00:00.000Z";
 const eligibleFingerprint = `sha256:${"e".repeat(64)}`;
@@ -30,6 +31,33 @@ function catalog(overrides: Record<string, unknown> = {}): HomeAutomationMigrati
     ],
     ...overrides,
   } as HomeAutomationMigrationInput["catalog"];
+}
+
+function simulationReceiptFor(
+  sourceFingerprint: string,
+  candidateContentHash: string,
+  preparation: {
+    readonly artifactId: string;
+    readonly artifactRevision: number;
+    readonly artifactContentHash: string;
+    readonly compileResultId: string;
+    readonly dryRunResultId: string;
+  },
+) {
+  const unsigned = {
+    schemaVersion: "1" as const,
+    kind: "home-automation-migration-simulation" as const,
+    sourceCut: { bridgeId: "bridge-ha", epochId: "epoch-1", lastSeq: 12, configFingerprint: sourceFingerprint },
+    sourceFingerprint,
+    candidateContentHash,
+    preparation,
+    expectedTriggers: [{ eventId: "event-1", triggered: true, conditionsSatisfied: true }],
+    expectedActions: [{ eventId: "event-1", actionOrder: 1, kind: "notify_local" as const, message: "review" }],
+    existingRuleInterference: [],
+    simulationDigest: `sha256:${"0".repeat(64)}`,
+    writesPerformed: false as const,
+  };
+  return { ...unsigned, simulationDigest: computeHomeAutomationMigrationSimulationDigest(unsigned) };
 }
 
 function service(store = new InMemoryHomeAutomationMigrationStore()): HomeAutomationMigrationService {
@@ -264,6 +292,10 @@ test("eligible rules advance through an independent durable workflow with neutra
     artifactContentHash: `sha256:${"5".repeat(64)}`,
     compileResultId,
     dryRunResultId,
+    simulationReceipt: simulationReceiptFor(sourceFingerprint, candidateContentHash, {
+      artifactId: "artifact-neutral-1", artifactRevision: 2, artifactContentHash: `sha256:${"5".repeat(64)}`,
+      compileResultId, dryRunResultId,
+    }),
   });
   assert.equal(simulated?.rules[0]?.workflow?.status, "simulated");
   assert.equal(simulated?.rules[0]?.workflow?.compileResultId, compileResultId);
@@ -318,6 +350,10 @@ test("an approved ready rule records a durable switch, verification, rollback, a
     artifactContentHash: `sha256:${"2".repeat(64)}`,
     compileResultId: `sha256:${"3".repeat(64)}`,
     dryRunResultId: `sha256:${"4".repeat(64)}`,
+    simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"1".repeat(64)}`, {
+      artifactId: "artifact-switch", artifactRevision: 1, artifactContentHash: `sha256:${"2".repeat(64)}`,
+      compileResultId: `sha256:${"3".repeat(64)}`, dryRunResultId: `sha256:${"4".repeat(64)}`,
+    }),
   });
   service.readyRule({
     migrationId: created.assessment.migrationId,
@@ -386,7 +422,7 @@ test("failed switch and rollback operations can resume with fresh operation rece
   });
   const created = await service.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
   service.translateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "assessed", proposalId: "proposal-resume", candidateProposalRevision: 1, candidateContentHash: `sha256:${"6".repeat(64)}` });
-  service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-resume", artifactRevision: 1, artifactContentHash: `sha256:${"7".repeat(64)}`, compileResultId: `sha256:${"8".repeat(64)}`, dryRunResultId: `sha256:${"9".repeat(64)}` });
+  service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-resume", artifactRevision: 1, artifactContentHash: `sha256:${"7".repeat(64)}`, compileResultId: `sha256:${"8".repeat(64)}`, dryRunResultId: `sha256:${"9".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"6".repeat(64)}`, { artifactId: "artifact-resume", artifactRevision: 1, artifactContentHash: `sha256:${"7".repeat(64)}`, compileResultId: `sha256:${"8".repeat(64)}`, dryRunResultId: `sha256:${"9".repeat(64)}` }) });
   service.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
   service.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "1".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
   const failedSwitch = service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_failed" });
@@ -440,7 +476,7 @@ test("source-stale preflight and unrelated failure reasons cannot resume switchi
   });
   const created = await service.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
   service.translateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "assessed", proposalId: "proposal-preflight-resume", candidateProposalRevision: 1, candidateContentHash: `sha256:${"a".repeat(64)}` });
-  service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-preflight-resume", artifactRevision: 1, artifactContentHash: `sha256:${"b".repeat(64)}`, compileResultId: `sha256:${"c".repeat(64)}`, dryRunResultId: `sha256:${"d".repeat(64)}` });
+  service.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-preflight-resume", artifactRevision: 1, artifactContentHash: `sha256:${"b".repeat(64)}`, compileResultId: `sha256:${"c".repeat(64)}`, dryRunResultId: `sha256:${"d".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"a".repeat(64)}`, { artifactId: "artifact-preflight-resume", artifactRevision: 1, artifactContentHash: `sha256:${"b".repeat(64)}`, compileResultId: `sha256:${"c".repeat(64)}`, dryRunResultId: `sha256:${"d".repeat(64)}` }) });
   service.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
   service.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", reason: "source_stale" });
   assert.equal(service.resumeRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "needs_attention", switchOperationId: "6".repeat(32), switchActor: "member:alice" }), undefined);
@@ -460,7 +496,7 @@ test("switch recovery receipts survive SQLite restart and duplicate resumes do n
     });
     const created = await first.create({ catalog: catalog({ rules: [{ ruleRef: "ha-rule-1" }] }) });
     first.translateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "assessed", proposalId: "proposal-sqlite-resume", candidateProposalRevision: 1, candidateContentHash: `sha256:${"3".repeat(64)}` });
-    first.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-sqlite-resume", artifactRevision: 1, artifactContentHash: `sha256:${"4".repeat(64)}`, compileResultId: `sha256:${"5".repeat(64)}`, dryRunResultId: `sha256:${"6".repeat(64)}` });
+    first.simulateRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "translated", artifactId: "artifact-sqlite-resume", artifactRevision: 1, artifactContentHash: `sha256:${"4".repeat(64)}`, compileResultId: `sha256:${"5".repeat(64)}`, dryRunResultId: `sha256:${"6".repeat(64)}`, simulationReceipt: simulationReceiptFor(eligibleFingerprint, `sha256:${"3".repeat(64)}`, { artifactId: "artifact-sqlite-resume", artifactRevision: 1, artifactContentHash: `sha256:${"4".repeat(64)}`, compileResultId: `sha256:${"5".repeat(64)}`, dryRunResultId: `sha256:${"6".repeat(64)}` }) });
     first.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 2 });
     first.startRuleSwitch({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "ready", approvedProposalRevision: 3, switchOperationId: "7".repeat(32), switchActor: "member:alice", sourceWasEnabled: true });
     first.failRuleWorkflow({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "switching", reason: "switch_unknown" });
@@ -549,6 +585,10 @@ test("workflow failure keeps a fixed reason and metadata or unsupported rules ca
     artifactContentHash: `sha256:${"9".repeat(64)}`,
     compileResultId: `sha256:${"a".repeat(64)}`,
     dryRunResultId: `sha256:${"b".repeat(64)}`,
+    simulationReceipt: simulationReceiptFor(`sha256:${"6".repeat(64)}`, `sha256:${"8".repeat(64)}`, {
+      artifactId: "artifact-failure-retry", artifactRevision: 1, artifactContentHash: `sha256:${"9".repeat(64)}`,
+      compileResultId: `sha256:${"a".repeat(64)}`, dryRunResultId: `sha256:${"b".repeat(64)}`,
+    }),
   });
   const simulationFailure = failedService.failRuleWorkflow({
     migrationId: failed.assessment.migrationId,
@@ -567,6 +607,10 @@ test("workflow failure keeps a fixed reason and metadata or unsupported rules ca
     artifactContentHash: `sha256:${"c".repeat(64)}`,
     compileResultId: `sha256:${"d".repeat(64)}`,
     dryRunResultId: `sha256:${"e".repeat(64)}`,
+    simulationReceipt: simulationReceiptFor(`sha256:${"6".repeat(64)}`, `sha256:${"8".repeat(64)}`, {
+      artifactId: "artifact-failure-retry-2", artifactRevision: 2, artifactContentHash: `sha256:${"c".repeat(64)}`,
+      compileResultId: `sha256:${"d".repeat(64)}`, dryRunResultId: `sha256:${"e".repeat(64)}`,
+    }),
   });
   assert.equal(simulationRetry?.rules[0]?.workflow?.status, "simulated");
   assert.equal(simulationRetry?.rules[0]?.workflow?.artifactRevision, 2);
@@ -676,6 +720,10 @@ test("each eligible rule keeps an independent workflow across a SQLite restart",
       artifactContentHash: `sha256:${"c".repeat(64)}`,
       compileResultId: `sha256:${"d".repeat(64)}`,
       dryRunResultId: `sha256:${"e".repeat(64)}`,
+      simulationReceipt: simulationReceiptFor(sourceFingerprint, `sha256:${"b".repeat(64)}`, {
+        artifactId: "artifact-restart-safe", artifactRevision: 4, artifactContentHash: `sha256:${"c".repeat(64)}`,
+        compileResultId: `sha256:${"d".repeat(64)}`, dryRunResultId: `sha256:${"e".repeat(64)}`,
+      }),
     });
     const ready = second.readyRule({ migrationId: created.assessment.migrationId, ruleRef: "ha-rule-1", from: "simulated", reviewProposalRevision: 4 });
     assert.equal(simulated?.rules[0]?.workflow?.status, "simulated");

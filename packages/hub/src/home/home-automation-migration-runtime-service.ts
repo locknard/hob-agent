@@ -36,6 +36,12 @@ import {
   type HomeAutomationMigrationSimulationResult,
 } from "./home-automation-migration-simulator.js";
 import type {
+  HomeAutomationMigrationSimulationEvidencePort,
+  HomeAutomationMigrationSimulationReceipt,
+  HomeAutomationMigrationSimulationSourceCut,
+} from "./home-automation-migration-simulation.js";
+import type { ForeignRuleArtifactCandidate } from "../artifact/foreign-rule-artifact-candidate.js";
+import type {
   HomeAutomationMigrationAssessment,
   HomeAutomationMigrationRuleWorkflow,
   HomeAutomationMigrationCloseReason,
@@ -174,6 +180,7 @@ export interface HomeAutomationMigrationRuntimeServiceOptions extends SqliteHome
   readonly clock?: () => string;
   readonly migrationIdFactory?: () => string;
   readonly idempotencyKeyFactory?: () => string;
+  readonly simulationEvidence?: HomeAutomationMigrationSimulationEvidencePort;
 }
 
 export interface HomeAutomationMigrationRuntimeAssessOptions {
@@ -202,6 +209,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   private readonly migration: HomeAutomationMigrationService;
   private readonly selection: HomeAutomationMigrationSelectionFacade;
   private readonly simulator = new HomeAutomationMigrationSimulator();
+  private readonly simulationEvidence?: HomeAutomationMigrationSimulationEvidencePort;
   private preparation: HomeAutomationMigrationPreparationService | undefined;
   private closed = false;
 
@@ -212,6 +220,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
     const world = readHomeWorld(ctx);
     this.path = path;
     this.world = world;
+    this.simulationEvidence = options.simulationEvidence;
     const store = new SqliteHomeAutomationMigrationStore({ path });
     const translator = new HomeAutomationMigrationTranslator(world);
     this.migration = new HomeAutomationMigrationService({
@@ -631,11 +640,53 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
 
       if (projection.status === "translated") return workflowResult(parsedInput.ruleRef, workflow);
 
+      let simulationReceipt: HomeAutomationMigrationSimulationReceipt | undefined;
+      if (workflow.status === "translated") {
+        // The dual-run receipt binds the exact prepared Artifact and its
+        // compile/dry-run attestations, so an unpromoted preparation remains
+        // translated until those durable refs are observable.
+        if (projection.status !== "ready") return workflowResult(parsedInput.ruleRef, workflow);
+        const refs = projection.preparedArtifact;
+        const evidencePort = this.simulationEvidence;
+        if (evidencePort === undefined) return this.failWorkflow(parsedInput, workflow, "simulation_unavailable");
+        const sourceCut: HomeAutomationMigrationSimulationSourceCut = {
+          bridgeId: assessment.sourceBridgeId,
+          epochId: assessment.sourceEpochId,
+          lastSeq: assessment.sourceLastSeq,
+          configFingerprint: workflow.sourceFingerprint,
+        };
+        let evidence: Awaited<ReturnType<HomeAutomationMigrationSimulationEvidencePort["read"]>> | undefined;
+        try {
+          evidence = await evidencePort.read({
+            sourceCut,
+            candidate: candidate as ForeignRuleArtifactCandidate,
+            signal: options.signal ?? new AbortController().signal,
+          });
+        } catch {
+          evidence = undefined;
+        }
+        if (evidence === undefined || !sameSimulationSourceCut(evidence.sourceCut, sourceCut)) {
+          return this.failWorkflow(parsedInput, workflow, "simulation_unavailable");
+        }
+        const dualRun = this.simulator.simulate({
+          sourceCut,
+          candidate: candidate as ForeignRuleArtifactCandidate,
+          preparation: {
+            artifactId: refs.artifactId,
+            artifactRevision: refs.revision,
+            artifactContentHash: refs.contentHash,
+            compileResultId: refs.compileResultId,
+            dryRunResultId: refs.dryRunResultId,
+          },
+          eventSamples: evidence.eventSamples,
+          existingRuleSummaries: evidence.existingRuleSummaries,
+        });
+        if (dualRun.status !== "simulated") return this.failWorkflow(parsedInput, workflow, "simulation_failed");
+        simulationReceipt = dualRun.receipt;
+      }
+
       let simulatedWorkflow = workflow;
       if (workflow.status === "translated") {
-        // Artifact refs are authoritative only on the ready N+1 envelope. A
-        // succeeded job projection by itself never supplies refs to this CAS,
-        // so the rule remains translated until that envelope is observable.
         if (projection.status !== "ready") return workflowResult(parsedInput.ruleRef, workflow);
         const refs = projection.preparedArtifact;
         const simulated = this.migration.simulateRule({
@@ -647,6 +698,7 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
           artifactContentHash: refs.contentHash,
           compileResultId: refs.compileResultId,
           dryRunResultId: refs.dryRunResultId,
+          simulationReceipt,
         });
         if (simulated === undefined) {
           assessment = this.migration.get(parsedInput.migrationId);
@@ -662,6 +714,15 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
       }
 
       if (projection.status !== "ready") return workflowResult(parsedInput.ruleRef, simulatedWorkflow);
+      const freshCandidate = await this.createArtifactCandidate({
+        migrationId: parsedInput.migrationId,
+        ruleRef: parsedInput.ruleRef,
+      }, options.signal === undefined ? {} : { signal: options.signal });
+      if (freshCandidate.status !== "candidate"
+        || freshCandidate.sourceFingerprint !== workflow.sourceFingerprint
+        || computeHomeAutomationMigrationCandidateContentHash(freshCandidate.content) !== workflow.candidateContentHash) {
+        return this.failWorkflow(parsedInput, simulatedWorkflow, "simulation_unavailable");
+      }
       const reviewProposalRevision = projection.reviewProposalRevision;
       const ready = this.migration.readyRule({
         migrationId: parsedInput.migrationId,
@@ -814,6 +875,16 @@ export class HomeAutomationMigrationRuntimeService extends Service implements Ho
   }
 }
 
+function sameSimulationSourceCut(
+  left: HomeAutomationMigrationSimulationSourceCut,
+  right: HomeAutomationMigrationSimulationSourceCut,
+): boolean {
+  return left.bridgeId === right.bridgeId
+    && left.epochId === right.epochId
+    && left.lastSeq === right.lastSeq
+    && left.configFingerprint === right.configFingerprint;
+}
+
 interface HomeWorldMigrationPort extends HomeAutomationMigrationWorldPort {
   foreignRuleCatalog(): Promise<readonly HomeWorldForeignRuleCatalog[]>;
   resolveBridgeActionTargetForBinding(input: unknown): BridgeActionTarget | undefined;
@@ -875,7 +946,7 @@ function readHomeWorld(ctx: Context): HomeWorldMigrationPort {
 function readPath(options: unknown): string {
   try {
     if (!isRecord(options)
-      || Object.keys(options).some((key) => !["path", "clock", "migrationIdFactory", "idempotencyKeyFactory"].includes(key))) {
+      || Object.keys(options).some((key) => !["path", "clock", "migrationIdFactory", "idempotencyKeyFactory", "simulationEvidence"].includes(key))) {
       throw new TypeError("home automation migration path is required");
     }
     if (typeof options.path !== "string" || options.path.length === 0 || options.path.trim() !== options.path) {
@@ -885,6 +956,10 @@ function readPath(options: unknown): string {
       if (options[key] !== undefined && typeof options[key] !== "function") {
         throw new TypeError("home automation migration option is invalid");
       }
+    }
+    if (options.simulationEvidence !== undefined
+      && (!isRecord(options.simulationEvidence) || typeof options.simulationEvidence.read !== "function")) {
+      throw new TypeError("home automation simulation evidence option is invalid");
     }
     return options.path;
   } catch {

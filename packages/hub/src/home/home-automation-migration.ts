@@ -1,4 +1,5 @@
 import type { HomeWorldForeignRuleCatalog } from "../world/home-world-service.js";
+import type { HomeAutomationMigrationSimulationReceipt } from "./home-automation-migration-simulation.js";
 
 /** The bounded lifecycle owned by the read-only HA migration assessment. Unsupported is a rule disposition, not a lifecycle state. */
 export type HomeAutomationMigrationStatus =
@@ -148,6 +149,8 @@ export interface HomeAutomationMigrationRuleWorkflowTransition {
   readonly artifactContentHash?: string;
   readonly compileResultId?: string;
   readonly dryRunResultId?: string;
+  /** Complete neutral no-write dual-run proof required for simulated. */
+  readonly simulationReceipt?: HomeAutomationMigrationSimulationReceipt;
   readonly reviewProposalRevision?: number;
   readonly approvedProposalRevision?: number;
   readonly switchOperationId?: string;

@@ -9,6 +9,7 @@ import {
   InMemoryHomeAutomationMigrationStore,
   SqliteHomeAutomationMigrationStore,
 } from "./home-automation-migration-store.js";
+import { computeHomeAutomationMigrationSimulationDigest } from "./home-automation-migration-simulation.js";
 
 const createdAt = "2026-08-24T08:00:00.000Z";
 const discovered = {
@@ -32,6 +33,33 @@ const discovered = {
   }],
   createdAt,
 };
+
+function simulationReceipt(
+  sourceFingerprint: string,
+  candidateContentHash: string,
+  preparation = {
+    artifactId: "artifact-simulation-receipt",
+    artifactRevision: 1,
+    artifactContentHash: `sha256:${"e".repeat(64)}`,
+    compileResultId: `sha256:${"f".repeat(64)}`,
+    dryRunResultId: `sha256:${"0".repeat(64)}`,
+  },
+) {
+  const unsigned = {
+    schemaVersion: "1" as const,
+    kind: "home-automation-migration-simulation" as const,
+    sourceCut: { bridgeId: "bridge-ha", epochId: "epoch-1", lastSeq: 12, configFingerprint: sourceFingerprint },
+    sourceFingerprint,
+    candidateContentHash,
+    preparation,
+    expectedTriggers: [{ eventId: "event-1", triggered: true, conditionsSatisfied: true }],
+    expectedActions: [{ eventId: "event-1", actionOrder: 1, kind: "notify_local" as const, message: "review" }],
+    existingRuleInterference: [],
+    simulationDigest: `sha256:${"0".repeat(64)}`,
+    writesPerformed: false as const,
+  };
+  return { ...unsigned, simulationDigest: computeHomeAutomationMigrationSimulationDigest(unsigned) };
+}
 
 test("in-memory store preserves discovered to assessed transitions and recovery", () => {
   const store = new InMemoryHomeAutomationMigrationStore();
@@ -272,6 +300,142 @@ test("sqlite rule workflow transition is a strict per-rule CAS", async () => {
   }
 });
 
+test("requires and durably retains a complete dual-run receipt before ready", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-simulation-receipt-"));
+  const path = join(directory, "migrations.sqlite");
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const candidateContentHash = `sha256:${"b".repeat(64)}`;
+  const receipt = simulationReceipt(sourceFingerprint, candidateContentHash);
+  const eligibleRules = [{
+    ruleRef: "ha-rule-1",
+    name: "晚间灯光",
+    enabled: true,
+    updatedAt: createdAt,
+    triggerClass: "state" as const,
+    conditionClass: "flat_and" as const,
+    actionClass: "reversible" as const,
+    sourceFingerprint,
+    disposition: "eligible" as const,
+    workflow: { status: "assessed" as const, sourceFingerprint, assessedAt: createdAt },
+  }];
+  try {
+    const first = new SqliteHomeAutomationMigrationStore({ path });
+    first.discover({ ...discovered, analysisMode: "trusted_neutral" });
+    assert.equal(first.assess({ migrationId: discovered.migrationId, status: "assessed", assessedAt: createdAt, rules: eligibleRules }), true);
+    assert.equal(first.transitionRuleWorkflow({
+      migrationId: discovered.migrationId,
+      ruleRef: "ha-rule-1",
+      from: "assessed",
+      to: "translated",
+      transitionedAt: createdAt,
+      proposalId: "proposal-simulation-receipt",
+      candidateProposalRevision: 1,
+      candidateContentHash,
+    }), true);
+    assert.equal(first.transitionRuleWorkflow({
+      migrationId: discovered.migrationId,
+      ruleRef: "ha-rule-1",
+      from: "translated",
+      to: "simulated",
+      transitionedAt: createdAt,
+      artifactId: "artifact-simulation-receipt",
+      artifactRevision: 1,
+      artifactContentHash: `sha256:${"e".repeat(64)}`,
+      compileResultId: `sha256:${"f".repeat(64)}`,
+      dryRunResultId: `sha256:${"0".repeat(64)}`,
+      simulationReceipt: receipt,
+    } as never), true);
+    assert.equal(first.transitionRuleWorkflow({
+      migrationId: discovered.migrationId,
+      ruleRef: "ha-rule-1",
+      from: "simulated",
+      to: "ready",
+      transitionedAt: createdAt,
+      reviewProposalRevision: 2,
+    }), true);
+    const stored = (first as unknown as {
+      getSimulationReceipt: (migrationId: string, ruleRef: string) => unknown;
+    }).getSimulationReceipt(discovered.migrationId, "ha-rule-1");
+    assert.deepEqual(stored, receipt);
+    first.close();
+
+    const second = new SqliteHomeAutomationMigrationStore({ path });
+    assert.deepEqual((second as unknown as {
+      getSimulationReceipt: (migrationId: string, ruleRef: string) => unknown;
+    }).getSimulationReceipt(discovered.migrationId, "ha-rule-1"), receipt);
+    second.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects absent, provider-shaped, stale, and hash-mismatched receipts before simulated", () => {
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const candidateContentHash = `sha256:${"b".repeat(64)}`;
+  const store = new InMemoryHomeAutomationMigrationStore();
+  store.discover({ ...discovered, analysisMode: "trusted_neutral" });
+  assert.equal(store.assess({
+    migrationId: discovered.migrationId,
+    status: "assessed",
+    assessedAt: createdAt,
+    rules: [{
+      ruleRef: "ha-rule-1", name: "晚间灯光", enabled: true, updatedAt: createdAt,
+      triggerClass: "state", conditionClass: "flat_and", actionClass: "reversible",
+      sourceFingerprint, disposition: "eligible", workflow: { status: "assessed", sourceFingerprint, assessedAt: createdAt },
+    }],
+  }), true);
+  const translated = {
+    migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "assessed" as const, to: "translated" as const,
+    transitionedAt: createdAt, proposalId: "proposal-receipt-guards", candidateProposalRevision: 1, candidateContentHash,
+  };
+  assert.equal(store.transitionRuleWorkflow(translated), true);
+  const base = {
+    migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "translated" as const, to: "simulated" as const,
+    transitionedAt: createdAt, artifactId: "artifact-receipt-guards", artifactRevision: 1,
+    artifactContentHash: `sha256:${"c".repeat(64)}`, compileResultId: `sha256:${"d".repeat(64)}`, dryRunResultId: `sha256:${"e".repeat(64)}`,
+  };
+  assert.throws(() => store.transitionRuleWorkflow(base), /workflow transition is invalid/);
+  const valid = simulationReceipt(sourceFingerprint, candidateContentHash, {
+    artifactId: base.artifactId,
+    artifactRevision: base.artifactRevision,
+    artifactContentHash: base.artifactContentHash,
+    compileResultId: base.compileResultId,
+    dryRunResultId: base.dryRunResultId,
+  });
+  const wrongPreparation = {
+    ...valid,
+    preparation: { ...valid.preparation, artifactId: "artifact-from-older-preparation" },
+  };
+  assert.equal(store.transitionRuleWorkflow({
+    ...base,
+    simulationReceipt: {
+      ...wrongPreparation,
+      simulationDigest: computeHomeAutomationMigrationSimulationDigest(wrongPreparation),
+    },
+  }), false);
+  assert.throws(() => store.transitionRuleWorkflow({ ...base, simulationReceipt: { ...valid, nativePayload: "blocked" } } as never), /workflow transition is invalid/);
+  assert.equal(store.transitionRuleWorkflow({
+    ...base,
+    simulationReceipt: {
+      ...valid,
+      sourceCut: { ...valid.sourceCut, lastSeq: valid.sourceCut.lastSeq + 1 },
+      simulationDigest: computeHomeAutomationMigrationSimulationDigest({ ...valid, sourceCut: { ...valid.sourceCut, lastSeq: valid.sourceCut.lastSeq + 1 } }),
+    },
+  }), false);
+  assert.equal(store.transitionRuleWorkflow({
+    ...base,
+    simulationReceipt: {
+      ...valid,
+      candidateContentHash: `sha256:${"f".repeat(64)}`,
+      simulationDigest: computeHomeAutomationMigrationSimulationDigest({ ...valid, candidateContentHash: `sha256:${"f".repeat(64)}` }),
+    },
+  }), false);
+  assert.throws(() => store.transitionRuleWorkflow({
+    ...base,
+    simulationReceipt: { ...valid, simulationDigest: `sha256:${"0".repeat(64)}` },
+  }), /workflow transition is invalid/);
+});
+
 test("sqlite workflow JSON rejects bridge-shaped or semantically incomplete records", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-workflow-corrupt-"));
   const path = join(directory, "migrations.sqlite");
@@ -437,6 +601,10 @@ test("sqlite persists the complete switch and rollback workflow across restart",
       artifactContentHash,
       compileResultId: `sha256:${"e".repeat(64)}`,
       dryRunResultId: `sha256:${"f".repeat(64)}`,
+      simulationReceipt: simulationReceipt(sourceFingerprint, candidateContentHash, {
+        artifactId: "artifact-switch-restart", artifactRevision: 1, artifactContentHash,
+        compileResultId: `sha256:${"e".repeat(64)}`, dryRunResultId: `sha256:${"f".repeat(64)}`,
+      }),
     }), true);
     assert.equal(first.transitionRuleWorkflow({
       migrationId: discovered.migrationId,
@@ -599,6 +767,10 @@ test("sqlite workflow CAS rejects duplicate and competing switch starts without 
       migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "translated", to: "simulated", transitionedAt: createdAt,
       artifactId: "artifact-cas-switch", artifactRevision: 1, artifactContentHash: `sha256:${"f".repeat(64)}`,
       compileResultId: `sha256:${"0".repeat(64)}`, dryRunResultId: `sha256:${"1".repeat(64)}`,
+      simulationReceipt: simulationReceipt(sourceFingerprint, `sha256:${"e".repeat(64)}`, {
+        artifactId: "artifact-cas-switch", artifactRevision: 1, artifactContentHash: `sha256:${"f".repeat(64)}`,
+        compileResultId: `sha256:${"0".repeat(64)}`, dryRunResultId: `sha256:${"1".repeat(64)}`,
+      }),
     }), true);
     assert.equal(owner.transitionRuleWorkflow({
       migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "simulated", to: "ready", transitionedAt: createdAt,
@@ -666,6 +838,10 @@ test("ready preflight failures are limited to source-stale and unknown-switch re
     migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "translated", to: "simulated", transitionedAt: createdAt,
     artifactId: "artifact-preflight", artifactRevision: 1, artifactContentHash: `sha256:${"0".repeat(64)}`,
     compileResultId: `sha256:${"1".repeat(64)}`, dryRunResultId: `sha256:${"2".repeat(64)}`,
+    simulationReceipt: simulationReceipt(sourceFingerprint, `sha256:${"f".repeat(64)}`, {
+      artifactId: "artifact-preflight", artifactRevision: 1, artifactContentHash: `sha256:${"0".repeat(64)}`,
+      compileResultId: `sha256:${"1".repeat(64)}`, dryRunResultId: `sha256:${"2".repeat(64)}`,
+    }),
   }), true);
   assert.equal(store.transitionRuleWorkflow({
     migrationId: discovered.migrationId, ruleRef: "ha-rule-1", from: "simulated", to: "ready", transitionedAt: createdAt,

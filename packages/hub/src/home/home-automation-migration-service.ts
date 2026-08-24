@@ -15,6 +15,10 @@ import {
   type HomeAutomationMigrationRuleWorkflowTransition,
 } from "./home-automation-migration.js";
 import type { HomeAutomationMigrationStore } from "./home-automation-migration-store.js";
+import {
+  parseHomeAutomationMigrationSimulationReceipt,
+  type HomeAutomationMigrationSimulationReceipt,
+} from "./home-automation-migration-simulation.js";
 
 export type {
   HomeAutomationMigrationAssessment,
@@ -69,6 +73,7 @@ export interface HomeAutomationMigrationSimulateRuleInput {
   readonly artifactContentHash: string;
   readonly compileResultId: string;
   readonly dryRunResultId: string;
+  readonly simulationReceipt?: HomeAutomationMigrationSimulationReceipt;
 }
 
 export interface HomeAutomationMigrationReadyRuleInput {
@@ -145,6 +150,7 @@ export interface HomeAutomationMigrationRetryRuleWorkflowInput {
   readonly artifactContentHash?: string;
   readonly compileResultId?: string;
   readonly dryRunResultId?: string;
+  readonly simulationReceipt?: HomeAutomationMigrationSimulationReceipt;
 }
 
 export interface HomeAutomationMigrationServiceOptions {
@@ -338,7 +344,8 @@ export class HomeAutomationMigrationService {
     if (workflow?.status !== "needs_attention") return undefined;
     if (workflow.failureReason === "compile_failed" || workflow.failureReason === "compile_unavailable") {
       if (input.proposalId === undefined || input.candidateProposalRevision === undefined || input.candidateContentHash === undefined || input.artifactId !== undefined || input.artifactRevision !== undefined
-        || input.artifactContentHash !== undefined || input.compileResultId !== undefined || input.dryRunResultId !== undefined) return undefined;
+        || input.artifactContentHash !== undefined || input.compileResultId !== undefined || input.dryRunResultId !== undefined
+        || input.simulationReceipt !== undefined) return undefined;
       return this.transitionRuleWorkflow({
         migrationId: input.migrationId,
         ruleRef: input.ruleRef,
@@ -352,7 +359,7 @@ export class HomeAutomationMigrationService {
     if (workflow.failureReason === "simulation_failed" || workflow.failureReason === "simulation_unavailable") {
       if (input.proposalId !== undefined || input.candidateProposalRevision !== undefined || input.candidateContentHash !== undefined
         || input.artifactId === undefined || input.artifactRevision === undefined || input.artifactContentHash === undefined
-        || input.compileResultId === undefined || input.dryRunResultId === undefined) return undefined;
+        || input.compileResultId === undefined || input.dryRunResultId === undefined || input.simulationReceipt === undefined) return undefined;
       return this.transitionRuleWorkflow({
         migrationId: input.migrationId,
         ruleRef: input.ruleRef,
@@ -363,6 +370,7 @@ export class HomeAutomationMigrationService {
         artifactContentHash: input.artifactContentHash,
         compileResultId: input.compileResultId,
         dryRunResultId: input.dryRunResultId,
+        simulationReceipt: input.simulationReceipt,
       });
     }
     return undefined;
@@ -700,7 +708,7 @@ function isStrictRetryRuleWorkflowInput(value: unknown): value is HomeAutomation
   try {
     if (!isRecord(value) || !hasOnlyKeys(value, [
       "migrationId", "ruleRef", "proposalId", "candidateProposalRevision", "candidateContentHash", "artifactId", "artifactRevision",
-      "artifactContentHash", "compileResultId", "dryRunResultId",
+      "artifactContentHash", "compileResultId", "dryRunResultId", "simulationReceipt",
     ]) || !isMigrationId(value.migrationId)
       || !isBoundedText(value.ruleRef, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)) return false;
     if ((value.proposalId === undefined) !== (value.candidateProposalRevision === undefined)
@@ -712,6 +720,9 @@ function isStrictRetryRuleWorkflowInput(value: unknown): value is HomeAutomation
       || value.artifactContentHash !== undefined && !isDigest(value.artifactContentHash)
       || value.compileResultId !== undefined && !isDigest(value.compileResultId)
       || value.dryRunResultId !== undefined && !isDigest(value.dryRunResultId)) return false;
+    if (value.simulationReceipt !== undefined) {
+      try { parseHomeAutomationMigrationSimulationReceipt(value.simulationReceipt); } catch { return false; }
+    }
     return true;
   } catch {
     return false;

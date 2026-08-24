@@ -1,6 +1,26 @@
 import { createHash } from "node:crypto";
 
+import type { ForeignRuleArtifactCandidate } from "../artifact/foreign-rule-artifact-candidate.js";
 import { parseArtifactContent, type ArtifactContent } from "../artifact/neutral-artifact.js";
+import {
+  HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS,
+  computeHomeAutomationMigrationSimulationDigest,
+  type HomeAutomationMigrationDualRunInput,
+  type HomeAutomationMigrationDualRunResult,
+  type HomeAutomationMigrationExistingRuleAction,
+  type HomeAutomationMigrationExistingRuleInterference,
+  type HomeAutomationMigrationExistingRuleSummary,
+  type HomeAutomationMigrationExpectedAction,
+  type HomeAutomationMigrationExpectedTrigger,
+  type HomeAutomationMigrationSimulationEvent,
+  type HomeAutomationMigrationSimulationPreparation,
+  type HomeAutomationMigrationSimulationReason as HomeAutomationMigrationDualRunReason,
+  type HomeAutomationMigrationSimulationScalar,
+  type HomeAutomationMigrationSimulationSourceCut,
+  type HomeAutomationMigrationSimulationValue,
+  type HomeAutomationMigrationSimulationReceipt,
+  parseHomeAutomationMigrationSimulationReceipt,
+} from "./home-automation-migration-simulation.js";
 
 /** The narrow immutable input accepted by the migration projection. */
 export interface HomeAutomationMigrationSimulatorInput {
@@ -139,6 +159,10 @@ export class HomeAutomationMigrationSimulator {
   project(input: HomeAutomationMigrationSimulatorInput): HomeAutomationMigrationSimulationResult {
     return projectHomeAutomationMigration(input);
   }
+
+  simulate(input: HomeAutomationMigrationDualRunInput): HomeAutomationMigrationDualRunResult {
+    return simulateHomeAutomationMigrationDualRun(input);
+  }
 }
 
 export const simulateHomeAutomationMigration = projectHomeAutomationMigration;
@@ -147,6 +171,310 @@ export const simulateHomeAutomationMigration = projectHomeAutomationMigration;
 export function computeHomeAutomationMigrationCandidateContentHash(content: unknown): string {
   const parsed = parseArtifactContent(content);
   return digestCanonical(parsed);
+}
+
+/**
+ * Runs one bounded, neutral dual-run over supplied event samples. The old
+ * rules are represented only by summaries; no provider payload, bridge, or
+ * write-capable dependency can enter this function.
+ */
+export function simulateHomeAutomationMigrationDualRun(
+  input: HomeAutomationMigrationDualRunInput,
+): HomeAutomationMigrationDualRunResult {
+  try {
+    if (!isRecord(input) || !hasExactKeys(input, ["sourceCut", "candidate", "preparation", "eventSamples", "existingRuleSummaries"])) {
+      return dualRunNeeds("invalid_input");
+    }
+    const sourceCut = parseSimulationSourceCut(input.sourceCut);
+    if (sourceCut === undefined) return dualRunNeeds("invalid_input");
+    const candidate = parseDualRunCandidate(input.candidate);
+    if (candidate === undefined) return dualRunNeeds("unsupported");
+    const preparation = parseDualRunPreparation(input.preparation);
+    if (preparation === undefined) return dualRunNeeds("invalid_input");
+    if (candidate.sourceFingerprint !== sourceCut.configFingerprint) return dualRunNeeds("stale");
+
+    const eventSamples = parseSimulationEvents(input.eventSamples);
+    if (eventSamples === undefined) return dualRunNeeds("invalid_input");
+    if (eventSamples.length > HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxEventSamples) {
+      return dualRunNeeds("over_limit");
+    }
+    const existingRuleSummaries = parseExistingRuleSummaries(input.existingRuleSummaries);
+    if (existingRuleSummaries === undefined) return dualRunNeeds("invalid_input");
+    if (existingRuleSummaries.length > HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxExistingRuleSummaries) {
+      return dualRunNeeds("over_limit");
+    }
+
+    const expectedTriggers: HomeAutomationMigrationExpectedTrigger[] = [];
+    const expectedActions: HomeAutomationMigrationExpectedAction[] = [];
+    const existingRuleInterference: HomeAutomationMigrationExistingRuleInterference[] = [];
+    const deviceTargetIds = candidate.content.actions.flatMap((action) => action.kind === "notify_local" ? [] : [action.target.hwCapabilityId]);
+
+    for (const event of eventSamples) {
+      const triggered = eventMatchesTrigger(candidate.content.trigger, event);
+      const conditions = evaluateConditions(candidate.content.conditions, event);
+      if (conditions === "ambiguous") return dualRunNeeds("ambiguous");
+      const shouldRun = triggered && conditions === true;
+      expectedTriggers.push(Object.freeze({
+        eventId: event.eventId,
+        triggered,
+        conditionsSatisfied: conditions,
+      }));
+      if (shouldRun) {
+        candidate.content.actions.forEach((action, index) => {
+          expectedActions.push(expectedAction(event.eventId, index + 1, action));
+        });
+      }
+
+      for (const existing of existingRuleSummaries) {
+        if (!shouldRun || !existing.enabled || !existingRuleMatchesTrigger(existing.trigger, event)) continue;
+        const sharedCapabilityIds = [...new Set(existing.actions.flatMap((action) => action.kind === "notify_local" ? [] : [action.targetCapabilityId]))]
+          .filter((capabilityId) => deviceTargetIds.includes(capabilityId));
+        existingRuleInterference.push(Object.freeze({
+          eventId: event.eventId,
+          ruleRef: existing.ruleRef,
+          reason: sharedCapabilityIds.length > 0 ? "same_trigger_and_shared_target" as const : "same_trigger" as const,
+          sharedCapabilityIds: Object.freeze(sharedCapabilityIds),
+          existingActionKinds: Object.freeze(existing.actions.map((action) => action.kind)),
+        }));
+      }
+    }
+
+    if (expectedActions.length > HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxExpectedActions
+      || existingRuleInterference.length > HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxInterferenceRecords) {
+      return dualRunNeeds("over_limit");
+    }
+    const candidateContentHash = digestCanonical(candidate.content);
+    const unsignedReceipt = {
+      schemaVersion: "1" as const,
+      kind: "home-automation-migration-simulation" as const,
+      sourceCut,
+      sourceFingerprint: candidate.sourceFingerprint,
+      candidateContentHash,
+      preparation,
+      expectedTriggers: Object.freeze(expectedTriggers),
+      expectedActions: Object.freeze(expectedActions),
+      existingRuleInterference: Object.freeze(existingRuleInterference),
+      simulationDigest: `sha256:${"0".repeat(64)}`,
+      writesPerformed: false as const,
+    };
+    const receipt = parseHomeAutomationMigrationSimulationReceipt({
+      ...unsignedReceipt,
+      simulationDigest: computeHomeAutomationMigrationSimulationDigest(unsignedReceipt),
+    });
+    return Object.freeze({ status: "simulated" as const, receipt, writesPerformed: false as const });
+  } catch {
+    return dualRunNeeds("invalid_input");
+  }
+}
+
+function parseDualRunPreparation(value: unknown): HomeAutomationMigrationSimulationPreparation | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId",
+  ]) || !isBoundedId(value.artifactId, 200)
+    || !isPositiveSafeInteger(value.artifactRevision)
+    || !isDigest(value.artifactContentHash)
+    || !isDigest(value.compileResultId)
+    || !isDigest(value.dryRunResultId)) return undefined;
+  return Object.freeze({
+    artifactId: value.artifactId,
+    artifactRevision: value.artifactRevision,
+    artifactContentHash: value.artifactContentHash,
+    compileResultId: value.compileResultId,
+    dryRunResultId: value.dryRunResultId,
+  });
+}
+
+function parseSimulationSourceCut(value: unknown): HomeAutomationMigrationSimulationSourceCut | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ["bridgeId", "epochId", "lastSeq", "configFingerprint"])
+    || !isBoundedId(value.bridgeId, 200)
+    || !isBoundedId(value.epochId, 256)
+    || !isPositiveSafeInteger(value.lastSeq)
+    || !isDigest(value.configFingerprint)) return undefined;
+  return Object.freeze({
+    bridgeId: value.bridgeId,
+    epochId: value.epochId,
+    lastSeq: value.lastSeq,
+    configFingerprint: value.configFingerprint,
+  });
+}
+
+function parseDualRunCandidate(value: unknown): ForeignRuleArtifactCandidate | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ["status", "sourceFingerprint", "ruleRef", "title", "content"])
+    || value.status !== "candidate"
+    || !isDigest(value.sourceFingerprint)
+    || !isBoundedId(value.ruleRef, 200)
+    || !isBoundedText(value.title, 120)) return undefined;
+  let content: ArtifactContent;
+  try { content = parseArtifactContent(value.content); } catch { return undefined; }
+  const deviceTargetIds = content.actions.flatMap((action) => action.kind === "notify_local" ? [] : [action.target.hwCapabilityId]);
+  if (content.conditions.length > 8 || content.actions.length > 4 || new Set(deviceTargetIds).size > 1) return undefined;
+  return Object.freeze({
+    status: "candidate" as const,
+    sourceFingerprint: value.sourceFingerprint,
+    ruleRef: value.ruleRef,
+    title: value.title,
+    content,
+  });
+}
+
+function parseSimulationEvents(value: unknown): readonly HomeAutomationMigrationSimulationEvent[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  if (value.length > HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxEventSamples) return value as never;
+  const ids = new Set<string>();
+  const events = value.map((item) => {
+    if (!isRecord(item) || !isBoundedId(item.eventId, HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxEventIdLength)
+      || ids.has(item.eventId) || !isIsoTimestamp(item.occurredAt) || !Array.isArray(item.values)
+      || item.values.length > HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxValuesPerEvent) return undefined;
+    ids.add(item.eventId);
+    const values = parseSimulationValues(item.values);
+    if (values === undefined) return undefined;
+    if (item.kind === "capability_changed") {
+      return !hasExactKeys(item, ["eventId", "kind", "occurredAt", "capabilityId", "values"])
+        || !isBoundedId(item.capabilityId, HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxCapabilityIdLength)
+        ? undefined
+        : Object.freeze({ eventId: item.eventId, kind: "capability_changed" as const, occurredAt: item.occurredAt, capabilityId: item.capabilityId, values });
+    }
+    if (item.kind === "schedule") {
+      return !hasExactKeys(item, ["eventId", "kind", "occurredAt", "timezone", "daysOfWeek", "at", "values"])
+        || !isBoundedId(item.timezone, 128)
+        || !isScheduleDays(item.daysOfWeek)
+        || !isScheduleTime(item.at)
+        ? undefined
+        : Object.freeze({ eventId: item.eventId, kind: "schedule" as const, occurredAt: item.occurredAt, timezone: item.timezone, daysOfWeek: Object.freeze([...item.daysOfWeek]), at: item.at, values });
+    }
+    return undefined;
+  });
+  return events.some((event) => event === undefined) ? undefined : Object.freeze(events as HomeAutomationMigrationSimulationEvent[]);
+}
+
+function parseSimulationValues(value: unknown): readonly HomeAutomationMigrationSimulationValue[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = new Set<string>();
+  const values = value.map((item) => {
+    if (!isRecord(item) || !hasExactKeys(item, ["capabilityId", "value"])
+      || !isBoundedId(item.capabilityId, HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxCapabilityIdLength)
+      || ids.has(item.capabilityId) || !isScalar(item.value)) return undefined;
+    ids.add(item.capabilityId);
+    return Object.freeze({ capabilityId: item.capabilityId, value: item.value });
+  });
+  return values.some((item) => item === undefined) ? undefined : Object.freeze(values as HomeAutomationMigrationSimulationValue[]);
+}
+
+function parseExistingRuleSummaries(value: unknown): readonly HomeAutomationMigrationExistingRuleSummary[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs = new Set<string>();
+  const summaries = value.map((item) => {
+    if (!isRecord(item) || !hasExactKeys(item, ["ruleRef", "enabled", "trigger", "actions"])
+      || !isBoundedId(item.ruleRef, 200) || refs.has(item.ruleRef) || typeof item.enabled !== "boolean"
+      || !Array.isArray(item.actions) || item.actions.length === 0 || item.actions.length > 4) return undefined;
+    refs.add(item.ruleRef);
+    const trigger = parseExistingTrigger(item.trigger);
+    const actions = parseExistingActions(item.actions);
+    if (trigger === undefined || actions === undefined) return undefined;
+    return Object.freeze({ ruleRef: item.ruleRef, enabled: item.enabled, trigger, actions });
+  });
+  return summaries.some((item) => item === undefined) ? undefined : Object.freeze(summaries as HomeAutomationMigrationExistingRuleSummary[]);
+}
+
+function parseExistingTrigger(value: unknown): HomeAutomationMigrationExistingRuleSummary["trigger"] | undefined {
+  if (!isRecord(value) || typeof value.kind !== "string") return undefined;
+  if (value.kind === "capability_changed") {
+    return hasExactKeys(value, ["kind", "sourceCapabilityId"]) && isBoundedId(value.sourceCapabilityId, HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxCapabilityIdLength)
+      ? Object.freeze({ kind: "capability_changed" as const, sourceCapabilityId: value.sourceCapabilityId })
+      : undefined;
+  }
+  if (value.kind === "schedule") {
+    return hasExactKeys(value, ["kind", "timezone", "daysOfWeek", "at"])
+      && isBoundedId(value.timezone, 128) && isScheduleDays(value.daysOfWeek) && isScheduleTime(value.at)
+      ? Object.freeze({ kind: "schedule" as const, timezone: value.timezone, daysOfWeek: Object.freeze([...value.daysOfWeek]), at: value.at })
+      : undefined;
+  }
+  return undefined;
+}
+
+function parseExistingActions(value: readonly unknown[]): readonly HomeAutomationMigrationExistingRuleAction[] | undefined {
+  const actions = value.map((item) => {
+    if (!isRecord(item) || typeof item.kind !== "string") return undefined;
+    if (item.kind === "notify_local") {
+      return hasExactKeys(item, ["kind", "message"]) && isBoundedText(item.message, HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxMessageLength)
+        ? Object.freeze({ kind: "notify_local" as const, message: item.message })
+        : undefined;
+    }
+    if ((item.kind !== "set_boolean" && item.kind !== "set_level")
+      || !hasExactKeys(item, ["kind", "targetCapabilityId", "value"])
+      || !isBoundedId(item.targetCapabilityId, HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxCapabilityIdLength)) return undefined;
+    if (item.kind === "set_boolean" && typeof item.value === "boolean") {
+      return Object.freeze({ kind: "set_boolean" as const, targetCapabilityId: item.targetCapabilityId, value: item.value });
+    }
+    if (item.kind === "set_level" && typeof item.value === "number" && Number.isFinite(item.value) && item.value >= 0 && item.value <= 1) {
+      return Object.freeze({ kind: "set_level" as const, targetCapabilityId: item.targetCapabilityId, value: item.value });
+    }
+    return undefined;
+  });
+  return actions.some((item) => item === undefined) ? undefined : Object.freeze(actions as HomeAutomationMigrationExistingRuleAction[]);
+}
+
+function eventMatchesTrigger(
+  trigger: ArtifactContent["trigger"],
+  event: HomeAutomationMigrationSimulationEvent,
+): boolean {
+  if (trigger.kind === "capability_changed") {
+    return event.kind === "capability_changed" && trigger.source.hwCapabilityId === event.capabilityId;
+  }
+  return event.kind === "schedule"
+    && trigger.timezone === event.timezone
+    && trigger.at === event.at
+    && sameNumberArray(trigger.daysOfWeek, event.daysOfWeek);
+}
+
+function existingRuleMatchesTrigger(
+  trigger: HomeAutomationMigrationExistingRuleSummary["trigger"],
+  event: HomeAutomationMigrationSimulationEvent,
+): boolean {
+  if (trigger.kind === "capability_changed") {
+    return event.kind === "capability_changed" && trigger.sourceCapabilityId === event.capabilityId;
+  }
+  return event.kind === "schedule"
+    && trigger.timezone === event.timezone
+    && trigger.at === event.at
+    && sameNumberArray(trigger.daysOfWeek, event.daysOfWeek);
+}
+
+function evaluateConditions(
+  conditions: ArtifactContent["conditions"],
+  event: HomeAutomationMigrationSimulationEvent,
+): true | false | "ambiguous" {
+  for (const condition of conditions) {
+    const observed = event.values.find((value) => value.capabilityId === condition.source.hwCapabilityId);
+    if (observed === undefined) return "ambiguous";
+    if (!compareCondition(condition.operator, observed.value, condition.value)) return false;
+  }
+  return true;
+}
+
+function compareCondition(
+  operator: "equals" | "not_equals" | "greater_than" | "less_than",
+  observed: HomeAutomationMigrationSimulationScalar,
+  expected: HomeAutomationMigrationSimulationScalar,
+): boolean {
+  if (operator === "equals") return observed === expected;
+  if (operator === "not_equals") return observed !== expected;
+  if (typeof observed !== "number" || typeof expected !== "number") return false;
+  return operator === "greater_than" ? observed > expected : observed < expected;
+}
+
+function expectedAction(
+  eventId: string,
+  actionOrder: number,
+  action: ArtifactContent["actions"][number],
+): HomeAutomationMigrationExpectedAction {
+  if (action.kind === "notify_local") return Object.freeze({ eventId, actionOrder, kind: "notify_local" as const, message: action.message });
+  if (action.kind === "set_boolean") return Object.freeze({ eventId, actionOrder, kind: "set_boolean" as const, targetCapabilityId: action.target.hwCapabilityId, value: action.value });
+  return Object.freeze({ eventId, actionOrder, kind: "set_level" as const, targetCapabilityId: action.target.hwCapabilityId, value: action.value });
+}
+
+function dualRunNeeds(reason: HomeAutomationMigrationDualRunReason): HomeAutomationMigrationDualRunResult {
+  return Object.freeze({ status: "needs_attention" as const, reason, writesPerformed: false as const });
 }
 
 interface ParsedInput {
@@ -415,6 +743,35 @@ function isDigest(value: unknown): value is string {
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function isScheduleDays(value: unknown): value is readonly number[] {
+  return Array.isArray(value)
+    && value.length >= 1
+    && value.length <= 7
+    && value.every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 6)
+    && new Set(value).size === value.length;
+}
+
+function isScheduleTime(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value);
+}
+
+function isScalar(value: unknown): value is HomeAutomationMigrationSimulationScalar {
+  return value === null
+    || typeof value === "string" && Buffer.byteLength(value, "utf8") <= HOME_AUTOMATION_MIGRATION_SIMULATION_LIMITS.maxScalarStringBytes
+    || typeof value === "boolean"
+    || typeof value === "number" && Number.isFinite(value);
+}
+
+function sameNumberArray(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

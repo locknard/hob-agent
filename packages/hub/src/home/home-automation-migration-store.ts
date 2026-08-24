@@ -36,11 +36,16 @@ import {
   type HomeAutomationMigrationSelectionRecordStatus,
   type HomeAutomationMigrationSelectionStorePort,
 } from "./home-automation-migration-selection.js";
+import {
+  parseHomeAutomationMigrationSimulationReceipt,
+  type HomeAutomationMigrationSimulationReceipt,
+} from "./home-automation-migration-simulation.js";
 
 export interface HomeAutomationMigrationStore extends HomeAutomationMigrationSelectionStorePort {
   discover(input: HomeAutomationMigrationDiscovery): HomeAutomationMigrationStoreBeginResult;
   assess(input: HomeAutomationMigrationAssessmentTransition): boolean;
   transitionRuleWorkflow(input: HomeAutomationMigrationRuleWorkflowTransition): boolean;
+  getSimulationReceipt(migrationId: string, ruleRef: string): HomeAutomationMigrationSimulationReceipt | undefined;
   get(migrationId: string): HomeAutomationMigrationAssessment | undefined;
   list(): readonly HomeAutomationMigrationAssessment[];
   replay(input: { readonly idempotencyKey: string; readonly inputDigest: string }): HomeAutomationMigrationAssessment | undefined;
@@ -58,6 +63,7 @@ export interface HomeAutomationMigrationStoreBeginResult {
 export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigrationStore {
   private readonly records = new Map<string, HomeAutomationMigrationAssessment>();
   private readonly selections = new Map<string, HomeAutomationMigrationSelectionRecord>();
+  private readonly simulationReceipts = new Map<string, HomeAutomationMigrationSimulationReceipt>();
   private closed = false;
 
   discover(input: HomeAutomationMigrationDiscovery): HomeAutomationMigrationStoreBeginResult {
@@ -114,10 +120,23 @@ export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigra
     const currentRule = current.rules[ruleIndex]!;
     if (currentRule.disposition !== "eligible" || currentRule.workflow === undefined
       || currentRule.workflow.status !== input.from) return false;
+    if (input.to === "simulated" && !simulationReceiptMatchesAssessment(input.simulationReceipt, current, currentRule, input)) return false;
+    if (input.to === "ready" && !simulationReceiptMatchesAssessment(this.getSimulationReceipt(input.migrationId, input.ruleRef), current, currentRule, input)) return false;
     const nextWorkflow = buildWorkflowTransition(currentRule.workflow, input);
     const rules = current.rules.map((rule, index) => index === ruleIndex ? { ...rule, workflow: nextWorkflow } : { ...rule });
     this.records.set(current.migrationId, { ...current, rules });
+    if (input.to === "simulated") {
+      this.simulationReceipts.set(simulationReceiptKey(input.migrationId, input.ruleRef), cloneSimulationReceipt(input.simulationReceipt!));
+    }
     return true;
+  }
+
+  getSimulationReceipt(migrationId: string, ruleRef: string): HomeAutomationMigrationSimulationReceipt | undefined {
+    this.assertOpen();
+    validateId(migrationId, "migration id");
+    validateRuleRef(ruleRef);
+    const receipt = this.simulationReceipts.get(simulationReceiptKey(migrationId, ruleRef));
+    return receipt === undefined ? undefined : cloneSimulationReceipt(receipt);
   }
 
   issueSelection(input: HomeAutomationMigrationSelectionIssue): HomeAutomationMigrationSelectionIssueResult {
@@ -452,6 +471,14 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
         this.db.exec("ROLLBACK");
         return false;
       }
+      const existingReceipt = input.to === "ready"
+        ? this.readSimulationReceipt(input.migrationId, input.ruleRef)
+        : undefined;
+      if (input.to === "simulated" && !simulationReceiptMatchesAssessment(input.simulationReceipt, current, currentRule, input)
+        || input.to === "ready" && !simulationReceiptMatchesAssessment(existingReceipt, current, currentRule, input)) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
       const nextWorkflow = buildWorkflowTransition(currentRule.workflow, input);
       const nextRules = current.rules.map((rule, index) => index === ruleIndex ? { ...rule, workflow: nextWorkflow } : { ...rule });
       const result = this.db.prepare(`UPDATE home_automation_migrations
@@ -461,6 +488,13 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
         this.db.exec("ROLLBACK");
         return false;
       }
+      if (input.to === "simulated") {
+        this.db.prepare(`INSERT INTO home_automation_migration_simulation_receipts
+          (migration_id, rule_ref, receipt_json)
+          VALUES (?, ?, ?)
+          ON CONFLICT (migration_id, rule_ref) DO UPDATE SET receipt_json = excluded.receipt_json`)
+          .run(input.migrationId, input.ruleRef, JSON.stringify(input.simulationReceipt));
+      }
       this.db.exec("COMMIT");
       this.ensurePrivateFiles();
       return true;
@@ -468,6 +502,13 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
       this.rollback();
       throw error;
     }
+  }
+
+  getSimulationReceipt(migrationId: string, ruleRef: string): HomeAutomationMigrationSimulationReceipt | undefined {
+    this.assertOpen();
+    validateId(migrationId, "migration id");
+    validateRuleRef(ruleRef);
+    return this.readSimulationReceipt(migrationId, ruleRef);
   }
 
   issueSelection(input: HomeAutomationMigrationSelectionIssue): HomeAutomationMigrationSelectionIssueResult {
@@ -774,6 +815,24 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
     return row === undefined ? undefined : fromRow(row);
   }
 
+  private readSimulationReceipt(
+    migrationId: string,
+    ruleRef: string,
+  ): HomeAutomationMigrationSimulationReceipt | undefined {
+    const row = this.db.prepare(`SELECT receipt_json
+      FROM home_automation_migration_simulation_receipts
+      WHERE migration_id = ? AND rule_ref = ?`).get(migrationId, ruleRef) as Row | undefined;
+    if (row === undefined) return undefined;
+    if (typeof row.receipt_json !== "string") throw new Error("Stored home automation simulation receipt is corrupt");
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.receipt_json); } catch { throw new Error("Stored home automation simulation receipt is corrupt"); }
+    try {
+      return parseHomeAutomationMigrationSimulationReceipt(parsed);
+    } catch {
+      throw new Error("Stored home automation simulation receipt is corrupt");
+    }
+  }
+
   private casSelectionUpdate(
     current: HomeAutomationMigrationSelectionRecord,
     next: {
@@ -823,6 +882,14 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
       ) STRICT;
       CREATE INDEX IF NOT EXISTS home_automation_migrations_status
         ON home_automation_migrations (status, created_at ASC, migration_id ASC);
+      CREATE TABLE IF NOT EXISTS home_automation_migration_simulation_receipts (
+        migration_id TEXT NOT NULL,
+        rule_ref TEXT NOT NULL,
+        receipt_json TEXT NOT NULL,
+        PRIMARY KEY (migration_id, rule_ref),
+        FOREIGN KEY (migration_id) REFERENCES home_automation_migrations (migration_id),
+        CHECK (length(rule_ref) BETWEEN 1 AND 200)
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS home_automation_migration_selections (
         selection_id TEXT PRIMARY KEY,
         migration_id TEXT NOT NULL,
@@ -1161,7 +1228,7 @@ function workflowEqual(left: HomeAutomationMigrationRuleWorkflow, right: HomeAut
 function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTransition): void {
   const allowedKeys = [
     "migrationId", "ruleRef", "from", "to", "transitionedAt", "proposalId", "candidateProposalRevision",
-    "candidateContentHash", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "failureReason",
+    "candidateContentHash", "artifactId", "artifactRevision", "artifactContentHash", "compileResultId", "dryRunResultId", "simulationReceipt", "failureReason",
     "reviewProposalRevision", "approvedProposalRevision", "switchOperationId", "switchActor", "sourceWasEnabled",
     "deploymentId", "deploymentTarget", "deploymentConfigFingerprint", "rollbackOperationId", "rollbackActor",
   ] as const;
@@ -1199,6 +1266,9 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
   if (input.dryRunResultId !== undefined && !isDigest(input.dryRunResultId)) {
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
+  if (input.simulationReceipt !== undefined) {
+    try { parseHomeAutomationMigrationSimulationReceipt(input.simulationReceipt); } catch { throw new TypeError("Home automation migration rule workflow transition is invalid"); }
+  }
   if (input.approvedProposalRevision !== undefined && !isPositiveSafeInteger(input.approvedProposalRevision)) {
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
@@ -1227,6 +1297,10 @@ function validateWorkflowTransition(input: HomeAutomationMigrationRuleWorkflowTr
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
   if (input.failureReason !== undefined && !isWorkflowFailureReason(input.failureReason)) {
+    throw new TypeError("Home automation migration rule workflow transition is invalid");
+  }
+  if (input.to === "simulated" && input.simulationReceipt === undefined
+    || input.to !== "simulated" && input.simulationReceipt !== undefined) {
     throw new TypeError("Home automation migration rule workflow transition is invalid");
   }
   if (input.to === "translated") {
@@ -1491,6 +1565,46 @@ function clearWorkflowFailure(value: HomeAutomationMigrationRuleWorkflow): HomeA
   delete next.failedAt;
   delete next.failureReason;
   return next;
+}
+
+function simulationReceiptMatchesAssessment(
+  receipt: HomeAutomationMigrationSimulationReceipt | undefined,
+  assessment: HomeAutomationMigrationAssessment,
+  rule: HomeAutomationMigrationRuleAssessment,
+  transition: HomeAutomationMigrationRuleWorkflowTransition,
+): boolean {
+  if (receipt === undefined || rule.workflow?.candidateContentHash === undefined || rule.sourceFingerprint === undefined) return false;
+  try {
+    const parsed = parseHomeAutomationMigrationSimulationReceipt(receipt);
+    const workflow = rule.workflow;
+    const artifactId = transition.to === "simulated" ? transition.artifactId : workflow.artifactId;
+    const artifactRevision = transition.to === "simulated" ? transition.artifactRevision : workflow.artifactRevision;
+    const artifactContentHash = transition.to === "simulated" ? transition.artifactContentHash : workflow.artifactContentHash;
+    const compileResultId = transition.to === "simulated" ? transition.compileResultId : workflow.compileResultId;
+    const dryRunResultId = transition.to === "simulated" ? transition.dryRunResultId : workflow.dryRunResultId;
+    return parsed.writesPerformed === false
+      && parsed.sourceCut.bridgeId === assessment.sourceBridgeId
+      && parsed.sourceCut.epochId === assessment.sourceEpochId
+      && parsed.sourceCut.lastSeq === assessment.sourceLastSeq
+      && parsed.sourceCut.configFingerprint === rule.sourceFingerprint
+      && parsed.sourceFingerprint === rule.sourceFingerprint
+      && parsed.candidateContentHash === workflow.candidateContentHash
+      && parsed.preparation.artifactId === artifactId
+      && parsed.preparation.artifactRevision === artifactRevision
+      && parsed.preparation.artifactContentHash === artifactContentHash
+      && parsed.preparation.compileResultId === compileResultId
+      && parsed.preparation.dryRunResultId === dryRunResultId;
+  } catch {
+    return false;
+  }
+}
+
+function simulationReceiptKey(migrationId: string, ruleRef: string): string {
+  return `${migrationId}\u0000${ruleRef}`;
+}
+
+function cloneSimulationReceipt(value: HomeAutomationMigrationSimulationReceipt): HomeAutomationMigrationSimulationReceipt {
+  return parseHomeAutomationMigrationSimulationReceipt(JSON.parse(JSON.stringify(value)));
 }
 
 function workflowLastTimestamp(value: HomeAutomationMigrationRuleWorkflow): string {
@@ -1920,6 +2034,13 @@ function compareAssessment(left: HomeAutomationMigrationAssessment, right: HomeA
 
 function validateId(value: unknown, label: string): string {
   if (!isMigrationId(value)) throw new TypeError(`Invalid home automation migration ${label}`);
+  return value;
+}
+
+function validateRuleRef(value: unknown): string {
+  if (!isBoundedText(value, HOME_AUTOMATION_MIGRATION_LIMITS.maxRuleRefLength)) {
+    throw new TypeError("Invalid home automation migration rule ref");
+  }
   return value;
 }
 
