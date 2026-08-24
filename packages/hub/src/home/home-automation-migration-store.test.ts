@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   InMemoryHomeAutomationMigrationStore,
   SqliteHomeAutomationMigrationStore,
+  type HomeAutomationMigrationStore,
   type HomeAutomationMigrationRestoreFailedSwitchCommand,
 } from "./home-automation-migration-store.js";
 import { computeHomeAutomationMigrationSimulationDigest } from "./home-automation-migration-simulation.js";
@@ -62,6 +63,78 @@ function simulationReceipt(
   return { ...unsigned, simulationDigest: computeHomeAutomationMigrationSimulationDigest(unsigned) };
 }
 
+function prepareSwitchingWorkflow(store: HomeAutomationMigrationStore): void {
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const candidateContentHash = `sha256:${"b".repeat(64)}`;
+  const rule = {
+    ruleRef: "ha-rule-1",
+    name: "晚间灯光",
+    enabled: true,
+    updatedAt: createdAt,
+    triggerClass: "state" as const,
+    conditionClass: "flat_and" as const,
+    actionClass: "reversible" as const,
+    sourceFingerprint,
+    disposition: "eligible" as const,
+    workflow: { status: "assessed" as const, sourceFingerprint, assessedAt: createdAt },
+  };
+  store.discover({ ...discovered, analysisMode: "trusted_neutral", rules: [rule] });
+  assert.equal(store.assess({
+    migrationId: discovered.migrationId,
+    status: "assessed",
+    assessedAt: createdAt,
+    rules: [rule],
+  }), true);
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "assessed",
+    to: "translated",
+    transitionedAt: createdAt,
+    proposalId: "proposal-close-guard",
+    candidateProposalRevision: 1,
+    candidateContentHash,
+  }), true);
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "translated",
+    to: "simulated",
+    transitionedAt: createdAt,
+    artifactId: "artifact-close-guard",
+    artifactRevision: 1,
+    artifactContentHash: `sha256:${"c".repeat(64)}`,
+    compileResultId: `sha256:${"d".repeat(64)}`,
+    dryRunResultId: `sha256:${"e".repeat(64)}`,
+    simulationReceipt: simulationReceipt(sourceFingerprint, candidateContentHash, {
+      artifactId: "artifact-close-guard",
+      artifactRevision: 1,
+      artifactContentHash: `sha256:${"c".repeat(64)}`,
+      compileResultId: `sha256:${"d".repeat(64)}`,
+      dryRunResultId: `sha256:${"e".repeat(64)}`,
+    }),
+  }), true);
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "simulated",
+    to: "ready",
+    transitionedAt: createdAt,
+    reviewProposalRevision: 2,
+  }), true);
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "ready",
+    to: "switching",
+    transitionedAt: createdAt,
+    approvedProposalRevision: 3,
+    switchOperationId: "f".repeat(32),
+    switchActor: "member:alice",
+    sourceWasEnabled: true,
+  }), true);
+}
+
 test("in-memory store preserves discovered to assessed transitions and recovery", () => {
   const store = new InMemoryHomeAutomationMigrationStore();
   assert.equal(store.discover(discovered).outcome, "created");
@@ -82,6 +155,82 @@ test("in-memory store preserves discovered to assessed transitions and recovery"
   assert.equal(store.get(discovered.migrationId)?.status, "assessed");
   assert.equal(store.closeAssessment({ migrationId: discovered.migrationId, closedAt: createdAt, reason: "household_closed" }), true);
   assert.equal(store.get(discovered.migrationId)?.status, "closed");
+});
+
+test("close fails closed while a rule workflow is active and preserves both states", () => {
+  const store = new InMemoryHomeAutomationMigrationStore();
+  prepareSwitchingWorkflow(store);
+
+  const assertCloseBlocked = (workflowStatus: "switching" | "verified" | "rolling_back" | "needs_attention"): void => {
+    const beforeClose = store.get(discovered.migrationId);
+    assert.equal(beforeClose?.status, "assessed");
+    assert.equal(beforeClose?.rules[0]?.workflow?.status, workflowStatus);
+    assert.equal(store.closeAssessment({
+      migrationId: discovered.migrationId,
+      closedAt: createdAt,
+      reason: "household_closed",
+    }), false);
+    assert.deepEqual(store.get(discovered.migrationId), beforeClose);
+  };
+
+  assertCloseBlocked("switching");
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "switching",
+    to: "verified",
+    transitionedAt: createdAt,
+    expectedSwitchOperationId: "f".repeat(32),
+    deploymentId: "deployment-close-guard",
+    deploymentTarget: "home-assistant",
+    deploymentConfigFingerprint: `sha256:${"f".repeat(64)}`,
+  }), true);
+  assertCloseBlocked("verified");
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "verified",
+    to: "rolling_back",
+    transitionedAt: createdAt,
+    rollbackOperationId: "1".repeat(32),
+    rollbackActor: "member:alice",
+  }), true);
+  assertCloseBlocked("rolling_back");
+  assert.equal(store.transitionRuleWorkflow({
+    migrationId: discovered.migrationId,
+    ruleRef: "ha-rule-1",
+    from: "rolling_back",
+    to: "needs_attention",
+    transitionedAt: createdAt,
+    expectedRollbackOperationId: "1".repeat(32),
+    failureReason: "rollback_unknown",
+  }), true);
+  assertCloseBlocked("needs_attention");
+});
+
+test("sqlite close rolls back when a rule workflow is switching", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-home-automation-migration-close-guard-"));
+  const path = join(directory, "migrations.sqlite");
+  let store: SqliteHomeAutomationMigrationStore | undefined;
+  try {
+    store = new SqliteHomeAutomationMigrationStore({ path });
+    prepareSwitchingWorkflow(store);
+    const beforeClose = store.get(discovered.migrationId);
+    assert.equal(store.closeAssessment({
+      migrationId: discovered.migrationId,
+      closedAt: createdAt,
+      reason: "household_closed",
+    }), false);
+    assert.deepEqual(store.get(discovered.migrationId), beforeClose);
+    store.close();
+
+    const reopened = new SqliteHomeAutomationMigrationStore({ path });
+    assert.deepEqual(reopened.get(discovered.migrationId), beforeClose);
+    reopened.close();
+  } finally {
+    store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("in-memory store rejects an assessment status that disagrees with rule dispositions before writing", () => {

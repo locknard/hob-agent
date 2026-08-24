@@ -341,6 +341,7 @@ export class InMemoryHomeAutomationMigrationStore implements HomeAutomationMigra
     if (Date.parse(input.closedAt) < Date.parse(current.createdAt)) {
       throw new TypeError("Migration close time precedes discovery");
     }
+    if (hasActiveRuleWorkflow(current.rules)) return false;
     this.records.set(current.migrationId, {
       ...current,
       status: "closed",
@@ -856,6 +857,10 @@ export class SqliteHomeAutomationMigrationStore implements HomeAutomationMigrati
         return false;
       }
       if (Date.parse(input.closedAt) < Date.parse(current.createdAt)) throw new TypeError("Migration close time precedes discovery");
+      if (hasActiveRuleWorkflow(current.rules)) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
       const result = this.db.prepare(`UPDATE home_automation_migrations
         SET status = 'closed', closed_at = ?, closed_from = ?, close_reason = ?
         WHERE migration_id = ? AND status <> 'closed'`)
@@ -1251,6 +1256,13 @@ function assertStoredAggregateStatus(
 ): void {
   const hasNeedsAttention = rules.length === 0 || rules.some((rule) => rule.disposition === "needs_attention");
   if ((status === "needs_attention") !== hasNeedsAttention) throw new Error("Stored home automation migration is corrupt");
+}
+
+function hasActiveRuleWorkflow(rules: readonly HomeAutomationMigrationRuleAssessment[]): boolean {
+  return rules.some((rule) => rule.workflow?.status === "switching"
+    || rule.workflow?.status === "verified"
+    || rule.workflow?.status === "rolling_back"
+    || rule.workflow?.status === "needs_attention");
 }
 
 function validateDiscovery(input: HomeAutomationMigrationDiscovery): void {
