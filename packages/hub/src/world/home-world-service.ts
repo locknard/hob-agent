@@ -604,15 +604,10 @@ export class HomeWorldService extends Service {
   }
 
   /** Subscribes to each live bridge sync that reaches a materialized ready cut. */
-  subscribe(listener: HomeWorldBridgeReadyListener): () => void {
+  onBridgeReady(listener: HomeWorldBridgeReadyListener): () => void {
     if (this.stopTask !== undefined || typeof listener !== "function") return () => undefined;
     this.bridgeReadyListeners.add(listener);
     return () => { this.bridgeReadyListeners.delete(listener); };
-  }
-
-  /** Explicit bridge-ready alias for callers that prefer event-shaped naming. */
-  onBridgeReady(listener: HomeWorldBridgeReadyListener): () => void {
-    return this.subscribe(listener);
   }
 
   /** Caller-owned read-model handle, useful for recovery diagnostics only. */

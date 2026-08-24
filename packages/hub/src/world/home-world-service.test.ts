@@ -317,7 +317,7 @@ test("notifies bridge-ready subscribers only after each accepted sync is indexed
     watermark: ReturnType<HomeWorldService["worldModelWatermark"]>;
   }> = [];
   const pending = new Promise<void>(() => undefined);
-  const unsubscribe = service.subscribe((metadata) => {
+  const unsubscribe = service.onBridgeReady((metadata) => {
     const snapshot = service.snapshot().bridges[bridgeId];
     events.push({
       metadata,
