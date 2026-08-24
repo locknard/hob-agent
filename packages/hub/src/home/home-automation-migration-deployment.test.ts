@@ -14,6 +14,7 @@ const PERSISTED_SWITCH_OPERATION_ID = "11111111111111111111111111111111";
 const ROLLBACK_OPERATION_ID = "6374645a003501464e33bcaa734d4ed3";
 const RECOVERY_SWITCH_OPERATION_ID = "1327fcc9190451509e41812042f0792b";
 const RECOVERY_ROLLBACK_OPERATION_ID = "b089ca611391d06fde794987c0fdc66b";
+const FOREIGN_RULE_CATALOG_PREFLIGHT_REASON = "现有规则状态已经变化或暂时无法确认，需要重新准备迁移；家里的设置保持原样。";
 const BASE_REQUEST = {
   proposalId: "proposal-migration",
   revision: 3,
@@ -161,6 +162,59 @@ test("preflights current semantics before pausing the source rule or opening a s
   assert.match((outcome as { readonly reason: string }).reason, /当前设备状态|重新准备/);
   assert.deepEqual(events, [], "a blocked preflight leaves both the source and target untouched");
 });
+
+test("preflights the foreign catalog once before reading or switching the source rule", async () => {
+  const { events, runtime, wrapper } = deploymentFixture();
+  let catalogReads = 0;
+  runtime.readForeignRuleCatalog = (input: { readonly migrationId: string; readonly ruleRef: string }) => {
+    catalogReads += 1;
+    assert.equal(input.migrationId, "0123456789abcdef0123456789abcdef");
+    assert.equal(input.ruleRef, "opaque-rule-ref");
+    events.push("foreign.catalog");
+    return { status: "unchanged" as const };
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.equal(outcome.status, "verified");
+  assert.equal(catalogReads, 1);
+  assert.deepEqual(
+    events.slice(0, 3),
+    ["foreign.catalog", "source.status", "runtime.startSwitch"],
+    "the catalog fence precedes source read and switch CAS",
+  );
+  assert.equal(events.filter((event) => event === "foreign.catalog").length, 1);
+});
+
+for (const scenario of [
+  { name: "changed", result: { status: "changed" as const } },
+  { name: "unavailable", result: { status: "unavailable" as const } },
+  { name: "throws", error: new Error("catalog read failed") },
+]) {
+  test(`fails closed before source access when the ready migration catalog is ${scenario.name}`, async () => {
+    const { events, failCalls, runtime, wrapper } = deploymentFixture();
+    let catalogReads = 0;
+    runtime.readForeignRuleCatalog = () => {
+      catalogReads += 1;
+      events.push("foreign.catalog");
+      if (scenario.error !== undefined) throw scenario.error;
+      return scenario.result!;
+    };
+
+    const outcome = await wrapper.deploy(BASE_REQUEST);
+
+    assert.equal(outcome.status, "failed");
+    assert.equal((outcome as { readonly reason: string }).reason, FOREIGN_RULE_CATALOG_PREFLIGHT_REASON);
+    assert.equal(catalogReads, 1);
+    assert.deepEqual(events, ["foreign.catalog", "runtime.fail"], "catalog failure leaves source and target untouched");
+    assert.deepEqual(failCalls, [{
+      migrationId: "0123456789abcdef0123456789abcdef",
+      ruleRef: "opaque-rule-ref",
+      from: "ready",
+      reason: "source_stale",
+    }]);
+  });
+}
 
 function governedLookup(
   workflowStatus: "switching" | "needs_attention" | "rolling_back",

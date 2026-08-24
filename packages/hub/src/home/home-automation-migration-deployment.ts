@@ -131,6 +131,7 @@ const ROLLBACK_UNKNOWN_REASON = "迁移回退结果暂时无法确认，已停�
 const ROLLBACK_TARGET_FINGERPRINT_FAILURE_REASON = "迁移回退的目标指纹无法验证，需要人工确认后恢复。";
 const SWITCH_TARGET_FINGERPRINT_FAILURE_REASON = "迁移自动化的部署指纹无法验证，已停止后续写入。";
 const SEMANTIC_PREFLIGHT_FAILURE_REASON = "方案里的设备当前状态或能力语义已经变化，需要重新准备后再启用；家里的设置保持原样。";
+const FOREIGN_RULE_CATALOG_PREFLIGHT_FAILURE_REASON = "现有规则状态已经变化或暂时无法确认，需要重新准备迁移；家里的设置保持原样。";
 const FOREIGN_RULE_CATALOG_CHANGED_REASON = "现有规则目录发生变化，需要重新评估后再继续运行。";
 const FOREIGN_RULE_CATALOG_UNAVAILABLE_REASON = "现有规则冲突状态暂时无法确认，需要继续恢复迁移状态。";
 
@@ -290,6 +291,21 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
 
     const semanticPreflight = await this.readSemanticPreflight(request);
     if (semanticPreflight.status === "blocked") return failed(SEMANTIC_PREFLIGHT_FAILURE_REASON);
+
+    let foreignRuleCatalog: HomeAutomationMigrationForeignRuleCatalogState;
+    try {
+      foreignRuleCatalog = await this.runtime.readForeignRuleCatalog({
+        migrationId: lookup.migrationId,
+        ruleRef: lookup.ruleRef,
+      });
+    } catch {
+      this.fail(lookup, "ready", "source_stale");
+      return failed(FOREIGN_RULE_CATALOG_PREFLIGHT_FAILURE_REASON);
+    }
+    if (foreignRuleCatalog.status !== "unchanged") {
+      this.fail(lookup, "ready", "source_stale");
+      return failed(FOREIGN_RULE_CATALOG_PREFLIGHT_FAILURE_REASON);
+    }
 
     const control = this.source.foreignRuleControlFor(lookup.sourceBridgeId);
     if (control === undefined) {
