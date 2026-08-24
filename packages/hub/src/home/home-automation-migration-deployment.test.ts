@@ -678,7 +678,54 @@ test("requires exact restored readback before converging a close", async () => {
   }
 });
 
-test("records switching failure after a known target deployment failure and restores the source", async () => {
+test("fails closed after a known target deployment failure without a durable target fingerprint", async () => {
+  for (const target of [
+    { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+    { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+  ]) {
+    const { events, failCalls, runtime, base, wrapper } = deploymentFixture();
+    const initialLookup = runtime.findWorkflowForProposal;
+    let lookupCount = 0;
+    runtime.findWorkflowForProposal = (proposalId: string) => {
+      lookupCount += 1;
+      return lookupCount === 1 ? initialLookup(proposalId) : governedLookup("needs_attention", "switch_failed");
+    };
+    base.deploy = async () => {
+      events.push("base.deploy");
+      return {
+        status: "failed",
+        deploymentId: BASE_REQUEST.intent.deploymentId,
+        target: BASE_REQUEST.intent.target,
+        reason: "known rejection",
+      };
+    };
+    base.status = async () => {
+      events.push("base.status");
+      return target;
+    };
+
+    const outcome = await wrapper.deploy(BASE_REQUEST);
+
+    assert.equal(outcome.status, "failed", target.status);
+    assert.deepEqual(events, [
+      "source.status",
+      "runtime.startSwitch",
+      "source.set:false",
+      "base.deploy",
+      "base.status",
+      "runtime.fail",
+    ], target.status);
+    assert.deepEqual(failCalls, [{
+      migrationId: "0123456789abcdef0123456789abcdef",
+      ruleRef: "opaque-rule-ref",
+      from: "switching",
+      reason: "verification_failed",
+      expectedSwitchOperationId: SWITCH_OPERATION_ID,
+    }], target.status);
+  }
+});
+
+test("restores the source after a failed target is read back missing without deleting", async () => {
   const { events, failCalls, runtime, base, wrapper } = deploymentFixture();
   const restoreInputs: unknown[] = [];
   runtime.restoreFailedSwitch = (input: unknown) => {
@@ -701,16 +748,19 @@ test("records switching failure after a known target deployment failure and rest
       reason: "known rejection",
     };
   };
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "missing" } as const;
+  };
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
-  assert.equal(outcome.status, "failed");
+  assert.deepEqual(outcome, { status: "failed", reason: "迁移切换没有完成，原有规则保持可恢复状态。" });
   assert.deepEqual(events, [
     "source.status",
     "runtime.startSwitch",
     "source.set:false",
     "base.deploy",
-    "base.withdraw",
     "base.status",
     "source.set:true",
     "source.status",
@@ -735,7 +785,7 @@ test("records switching failure after a known target deployment failure and rest
   }]);
 });
 
-test("retries a failed switch by withdrawing only the approved target and closes the exact failed receipt", async () => {
+test("fails closed when a failed switch has no persisted target fingerprint", async () => {
   const { events, runtime, base, wrapper } = deploymentFixture();
   runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_failed");
   base.status = async () => {
@@ -749,18 +799,11 @@ test("retries a failed switch by withdrawing only the approved target and closes
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
-  assert.deepEqual(outcome, { status: "failed", reason: "迁移切换没有完成，原有规则保持可恢复状态。" });
-  assert.deepEqual(events, [
-    "source.status",
-    "base.status",
-    "runtime.resumeSwitch",
-    "base.withdraw",
-    "base.status",
-    "source.status",
-    "base.status",
-    "runtime.fail",
-    "runtime.restoreFailedSwitch",
-  ]);
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.status", "base.status"]);
   assert.equal(events.includes("base.deploy.unexpected"), false);
 });
 
@@ -798,7 +841,7 @@ test("accepts a failed-switch recovery when exact readback is already restored w
   assert.deepEqual(events, ["source.status", "base.status", "runtime.restoreFailedSwitch"]);
 });
 
-test("withdraws a failed switch with the approved intent identity before closing its exact receipt", async () => {
+test("fails closed before using an un-fingerprinted failed-switch target identity", async () => {
   const { events, runtime, base, wrapper } = deploymentFixture();
   runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_failed");
   base.status = async () => {
@@ -823,18 +866,12 @@ test("withdraws a failed switch with the approved intent identity before closing
     actor: BASE_REQUEST.actor,
   });
 
-  assert.deepEqual(outcome, { restored: true });
-  assert.deepEqual(events, [
-    "source.status",
-    "base.status",
-    "runtime.resumeSwitch",
-    "base.withdraw",
-    "base.status",
-    "source.status",
-    "base.status",
-    "runtime.fail",
-    "runtime.restoreFailedSwitch",
-  ]);
+  assert.deepEqual(outcome, {
+    restored: false,
+    recoveryRequired: true,
+    reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.status", "base.status"]);
 });
 
 test("does not claim a failed-switch recovery after the exact receipt CAS loses a race", async () => {
@@ -872,7 +909,7 @@ test("does not claim a failed-switch recovery after the exact receipt CAS loses 
   assert.deepEqual(events, ["source.status", "base.status", "runtime.restoreFailedSwitch"]);
 });
 
-test("uses the approved intent identity when a verified outcome returns a rogue identity", async () => {
+test("fails closed when a verified outcome returns a rogue identity without a durable target fingerprint", async () => {
   const { withdrawRequests, base, wrapper } = deploymentFixture();
   base.deploy = async () => ({
     status: "verified",
@@ -883,13 +920,11 @@ test("uses the approved intent identity when a verified outcome returns a rogue 
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
-  assert.equal(outcome.status, "failed");
-  assert.deepEqual(withdrawRequests, [{
-    proposalId: BASE_REQUEST.proposalId,
-    deploymentId: BASE_REQUEST.intent.deploymentId,
-    target: BASE_REQUEST.intent.target,
-    actor: BASE_REQUEST.actor,
-  }]);
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的部署身份无法验证，已停止后续写入。",
+  });
+  assert.deepEqual(withdrawRequests, []);
 });
 
 test("records rolling-back failure when the Hob target cannot be withdrawn", async () => {
@@ -1198,11 +1233,14 @@ test("treats a paused target as known but unsafe and performs no recovery write"
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
-  assert.equal(outcome.status, "failed");
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+  });
   assert.deepEqual(events, ["source.status", "base.status"]);
 });
 
-test("cleans up a running target when switching recovery has no persisted target fingerprint", async () => {
+test("fails closed when failed-switch recovery has no persisted target fingerprint", async () => {
   const { events, runtime, base, control, wrapper } = deploymentFixture();
   runtime.findWorkflowForProposal = () => governedLookup("needs_attention", "switch_unknown");
   control.status = async () => {
@@ -1216,15 +1254,184 @@ test("cleans up a running target when switching recovery has no persisted target
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
-  assert.equal(outcome.status, "failed");
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.status", "base.status"]);
+});
+
+test("rejects a failed-switch receipt carrying an unexpected persisted target fingerprint", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => ({
+    ...governedLookup("needs_attention", "switch_unknown"),
+    deploymentConfigFingerprint: `sha256:${"c".repeat(64)}`,
+  });
+  control.status = async () => {
+    events.push("source.status.unexpected");
+    throw new Error("invalid failed-switch receipt must not read source");
+  };
+  base.status = async () => {
+    events.push("base.status.unexpected");
+    throw new Error("invalid failed-switch receipt must not read target");
+  };
+  base.withdraw = async () => {
+    events.push("base.withdraw.unexpected");
+    return { restored: true };
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移切换结果暂时无法确认，已停止后续写入。",
+  });
+  assert.deepEqual(events, []);
+});
+
+test("fails closed for a needs-attention switch when a present target lacks an exact persisted fingerprint", async () => {
+  for (const scenario of [
+    {
+      name: "running target without fingerprint",
+      target: { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+      persistedFingerprint: undefined,
+    },
+    {
+      name: "paused target without fingerprint",
+      target: { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+      persistedFingerprint: undefined,
+    },
+    {
+      name: "running target with a mismatched fingerprint",
+      target: { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+      persistedFingerprint: `sha256:${"c".repeat(64)}`,
+    },
+    {
+      name: "paused target with a mismatched fingerprint",
+      target: { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const,
+      persistedFingerprint: `sha256:${"c".repeat(64)}`,
+    },
+  ]) {
+    const { events, runtime, base, control, wrapper } = deploymentFixture();
+    runtime.findWorkflowForProposal = () => ({
+      ...governedLookup("needs_attention", "verification_failed"),
+      deploymentId: undefined,
+      deploymentTarget: undefined,
+      deploymentConfigFingerprint: scenario.persistedFingerprint,
+    });
+    control.status = async () => {
+      events.push("source.status");
+      return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+    };
+    control.setEnabled = async () => {
+      events.push("source.set.unexpected");
+      throw new Error(`${scenario.name} must not change the source`);
+    };
+    base.status = async () => {
+      events.push("base.status");
+      return scenario.target;
+    };
+    base.withdraw = async () => {
+      events.push("base.withdraw.unexpected");
+      return { restored: true };
+    };
+
+    const outcome = await wrapper.deploy(BASE_REQUEST);
+
+    assert.deepEqual(outcome, {
+      status: "failed",
+      reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+    }, scenario.name);
+    assert.deepEqual(events, ["source.status", "base.status"], scenario.name);
+  }
+});
+
+test("cleans up a paused target only after needs-attention recovery confirms its exact fingerprint", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => ({
+    ...governedLookup("needs_attention", "verification_failed"),
+    deploymentId: undefined,
+    deploymentTarget: undefined,
+    deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT,
+  });
+  control.status = async () => {
+    events.push("source.status");
+    return events.includes("source.set:true")
+      ? { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const
+      : { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  base.status = async () => {
+    events.push("base.status");
+    return events.includes("base.withdraw")
+      ? { status: "missing" } as const
+      : { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+  base.withdraw = async (request) => {
+    events.push("base.withdraw");
+    assert.deepEqual(request, {
+      proposalId: BASE_REQUEST.proposalId,
+      deploymentId: BASE_REQUEST.intent.deploymentId,
+      target: BASE_REQUEST.intent.target,
+      actor: BASE_REQUEST.actor,
+    });
+    return { restored: true };
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移切换没有完成，原有规则保持可恢复状态。",
+  });
   assert.deepEqual(events, [
     "source.status",
     "base.status",
     "runtime.resumeSwitch",
+    "base.status",
     "base.withdraw",
     "base.status",
+    "source.set:true",
+    "source.status",
     "runtime.fail",
   ]);
+});
+
+test("rechecks a paused target fingerprint after opening recovery CAS", async () => {
+  const { events, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => ({
+    ...governedLookup("needs_attention", "verification_failed"),
+    deploymentId: undefined,
+    deploymentTarget: undefined,
+    deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT,
+  });
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "paused", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  let targetReads = 0;
+  base.status = async () => {
+    events.push("base.status");
+    targetReads += 1;
+    return targetReads === 1
+      ? { status: "paused", configFingerprint: DEPLOYMENT_FINGERPRINT } as const
+      : { status: "running", configFingerprint: `sha256:${"c".repeat(64)}` } as const;
+  };
+  base.withdraw = async () => {
+    events.push("base.withdraw.unexpected");
+    return { restored: true };
+  };
+  control.setEnabled = async () => {
+    events.push("source.set.unexpected");
+    throw new Error("rewritten target must not change the source");
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.resumeSwitch", "base.status", "runtime.fail"]);
 });
 
 test("does not write when recovery preflight is unknown", async () => {
@@ -1280,7 +1487,7 @@ test("closes an active switching receipt for every recovery preflight rejection 
     {
       name: "target paused",
       kind: "target-paused" as const,
-      reason: "switch_failed" as const,
+      reason: "verification_failed" as const,
       events: ["source.status", "base.status", "runtime.fail"],
     },
     {
@@ -1289,11 +1496,17 @@ test("closes an active switching receipt for every recovery preflight rejection 
       reason: "verification_failed" as const,
       events: ["source.status", "base.status", "runtime.fail"],
     },
+    {
+      name: "paused target fingerprint mismatched",
+      kind: "target-paused-fingerprint" as const,
+      reason: "verification_failed" as const,
+      events: ["source.status", "base.status", "runtime.fail"],
+    },
   ]) {
     const { events, failCalls, runtime, base, control, sourcePort, wrapper } = deploymentFixture();
     runtime.findWorkflowForProposal = () => {
       const lookup = governedLookup("switching");
-      return scenario.kind === "target-fingerprint"
+      return scenario.kind === "target-fingerprint" || scenario.kind === "target-paused-fingerprint"
         ? { ...lookup, deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT }
         : lookup;
     };
@@ -1326,6 +1539,11 @@ test("closes an active switching receipt for every recovery preflight rejection 
       base.status = async () => {
         events.push("base.status");
         return { status: "running", configFingerprint: `sha256:${"c".repeat(64)}` } as const;
+      };
+    } else if (scenario.kind === "target-paused-fingerprint") {
+      base.status = async () => {
+        events.push("base.status");
+        return { status: "paused", configFingerprint: `sha256:${"c".repeat(64)}` } as const;
       };
     }
 
@@ -1431,20 +1649,14 @@ test("does not verify an un-fingerprinted running target during switching recove
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
-  assert.equal(outcome.status, "failed");
-  assert.deepEqual(events, [
-    "source.status",
-    "base.status",
-    "runtime.fail",
-    "runtime.resumeSwitch",
-    "base.withdraw",
-    "base.status",
-    "source.status",
-    "runtime.fail",
-  ]);
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.fail"]);
 });
 
-test("records a known switching failure when target cleanup is unavailable", async () => {
+test("records a switching fingerprint failure before target cleanup when no fingerprint is persisted", async () => {
   const { events, runtime, base, control, failCalls, wrapper } = deploymentFixture();
   runtime.findWorkflowForProposal = () => governedLookup("switching");
   base.withdraw = undefined;
@@ -1459,24 +1671,109 @@ test("records a known switching failure when target cleanup is unavailable", asy
 
   const outcome = await wrapper.deploy(BASE_REQUEST);
 
-  assert.deepEqual(outcome, { status: "failed", reason: "迁移切换没有完成，原有规则保持可恢复状态。" });
-  assert.deepEqual(events, ["source.status", "base.status", "runtime.fail", "runtime.resumeSwitch", "runtime.fail"]);
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的部署指纹无法验证，已停止后续写入。",
+  });
+  assert.deepEqual(events, ["source.status", "base.status", "runtime.fail"]);
   assert.deepEqual(failCalls, [
     {
       migrationId: "0123456789abcdef0123456789abcdef",
       ruleRef: "opaque-rule-ref",
       from: "switching",
-      reason: "switch_unknown",
+      reason: "verification_failed",
       expectedSwitchOperationId: PERSISTED_SWITCH_OPERATION_ID,
     },
-    {
+  ]);
+});
+
+test("gates recoverKnownFailure by the durable target fingerprint before cleanup", async () => {
+  for (const scenario of [
+    { name: "unknown target", target: { status: "unknown" } as const, reason: "迁移切换结果暂时无法确认，已停止后续写入。" },
+    { name: "mismatched target", target: { status: "running", configFingerprint: `sha256:${"c".repeat(64)}` } as const, reason: "迁移自动化的运行状态无法验证，已停止后续写入。" },
+    { name: "paused mismatched target", target: { status: "paused", configFingerprint: `sha256:${"c".repeat(64)}` } as const, reason: "迁移自动化的运行状态无法验证，已停止后续写入。" },
+    { name: "missing target", target: { status: "missing" } as const, reason: "迁移自动化的运行状态无法验证，已停止后续写入。" },
+  ]) {
+    const { events, failCalls, runtime, base, wrapper } = deploymentFixture();
+    runtime.findWorkflowForProposal = () => ({
+      ...governedLookup("switching"),
+      deploymentId: BASE_REQUEST.intent.deploymentId,
+      deploymentTarget: BASE_REQUEST.intent.target,
+      deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT,
+    });
+    let targetReads = 0;
+    base.status = async () => {
+      events.push("base.status");
+      targetReads += 1;
+      if (targetReads === 1) return { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+      return scenario.target;
+    };
+    base.withdraw = async () => {
+      events.push("base.withdraw.unexpected");
+      return { restored: true };
+    };
+
+    const outcome = await wrapper.deploy(BASE_REQUEST);
+
+    assert.deepEqual(outcome, { status: "failed", reason: scenario.reason }, scenario.name);
+    assert.equal(events.includes("base.withdraw.unexpected"), false, scenario.name);
+    assert.equal(events.includes("source.set:true"), scenario.name === "missing target", scenario.name);
+    assert.equal(events.includes("runtime.verifySwitch"), false, scenario.name);
+    assert.deepEqual(failCalls.at(-1), {
       migrationId: "0123456789abcdef0123456789abcdef",
       ruleRef: "opaque-rule-ref",
       from: "switching",
-      reason: "switch_failed",
+      reason: scenario.name === "unknown target" ? "switch_unknown" : "verification_failed",
       expectedSwitchOperationId: RECOVERY_SWITCH_OPERATION_ID,
-    },
-  ]);
+    }, scenario.name);
+  }
+});
+
+test("allows recoverKnownFailure cleanup after an exact durable target readback", async () => {
+  const { events, failCalls, runtime, base, control, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => ({
+    ...governedLookup("switching"),
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    deploymentTarget: BASE_REQUEST.intent.target,
+    deploymentConfigFingerprint: DEPLOYMENT_FINGERPRINT,
+  });
+  control.status = async () => {
+    events.push("source.status");
+    return { status: "running", sourceFingerprint: SOURCE_FINGERPRINT } as const;
+  };
+  let targetReads = 0;
+  base.status = async () => {
+    events.push("base.status");
+    targetReads += 1;
+    return targetReads >= 4 || events.includes("base.withdraw")
+      ? { status: "missing" } as const
+      : { status: "running", configFingerprint: DEPLOYMENT_FINGERPRINT } as const;
+  };
+  base.withdraw = async (request) => {
+    events.push("base.withdraw");
+    assert.deepEqual(request, {
+      proposalId: BASE_REQUEST.proposalId,
+      deploymentId: BASE_REQUEST.intent.deploymentId,
+      target: BASE_REQUEST.intent.target,
+      actor: BASE_REQUEST.actor,
+    });
+    return { restored: true };
+  };
+
+  const outcome = await wrapper.deploy(BASE_REQUEST);
+
+  assert.deepEqual(outcome, {
+    status: "failed",
+    reason: "迁移自动化的运行状态无法验证，已停止后续写入。",
+  });
+  assert.equal(events.includes("runtime.verifySwitch"), false);
+  assert.deepEqual(failCalls.at(-1), {
+    migrationId: "0123456789abcdef0123456789abcdef",
+    ruleRef: "opaque-rule-ref",
+    from: "switching",
+    reason: "verification_failed",
+    expectedSwitchOperationId: RECOVERY_SWITCH_OPERATION_ID,
+  });
 });
 
 test("rollback recovery withdraws the approved target, confirms missing, then restores source", async () => {

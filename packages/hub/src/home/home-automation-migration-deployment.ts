@@ -113,6 +113,7 @@ const SWITCH_UNKNOWN_REASON = "迁移切换结果暂时无法确认，已停止�
 const ROLLBACK_FAILURE_REASON = "迁移回退没有完成，原有规则状态需要处理。";
 const ROLLBACK_UNKNOWN_REASON = "迁移回退结果暂时无法确认，已停止后续写入。";
 const ROLLBACK_TARGET_FINGERPRINT_FAILURE_REASON = "迁移回退的目标指纹无法验证，需要人工确认后恢复。";
+const SWITCH_TARGET_FINGERPRINT_FAILURE_REASON = "迁移自动化的部署指纹无法验证，已停止后续写入。";
 const SEMANTIC_PREFLIGHT_FAILURE_REASON = "方案里的设备当前状态或能力语义已经变化，需要重新准备后再启用；家里的设置保持原样。";
 
 /**
@@ -314,8 +315,9 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     if (target.status === "unknown") {
       return { restored: false, recoveryRequired: true, reason: SWITCH_UNKNOWN_REASON };
     }
-    if (target.status === "paused") {
-      return { restored: false, recoveryRequired: true, reason: "迁移自动化的目标当前已暂停，需要人工确认后恢复。" };
+    const targetCheck = switchTargetCheck(target, request.lookup.deploymentConfigFingerprint);
+    if (targetCheck.status === "unsafe") {
+      return { restored: false, recoveryRequired: true, reason: targetCheck.reason };
     }
 
     // An already restored readback can close the durable failure without a new
@@ -445,13 +447,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return failed(SWITCH_UNKNOWN_REASON);
     }
     const expectedFingerprint = lookup.deploymentConfigFingerprint;
-    if (target.status === "paused") {
-      failPreflight("switch_failed");
-      return failed("迁移自动化的目标当前已暂停，需要人工确认后恢复。");
-    }
-    if (target.status === "running" && expectedFingerprint !== undefined && target.configFingerprint !== expectedFingerprint) {
-      failPreflight("verification_failed");
-      return failed("迁移自动化的部署指纹无法验证，已停止后续写入。");
+    const targetCheck = switchTargetCheck(target, expectedFingerprint);
+    if (targetCheck.status === "unsafe") {
+      failPreflight(targetCheck.failureReason);
+      return failed(targetCheck.reason);
     }
 
     const switchOperationId = recoverySwitchOperationId(request.proposalId, `recovery:${request.revision}`, lookup);
@@ -468,35 +467,43 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       switchActor: request.actor,
     })) return failed(SWITCH_UNKNOWN_REASON);
 
-    if (target.status === "running" && expectedFingerprint === undefined) {
-      let withdrawn: { readonly restored: boolean };
-      try {
-        if (this.base.withdraw === undefined) {
+    if (target.status === "paused") {
+      const targetBeforeCleanup = await this.readTarget(request.intent.deploymentId, request.intent.target);
+      const targetBeforeCleanupCheck = switchTargetCheck(targetBeforeCleanup, expectedFingerprint);
+      if (targetBeforeCleanupCheck.status === "unsafe") {
+        failSwitch(targetBeforeCleanupCheck.failureReason);
+        return failed(targetBeforeCleanupCheck.reason);
+      }
+      if (targetBeforeCleanupCheck.status !== "missing") {
+        let withdrawn: { readonly restored: boolean };
+        try {
+          if (this.base.withdraw === undefined) {
+            failSwitch("switch_failed");
+            return failed(SWITCH_FAILURE_REASON);
+          }
+          withdrawn = await this.base.withdraw({
+            proposalId: request.proposalId,
+            deploymentId: request.intent.deploymentId,
+            target: request.intent.target,
+            actor: request.actor,
+          });
+        } catch {
+          failSwitch("switch_unknown");
+          return failed(SWITCH_UNKNOWN_REASON);
+        }
+        if (!withdrawn.restored) {
           failSwitch("switch_failed");
           return failed(SWITCH_FAILURE_REASON);
         }
-        withdrawn = await this.base.withdraw({
-          proposalId: request.proposalId,
-          deploymentId: request.intent.deploymentId,
-          target: request.intent.target,
-          actor: request.actor,
-        });
-      } catch {
-        failSwitch("switch_unknown");
-        return failed(SWITCH_UNKNOWN_REASON);
-      }
-      if (!withdrawn.restored) {
-        failSwitch("switch_failed");
-        return failed(SWITCH_FAILURE_REASON);
-      }
-      const afterWithdraw = await this.readTarget(request.intent.deploymentId, request.intent.target);
-      if (afterWithdraw.status === "unknown") {
-        failSwitch("switch_unknown");
-        return failed(SWITCH_UNKNOWN_REASON);
-      }
-      if (afterWithdraw.status !== "missing") {
-        failSwitch("switch_failed");
-        return failed(SWITCH_FAILURE_REASON);
+        const afterWithdraw = await this.readTarget(request.intent.deploymentId, request.intent.target);
+        if (afterWithdraw.status === "unknown") {
+          failSwitch("switch_unknown");
+          return failed(SWITCH_UNKNOWN_REASON);
+        }
+        if (afterWithdraw.status !== "missing") {
+          failSwitch("switch_failed");
+          return failed(SWITCH_FAILURE_REASON);
+        }
       }
       if (source.status === "paused") {
         const restored = await this.setSource(control, lookup, true, switchOperationId);
@@ -513,6 +520,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       if (finalSource.status === "unknown") {
         failSwitch("switch_unknown");
         return failed(SWITCH_UNKNOWN_REASON);
+      }
+      if (finalSource.status !== "running" || finalSource.sourceFingerprint !== lookup.sourceFingerprint) {
+        failSwitch("switch_failed");
+        return failed(SWITCH_FAILURE_REASON);
       }
       failSwitch("switch_failed");
       return failed(SWITCH_FAILURE_REASON);
@@ -1056,34 +1067,44 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     failure: "switch_failed" | "verification_failed",
     expectedSwitchOperationId: string,
   ): Promise<"known" | "switch_unknown"> {
-    let withdrawn: { readonly restored: boolean };
-    try {
-      if (this.base.withdraw === undefined) {
+    const expectedFingerprint = lookup.status === "governed" ? lookup.deploymentConfigFingerprint : undefined;
+    const target = await this.readTarget(request.intent.deploymentId, request.intent.target);
+    const targetCheck = switchTargetCheck(target, expectedFingerprint);
+    if (targetCheck.status === "unsafe") {
+      this.fail(lookup, "switching", targetCheck.failureReason, expectedSwitchOperationId);
+      return targetCheck.failureReason === "switch_unknown" ? "switch_unknown" : "known";
+    }
+
+    if (targetCheck.status !== "missing") {
+      let withdrawn: { readonly restored: boolean };
+      try {
+        if (this.base.withdraw === undefined) {
+          this.fail(lookup, "switching", failure, expectedSwitchOperationId);
+          return "known";
+        }
+        withdrawn = await this.base.withdraw({
+          proposalId: request.proposalId,
+          deploymentId: request.intent.deploymentId,
+          target: request.intent.target,
+          actor: request.actor,
+        });
+      } catch {
+        this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
+        return "switch_unknown";
+      }
+      if (!withdrawn.restored) {
         this.fail(lookup, "switching", failure, expectedSwitchOperationId);
         return "known";
       }
-      withdrawn = await this.base.withdraw({
-        proposalId: request.proposalId,
-        deploymentId: request.intent.deploymentId,
-        target: request.intent.target,
-        actor: request.actor,
-      });
-    } catch {
-      this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
-      return "switch_unknown";
-    }
-    if (!withdrawn.restored) {
-      this.fail(lookup, "switching", failure, expectedSwitchOperationId);
-      return "known";
-    }
-    const afterWithdraw = await this.readTarget(request.intent.deploymentId, request.intent.target);
-    if (afterWithdraw.status === "unknown") {
-      this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
-      return "switch_unknown";
-    }
-    if (afterWithdraw.status !== "missing") {
-      this.fail(lookup, "switching", failure, expectedSwitchOperationId);
-      return "known";
+      const afterWithdraw = await this.readTarget(request.intent.deploymentId, request.intent.target);
+      if (afterWithdraw.status === "unknown") {
+        this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
+        return "switch_unknown";
+      }
+      if (afterWithdraw.status !== "missing") {
+        this.fail(lookup, "switching", failure, expectedSwitchOperationId);
+        return "known";
+      }
     }
     const restored = await this.setSource(control, lookup, true, operationId("restore", request.proposalId, request.revision, lookup));
     if (restored.status === "unknown") {
@@ -1169,6 +1190,29 @@ type TargetReadback = {
   readonly status: "running" | "paused" | "missing" | "unknown";
   readonly configFingerprint?: string;
 };
+
+type SwitchTargetCheck =
+  | { readonly status: "missing" | "matched" }
+  | {
+      readonly status: "unsafe";
+      readonly reason: string;
+      readonly failureReason: "switch_unknown" | "verification_failed";
+    };
+
+function switchTargetCheck(target: TargetReadback, expectedFingerprint: string | undefined): SwitchTargetCheck {
+  if (target.status === "missing") return { status: "missing" };
+  if (target.status === "unknown") {
+    return { status: "unsafe", reason: SWITCH_UNKNOWN_REASON, failureReason: "switch_unknown" };
+  }
+  if (!hasNonEmptyString(expectedFingerprint) || target.configFingerprint !== expectedFingerprint) {
+    return {
+      status: "unsafe",
+      reason: SWITCH_TARGET_FINGERPRINT_FAILURE_REASON,
+      failureReason: "verification_failed",
+    };
+  }
+  return { status: "matched" };
+}
 
 type RollbackTargetCheck =
   | { readonly status: "missing" | "matched" }
