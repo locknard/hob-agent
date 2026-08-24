@@ -21,6 +21,7 @@
     "credentials:music-assistant": "tsx packages/hub/src/cli/music-assistant-credential-setup.ts",
     "credentials:test": "tsx packages/hub/src/cli/model-credential-probe.ts",
     "draft:home-map": "tsx packages/hub/src/cli/home-map-draft.ts",
+    "container:smoke": "tsx scripts/container-smoke.ts",
     "check:view": "tsx scripts/check-view-recipe.ts",
     "check": "pnpm check:types && pnpm check:instructions",
     "check:types": "tsc --noEmit -p tsconfig.json",
