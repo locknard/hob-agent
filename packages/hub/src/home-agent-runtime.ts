@@ -12,6 +12,10 @@ import { BridgeAutomationDeployment } from "./home/bridge-automation-deployment.
 import { HomeAutomationMigrationDeployment } from "./home/home-automation-migration-deployment.js";
 import { HomeAutomationMigrationSimulationEvidenceSource } from "./home/home-automation-migration-evidence-source.js";
 import { recoverMigrationPreparationHandoffs } from "./home/migration-preparation-recovery.js";
+import {
+  MigrationCutoverRecoveryCoordinator,
+  type MigrationCutoverRecoveryResult,
+} from "./home/migration-cutover-recovery.js";
 import { HomeProposalService } from "./home/home-proposal-service.js";
 import { ArtifactRegistry, type ArtifactRegistryOptions } from "./artifact/artifact-registry.js";
 import {
@@ -249,6 +253,8 @@ class HomeAgentProductBundleRuntime {
   private artifactPipeline: ArtifactPipelineComposition | undefined;
   private preparationRunner: ArtifactPreparationJobRunner | undefined;
   private migrationRecoveryTask: Promise<void> | undefined;
+  private migrationCutoverRecoveryTask: Promise<MigrationCutoverRecoveryResult> | undefined;
+  private unsubscribeMigrationCutoverRecovery: (() => void) | undefined;
   private viewRecipeDraftStore: SqliteProductViewRecipeDraftStore | undefined;
 
   constructor(
@@ -333,7 +339,32 @@ class HomeAgentProductBundleRuntime {
         jobs: this.proposalStore,
         migrations: this.service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations"),
       });
-      void this.service<HomeProposalService>("homeProposals").reconcileAutomations().catch(() => undefined);
+      const homeWorld = this.service<HomeWorldService>("homeWorld");
+      const homeProposals = this.service<HomeProposalService>("homeProposals");
+      const migrationCutoverRecovery = new MigrationCutoverRecoveryCoordinator({
+        proposals: homeProposals,
+        migrations: this.service<HomeAutomationMigrationRuntimeService>("homeAutomationMigrations"),
+        isBridgeReady: (bridgeId) => {
+          const bridge = homeWorld.snapshot().bridges[bridgeId];
+          return bridge?.diagnostics.connectionState === "ready"
+            && bridge.watermark !== null
+            && bridge.watermark !== undefined
+            && bridge.metrics.connection === "up"
+            && bridge.metrics.consistency === "ready";
+        },
+      });
+      const recoverCutovers = (): void => {
+        const preparationRecovery = this.migrationRecoveryTask ?? Promise.resolve();
+        const task = preparationRecovery.then(() => migrationCutoverRecovery.sweep());
+        this.migrationCutoverRecoveryTask = task;
+        void task.catch(() => undefined);
+      };
+      this.unsubscribeMigrationCutoverRecovery = homeWorld.onBridgeReady(recoverCutovers);
+      // Covers the race where the initial ready sync committed before the
+      // listener was installed. The coordinator's per-bridge ready gate keeps
+      // an early or partial startup sweep read-only.
+      recoverCutovers();
+      void homeProposals.reconcileAutomations().catch(() => undefined);
       await this.mount(HomeRetentionService);
       if (this.options.mediaCatalog !== undefined) {
         await this.mount(HomeMediaCatalogService, this.options.mediaCatalog);
@@ -461,8 +492,11 @@ class HomeAgentProductBundleRuntime {
   private async disposeRuntime(disposeContext: boolean): Promise<void> {
     let failure: unknown;
     try {
+      this.unsubscribeMigrationCutoverRecovery?.();
+      this.unsubscribeMigrationCutoverRecovery = undefined;
       await this.preparationRunner?.stop();
       await this.migrationRecoveryTask;
+      await this.migrationCutoverRecoveryTask;
       await this.artifactPipeline?.stop();
       if (disposeContext) {
         await this.context.fiber.dispose();

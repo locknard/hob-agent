@@ -302,6 +302,79 @@ test("starts HomeWorld before the DSH Home Agent and stops both from one root", 
   await runtime.stop();
 });
 
+test("coalesces migration cutover recovery on each neutral bridge-ready notification", async () => {
+  const runtime = createHomeAgentRuntime({
+    homeWorld: homeWorldOptions(),
+    launchEnvironment: launchEnvironment(),
+    agent: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sessionId: "migration-cutover-ready-test",
+    },
+  });
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const retries: unknown[] = [];
+  try {
+    await runtime.start();
+    const proposals = runtime.context.homeProposals as unknown as {
+      listAutomations(): readonly unknown[];
+      retryEnable(input: unknown): Promise<void>;
+    };
+    proposals.listAutomations = () => [{
+      id: "proposal-cutover-ready",
+      revision: 7,
+      reviewLane: "migration",
+      lifecycle: "enabling",
+      deployment: { target: "bridge-ready" },
+    }];
+    proposals.retryEnable = async (input) => {
+      retries.push(input);
+      await gate;
+    };
+    const migrations = runtime.context.homeAutomationMigrations as unknown as {
+      findWorkflowForProposal(proposalId: string): unknown;
+    };
+    migrations.findWorkflowForProposal = () => ({
+      status: "ready",
+      sourceBridgeId: "bridge-ready",
+    });
+    const homeWorld = runtime.context.homeWorld as unknown as {
+      snapshot(): unknown;
+      notifyBridgeReady(metadata: { readonly bridgeId: string }): void;
+    };
+    homeWorld.snapshot = () => ({
+      bridges: {
+        "bridge-ready": {
+          diagnostics: { connectionState: "ready" },
+          watermark: { epochId: "epoch-ready", lastSeq: 2 },
+          metrics: { connection: "up", consistency: "ready" },
+        },
+      },
+    });
+
+    homeWorld.notifyBridgeReady({ bridgeId: "bridge-ready" });
+    homeWorld.notifyBridgeReady({ bridgeId: "bridge-ready" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(retries, [{
+      proposalId: "proposal-cutover-ready",
+      expectedRevision: 7,
+      actor: "system",
+    }]);
+    release?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    homeWorld.notifyBridgeReady({ bridgeId: "bridge-ready" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(retries.length, 2);
+  } finally {
+    release?.();
+    await runtime.stop();
+  }
+});
+
 test("mounts the read-only home automation migration service after HomeWorld and closes its SQLite store", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hob-runtime-home-automation-migrations-"));
   const path = join(directory, "home-automation-migrations.sqlite");
