@@ -157,6 +157,11 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       && (request.lifecycle === "active" || request.lifecycle === "paused")) {
       return "allow";
     }
+    if (lookup.status === "governed"
+      && hasVerifiedFailureReceipt(lookup)
+      && (request.lifecycle === "active" || request.lifecycle === "paused")) {
+      return "allow";
+    }
     return "defer";
   }
 
@@ -171,6 +176,12 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     }
     if (lookup.status === "not_migration") {
       return { disposition: "observed", target: await this.readTarget(request.deploymentId, request.target) };
+    }
+    if (lookup.status === "governed"
+      && hasVerifiedFailureReceipt(lookup)
+      && sameDeploymentIdentity(request.deploymentId, lookup.deploymentId)
+      && sameDeploymentIdentity(request.target, lookup.deploymentTarget)) {
+      return { disposition: "recovery_required", reason: "迁移自动化的验证失败需要继续恢复。" };
     }
     if (lookup.status !== "governed"
       || lookup.workflowStatus !== "verified"
@@ -1376,6 +1387,23 @@ function sameDeploymentIdentity(requested: unknown, persisted: unknown): boolean
   return hasNonEmptyString(requested)
     && hasNonEmptyString(persisted)
     && requested === persisted;
+}
+
+function hasVerifiedFailureReceipt(
+  lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
+): boolean {
+  return lookup.workflowStatus === "needs_attention"
+    && lookup.failureReason === "verification_failed"
+    && typeof lookup.approvedProposalRevision === "number"
+    && Number.isSafeInteger(lookup.approvedProposalRevision)
+    && lookup.approvedProposalRevision > 0
+    && lookup.sourceWasEnabled === true
+    && hasNonEmptyString(lookup.switchOperationId)
+    && hasNonEmptyString(lookup.switchActor)
+    && hasNonEmptyString(lookup.switchStartedAt)
+    && hasNonEmptyString(lookup.deploymentId)
+    && hasNonEmptyString(lookup.deploymentTarget)
+    && hasNonEmptyString(lookup.deploymentConfigFingerprint);
 }
 
 function operationId(

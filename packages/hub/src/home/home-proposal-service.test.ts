@@ -1621,6 +1621,122 @@ test("keeps a verified migration recovery-required when reconciliation reads a m
   }
 });
 
+test("repairs an active or paused Proposal after a verified migration failure survives a restart", async () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T02:16:00.000Z" });
+  const ctx = new Context();
+  const events: string[] = [];
+  const sourceFingerprint = `sha256:${"a".repeat(64)}`;
+  const targetFingerprint = `sha256:${"b".repeat(64)}`;
+  const workflowByProposal = new Map<string, unknown>();
+  const base: ProposalDeploymentPort = {
+    resolveIntent: () => ({
+      deploymentId: "unused",
+      target: "ha-main",
+      targets: [],
+    }),
+    deploy: async () => {
+      throw new Error("reconciliation must not redeploy");
+    },
+    status: async () => {
+      events.push("target.status");
+      throw new Error("reconciliation must not read the remote target twice");
+    },
+  };
+  const runtime = {
+    findWorkflowForProposal: (proposalId: string) => workflowByProposal.get(proposalId),
+    failRuleWorkflow: () => {
+      events.push("runtime.fail");
+      return true;
+    },
+  };
+  const sourceControl = {
+    status: async () => {
+      events.push("source.status");
+      throw new Error("reconciliation must not read the source during durable repair");
+    },
+    setEnabled: async () => {
+      events.push("source.set");
+      throw new Error("reconciliation must not write the source during durable repair");
+    },
+  };
+  const deployment = new HomeAutomationMigrationDeployment(
+    base,
+    runtime as never,
+    { foreignRuleControlFor: () => sourceControl },
+  );
+  let fiber: Awaited<ReturnType<typeof ctx.plugin>> | undefined;
+  try {
+    fiber = await ctx.plugin(HomeProposalService, { store, deployment } as never);
+
+    const createCrashedMigration = (suffix: string) => {
+      const intent = {
+        deploymentId: `hob_migration_crash_${suffix}`,
+        target: "ha-main",
+        targets: [{ hwCapabilityId: "hwc-1", binding: { bridgeId: "ha-main", nativeId: "native-1", nativeInstanceId: "entity-1" } }],
+      } as const;
+      const created = store.createMigrationGoverned({
+        ...candidate,
+        kind: "automation-draft",
+        artifactCandidate: automationCandidate,
+        dedupKey: `migration-crash-repair-${suffix}`,
+        idempotencyKey: `migration-crash-repair-${suffix}:v1`,
+        provenance: { producer: "home-automation-migration" },
+        intent: { ...candidate.intent, type: "automation-draft" },
+      });
+      assert.equal(created.kind, "created");
+      if (created.kind !== "created") throw new Error("expected migration proposal");
+      const ready = prepareToReady(store, created.proposal.id);
+      const enabling = store.decideProposal({
+        proposalId: ready.id,
+        expectedRevision: ready.revision,
+        decision: "approve",
+        reviewer: "member:alice",
+        deploymentIntent: intent,
+      });
+      const active = store.recordProposalDeployment({
+        proposalId: enabling.id,
+        expectedRevision: enabling.revision,
+        actor: "member:alice",
+        outcome: { status: "verified", deploymentId: intent.deploymentId, target: intent.target, configFingerprint: targetFingerprint },
+      });
+      workflowByProposal.set(active.id, {
+        status: "governed",
+        workflowStatus: "needs_attention",
+        failureReason: "verification_failed",
+        migrationId: "0123456789abcdef0123456789abcdef",
+        ruleRef: "opaque-rule-ref",
+        sourceBridgeId: "bridge-ha",
+        sourceFingerprint,
+        approvedProposalRevision: enabling.revision,
+        switchOperationId: "11111111111111111111111111111111",
+        switchActor: "member:alice",
+        sourceWasEnabled: true,
+        switchStartedAt: "2026-08-22T02:15:30.000Z",
+        deploymentId: intent.deploymentId,
+        deploymentTarget: intent.target,
+        deploymentConfigFingerprint: targetFingerprint,
+      });
+      return active;
+    };
+
+    const active = createCrashedMigration("active");
+    const paused = createCrashedMigration("paused");
+    store.pauseAutomation({ proposalId: paused.id, actor: "member:alice" });
+
+    await ctx.homeProposals.reconcileAutomations();
+
+    assert.equal(store.get(active.id)?.lifecycle, "recovery_required");
+    assert.equal(store.get(paused.id)?.lifecycle, "recovery_required");
+    assert.equal(store.get(active.id)?.deployment?.restoredAt, undefined);
+    assert.equal(store.get(paused.id)?.deployment?.restoredAt, undefined);
+    assert.deepEqual(events, [], "durable repair does not repeat source or target remote operations");
+  } finally {
+    await fiber?.dispose();
+    await ctx.fiber.dispose();
+    store.close();
+  }
+});
+
 test("passes the authenticated reviewer and bounded retry actor to deployment", async () => {
   const store = new SqliteProposalStore({ path: ":memory:", now: () => "2026-08-22T02:30:00.000Z" });
   const ctx = new Context();
