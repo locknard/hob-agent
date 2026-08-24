@@ -21,11 +21,19 @@ import {
 } from "@hob/bridge-contract";
 import {
   AUTOMATIONS_EXTENSION,
+  AUTOMATIONS_EXTENSION_V2,
+  bridgeAutomationDeployRequestSchema,
+  bridgeAutomationOperationIdSchema,
+  bridgeAutomationSetEnabledRequestSchema,
+  bridgeAutomationWithdrawRequestSchema,
   bridgeAutomationSpecSchema,
   type AutomationsExtension,
+  type AutomationsExtensionV2,
   type BridgeAutomationAction,
   type BridgeAutomationCondition,
+  type BridgeAutomationCommandResultV2,
   type BridgeAutomationDeployResult,
+  type BridgeAutomationDeployResultV2,
   type BridgeAutomationStatusResult,
   type BridgeAutomationSpec,
   type BridgeAutomationCommandResult,
@@ -94,6 +102,8 @@ const MAX_HOME_ASSISTANT_IDENTITY_VALUE_LENGTH = 256;
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONFIG_BYTES = 256 * 1024;
 /** Foreign-rule toggle operation entries retained for this adapter instance. */
 export const MAX_HOME_ASSISTANT_FOREIGN_RULE_CONTROL_OPERATIONS = 128;
+/** Automation operation entries retained for this adapter instance. */
+export const MAX_HOME_ASSISTANT_AUTOMATION_OPERATIONS = 128;
 
 export interface HomeAssistantState {
   entity_id: string;
@@ -891,6 +901,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
   private foreignRuleConfigIdsByRef = new Map<string, string>();
   private foreignRuleTitlesByRef = new Map<string, string>();
   private foreignRuleControlOperations = new Map<string, ForeignRuleControlOperationEntry>();
+  private automationOperations = new Map<string, HomeAssistantAutomationOperationEntry>();
   private resyncInFlight = false;
 
   constructor(
@@ -909,6 +920,7 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         ORG_HINTS_EXTENSION,
         ACTIONS_EXTENSION,
         AUTOMATIONS_EXTENSION,
+        AUTOMATIONS_EXTENSION_V2,
       ]),
     });
     this.control = Object.freeze({
@@ -963,6 +975,15 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
         deploy: (spec, options) => this.deployAutomation(spec, options.signal),
         setEnabled: (request, options) => this.setAutomationEnabled(request, options.signal),
         withdraw: (request, options) => this.withdrawAutomation(request, options.signal),
+      };
+      return handle as ExtensionHandleRegistry[K];
+    }
+    if (name === "automations@2") {
+      const handle: AutomationsExtensionV2 = {
+        status: (request, options) => this.automationStatus(request, options.signal),
+        deploy: (request, options) => this.deployAutomationV2(request, options.signal),
+        setEnabled: (request, options) => this.setAutomationEnabledV2(request, options.signal),
+        withdraw: (request, options) => this.withdrawAutomationV2(request, options.signal),
       };
       return handle as ExtensionHandleRegistry[K];
     }
@@ -1351,6 +1372,254 @@ export class HomeAssistantBridgeAdapter implements ContractBridgeAdapter {
     } catch {
       return { status: "rejected", reason: "unavailable", detail: "Home Assistant configuration API is unreachable" };
     }
+  }
+
+  private async deployAutomationV2(
+    requestValue: Parameters<AutomationsExtensionV2["deploy"]>[0],
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationDeployResultV2> {
+    const operationId = automationOperationId(requestValue);
+    const parsed = bridgeAutomationDeployRequestSchema.safeParse(requestValue);
+    if (!parsed.success) {
+      return { status: "rejected", operationId, reason: "failed", detail: "Automation deploy request is invalid" };
+    }
+    const request = parsed.data;
+    return this.runAutomationOperation(
+      request.operationId,
+      "deploy",
+      automationOperationRequestKey("deploy", request),
+      () => this.performAutomationDeployV2(request, signal),
+      () => ({ status: "rejected", operationId: request.operationId, reason: "failed" }),
+      () => ({ status: "unknown", operationId: request.operationId, reason: "unavailable" }),
+    );
+  }
+
+  private async performAutomationDeployV2(
+    request: Parameters<AutomationsExtensionV2["deploy"]>[0],
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationDeployResultV2> {
+    if (this.lifecycle !== "running") {
+      return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant bridge is not running" };
+    }
+    const spec = request.spec;
+    const config = this.compileAutomationConfig(spec);
+    if ("reason" in config) {
+      return { status: "rejected", operationId: request.operationId, reason: config.reason, detail: config.detail };
+    }
+    try {
+      if (spec.trigger.kind === "schedule") {
+        const instanceTimezone = await this.instanceTimezone(signal);
+        if (instanceTimezone === undefined) {
+          return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant timezone is unavailable" };
+        }
+        if (instanceTimezone !== spec.trigger.timezone) {
+          return { status: "rejected", operationId: request.operationId, reason: "unsupported", detail: `Home Assistant runs in ${instanceTimezone}, not ${spec.trigger.timezone}` };
+        }
+      }
+
+      const existing = await this.automationConfigRequest("GET", spec.automationId, signal);
+      if (existing.statusCode !== 404) {
+        if (!existing.ok) {
+          return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant automation config is unavailable" };
+        }
+        if (!isRecord(existing.body) || !storedAutomationMatches(config.value, existing.body)) {
+          return { status: "rejected", operationId: request.operationId, reason: "failed", detail: "Home Assistant automation is not an unchanged Hub-owned config" };
+        }
+        return {
+          status: "deployed",
+          operationId: request.operationId,
+          nativeAutomationId: spec.automationId,
+          configFingerprint: automationConfigFingerprint(existing.body),
+        };
+      }
+
+      let written: { readonly ok: boolean; readonly statusCode: number; readonly body?: unknown };
+      try {
+        written = await this.automationConfigRequest("POST", spec.automationId, signal, config.value);
+      } catch {
+        return { status: "unknown", operationId: request.operationId, reason: "unavailable" };
+      }
+      if (!written.ok) {
+        return { status: "rejected", operationId: request.operationId, reason: "failed", detail: `Home Assistant rejected the automation (${written.statusCode})` };
+      }
+
+      let readBack: { readonly ok: boolean; readonly statusCode: number; readonly body?: unknown };
+      try {
+        readBack = await this.automationConfigRequest("GET", spec.automationId, signal);
+      } catch {
+        return { status: "unknown", operationId: request.operationId, reason: "unavailable" };
+      }
+      if (!readBack.ok || !isRecord(readBack.body) || !storedAutomationMatches(config.value, readBack.body)) {
+        return { status: "unknown", operationId: request.operationId, reason: "not_confirmed" };
+      }
+      return {
+        status: "deployed",
+        operationId: request.operationId,
+        nativeAutomationId: spec.automationId,
+        configFingerprint: automationConfigFingerprint(readBack.body),
+      };
+    } catch {
+      return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant configuration API is unreachable" };
+    }
+  }
+
+  private async setAutomationEnabledV2(
+    requestValue: Parameters<AutomationsExtensionV2["setEnabled"]>[0],
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationCommandResultV2> {
+    const operationId = automationOperationId(requestValue);
+    const parsed = bridgeAutomationSetEnabledRequestSchema.safeParse(requestValue);
+    if (!parsed.success) {
+      return { status: "rejected", operationId, reason: "failed", detail: "Automation toggle request is invalid" };
+    }
+    const request = parsed.data;
+    return this.runAutomationOperation(
+      request.operationId,
+      "set_enabled",
+      automationOperationRequestKey("set_enabled", request),
+      () => this.performAutomationEnabledV2(request, signal),
+      () => ({ status: "rejected", operationId: request.operationId, reason: "failed" }),
+      () => ({ status: "unknown", operationId: request.operationId, reason: "unavailable" }),
+    );
+  }
+
+  private async performAutomationEnabledV2(
+    request: Parameters<AutomationsExtensionV2["setEnabled"]>[0],
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationCommandResultV2> {
+    if (this.lifecycle !== "running" || this.bridge === undefined) {
+      return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant bridge is not running" };
+    }
+    const current = await this.automationStatus({ nativeAutomationId: request.nativeAutomationId }, signal);
+    if (current.status === "missing") {
+      return { status: "rejected", operationId: request.operationId, reason: "not_found", detail: "Unknown automation id" };
+    }
+    if (current.status === "unknown") {
+      return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant automation state is unavailable" };
+    }
+    const expected = request.enabled ? "running" : "paused";
+    if (current.status === expected) return { status: "acknowledged", operationId: request.operationId };
+
+    try {
+      await this.bridge.callService({
+        domain: "automation",
+        service: request.enabled ? "turn_on" : "turn_off",
+        entityId: `automation.${request.nativeAutomationId}`,
+      }, signal);
+    } catch {
+      return { status: "unknown", operationId: request.operationId, reason: "unavailable" };
+    }
+    const observed = await this.automationStatus({ nativeAutomationId: request.nativeAutomationId }, signal);
+    return observed.status === expected
+      ? { status: "acknowledged", operationId: request.operationId }
+      : { status: "unknown", operationId: request.operationId, reason: "not_confirmed" };
+  }
+
+  private async withdrawAutomationV2(
+    requestValue: Parameters<AutomationsExtensionV2["withdraw"]>[0],
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationCommandResultV2> {
+    const operationId = automationOperationId(requestValue);
+    const parsed = bridgeAutomationWithdrawRequestSchema.safeParse(requestValue);
+    if (!parsed.success) {
+      return { status: "rejected", operationId, reason: "failed", detail: "Automation withdrawal request is invalid" };
+    }
+    const request = parsed.data;
+    return this.runAutomationOperation(
+      request.operationId,
+      "withdraw",
+      automationOperationRequestKey("withdraw", request),
+      () => this.performAutomationWithdrawV2(request, signal),
+      () => ({ status: "rejected", operationId: request.operationId, reason: "failed" }),
+      () => ({ status: "unknown", operationId: request.operationId, reason: "unavailable" }),
+    );
+  }
+
+  private async performAutomationWithdrawV2(
+    request: Parameters<AutomationsExtensionV2["withdraw"]>[0],
+    signal: AbortSignal,
+  ): Promise<BridgeAutomationCommandResultV2> {
+    if (this.lifecycle !== "running") {
+      return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant bridge is not running" };
+    }
+    let existing: { readonly ok: boolean; readonly statusCode: number; readonly body?: unknown };
+    try {
+      existing = await this.automationConfigRequest("GET", request.nativeAutomationId, signal);
+    } catch {
+      return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant automation config is unavailable" };
+    }
+    if (existing.statusCode === 404) return { status: "acknowledged", operationId: request.operationId };
+    if (!existing.ok) {
+      return { status: "rejected", operationId: request.operationId, reason: "unavailable", detail: "Home Assistant automation config is unavailable" };
+    }
+    if (!isRecord(existing.body) || !hasHomeAssistantAutomationOwnershipMarker(request.nativeAutomationId, existing.body)) {
+      return { status: "rejected", operationId: request.operationId, reason: "failed", detail: "Home Assistant automation is not Hub-owned" };
+    }
+
+    let deleted: { readonly ok: boolean; readonly statusCode: number; readonly body?: unknown };
+    try {
+      deleted = await this.automationConfigRequest("DELETE", request.nativeAutomationId, signal);
+    } catch {
+      return { status: "unknown", operationId: request.operationId, reason: "unavailable" };
+    }
+    if (deleted.statusCode === 404) return { status: "acknowledged", operationId: request.operationId };
+    if (!deleted.ok) {
+      return { status: "rejected", operationId: request.operationId, reason: "failed", detail: `Home Assistant rejected the removal (${deleted.statusCode})` };
+    }
+
+    let readBack: { readonly ok: boolean; readonly statusCode: number; readonly body?: unknown };
+    try {
+      readBack = await this.automationConfigRequest("GET", request.nativeAutomationId, signal);
+    } catch {
+      return { status: "unknown", operationId: request.operationId, reason: "unavailable" };
+    }
+    return readBack.statusCode === 404
+      ? { status: "acknowledged", operationId: request.operationId }
+      : { status: "unknown", operationId: request.operationId, reason: readBack.ok ? "not_confirmed" : "unavailable" };
+  }
+
+  private runAutomationOperation<T extends HomeAssistantAutomationOperationResult>(
+    operationId: string,
+    kind: HomeAssistantAutomationOperationKind,
+    requestKey: string,
+    perform: () => Promise<T>,
+    collision: () => T,
+    unavailable: () => T,
+  ): Promise<T> {
+    const existing = this.automationOperations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.kind !== kind || existing.requestKey !== requestKey) return Promise.resolve(collision());
+      if (!existing.settled || existing.lastResult?.status !== "unknown") {
+        return existing.result as Promise<T>;
+      }
+    } else if (!this.reserveAutomationOperation()) {
+      return Promise.resolve(unavailable());
+    }
+
+    const result = Promise.resolve().then(perform).catch(() => unavailable());
+    const entry = existing ?? {
+      kind,
+      requestKey,
+      result: result as Promise<HomeAssistantAutomationOperationResult>,
+      settled: false,
+    } satisfies HomeAssistantAutomationOperationEntry;
+    entry.result = result as Promise<HomeAssistantAutomationOperationResult>;
+    entry.settled = false;
+    entry.lastResult = undefined;
+    this.automationOperations.set(operationId, entry);
+    void result.then((value) => {
+      entry.lastResult = value;
+      entry.settled = true;
+    });
+    return result;
+  }
+
+  private reserveAutomationOperation(): boolean {
+    if (this.automationOperations.size < MAX_HOME_ASSISTANT_AUTOMATION_OPERATIONS) return true;
+    const evictable = [...this.automationOperations.entries()].find(([, entry]) => entry.settled)?.[0];
+    if (evictable === undefined) return false;
+    this.automationOperations.delete(evictable);
+    return true;
   }
 
   /** Reads the automation entity state; the config read-back covers existence. */
@@ -1777,6 +2046,17 @@ type ForeignRuleTranslationProjection =
   | { readonly status: "translated"; readonly title: string; readonly plan: ForeignRuleMigrationPlan }
   | { readonly status: "unsupported"; readonly reason: ForeignRuleMigrationUnsupportedReason }
   | { readonly status: "unavailable"; readonly reason: "upstream_unavailable" | "invalid_response" | "cancelled" };
+
+type HomeAssistantAutomationOperationKind = "deploy" | "set_enabled" | "withdraw";
+type HomeAssistantAutomationOperationResult = BridgeAutomationDeployResultV2 | BridgeAutomationCommandResultV2;
+
+interface HomeAssistantAutomationOperationEntry {
+  readonly kind: HomeAssistantAutomationOperationKind;
+  readonly requestKey: string;
+  result: Promise<HomeAssistantAutomationOperationResult>;
+  lastResult?: HomeAssistantAutomationOperationResult;
+  settled: boolean;
+}
 
 type ForeignRuleControlConfigRead =
   | { readonly status: "ok"; readonly sourceFingerprint: string }
@@ -2710,6 +2990,20 @@ function foreignRuleControlRequestKey(request: {
   readonly enabled: boolean;
 }): string {
   return JSON.stringify([request.ruleRef, request.expectedSourceFingerprint, request.enabled]);
+}
+
+const INVALID_AUTOMATION_OPERATION_ID = "00000000000000000000000000000000";
+
+function automationOperationId(value: unknown): string {
+  const parsed = bridgeAutomationOperationIdSchema.safeParse(isRecord(value) ? value.operationId : undefined);
+  return parsed.success ? parsed.data : INVALID_AUTOMATION_OPERATION_ID;
+}
+
+function automationOperationRequestKey(
+  kind: HomeAssistantAutomationOperationKind,
+  request: unknown,
+): string {
+  return `${kind}\u0000${stableJson(request)}`;
 }
 
 /** Deep equality on the behavioral fields; storage may add bookkeeping keys. */

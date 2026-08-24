@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
+
 import type {
-  AutomationsExtension,
+  AutomationsExtensionV2,
   BridgeActionTarget,
   BridgeAutomationStatusResult,
   BridgeAutomationAction,
@@ -42,13 +44,13 @@ export interface AutomationBridgeSource {
   capabilityDeviceName(hwCapabilityId: string): string | undefined;
   automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
     readonly bridgeId: string;
-    readonly automations: AutomationsExtension;
+    readonly automations: AutomationsExtensionV2;
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined;
-  automationsHandleFor(bridgeId: string): AutomationsExtension | undefined;
+  automationsHandleFor(bridgeId: string): AutomationsExtensionV2 | undefined;
   automationBridgeById(bridgeId: string): {
     readonly bridgeId: string;
-    readonly automations: AutomationsExtension;
+    readonly automations: AutomationsExtensionV2;
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined;
   /** Optional in test-only adapters; the production HomeWorld supplies state. */
@@ -163,6 +165,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
   async deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
+    readonly operationId?: string;
     /** Hub audit principal; the ecosystem adapter accepts it without interpreting it. */
     readonly actor: string;
     readonly kind: string;
@@ -204,7 +207,9 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     if (spec.value.automationId !== request.intent.deploymentId) {
       return { status: "failed", reason: "部署身份与批准时的意图不一致，家里的设置保持原样。" };
     }
-    const result = await bridge.automations.deploy(spec.value, { signal: AbortSignal.timeout(15_000) });
+    const operationId = request.operationId
+      ?? stableAutomationOperationId("deploy", request.proposalId, request.revision, request.intent.deploymentId, request.intent.target);
+    const result = await bridge.automations.deploy({ operationId, spec: spec.value }, { signal: AbortSignal.timeout(15_000) });
     if (result.status === "deployed") {
       return {
         status: "verified",
@@ -213,6 +218,7 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
         ...(result.configFingerprint === undefined ? {} : { configFingerprint: result.configFingerprint }),
       };
     }
+    if (result.status === "unknown") return { status: "failed", reason: "部署结果暂时无法确认，家里的设置保持原样；稍后继续恢复。" };
     return { status: "failed", reason: deployRejectionReason(result.reason) };
   }
 
@@ -292,38 +298,47 @@ export class BridgeAutomationDeployment implements ProposalDeploymentPort {
     }
   }
 
-  async pause(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> {
+  async pause(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string; readonly operationId?: string }): Promise<void> {
     await this.toggle(request, false);
   }
 
-  async resume(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> {
+  async resume(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string; readonly operationId?: string }): Promise<void> {
     await this.toggle(request, true);
   }
 
-  async withdraw(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string }): Promise<{ readonly restored: boolean }> {
+  async withdraw(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string; readonly operationId?: string }): Promise<{ readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string }> {
     const automations = request.target === undefined ? undefined : this.world.automationsHandleFor(request.target);
     if (automations === undefined) return { restored: false };
+    if (request.operationId === undefined) {
+      return { restored: false, recoveryRequired: true, reason: "自动化回退缺少稳定的操作标识，等待继续恢复。" };
+    }
+    const operationId = request.operationId;
     const result = await automations.withdraw(
-      { nativeAutomationId: request.deploymentId },
+      { nativeAutomationId: request.deploymentId, operationId },
       { signal: AbortSignal.timeout(15_000) },
     );
     // The Hub only ever deploys its own automations, so removal restores the
     // home to exactly the configuration it had before enablement.
+    if (result.status === "unknown") {
+      return { restored: false, recoveryRequired: true, reason: "自动化回退结果暂时无法确认，等待继续恢复。" };
+    }
     return { restored: result.status === "acknowledged" };
   }
 
   private async toggle(
-    request: { readonly deploymentId?: string; readonly target?: string },
+    request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string; readonly operationId?: string },
     enabled: boolean,
   ): Promise<void> {
     if (request.deploymentId === undefined) return;
     const automations = request.target === undefined ? undefined : this.world.automationsHandleFor(request.target);
     if (automations === undefined) throw new Error("automation_bridge_unavailable");
+    if (request.operationId === undefined) throw new Error("automation_operation_id_required");
+    const operationId = request.operationId;
     const result = await automations.setEnabled(
-      { nativeAutomationId: request.deploymentId, enabled },
+      { nativeAutomationId: request.deploymentId, enabled, operationId },
       { signal: AbortSignal.timeout(15_000) },
     );
-    if (result.status !== "acknowledged") throw new Error("automation_toggle_rejected");
+    if (result.status !== "acknowledged") throw new Error(result.status === "unknown" ? "automation_toggle_unknown" : "automation_toggle_rejected");
   }
 }
 
@@ -440,6 +455,19 @@ function householdSemanticReason(_reason: HomeWorldArtifactPlanPreflightReason):
 export function automationIdForProposal(proposalId: string): string {
   const sanitized = proposalId.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return `hob_${sanitized}`.slice(0, 120);
+}
+
+function stableAutomationOperationId(
+  kind: "deploy" | "pause" | "resume" | "withdraw",
+  proposalId: string,
+  revision: number | string,
+  deploymentId: string,
+  target: string,
+): string {
+  return createHash("sha256")
+    .update(`${kind}\u0000${proposalId}\u0000${revision}\u0000${deploymentId}\u0000${target}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
 }
 
 function compileAutomationSpec(

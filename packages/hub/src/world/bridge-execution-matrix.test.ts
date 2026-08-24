@@ -4,7 +4,7 @@ import test from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 import {
   type ActionsExtension,
-  type AutomationsExtension,
+  type AutomationsExtensionV2,
   type BridgeActionRequest,
   type BridgeAdapter,
   type BridgeAutomationSpec,
@@ -37,7 +37,7 @@ class TestOnlyPeerAdapter implements BridgeAdapter {
     heartbeatIntervalMs: 60_000,
     extensions: [
       { id: "actions", version: "1.0.0" },
-      { id: "automations", version: "1.0.0" },
+      { id: "automations", version: "2.0.0" },
     ],
   } as const;
 
@@ -86,28 +86,28 @@ class TestOnlyPeerAdapter implements BridgeAdapter {
     },
   };
 
-  private readonly automationHandle: AutomationsExtension = {
-    deploy: async (spec) => {
+  private readonly automationHandle: AutomationsExtensionV2 = {
+    deploy: async ({ operationId, spec }) => {
       this.deployed.push(spec);
       const fingerprint = `peer:${spec.automationId}`;
       this.automations.set(spec.automationId, { fingerprint, enabled: true });
-      return { status: "deployed", nativeAutomationId: spec.automationId, configFingerprint: fingerprint };
+      return { status: "deployed", operationId, nativeAutomationId: spec.automationId, configFingerprint: fingerprint };
     },
     status: async ({ nativeAutomationId }) => {
       const automation = this.automations.get(nativeAutomationId);
       if (automation === undefined) return { status: "missing" };
       return { status: automation.enabled ? "running" : "paused", configFingerprint: automation.fingerprint };
     },
-    setEnabled: async ({ nativeAutomationId, enabled }) => {
+    setEnabled: async ({ operationId, nativeAutomationId, enabled }) => {
       const automation = this.automations.get(nativeAutomationId);
-      if (automation === undefined) return { status: "rejected", reason: "not_found" };
+      if (automation === undefined) return { status: "rejected", operationId, reason: "not_found" };
       automation.enabled = enabled;
-      return { status: "acknowledged" };
+      return { status: "acknowledged", operationId };
     },
-    withdraw: async ({ nativeAutomationId }) => {
+    withdraw: async ({ operationId, nativeAutomationId }) => {
       return this.automations.delete(nativeAutomationId)
-        ? { status: "acknowledged" }
-        : { status: "rejected", reason: "not_found" };
+        ? { status: "acknowledged", operationId }
+        : { status: "rejected", operationId, reason: "not_found" };
     },
   };
 
@@ -128,7 +128,7 @@ class TestOnlyPeerAdapter implements BridgeAdapter {
     name: K,
   ): import("@hob/bridge-contract").ExtensionHandleRegistry[K] | undefined {
     if (name === "actions@1") return this.actionHandle as never;
-    if (name === "automations@1") return this.automationHandle as never;
+    if (name === "automations@2") return this.automationHandle as never;
     return undefined;
   }
 
@@ -398,16 +398,18 @@ test("a test-only peer stays fail-closed until its automation semantics are expl
       status: "running",
       configFingerprint: "peer:hob_peer_evening_switch",
     });
-    await deployment.pause({ proposalId: "peer-evening-switch", deploymentId: "hob_peer_evening_switch", target: PEER_BRIDGE_ID });
+    await deployment.pause({ proposalId: "peer-evening-switch", deploymentId: "hob_peer_evening_switch", target: PEER_BRIDGE_ID, operationId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
     assert.deepEqual(await deployment.status({ deploymentId: "hob_peer_evening_switch", target: PEER_BRIDGE_ID }), {
       status: "paused",
       configFingerprint: "peer:hob_peer_evening_switch",
     });
-    await deployment.resume({ proposalId: "peer-evening-switch", deploymentId: "hob_peer_evening_switch", target: PEER_BRIDGE_ID });
+    await deployment.resume({ proposalId: "peer-evening-switch", deploymentId: "hob_peer_evening_switch", target: PEER_BRIDGE_ID, operationId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
     assert.deepEqual(await deployment.withdraw({
       proposalId: "peer-evening-switch",
       deploymentId: "hob_peer_evening_switch",
       target: PEER_BRIDGE_ID,
+      actor: "household-owner",
+      operationId: "cccccccccccccccccccccccccccccccc",
     }), { restored: true });
     assert.deepEqual(await deployment.status({ deploymentId: "hob_peer_evening_switch", target: PEER_BRIDGE_ID }), { status: "missing" });
   } finally {

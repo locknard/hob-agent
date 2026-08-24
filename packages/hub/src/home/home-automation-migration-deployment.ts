@@ -346,7 +346,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
 
     let outcome: Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>;
     try {
-      outcome = await this.base.deploy(request);
+      outcome = await this.base.deploy({
+        ...request,
+        operationId: targetAutomationOperationId("deploy", switchOperationId),
+      });
     } catch {
       this.fail(lookup, "switching", "switch_unknown", switchOperationId);
       return failed(SWITCH_UNKNOWN_REASON);
@@ -482,6 +485,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
           deploymentId: request.deploymentId,
           target: request.target,
           actor: request.actor,
+          operationId: targetAutomationOperationId("withdraw", switchOperationId),
         });
       } catch {
         this.fail(request.lookup, "switching", "switch_unknown", switchOperationId);
@@ -616,6 +620,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
             deploymentId: request.intent.deploymentId,
             target: request.intent.target,
             actor: request.actor,
+            operationId: targetAutomationOperationId("withdraw", switchOperationId),
           });
         } catch {
           failSwitch("switch_unknown");
@@ -737,7 +742,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
     }
     let outcome: Awaited<ReturnType<ProposalDeploymentPort["deploy"]>>;
     try {
-      outcome = await this.base.deploy(request);
+      outcome = await this.base.deploy({
+        ...request,
+        operationId: targetAutomationOperationId("deploy", switchOperationId),
+      });
     } catch {
       failSwitch("switch_unknown");
       return failed(SWITCH_UNKNOWN_REASON);
@@ -827,11 +835,22 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
       return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
     }
     if (lookup.status === "not_migration") {
+      const target = await this.readTarget(request.intent.deploymentId, request.intent.target);
+      if (target.status === "missing") return { restored: true };
+      if (target.status === "unknown") {
+        return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
+      }
       const withdrawn = await this.base.withdraw?.({
         proposalId: request.proposalId,
         deploymentId: request.intent.deploymentId,
         target: request.intent.target,
         actor: request.actor,
+        operationId: ordinaryRecoveryAutomationOperationId(
+          request.proposalId,
+          request.revision,
+          request.intent.deploymentId,
+          request.intent.target,
+        ),
       });
       return withdrawn ?? { restored: false };
     }
@@ -907,6 +926,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
           deploymentId: request.intent.deploymentId,
           target: request.intent.target,
           actor: request.actor,
+          operationId: targetAutomationOperationId("withdraw", rollbackOperationId),
         }) ?? { restored: false };
       } catch {
         failRollback("rollback_unknown");
@@ -1065,7 +1085,10 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
           failRollback("rollback_failed");
           return { restored: false, recoveryRequired: true, reason: ROLLBACK_FAILURE_REASON };
         }
-        withdrawn = await this.base.withdraw(request);
+        withdrawn = await this.base.withdraw({
+          ...request,
+          operationId: targetAutomationOperationId("withdraw", rollbackOperationId),
+        });
       } catch {
         failRollback("rollback_unknown");
         return { restored: false, recoveryRequired: true, reason: ROLLBACK_UNKNOWN_REASON };
@@ -1217,6 +1240,7 @@ export class HomeAutomationMigrationDeployment implements ProposalDeploymentPort
           deploymentId: request.intent.deploymentId,
           target: request.intent.target,
           actor: request.actor,
+          operationId: targetAutomationOperationId("withdraw", expectedSwitchOperationId),
         });
       } catch {
         this.fail(lookup, "switching", "switch_unknown", expectedSwitchOperationId);
@@ -1480,4 +1504,23 @@ function recoverySwitchOperationId(
   lookup: Extract<HomeAutomationMigrationDeploymentLookup, { readonly status: "governed" }>,
 ): string {
   return operationId("switch", proposalId, revision, lookup, lookup.switchOperationId ?? lookup.switchStartedAt);
+}
+
+function targetAutomationOperationId(kind: "deploy" | "withdraw", receiptOperationId: string): string {
+  return createHash("sha256")
+    .update(`automations-v2\u0000${kind}\u0000${receiptOperationId}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function ordinaryRecoveryAutomationOperationId(
+  proposalId: string,
+  revision: number,
+  deploymentId: string,
+  target: string,
+): string {
+  return createHash("sha256")
+    .update(`automations-v2\u0000withdraw-recovery\u0000${proposalId}\u0000${revision}\u0000${deploymentId}\u0000${target}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
 }

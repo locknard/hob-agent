@@ -125,6 +125,14 @@ Phase 0.5 的故障注入只接受下表六个精确 `fault` 值。机器可验�
 
 原 HA 规则使用独立、版本化的 `foreignRuleControl@1` 中立扩展进行状态读回和启停。该扩展只接受 `foreignRules@2` 产生的 opaque `ruleRef`、Hub 生成的操作幂等键和预期 source fingerprint；原生配置 id、entity、service、URL 与原生响应始终留在适配器内部。`automations@1` 继续只管理 Hub 创建的自动化，两个扩展互不扩张权限。
 
+### `automations@2` 操作回执决议
+
+`automations@1` 保留为明确标记的受信兼容 ingress，严格 schema 不扩展，也不承诺未知结果的操作级回放。Phase 0.5 的 Hub 部署路径改用版本化 `automations@2`：deploy、setEnabled 和 withdraw 请求都带有 Hub 生成的 32 位小写十六进制 `operationId`，每个结果回显相同 operationId，并以 `unknown` 结果保留无法确认的边界。相同 operationId 只能重放同一请求；参数冲突在任何远端读写前拒绝。
+
+`automations@2` adapter 可以保留有界的进程内 operation ledger，用于并发合并和进程内重放；该 ledger 不声称跨重启耐久。重启或 ledger 丢失后，Hub 仍以确定性 native automation identity、target/config fingerprint 和状态读回收敛，未知结果不盲目重放。migration deploy/rollback 的 operationId 直接派生自 durable switch/rollback receipt；普通 Proposal 路径使用 proposal/deployment identity 派生稳定 replay identity。
+
+适配器在同时声明 `automations@2` 和 `automations@1` 时只把 `@1` 作为受信旧调用入口；Hub 不从 `@2` 静默降级到 `@1`。当所有受支持适配器都声明 `automations@2`、Hub 内无 `@1` 调用方且兼容 ingress 的审计窗口完成后，在一次明确的合同版本发布中移除 `automations@1`。
+
 家庭成员批准精确 `ready` revision 后，Hub 先读回原规则的运行状态和配置指纹，再原子记录 `switching`。首期切换先停用原规则并确认其为暂停状态，再通过现有 Proposal 部署通道创建并验证 Hob 自动化；这段有界切换窗口不允许原规则和新规则同时运行。Hub 只有在原规则保持暂停、新规则运行、部署 identity 和配置指纹全部匹配时记录 `verified`。任一步出现 stale source、超时、未知结果或读回不一致时，Hub 停止后续写入；已知失败恢复原规则，未知结果先读回再决定恢复或继续，系统不盲目重放命令。
 
 迁移 Proposal 的 generic conflict cut 只排除它正在替换的那一条精确 source rule。该排除由

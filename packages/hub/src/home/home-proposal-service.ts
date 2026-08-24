@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Context, Service } from "@deepseek-ai/cordis";
 
 import {
@@ -69,6 +71,8 @@ export interface ProposalDeploymentPort {
   deploy(request: {
     readonly proposalId: string;
     readonly revision: number;
+    /** Optional stable bridge operation identity supplied by a governed workflow. */
+    readonly operationId?: string;
     /** The bounded Hub principal responsible for this deployment attempt. */
     readonly actor: string;
     readonly kind: CreateProposalInput["kind"];
@@ -91,9 +95,9 @@ export interface ProposalDeploymentPort {
     readonly proposalId: string;
     readonly lifecycle: ProposalEnvelope["lifecycle"];
   }): ProposalDeploymentReconciliationDisposition | Promise<ProposalDeploymentReconciliationDisposition>;
-  pause?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
-  resume?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string }): Promise<void> | void;
-  withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string }):
+  pause?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string; readonly operationId?: string }): Promise<void> | void;
+  resume?(request: { readonly proposalId: string; readonly deploymentId?: string; readonly target?: string; readonly operationId?: string }): Promise<void> | void;
+  withdraw?(request: { readonly proposalId: string; readonly deploymentId: string; readonly target?: string; readonly actor: string; readonly operationId?: string }):
     | Promise<{ readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string }>
     | { readonly restored: boolean; readonly recoveryRequired?: boolean; readonly reason?: string };
   /** Readback-driven restoration for a migration already projected as recovery_required. */
@@ -686,6 +690,13 @@ export class HomeProposalService extends Service {
       return await this.deployment.deploy({
         proposalId: proposal.id,
         revision: proposal.revision,
+        operationId: proposalAutomationOperationId(
+          "deploy",
+          proposal.id,
+          proposal.revision,
+          intent.deploymentId,
+          intent.target,
+        ),
         actor,
         kind: proposal.kind,
         title: proposal.title,
@@ -705,6 +716,13 @@ export class HomeProposalService extends Service {
         proposalId: current.id,
         deploymentId: current.deployment?.deploymentId,
         target: current.deployment?.target,
+        operationId: proposalAutomationOperationId(
+          "pause",
+          current.id,
+          paused.revision,
+          current.deployment?.deploymentId ?? "",
+          current.deployment?.target ?? "",
+        ),
       });
     } catch (error) {
       // The bridge disagreed; read-back reconciliation converges the lifecycle.
@@ -722,6 +740,13 @@ export class HomeProposalService extends Service {
         proposalId: current.id,
         deploymentId: current.deployment?.deploymentId,
         target: current.deployment?.target,
+        operationId: proposalAutomationOperationId(
+          "resume",
+          current.id,
+          resumed.revision,
+          current.deployment?.deploymentId ?? "",
+          current.deployment?.target ?? "",
+        ),
       });
     } catch (error) {
       this.store.pauseAutomation({ proposalId: resumed.id, actor: "system" });
@@ -758,6 +783,13 @@ export class HomeProposalService extends Service {
         deploymentId: current.deployment.deploymentId,
         target: current.deployment.target,
         actor: input.actor ?? "household-owner",
+        operationId: proposalAutomationOperationId(
+          "withdraw",
+          current.id,
+          current.revision,
+          current.deployment.deploymentId,
+          current.deployment.target ?? "",
+        ),
       });
       if (result?.recoveryRequired === true) {
         return this.store.markRecoveryRequired({
@@ -1211,4 +1243,17 @@ function overlaps(proposal: string, ruleName: string): boolean {
 
 function tokens(value: string): Set<string> {
   return new Set(value.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 2));
+}
+
+function proposalAutomationOperationId(
+  kind: "deploy" | "pause" | "resume" | "withdraw",
+  proposalId: string,
+  revision: number,
+  deploymentId: string,
+  target: string,
+): string {
+  return createHash("sha256")
+    .update(`proposal-automation-v2\u0000${kind}\u0000${proposalId}\u0000${revision}\u0000${deploymentId}\u0000${target}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
 }

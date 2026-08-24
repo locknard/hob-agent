@@ -24,7 +24,7 @@ import {
   bridgeActionCurrentStateSchema,
   bridgeActionResultSchema,
   type ActionsExtension,
-  type AutomationsExtension,
+  type AutomationsExtensionV2,
   type BridgeActionTarget,
   type BridgeActionCurrentState,
   type BridgeActionDescriptor,
@@ -1211,7 +1211,7 @@ export class HomeWorldService extends Service {
    */
   automationBridgeForTargets(hwCapabilityIds: readonly string[]): {
     readonly bridgeId: string;
-    readonly automations: AutomationsExtension;
+    readonly automations: AutomationsExtensionV2;
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined {
     const deviceCapabilityIds = hwCapabilityIds.filter((id) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id));
@@ -1233,7 +1233,7 @@ export class HomeWorldService extends Service {
   }
 
   /** Control and reconciliation address the bridge a deployment was recorded on. */
-  automationsHandleFor(bridgeId: string): AutomationsExtension | undefined {
+  automationsHandleFor(bridgeId: string): AutomationsExtensionV2 | undefined {
     return typeof bridgeId === "string" && bridgeId.length > 0 ? this.liveAutomationsHandle(bridgeId) : undefined;
   }
 
@@ -1261,7 +1261,7 @@ export class HomeWorldService extends Service {
   /** Deploy against a recorded intent: the same bridge, the same resolution rules. */
   automationBridgeById(bridgeId: string): {
     readonly bridgeId: string;
-    readonly automations: AutomationsExtension;
+    readonly automations: AutomationsExtensionV2;
     resolveTarget(hwCapabilityId: string): BridgeActionTarget | undefined;
   } | undefined {
     if (typeof bridgeId !== "string" || bridgeId.length === 0) return undefined;
@@ -1325,14 +1325,14 @@ export class HomeWorldService extends Service {
     };
   }
 
-  private liveAutomationsHandle(bridgeId: string): AutomationsExtension | undefined {
+  private liveAutomationsHandle(bridgeId: string): AutomationsExtensionV2 | undefined {
     const runtime = this.runtimesById.get(bridgeId);
     if (runtime === undefined
-      || runtime.extensionAvailability["automations@1"] !== "available"
+      || runtime.extensionAvailability["automations@2"] !== "available"
       || runtime.ingest.diagnostics().connectionState !== "ready") return undefined;
-    let handle: AutomationsExtension | undefined;
+    let handle: AutomationsExtensionV2 | undefined;
     try {
-      handle = runtime.adapter.extension("automations@1") as AutomationsExtension | undefined;
+      handle = runtime.adapter.extension("automations@2") as AutomationsExtensionV2 | undefined;
     } catch {
       return undefined;
     }

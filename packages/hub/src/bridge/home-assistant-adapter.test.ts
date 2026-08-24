@@ -7,7 +7,7 @@ import {
   type Envelope,
 } from "@hob/bridge-contract";
 import { runBridgeAdapterConformance } from "@hob/bridge-contract";
-import type { ActionsExtension, AutomationsExtension, BridgeActionDescriptor } from "@hob/bridge-contract";
+import type { ActionsExtension, AutomationsExtension, AutomationsExtensionV2, BridgeActionDescriptor } from "@hob/bridge-contract";
 import type { ForeignRuleMigrationHandle, ForeignRulesHandle } from "@hob/bridge-contract";
 import type { ForeignRuleControlHandle } from "@hob/bridge-contract";
 import { BridgeCatalog } from "./bridge-catalog.js";
@@ -551,6 +551,7 @@ test("factory construction is synchronous and does not resolve credentials or to
       { id: "orgHints", version: "1.0.0" },
       { id: "actions", version: "1.0.0" },
       { id: "automations", version: "1.0.0" },
+      { id: "automations", version: "2.0.0" },
     ],
   });
   void socket;
@@ -987,6 +988,7 @@ test("consumes the Home Assistant registration through the neutral conformance h
       { key: "orgHints@1", available: false },
       { key: "actions@1", available: true },
       { key: "automations@1", available: true },
+      { key: "automations@2", available: true },
     ],
   });
 
@@ -1411,6 +1413,18 @@ async function readyAutomationAdapter(fake: ReturnType<typeof automationFetchFak
   return { adapter, handle: adapter.extension("automations@1") as AutomationsExtension };
 }
 
+async function readyAutomationV2Adapter(fake: ReturnType<typeof automationFetchFake>) {
+  const socket = new FakeSocket();
+  const { adapter } = createAdapter(socket, {}, { fetchImpl: fake.fetchImpl });
+  const iterator = adapter.events(new AbortController().signal)[Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  respondToBootstrap(socket, "light.kitchen");
+  const events: Envelope[] = [(await first).value!];
+  while (events.at(-1)?.event.kind !== "sync-complete") events.push((await iterator.next()).value!);
+  return { adapter, socket, handle: adapter.extension("automations@2") as AutomationsExtensionV2 };
+}
+
 test("deploys a hub automation through the config API and verifies by read-back", async () => {
   const socket = new FakeSocket();
   const fake = automationFetchFake();
@@ -1542,6 +1556,118 @@ test("treats an owned unchanged automation as an idempotent deployment", async (
   assert.equal(first.status, "deployed");
   assert.equal(second.status, "deployed");
   assert.equal(fake.requests.filter((request) => request.method === "POST").length, 1);
+  await adapter.control.dispose();
+});
+
+test("automations v2 replays an uncertain deploy by operation id after read-back", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  let losePostResponse = true;
+  fake.fetchImpl = async (input, init) => {
+    const result = await delegate(input, init);
+    if (losePostResponse && (init?.method ?? "GET") === "POST") {
+      losePostResponse = false;
+      throw new Error("deployment response lost after Home Assistant accepted it");
+    }
+    return result;
+  };
+  const { adapter, socket, handle } = await readyAutomationV2Adapter(fake);
+  const request = { operationId: "0123456789abcdef0123456789abcdef", spec: hubAutomationSpec("hob_v2_replay") };
+
+  const uncertain = await handle.deploy(request, { signal: new AbortController().signal });
+  assert.deepEqual(uncertain, {
+    status: "unknown",
+    operationId: request.operationId,
+    reason: "unavailable",
+  });
+  const replay = await handle.deploy(request, { signal: new AbortController().signal });
+  assert.equal(replay.status, "deployed");
+  assert.equal((replay as { operationId: string }).operationId, request.operationId);
+  assert.equal(fake.requests.filter((item) => item.method === "POST").length, 1);
+
+  const collision = await handle.deploy({
+    operationId: request.operationId,
+    spec: { ...request.spec, title: "不同方案" },
+  }, { signal: new AbortController().signal });
+  assert.deepEqual(collision, {
+    status: "rejected",
+    operationId: request.operationId,
+    reason: "failed",
+  });
+  assert.equal(fake.requests.filter((item) => item.method === "POST").length, 1);
+  await adapter.control.dispose();
+});
+
+test("automations v2 resolves an uncertain toggle from desired state without replaying the service write", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  let state: "on" | "off" = "on";
+  fake.fetchImpl = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/states/automation.hob_v2_toggle")) {
+      return new Response(JSON.stringify({ state }), { status: 200 });
+    }
+    return delegate(input, init);
+  };
+  const { adapter, socket, handle } = await readyAutomationV2Adapter(fake);
+  const spec = hubAutomationSpec("hob_v2_toggle");
+  const deployed = await handle.deploy({
+    operationId: "11111111111111111111111111111111",
+    spec,
+  }, { signal: new AbortController().signal });
+  assert.equal(deployed.status, "deployed");
+
+  const request = {
+    operationId: "22222222222222222222222222222222",
+    nativeAutomationId: spec.automationId,
+    enabled: false,
+  } as const;
+  const pending = handle.setEnabled(request, { signal: new AbortController().signal });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const command = socket.sent.filter((item) => item.type === "call_service").at(-1)!;
+  state = "off";
+  socket.receive({ id: command.id, type: "result", success: false, error: { message: "response lost" } });
+  assert.deepEqual(await pending, { status: "unknown", operationId: request.operationId, reason: "unavailable" });
+
+  const writesBeforeReplay = socket.sent.filter((item) => item.type === "call_service").length;
+  assert.deepEqual(await handle.setEnabled(request, { signal: new AbortController().signal }), {
+    status: "acknowledged",
+    operationId: request.operationId,
+  });
+  assert.equal(socket.sent.filter((item) => item.type === "call_service").length, writesBeforeReplay);
+  await adapter.control.dispose();
+});
+
+test("automations v2 replays an uncertain withdrawal from missing read-back", async () => {
+  const fake = automationFetchFake();
+  const delegate = fake.fetchImpl;
+  let loseDeleteResponse = true;
+  fake.fetchImpl = async (input, init) => {
+    const result = await delegate(input, init);
+    if (loseDeleteResponse && (init?.method ?? "GET") === "DELETE") {
+      loseDeleteResponse = false;
+      throw new Error("withdrawal response lost after Home Assistant removed it");
+    }
+    return result;
+  };
+  const { adapter, handle } = await readyAutomationV2Adapter(fake);
+  const spec = hubAutomationSpec("hob_v2_withdraw");
+  await handle.deploy({ operationId: "33333333333333333333333333333333", spec }, { signal: new AbortController().signal });
+  const request = {
+    operationId: "44444444444444444444444444444444",
+    nativeAutomationId: spec.automationId,
+  } as const;
+
+  assert.deepEqual(await handle.withdraw(request, { signal: new AbortController().signal }), {
+    status: "unknown",
+    operationId: request.operationId,
+    reason: "unavailable",
+  });
+  assert.deepEqual(await handle.withdraw(request, { signal: new AbortController().signal }), {
+    status: "acknowledged",
+    operationId: request.operationId,
+  });
+  assert.equal(fake.requests.filter((item) => item.method === "DELETE").length, 1);
   await adapter.control.dispose();
 });
 

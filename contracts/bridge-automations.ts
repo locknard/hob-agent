@@ -5,10 +5,18 @@ import { bridgeActionTargetSchema } from "./bridge-actions.js";
 
 const boundedId = z.string().min(1).max(256);
 const boundedText = z.string().min(1).max(512);
+export const bridgeAutomationOperationIdSchema = z.string().regex(/^[0-9a-f]{32}$/);
+export type BridgeAutomationOperationId = z.infer<typeof bridgeAutomationOperationIdSchema>;
 
 export const AUTOMATIONS_EXTENSION = Object.freeze({
   id: "automations",
   version: "1.0.0",
+}) satisfies ExtensionDeclaration;
+
+/** Versioned command surface with explicit operation replay identity. */
+export const AUTOMATIONS_EXTENSION_V2 = Object.freeze({
+  id: "automations",
+  version: "2.0.0",
 }) satisfies ExtensionDeclaration;
 
 /**
@@ -90,6 +98,12 @@ export const bridgeAutomationDeployResultSchema = z.discriminatedUnion("status",
 ]);
 export type BridgeAutomationDeployResult = z.infer<typeof bridgeAutomationDeployResultSchema>;
 
+export const bridgeAutomationDeployRequestSchema = z.object({
+  operationId: bridgeAutomationOperationIdSchema,
+  spec: bridgeAutomationSpecSchema,
+}).strict();
+export type BridgeAutomationDeployRequest = z.infer<typeof bridgeAutomationDeployRequestSchema>;
+
 export const bridgeAutomationCommandResultSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("acknowledged") }).strict(),
   z.object({
@@ -99,6 +113,61 @@ export const bridgeAutomationCommandResultSchema = z.discriminatedUnion("status"
   }).strict(),
 ]);
 export type BridgeAutomationCommandResult = z.infer<typeof bridgeAutomationCommandResultSchema>;
+
+const bridgeAutomationUnknownReasonSchema = z.enum(["unavailable", "not_confirmed"]);
+
+export const bridgeAutomationDeployResultV2Schema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("deployed"),
+    operationId: bridgeAutomationOperationIdSchema,
+    nativeAutomationId: boundedId,
+    configFingerprint: z.string().min(1).max(128).optional(),
+  }).strict(),
+  z.object({
+    status: z.literal("rejected"),
+    operationId: bridgeAutomationOperationIdSchema,
+    reason: z.enum(["unsupported", "invalid_target", "unavailable", "failed"]),
+    detail: boundedText.optional(),
+  }).strict(),
+  z.object({
+    status: z.literal("unknown"),
+    operationId: bridgeAutomationOperationIdSchema,
+    reason: bridgeAutomationUnknownReasonSchema,
+  }).strict(),
+]);
+export type BridgeAutomationDeployResultV2 = z.infer<typeof bridgeAutomationDeployResultV2Schema>;
+
+export const bridgeAutomationSetEnabledRequestSchema = z.object({
+  operationId: bridgeAutomationOperationIdSchema,
+  nativeAutomationId: boundedId,
+  enabled: z.boolean(),
+}).strict();
+export type BridgeAutomationSetEnabledRequest = z.infer<typeof bridgeAutomationSetEnabledRequestSchema>;
+
+export const bridgeAutomationWithdrawRequestSchema = z.object({
+  operationId: bridgeAutomationOperationIdSchema,
+  nativeAutomationId: boundedId,
+}).strict();
+export type BridgeAutomationWithdrawRequest = z.infer<typeof bridgeAutomationWithdrawRequestSchema>;
+
+export const bridgeAutomationCommandResultV2Schema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("acknowledged"),
+    operationId: bridgeAutomationOperationIdSchema,
+  }).strict(),
+  z.object({
+    status: z.literal("rejected"),
+    operationId: bridgeAutomationOperationIdSchema,
+    reason: z.enum(["not_found", "unavailable", "failed"]),
+    detail: boundedText.optional(),
+  }).strict(),
+  z.object({
+    status: z.literal("unknown"),
+    operationId: bridgeAutomationOperationIdSchema,
+    reason: bridgeAutomationUnknownReasonSchema,
+  }).strict(),
+]);
+export type BridgeAutomationCommandResultV2 = z.infer<typeof bridgeAutomationCommandResultV2Schema>;
 
 export const bridgeAutomationStatusResultSchema = z.object({
   status: z.enum(["running", "paused", "missing", "unknown"]),
@@ -127,8 +196,29 @@ export interface AutomationsExtension {
   ): Promise<BridgeAutomationCommandResult>;
 }
 
+/** Automations command surface with operation-level replay identity. */
+export interface AutomationsExtensionV2 {
+  status(
+    request: { readonly nativeAutomationId: string },
+    options: { readonly signal: AbortSignal },
+  ): Promise<BridgeAutomationStatusResult>;
+  deploy(
+    request: BridgeAutomationDeployRequest,
+    options: { readonly signal: AbortSignal },
+  ): Promise<BridgeAutomationDeployResultV2>;
+  setEnabled(
+    request: BridgeAutomationSetEnabledRequest,
+    options: { readonly signal: AbortSignal },
+  ): Promise<BridgeAutomationCommandResultV2>;
+  withdraw(
+    request: BridgeAutomationWithdrawRequest,
+    options: { readonly signal: AbortSignal },
+  ): Promise<BridgeAutomationCommandResultV2>;
+}
+
 declare module "./bridge-contract.js" {
   interface ExtensionHandleRegistry {
     "automations@1": AutomationsExtension;
+    "automations@2": AutomationsExtensionV2;
   }
 }

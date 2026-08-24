@@ -1908,12 +1908,19 @@ test("routes an enable-failed migration close through the approved deployment id
 
     assert.equal(closed.lifecycle, "closed");
     assert.equal(closed.deployment?.status, "rolled_back");
-    assert.deepEqual(withdrawals, [{
+    assert.equal(withdrawals.length, 1);
+    assert.deepEqual(withdrawals[0] && {
+      proposalId: (withdrawals[0] as { proposalId: string }).proposalId,
+      deploymentId: (withdrawals[0] as { deploymentId: string }).deploymentId,
+      target: (withdrawals[0] as { target: string }).target,
+      actor: (withdrawals[0] as { actor: string }).actor,
+    }, {
       proposalId: failed.id,
       deploymentId: intent.deploymentId,
       target: intent.target,
       actor: "member:alice",
-    }]);
+    });
+    assert.match((withdrawals[0] as { operationId?: string }).operationId ?? "", /^[0-9a-f]{32}$/);
   } finally {
     await fiber?.dispose();
     await ctx.fiber.dispose();
@@ -2007,9 +2014,10 @@ test("a configuration gap blocks visibly and the settings recheck re-enables the
   const bridge = {
     bridgeId: "bridge-a",
     automations: {
-      deploy: async (spec: { automationId: string }) => ({ status: "deployed" as const, nativeAutomationId: spec.automationId }),
-      setEnabled: async () => ({ status: "acknowledged" as const }),
-      withdraw: async () => ({ status: "acknowledged" as const }),
+      deploy: async (request: { operationId: string; spec: { automationId: string } }) => ({ status: "deployed" as const, operationId: request.operationId, nativeAutomationId: request.spec.automationId }),
+      status: async () => ({ status: "running" as const, configFingerprint: "stub:fingerprint" }),
+      setEnabled: async (request: { operationId: string }) => ({ status: "acknowledged" as const, operationId: request.operationId }),
+      withdraw: async (request: { operationId: string }) => ({ status: "acknowledged" as const, operationId: request.operationId }),
     },
     resolveTarget: (hwCapabilityId: string) => ({
       hwCapabilityId,

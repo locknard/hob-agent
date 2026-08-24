@@ -486,6 +486,51 @@ test("switches one ready migration only after CAS and verifies both neutral depl
   ]);
 });
 
+test("derives target operation ids from durable switch and rollback receipts", async () => {
+  const { events, runtime, base, wrapper } = deploymentFixture();
+  let switchReceipt = "";
+  let rollbackReceipt = "";
+  let deployOperationId = "";
+  let withdrawOperationId = "";
+  runtime.startRuleSwitch = (input) => {
+    switchReceipt = input.switchOperationId;
+    return true;
+  };
+  runtime.startRuleRollback = (input) => {
+    rollbackReceipt = input.rollbackOperationId;
+    return true;
+  };
+  base.deploy = async (request) => {
+    deployOperationId = (request as typeof request & { readonly operationId?: string }).operationId ?? "";
+    return {
+      status: "verified",
+      deploymentId: BASE_REQUEST.intent.deploymentId,
+      target: BASE_REQUEST.intent.target,
+      configFingerprint: DEPLOYMENT_FINGERPRINT,
+    };
+  };
+  base.withdraw = async (request) => {
+    events.push("base.withdraw");
+    withdrawOperationId = (request as typeof request & { readonly operationId?: string }).operationId ?? "";
+    return { restored: true };
+  };
+
+  assert.equal((await wrapper.deploy(BASE_REQUEST)).status, "verified");
+  assert.match(switchReceipt, /^[0-9a-f]{32}$/);
+  assert.match(deployOperationId, /^[0-9a-f]{32}$/);
+  assert.notEqual(deployOperationId, switchReceipt);
+
+  assert.deepEqual(await wrapper.withdraw({
+    proposalId: BASE_REQUEST.proposalId,
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    actor: BASE_REQUEST.actor,
+  }), { restored: true });
+  assert.match(rollbackReceipt, /^[0-9a-f]{32}$/);
+  assert.match(withdrawOperationId, /^[0-9a-f]{32}$/);
+  assert.notEqual(withdrawOperationId, rollbackReceipt);
+});
+
 test("rolls a verified migration back in target-first order", async () => {
   const { events, wrapper } = deploymentFixture();
 
@@ -1046,12 +1091,11 @@ test("fails closed before using an un-fingerprinted failed-switch target identit
   };
   base.withdraw = async (request) => {
     events.push("base.withdraw");
-    assert.deepEqual(request, {
-      proposalId: BASE_REQUEST.proposalId,
-      deploymentId: BASE_REQUEST.intent.deploymentId,
-      target: BASE_REQUEST.intent.target,
-      actor: BASE_REQUEST.actor,
-    });
+    assert.equal(request.proposalId, BASE_REQUEST.proposalId);
+    assert.equal(request.deploymentId, BASE_REQUEST.intent.deploymentId);
+    assert.equal(request.target, BASE_REQUEST.intent.target);
+    assert.equal(request.actor, BASE_REQUEST.actor);
+    assert.match(request.operationId ?? "", /^[0-9a-f]{32}$/);
     return { restored: true };
   };
 
@@ -1261,6 +1305,37 @@ test("fully delegates non-migration proposals", async () => {
 
   assert.equal(outcome.status, "verified");
   assert.deepEqual(events, ["base.deploy"]);
+});
+
+test("converges an ordinary uncertain withdrawal from target readback", async () => {
+  const { events, runtime, base, wrapper } = deploymentFixture();
+  runtime.findWorkflowForProposal = () => ({ status: "not_migration" });
+  base.withdraw = async () => {
+    events.push("base.withdraw");
+    return { restored: false, recoveryRequired: true, reason: "结果暂时无法确认" };
+  };
+  const request = {
+    proposalId: BASE_REQUEST.proposalId,
+    deploymentId: BASE_REQUEST.intent.deploymentId,
+    target: BASE_REQUEST.intent.target,
+    actor: BASE_REQUEST.actor,
+    operationId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  };
+  assert.deepEqual(await wrapper.withdraw(request), {
+    restored: false,
+    recoveryRequired: true,
+    reason: "结果暂时无法确认",
+  });
+
+  base.status = async () => {
+    events.push("base.status");
+    return { status: "missing" };
+  };
+  assert.deepEqual(await wrapper.recover({
+    ...BASE_REQUEST,
+    revision: BASE_REQUEST.revision + 1,
+  }), { restored: true });
+  assert.deepEqual(events.slice(-2), ["base.withdraw", "base.status"]);
 });
 
 test("pause and resume only delegate the Hob target after migration cutover", async () => {
@@ -1564,12 +1639,11 @@ test("cleans up a paused target only after needs-attention recovery confirms its
   };
   base.withdraw = async (request) => {
     events.push("base.withdraw");
-    assert.deepEqual(request, {
-      proposalId: BASE_REQUEST.proposalId,
-      deploymentId: BASE_REQUEST.intent.deploymentId,
-      target: BASE_REQUEST.intent.target,
-      actor: BASE_REQUEST.actor,
-    });
+    assert.equal(request.proposalId, BASE_REQUEST.proposalId);
+    assert.equal(request.deploymentId, BASE_REQUEST.intent.deploymentId);
+    assert.equal(request.target, BASE_REQUEST.intent.target);
+    assert.equal(request.actor, BASE_REQUEST.actor);
+    assert.match(request.operationId ?? "", /^[0-9a-f]{32}$/);
     return { restored: true };
   };
 
@@ -1947,12 +2021,11 @@ test("allows recoverKnownFailure cleanup after an exact durable target readback"
   };
   base.withdraw = async (request) => {
     events.push("base.withdraw");
-    assert.deepEqual(request, {
-      proposalId: BASE_REQUEST.proposalId,
-      deploymentId: BASE_REQUEST.intent.deploymentId,
-      target: BASE_REQUEST.intent.target,
-      actor: BASE_REQUEST.actor,
-    });
+    assert.equal(request.proposalId, BASE_REQUEST.proposalId);
+    assert.equal(request.deploymentId, BASE_REQUEST.intent.deploymentId);
+    assert.equal(request.target, BASE_REQUEST.intent.target);
+    assert.equal(request.actor, BASE_REQUEST.actor);
+    assert.match(request.operationId ?? "", /^[0-9a-f]{32}$/);
     return { restored: true };
   };
 

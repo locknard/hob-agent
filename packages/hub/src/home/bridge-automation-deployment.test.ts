@@ -48,17 +48,21 @@ function bridgeStub(overrides: {
   const bridge = {
     bridgeId: "ha-main",
     automations: {
-      deploy: async (spec: BridgeAutomationSpec) => {
-        calls.deploys.push(spec);
-        return (overrides.deployResult ?? { status: "deployed", nativeAutomationId: spec.automationId }) as never;
+      deploy: async (request: { readonly operationId: string; readonly spec: BridgeAutomationSpec }) => {
+        calls.deploys.push(request.spec);
+        return (overrides.deployResult ?? {
+          status: "deployed",
+          operationId: request.operationId,
+          nativeAutomationId: request.spec.automationId,
+        }) as never;
       },
-      setEnabled: async (request: unknown) => {
-        calls.toggles.push(request);
-        return { status: "acknowledged" } as const;
+      setEnabled: async (request: { readonly operationId: string; readonly nativeAutomationId: string; readonly enabled: boolean }) => {
+        calls.toggles.push({ nativeAutomationId: request.nativeAutomationId, enabled: request.enabled });
+        return { status: "acknowledged", operationId: request.operationId } as const;
       },
-      withdraw: async (request: unknown) => {
-        calls.withdrawals.push(request);
-        return { status: "acknowledged" } as const;
+      withdraw: async (request: { readonly operationId: string; readonly nativeAutomationId: string }) => {
+        calls.withdrawals.push({ nativeAutomationId: request.nativeAutomationId });
+        return { status: "acknowledged", operationId: request.operationId } as const;
       },
     },
     resolveTarget: (hwCapabilityId: string) => (overrides.resolvable ?? true)
@@ -318,13 +322,74 @@ test("deploy fails closed when the intent no longer covers the plan's capabiliti
 test("pause, resume and withdraw address only the hub deployment", async () => {
   const { calls, world } = bridgeStub();
   const port = new BridgeAutomationDeployment(world);
-  await port.pause({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
-  await port.resume({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main" });
-  const withdrawal = await port.withdraw({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main", actor: "household-owner" });
+  await port.pause({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main", operationId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+  await port.resume({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main", operationId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
+  const withdrawal = await port.withdraw({ proposalId: "p1", deploymentId: "hob_p1", target: "ha-main", actor: "household-owner", operationId: "cccccccccccccccccccccccccccccccc" });
   assert.deepEqual(calls.toggles, [
     { nativeAutomationId: "hob_p1", enabled: false },
     { nativeAutomationId: "hob_p1", enabled: true },
   ]);
   assert.deepEqual(calls.withdrawals, [{ nativeAutomationId: "hob_p1" }]);
   assert.deepEqual(withdrawal, { restored: true });
+});
+
+test("uses stable operation ids for automations v2 deployment and commands", async () => {
+  const operationRequests: Array<{ readonly kind: string; readonly operationId?: string }> = [];
+  const v2 = {
+    deploy: async (request: { readonly operationId: string; readonly spec: BridgeAutomationSpec }) => {
+      operationRequests.push({ kind: "deploy", operationId: request.operationId });
+      return { status: "deployed" as const, operationId: request.operationId, nativeAutomationId: request.spec.automationId };
+    },
+    status: async () => ({ status: "running" as const, configFingerprint: "peer:fingerprint" }),
+    setEnabled: async (request: { readonly operationId: string; readonly nativeAutomationId: string; readonly enabled: boolean }) => {
+      operationRequests.push({ kind: request.enabled ? "resume" : "pause", operationId: request.operationId });
+      return { status: "acknowledged" as const, operationId: request.operationId };
+    },
+    withdraw: async (request: { readonly operationId: string; readonly nativeAutomationId: string }) => {
+      operationRequests.push({ kind: "withdraw", operationId: request.operationId });
+      return { status: "acknowledged" as const, operationId: request.operationId };
+    },
+  };
+  const base = bridgeStub().world;
+  const world = {
+    ...base,
+    automationBridgeById: () => ({
+      bridgeId: "ha-main",
+      automations: v2,
+      resolveTarget: base.automationBridgeById("ha-main")!.resolveTarget,
+    }),
+    automationsHandleFor: () => v2,
+  } as never;
+  const port = new BridgeAutomationDeployment(world);
+  const request = {
+    proposalId: "stable-operation-proposal",
+    revision: 3,
+    actor: "household-owner",
+    kind: "automation-draft" as const,
+    title: "睡前关闭",
+    artifactCandidate: { schemaVersion: "1" as const, content },
+    intent: {
+      deploymentId: "hob_stable_operation_proposal",
+      target: "ha-main",
+      targets: [
+        { hwCapabilityId: "hwc-presence", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-presence", nativeInstanceId: "ent-hwc-presence" } },
+        { hwCapabilityId: "hwc-strip", binding: { bridgeId: "ha-main", nativeId: "dev-hwc-strip", nativeInstanceId: "ent-hwc-strip" } },
+      ],
+    },
+  };
+
+  await port.deploy(request);
+  await port.deploy(request);
+  await port.pause({ proposalId: request.proposalId, deploymentId: request.intent.deploymentId, target: request.intent.target, operationId: "dddddddddddddddddddddddddddddddd" });
+  await port.pause({ proposalId: request.proposalId, deploymentId: request.intent.deploymentId, target: request.intent.target, operationId: "dddddddddddddddddddddddddddddddd" });
+  await port.withdraw({ proposalId: request.proposalId, deploymentId: request.intent.deploymentId, target: request.intent.target, actor: request.actor, operationId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" });
+  await port.withdraw({ proposalId: request.proposalId, deploymentId: request.intent.deploymentId, target: request.intent.target, actor: request.actor, operationId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" });
+
+  assert.equal(operationRequests.length, 6);
+  for (const operation of operationRequests) assert.match(operation.operationId ?? "", /^[0-9a-f]{32}$/);
+  assert.equal(operationRequests[0]?.operationId, operationRequests[1]?.operationId, "direct deploy replay is stable");
+  assert.equal(operationRequests[2]?.operationId, operationRequests[3]?.operationId, "pause replay is stable");
+  assert.equal(operationRequests[4]?.operationId, operationRequests[5]?.operationId, "withdraw replay is stable");
+  assert.notEqual(operationRequests[0]?.operationId, operationRequests[2]?.operationId);
+  assert.notEqual(operationRequests[2]?.operationId, operationRequests[4]?.operationId);
 });
