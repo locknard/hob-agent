@@ -87,6 +87,7 @@ import {
 } from "./ingest-journal.js";
 import {
   ImportedHistoryJournal,
+  HISTORY_MAX_RECORDS,
   type ImportedHistoryJournalOptions,
 } from "./imported-history-journal.js";
 import {
@@ -447,6 +448,23 @@ export interface HomeWorldImportedHistoryProposalResult {
   readonly coverage: readonly HomeWorldImportedHistoryProposalCoverage[];
   readonly truncated: boolean;
 }
+
+/** Neutral scalar paired with exactly one imported proposal reference for Hub-private replay. */
+export interface HomeWorldImportedHistoryReplaySample {
+  readonly bridgeId: string;
+  readonly importId: string;
+  readonly historySeq: number;
+  readonly sourceTs: string;
+  readonly sourceTsQuality: "platform";
+  readonly value: string | number | boolean | null;
+}
+
+export interface HomeWorldImportedHistoryReplayResult extends HomeWorldImportedHistoryProposalResult {
+  readonly samples: readonly HomeWorldImportedHistoryReplaySample[];
+}
+
+const MAX_IMPORTED_HISTORY_REPLAY_COVERAGE = 16;
+const MAX_IMPORTED_HISTORY_REPLAY_REFERENCES = 50;
 
 export type HomeWorldCausalityAttribution =
   | "user"
@@ -1302,7 +1320,45 @@ export class HomeWorldService extends Service {
     input: HomeWorldImportedHistoryQuery,
     importedWindow?: HomeWorldImportedHistoryWindow,
   ): HomeWorldImportedHistoryProposalResult {
-    const limit = validateImportedHistoryProposalQuery(input);
+    const projection = this.queryImportedHistoryProjection(input, importedWindow, false);
+    return {
+      requestedSince: projection.requestedSince,
+      requestedUntil: projection.requestedUntil,
+      references: projection.references,
+      coverage: projection.coverage,
+      truncated: projection.truncated,
+    };
+  }
+
+  /**
+   * Reads one frozen imported-history cut for Hub-private replay. The journal
+   * is read once and each returned sample is paired with its exact proposal
+   * reference; this path never invokes an adapter or provider.
+   */
+  queryImportedHistoryForReplay(
+    input: HomeWorldImportedHistoryQuery,
+    importedWindow: HomeWorldImportedHistoryWindow,
+    expectedReferences: readonly HomeWorldImportedHistoryProposalReference[],
+  ): HomeWorldImportedHistoryReplayResult {
+    if (importedWindow === undefined) {
+      throw new TypeError("home history replay requires a frozen requested window");
+    }
+    const frozenReferences = validateImportedHistoryReplayReferences(expectedReferences);
+    return this.queryImportedHistoryProjection(input, importedWindow, true, frozenReferences);
+  }
+
+  private queryImportedHistoryProjection(
+    input: HomeWorldImportedHistoryQuery,
+    importedWindow: HomeWorldImportedHistoryWindow | undefined,
+    includeSamples: boolean,
+    expectedReferences: readonly HomeWorldImportedHistoryProposalReference[] = [],
+  ): HomeWorldImportedHistoryReplayResult {
+    const limit = includeSamples
+      ? validateImportedHistoryReplayQuery(input)
+      : validateImportedHistoryProposalQuery(input);
+    if (includeSamples && expectedReferences.length > limit) {
+      throw new TypeError("history replay expected references exceed query limit");
+    }
     const window = importedWindow === undefined
       ? (() => {
         const requestedUntil = this.clock();
@@ -1344,22 +1400,49 @@ export class HomeWorldService extends Service {
         groups.set(binding.bridgeId, group);
       }
     }
+    if (includeSamples && groups.size > MAX_IMPORTED_HISTORY_REPLAY_COVERAGE) {
+      throw new TypeError("history replay coverage is invalid or unbounded");
+    }
+    const expectedByBridge = new Map<string, Map<string, HomeWorldImportedHistoryProposalReference>>();
+    if (includeSamples) {
+      for (const reference of expectedReferences) {
+        const capability = capabilities.get(reference.capabilityId);
+        const group = groups.get(reference.bridgeId);
+        if (capability === undefined
+          || capability.hwId !== reference.hwId
+          || group === undefined
+          || !capability.bindings.some((binding) => binding.bridgeId === reference.bridgeId)) {
+          throw new TypeError("history replay expected references are invalid or unbounded");
+        }
+        const bridgeReferences = expectedByBridge.get(reference.bridgeId) ?? new Map();
+        bridgeReferences.set(importedHistoryReferenceKey(reference), reference);
+        expectedByBridge.set(reference.bridgeId, bridgeReferences);
+      }
+    }
 
-    const references: HomeWorldImportedHistoryProposalReference[] = [];
+    type ProjectionEntry = {
+      readonly reference: HomeWorldImportedHistoryProposalReference;
+      readonly sample?: HomeWorldImportedHistoryReplaySample;
+    };
+    const entries: ProjectionEntry[] = [];
     const coverage: HomeWorldImportedHistoryProposalCoverage[] = [];
     let truncated = false;
+    let replayFailed = false;
     for (const bridgeId of [...groups.keys()].sort((left, right) => left.localeCompare(right))) {
       const group = groups.get(bridgeId)!;
+      const expected = expectedByBridge.get(bridgeId) ?? new Map<string, HomeWorldImportedHistoryProposalReference>();
       const reasons: HomeWorldImportedHistoryCoverageReason[] = [];
       const addReason = (reason: HomeWorldImportedHistoryCoverageReason): void => {
         if (!reasons.includes(reason)) reasons.push(reason);
       };
       const runtime = this.runtimesById.get(bridgeId);
       if (runtime === undefined || runtime.importedHistoryJournal === undefined) {
+        if (includeSamples && expected.size > 0) replayFailed = true;
         coverage.push({ bridgeId, status: "unavailable", reasons: ["history_unavailable"] });
         continue;
       }
       if (group.bindings.length > 20) {
+        if (includeSamples && expected.size > 0) replayFailed = true;
         coverage.push({ bridgeId, status: "unavailable", reasons: ["history_unavailable"] });
         continue;
       }
@@ -1374,6 +1457,7 @@ export class HomeWorldService extends Service {
           limit,
         });
       } catch {
+        if (includeSamples && expected.size > 0) replayFailed = true;
         coverage.push({ bridgeId, status: "unavailable", reasons: ["journal_query_unavailable"] });
         continue;
       }
@@ -1382,9 +1466,16 @@ export class HomeWorldService extends Service {
         addReason("query_truncated");
       }
       for (const gap of imported.gaps) addReason(gap.reason);
+      const matched = new Set<string>();
+      let replayMismatch = false;
       for (const record of imported.records) {
+        const expectedReference = includeSamples
+          ? expected.get(importedHistoryRecordIdentityKey(record.bridgeId, record.importId, record.historySeq))
+          : undefined;
+        if (includeSamples && expectedReference === undefined) continue;
         if (record.bridgeId !== bridgeId || record.state.origin !== "imported") {
           addReason("invalid_row");
+          replayMismatch = includeSamples;
           continue;
         }
         const capability = group.capabilitiesByBinding.get(evidenceBindingKey(
@@ -1412,7 +1503,7 @@ export class HomeWorldService extends Service {
           addReason("invalid_row");
           continue;
         }
-        references.push({
+        const reference: HomeWorldImportedHistoryProposalReference = {
           bridgeId,
           hwId: capability.hwId,
           capabilityId: capability.hwCapabilityId,
@@ -1425,21 +1516,56 @@ export class HomeWorldService extends Service {
             since: sourceRange.since,
             until: sourceRange.until,
           },
+        };
+        const referenceKey = importedHistoryReferenceKey(reference);
+        if (includeSamples && (matched.has(referenceKey)
+          || !sameImportedHistoryProposalReference(reference, expectedReference))) {
+          replayMismatch = true;
+          continue;
+        }
+        const outputReference = includeSamples ? expectedReference! : reference;
+        if (!includeSamples) {
+          entries.push({ reference });
+          continue;
+        }
+        const value = evidenceScalarForCapability(capability, record.state.attrs);
+        if (value === undefined) {
+          addReason("invalid_row");
+          replayMismatch = true;
+          continue;
+        }
+        matched.add(referenceKey);
+        entries.push({
+          reference: outputReference,
+          sample: {
+            bridgeId,
+            importId: record.importId,
+            historySeq: record.historySeq,
+            sourceTs: observedAt,
+            sourceTsQuality: "platform",
+            value,
+          },
         });
+      }
+      if (includeSamples && (replayMismatch || [...expected.keys()].some((key) => !matched.has(key)))) {
+        replayFailed = true;
+        addReason("invalid_row");
+        coverage.push({ bridgeId, status: "unavailable", reasons });
+        continue;
       }
       if (reasons.length === 0) addReason("retention_floor_unknown");
       coverage.push({ bridgeId, status: "partial", reasons });
     }
 
-    references.sort((left, right) => left.observedAt.localeCompare(right.observedAt)
-      || left.bridgeId.localeCompare(right.bridgeId)
-      || left.capabilityId.localeCompare(right.capabilityId)
-      || left.sourceRange.since.localeCompare(right.sourceRange.since)
-      || left.sourceRange.until.localeCompare(right.sourceRange.until)
-      || left.importId.localeCompare(right.importId)
-      || left.historySeq - right.historySeq);
-    if (references.length > limit) {
-      references.splice(limit);
+    entries.sort((left, right) => left.reference.observedAt.localeCompare(right.reference.observedAt)
+      || left.reference.bridgeId.localeCompare(right.reference.bridgeId)
+      || left.reference.capabilityId.localeCompare(right.reference.capabilityId)
+      || left.reference.sourceRange.since.localeCompare(right.reference.sourceRange.since)
+      || left.reference.sourceRange.until.localeCompare(right.reference.sourceRange.until)
+      || left.reference.importId.localeCompare(right.reference.importId)
+      || left.reference.historySeq - right.reference.historySeq);
+    if (entries.length > limit) {
+      entries.splice(limit);
       truncated = true;
       coverage.splice(0, coverage.length, ...coverage.map((item) => (
         item.status !== "partial" || item.reasons.includes("query_truncated")
@@ -1453,9 +1579,12 @@ export class HomeWorldService extends Service {
     return {
       requestedSince,
       requestedUntil,
-      references,
+      references: replayFailed ? [] : entries.map((entry) => entry.reference),
       coverage,
       truncated,
+      samples: replayFailed
+        ? []
+        : entries.flatMap((entry) => entry.sample === undefined ? [] : [entry.sample]),
     };
   }
 
@@ -3677,6 +3806,126 @@ function validateImportedHistoryProposalQuery(input: HomeWorldImportedHistoryQue
     throw new TypeError("home history query is invalid or unbounded");
   }
   return limit;
+}
+
+function validateImportedHistoryReplayQuery(input: HomeWorldImportedHistoryQuery): number {
+  const limit = input?.limit === undefined ? HISTORY_MAX_RECORDS : input.limit;
+  if (!input || typeof input !== "object"
+    || !Array.isArray(input.hwCapabilityIds)
+    || input.hwCapabilityIds.length < 1
+    || input.hwCapabilityIds.length > 20
+    || input.hwCapabilityIds.some((id) => typeof id !== "string" || id.length === 0 || id.length > 200)
+    || !Number.isSafeInteger(input.lookbackHours)
+    || input.lookbackHours < 1
+    || input.lookbackHours > 168
+    || !Number.isSafeInteger(limit)
+    || limit < 1
+    || limit > HISTORY_MAX_RECORDS) {
+    throw new TypeError("history replay query is invalid or unbounded");
+  }
+  return limit;
+}
+
+function validateImportedHistoryReplayReferences(
+  input: unknown,
+): readonly HomeWorldImportedHistoryProposalReference[] {
+  if (!Array.isArray(input) || input.length > MAX_IMPORTED_HISTORY_REPLAY_REFERENCES) {
+    throw new TypeError("history replay expected references are invalid or unbounded");
+  }
+  const references: HomeWorldImportedHistoryProposalReference[] = [];
+  const seen = new Set<string>();
+  for (const value of input) {
+    if (!isPlainJsonRecord(value) || !hasExactKeys(value, [
+      "bridgeId",
+      "hwId",
+      "capabilityId",
+      "observedAt",
+      "source",
+      "origin",
+      "importId",
+      "historySeq",
+      "sourceRange",
+    ])) {
+      throw new TypeError("history replay expected references are invalid or unbounded");
+    }
+    const reference = value as unknown as HomeWorldImportedHistoryProposalReference;
+    if (!boundedReplayReferenceId(reference.bridgeId)
+      || !boundedReplayReferenceId(reference.hwId)
+      || !boundedReplayReferenceId(reference.capabilityId)
+      || !boundedReplayReferenceId(reference.importId)
+      || reference.source !== "imported-history"
+      || reference.origin !== "imported"
+      || !Number.isSafeInteger(reference.historySeq)
+      || reference.historySeq <= 0
+      || !isUtcHistoryTimestamp(reference.observedAt)) {
+      throw new TypeError("history replay expected references are invalid or unbounded");
+    }
+    const sourceRange = canonicalProposalHistoryRange(reference.sourceRange);
+    if (sourceRange === undefined
+      || !isPlainJsonRecord(reference.sourceRange)
+      || !hasExactKeys(reference.sourceRange, ["since", "until"])
+      || sourceRange.since !== reference.sourceRange.since
+      || sourceRange.until !== reference.sourceRange.until
+      || !isImportedTimestampWithinRange(reference.observedAt, sourceRange)) {
+      throw new TypeError("history replay expected references are invalid or unbounded");
+    }
+    const key = importedHistoryReferenceKey(reference);
+    if (seen.has(key)) {
+      throw new TypeError("history replay expected references are invalid or unbounded");
+    }
+    seen.add(key);
+    references.push(reference);
+  }
+  return references;
+}
+
+function importedHistoryReferenceKey(reference: HomeWorldImportedHistoryProposalReference): string {
+  return importedHistoryRecordIdentityKey(reference.bridgeId, reference.importId, reference.historySeq);
+}
+
+function importedHistoryRecordIdentityKey(bridgeId: string, importId: string, historySeq: number): string {
+  return JSON.stringify([bridgeId, importId, historySeq]);
+}
+
+function sameImportedHistoryProposalReference(
+  left: HomeWorldImportedHistoryProposalReference,
+  right: HomeWorldImportedHistoryProposalReference | undefined,
+): boolean {
+  return right !== undefined
+    && left.bridgeId === right.bridgeId
+    && left.hwId === right.hwId
+    && left.capabilityId === right.capabilityId
+    && left.observedAt === right.observedAt
+    && left.source === right.source
+    && left.origin === right.origin
+    && left.importId === right.importId
+    && left.historySeq === right.historySeq
+    && left.sourceRange.since === right.sourceRange.since
+    && left.sourceRange.until === right.sourceRange.until;
+}
+
+function boundedReplayReferenceId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function isUtcHistoryTimestamp(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 64
+    && value.trim() === value
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function isImportedTimestampWithinRange(value: string, range: HistoryRange): boolean {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp)
+    && timestamp >= Date.parse(range.since)
+    && timestamp < Date.parse(range.until);
 }
 
 function validateImportedHistoryWindow(

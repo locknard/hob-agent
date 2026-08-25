@@ -349,6 +349,352 @@ test("uses the explicit import window without taking a second projection clock r
   }
 });
 
+test("projects one neutral replay sample for each exact imported proposal reference", async () => {
+  const { service, fiber } = await createService();
+  try {
+    const runtime = service.runtime(BRIDGE_ID);
+    assert.ok(runtime);
+    runtime.importedHistoryJournal.commitPage({
+      bridgeId: BRIDGE_ID,
+      page: historyPage(),
+      expectedLiveCut: { epochId: EPOCH_ID, lastSeq: 4 },
+    });
+    const frozenProposal = service.queryImportedHistoryForProposal(
+      { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 10 },
+      { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+    );
+    let journalReads = 0;
+    const originalQuery = runtime.importedHistoryJournal.queryImportedEvidence.bind(runtime.importedHistoryJournal);
+    runtime.importedHistoryJournal.queryImportedEvidence = (input) => {
+      journalReads += 1;
+      const actual = originalQuery(input);
+      const first = actual.records[0];
+      assert.ok(first);
+      return {
+        ...actual,
+        records: [
+          {
+            ...first,
+            historySeq: 99,
+            state: {
+              ...first.state,
+              attrs: { state: "extra-earlier-row" },
+              time: { sourceTs: "2026-08-24T23:01:00.000Z", sourceTsQuality: "device" },
+            },
+          },
+          ...actual.records,
+        ],
+      };
+    };
+
+    const result = service.queryImportedHistoryForReplay(
+      { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 10 },
+      { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+      frozenProposal.references,
+    );
+
+    const sourceSince = `2026-08-24T23:00:00.${"0".repeat(43)}Z`;
+    const sourceUntil = `2026-08-25T00:00:00.${"0".repeat(43)}Z`;
+    const sourceTs1 = "2026-08-24T23:10:00.000Z";
+    const sourceTs2 = "2026-08-24T23:30:00.000Z";
+    assert.deepEqual(result.references.map((reference) => ({
+      bridgeId: reference.bridgeId,
+      importId: reference.importId,
+      historySeq: reference.historySeq,
+      observedAt: reference.observedAt,
+      sourceRange: reference.sourceRange,
+    })), [
+      {
+        bridgeId: BRIDGE_ID,
+        importId: "import-proposal-history",
+        historySeq: 1,
+        observedAt: sourceTs1,
+        sourceRange: { since: sourceSince, until: sourceUntil },
+      },
+      {
+        bridgeId: BRIDGE_ID,
+        importId: "import-proposal-history",
+        historySeq: 2,
+        observedAt: sourceTs2,
+        sourceRange: { since: sourceSince, until: sourceUntil },
+      },
+    ]);
+    assert.deepEqual(result.samples, [
+      {
+        bridgeId: BRIDGE_ID,
+        importId: "import-proposal-history",
+        historySeq: 1,
+        sourceTs: sourceTs1,
+        sourceTsQuality: "platform",
+        value: "off",
+      },
+      {
+        bridgeId: BRIDGE_ID,
+        importId: "import-proposal-history",
+        historySeq: 2,
+        sourceTs: sourceTs2,
+        sourceTsQuality: "platform",
+        value: "on",
+      },
+    ]);
+    assert.equal(result.references.length, result.samples.length);
+    assert.deepEqual(result.coverage, [{
+      bridgeId: BRIDGE_ID,
+      status: "partial",
+      reasons: ["retention_floor_unknown"],
+    }]);
+    assert.equal(result.truncated, false);
+    assert.equal(journalReads, 1);
+    for (const sample of result.samples) {
+      assert.deepEqual(Object.keys(sample).sort(), [
+        "bridgeId",
+        "historySeq",
+        "importId",
+        "sourceTs",
+        "sourceTsQuality",
+        "value",
+      ]);
+    }
+    const encoded = JSON.stringify(result);
+    for (const forbidden of ["nativeId", "nativeInstanceId", "provider_payload", "raw", "liveCut", "epochId", "seq"]) {
+      assert.equal(encoded.includes(forbidden), false, forbidden);
+    }
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("ignores unrelated non-platform or non-scalar rows while keeping frozen refs and samples one-to-one", async () => {
+  const { service, fiber } = await createService();
+  try {
+    const runtime = service.runtime(BRIDGE_ID);
+    assert.ok(runtime);
+    const valid = importedRecord();
+    const sourceRange = valid.sourceRange!;
+    runtime.importedHistoryJournal.queryImportedEvidence = () => ({
+      records: [
+        valid,
+        {
+          ...valid,
+          historySeq: 2,
+          state: {
+            ...valid.state,
+            attrs: { state: "on" },
+            time: { sourceTs: "2026-08-24T23:20:00.000Z", sourceTsQuality: "device" },
+          },
+        },
+        {
+          ...valid,
+          historySeq: 3,
+          state: {
+            ...valid.state,
+            attrs: { state: { provider_payload: "private" } },
+            time: { sourceTs: "2026-08-24T23:30:00.000Z", sourceTsQuality: "platform" },
+          },
+        },
+      ],
+      gaps: [],
+      truncated: false,
+    });
+
+    const result = service.queryImportedHistoryForReplay(
+      { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 10 },
+      { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+      [{
+        bridgeId: BRIDGE_ID,
+        hwId: "hw-proposal-device",
+        capabilityId: CAPABILITY_ID,
+        observedAt: valid.state.time.sourceTs!,
+        source: "imported-history",
+        origin: "imported",
+        importId: valid.importId,
+        historySeq: valid.historySeq,
+        sourceRange,
+      }],
+    );
+
+    assert.deepEqual(result.references.map((reference) => reference.historySeq), [1]);
+    assert.deepEqual(result.samples.map((sample) => sample.historySeq), [1]);
+    assert.equal(result.references.length, result.samples.length);
+    assert.deepEqual(result.coverage, [{
+      bridgeId: BRIDGE_ID,
+      status: "partial",
+      reasons: ["retention_floor_unknown"],
+    }]);
+    assert.deepEqual(result.references[0]?.sourceRange, sourceRange);
+    assert.equal(JSON.stringify(result).includes("provider_payload"), false);
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("bounds and deterministically truncates imported replay samples without changing identity", async () => {
+  const { service, fiber } = await createService();
+  try {
+    const runtime = service.runtime(BRIDGE_ID);
+    assert.ok(runtime);
+    const page = historyPage();
+    const first = importedRecord({ historySeq: 1, state: page.records[0]!.state });
+    const second = importedRecord({ historySeq: 2, state: page.records[1]!.state });
+    runtime.importedHistoryJournal.queryImportedEvidence = () => ({
+      records: [second, first],
+      gaps: [],
+      truncated: true,
+    });
+
+    const result = service.queryImportedHistoryForReplay(
+      { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 1 },
+      { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+      [{
+        bridgeId: BRIDGE_ID,
+        hwId: "hw-proposal-device",
+        capabilityId: CAPABILITY_ID,
+        observedAt: first.state.time.sourceTs!,
+        source: "imported-history",
+        origin: "imported",
+        importId: first.importId,
+        historySeq: first.historySeq,
+        sourceRange: first.sourceRange!,
+      }],
+    );
+    assert.deepEqual(result.references.map((reference) => reference.historySeq), [1]);
+    assert.deepEqual(result.samples.map((sample) => sample.historySeq), [1]);
+    assert.equal(result.truncated, true);
+    assert.deepEqual(result.coverage, [{
+      bridgeId: BRIDGE_ID,
+      status: "partial",
+      reasons: ["query_truncated"],
+    }]);
+    assert.throws(
+      () => service.queryImportedHistoryForReplay(
+        { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 201 },
+        { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+        [{
+          bridgeId: BRIDGE_ID,
+          hwId: "hw-proposal-device",
+          capabilityId: CAPABILITY_ID,
+          observedAt: first.state.time.sourceTs!,
+          source: "imported-history",
+          origin: "imported",
+          importId: first.importId,
+          historySeq: first.historySeq,
+          sourceRange: first.sourceRange!,
+        }],
+      ),
+      /history replay query is invalid or unbounded/,
+    );
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+test("fails closed when a frozen imported reference is missing or its identity changes", async () => {
+  for (const mode of ["missing", "sourceTs", "sourceRange"] as const) {
+    const { service, fiber } = await createService();
+    try {
+      const runtime = service.runtime(BRIDGE_ID);
+      assert.ok(runtime);
+      runtime.importedHistoryJournal.commitPage({
+        bridgeId: BRIDGE_ID,
+        page: historyPage(),
+        expectedLiveCut: { epochId: EPOCH_ID, lastSeq: 4 },
+      });
+      const frozenProposal = service.queryImportedHistoryForProposal(
+        { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 10 },
+        { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+      );
+      const originalQuery = runtime.importedHistoryJournal.queryImportedEvidence.bind(runtime.importedHistoryJournal);
+      runtime.importedHistoryJournal.queryImportedEvidence = (input) => {
+        const actual = originalQuery(input);
+        if (mode === "missing") return { ...actual, records: actual.records.slice(0, 1) };
+        const first = actual.records[0];
+        assert.ok(first);
+        return {
+          ...actual,
+          records: [{
+            ...first,
+            ...(mode === "sourceRange" ? {
+              sourceRange: {
+                since: "2026-08-24T22:00:00.0000000000000000000000000000000000000000000Z",
+                until: "2026-08-25T00:00:00.0000000000000000000000000000000000000000000Z",
+              },
+            } : {
+              state: {
+                ...first.state,
+                time: { sourceTs: "2026-08-24T23:11:00.000Z", sourceTsQuality: "platform" },
+              },
+            }),
+          }, ...actual.records.slice(1)],
+        };
+      };
+
+      const result = service.queryImportedHistoryForReplay(
+        { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 10 },
+        { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+        frozenProposal.references,
+      );
+      assert.deepEqual(result.references, []);
+      assert.deepEqual(result.samples, []);
+      assert.deepEqual(result.coverage, [{
+        bridgeId: BRIDGE_ID,
+        status: "unavailable",
+        reasons: ["retention_floor_unknown", "invalid_row"],
+      }]);
+    } finally {
+      await fiber.dispose();
+    }
+  }
+});
+
+test("rejects duplicate, oversized, and unselected frozen imported references before journal read", async () => {
+  const { service, fiber } = await createService();
+  try {
+    const runtime = service.runtime(BRIDGE_ID);
+    assert.ok(runtime);
+    let journalReads = 0;
+    const originalQuery = runtime.importedHistoryJournal.queryImportedEvidence.bind(runtime.importedHistoryJournal);
+    runtime.importedHistoryJournal.queryImportedEvidence = (input) => {
+      journalReads += 1;
+      return originalQuery(input);
+    };
+    const expectedReference = {
+      bridgeId: BRIDGE_ID,
+      hwId: "hw-proposal-device",
+      capabilityId: CAPABILITY_ID,
+      observedAt: "2026-08-24T23:10:00.000Z",
+      source: "imported-history" as const,
+      origin: "imported" as const,
+      importId: "import-proposal-history",
+      historySeq: 1,
+      sourceRange: {
+        since: "2026-08-24T23:00:00.0000000000000000000000000000000000000000000Z",
+        until: "2026-08-25T00:00:00.0000000000000000000000000000000000000000000Z",
+      },
+    };
+    const call = (references: readonly typeof expectedReference[]) => service.queryImportedHistoryForReplay(
+      { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 10 },
+      { requestedSince: "2026-08-24T23:00:00.000Z", requestedUntil: CLOCK },
+      references,
+    );
+    assert.throws(() => call([expectedReference, expectedReference]), /expected references are invalid or unbounded/);
+    assert.throws(() => call([expectedReference, {
+      ...expectedReference,
+      sourceRange: {
+        since: "2026-08-24T22:00:00.0000000000000000000000000000000000000000000Z",
+        until: expectedReference.sourceRange.until,
+      },
+    }]), /expected references are invalid or unbounded/);
+    assert.throws(() => call(Array.from({ length: 51 }, (_, index) => ({
+      ...expectedReference,
+      historySeq: index + 1,
+    }))), /expected references are invalid or unbounded/);
+    assert.throws(() => call([{ ...expectedReference, capabilityId: "not-selected" }]), /expected references are invalid or unbounded/);
+    assert.equal(journalReads, 0);
+  } finally {
+    await fiber.dispose();
+  }
+});
+
 test("keeps legacy rows out of proposal refs and reports range-unavailable partial coverage", async () => {
   const { service, fiber } = await createService();
   try {
