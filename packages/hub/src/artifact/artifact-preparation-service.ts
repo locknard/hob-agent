@@ -38,6 +38,7 @@ export type ArtifactPreparationServiceStage =
   | ArtifactMutationCoordinatorStage
   | ArtifactCompilationCoordinatorStage
   | "mutation"
+  | "history-replay"
   | "lifecycle";
 export type ArtifactPreparationServiceFailureCode = "failed" | "stopped" | "malformed_result";
 

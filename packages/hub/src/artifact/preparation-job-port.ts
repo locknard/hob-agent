@@ -5,6 +5,7 @@ export const ARTIFACT_PREPARATION_JOB_STAGES = [
   "risk",
   "compile",
   "dry-run",
+  "history-replay",
 ] as const;
 export type ArtifactPreparationJobStage = typeof ARTIFACT_PREPARATION_JOB_STAGES[number];
 

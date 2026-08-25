@@ -149,6 +149,7 @@ function boundStage(stage: ArtifactPreparationServiceError["stage"]): ArtifactPr
     case "risk":
     case "compile":
     case "dry-run":
+    case "history-replay":
       return stage;
     case "dry-run-persist":
       return "dry-run";

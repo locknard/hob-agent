@@ -7,11 +7,22 @@ import {
   type ArtifactCompilationProposalPort,
 } from "./artifact-compilation-coordinator.js";
 import {
+  ArtifactHistoryReplayCoordinator,
+} from "./artifact-history-replay-coordinator.js";
+import {
+  evaluateHistoryReplay,
+  HISTORY_REPLAY_EVALUATOR,
+} from "./artifact-history-replay-evaluator.js";
+import {
   parseArtifactAuthorityAssessment,
   parseArtifactEvidenceAttestation,
   parseArtifactRiskAssessment,
 } from "./artifact-assessments.js";
 import { compileNeutralArtifact } from "./artifact-compiler.js";
+import {
+  parseArtifactCompileAttestation,
+  parseNeutralDryRunAttestation,
+} from "./artifact-compiler-contract.js";
 import { ArtifactRiskConflictSource } from "./artifact-conflict-source.js";
 import {
   ArtifactCurrentConflictSource,
@@ -45,6 +56,10 @@ import type {
   HomeWorldEvidenceQuery,
   HomeWorldEvidenceResult,
   HomeWorldForeignRuleCatalog,
+  HomeWorldImportedHistoryProposalReference,
+  HomeWorldImportedHistoryQuery,
+  HomeWorldImportedHistoryReplayResult,
+  HomeWorldImportedHistoryWindow,
   HomeWorldSnapshot,
 } from "../world/home-world-service.js";
 
@@ -63,6 +78,11 @@ interface PipelineHomeWorldPort {
   readonly resolveAuthorityCandidateInput?: (hwCapabilityId: string) => AuthorityCandidateResolveInput | undefined;
   readonly isActionAuthorityConfiguredForBridge?: (hwCapabilityId: string, bridgeId: string) => boolean;
   readonly resolveActionAuthority?: (hwCapabilityId: string) => { readonly status: "available" | "unavailable"; readonly bridgeId?: string };
+  readonly queryImportedHistoryForReplay?: (
+    input: HomeWorldImportedHistoryQuery,
+    importedWindow: HomeWorldImportedHistoryWindow,
+    expectedReferences: readonly HomeWorldImportedHistoryProposalReference[],
+  ) => HomeWorldImportedHistoryReplayResult;
 }
 
 export interface ArtifactPipelineCompositionOptions {
@@ -106,6 +126,25 @@ export async function createArtifactPipelineComposition(
     resolveActionAuthority: options.homeWorld.resolveActionAuthority?.bind(options.homeWorld)
       ?? (() => ({ status: "unavailable" as const })),
   };
+  const queryImportedHistoryForReplay = options.homeWorld.queryImportedHistoryForReplay
+    ?.bind(options.homeWorld);
+  const historyReplay = new ArtifactHistoryReplayCoordinator({
+    proposals,
+    world: {
+      queryImportedHistoryForReplay: (input, importedWindow, expectedReferences) => {
+        if (queryImportedHistoryForReplay === undefined) {
+          throw new Error("HomeWorld imported history replay is unavailable");
+        }
+        return queryImportedHistoryForReplay(input, importedWindow, expectedReferences);
+      },
+    },
+    registry: registry.historyReplay,
+    evaluator: {
+      id: HISTORY_REPLAY_EVALUATOR.id,
+      version: HISTORY_REPLAY_EVALUATOR.version,
+      evaluate: evaluateHistoryReplay,
+    },
+  });
 
   const existingConflict = new ArtifactRiskConflictSource({ proposals, registry: registry.conflict });
   const artifactProducer = new ArtifactProducer({
@@ -181,6 +220,19 @@ export async function createArtifactPipelineComposition(
           }
           throw new ArtifactPreparationServiceError("compile", "failed");
         }
+        if (compilationReceipt.compile.status === "compiled"
+          && compilationReceipt.dryRun.status === "passed"
+          && proposalHasImportedHistory(proposals, command.proposalId, command.proposalRevision)) {
+          const replayReceipt = runHistoryReplay(
+            historyReplay,
+            options.artifacts,
+            artifact,
+            compilationReceipt,
+          );
+          if (replayReceipt.result.status !== "passed") {
+            throw new ArtifactPreparationServiceError("history-replay", "failed");
+          }
+        }
         return {
           mutation: {
             artifact,
@@ -235,6 +287,50 @@ function fixedCapture(
   };
 }
 
+function runHistoryReplay(
+  coordinator: ArtifactHistoryReplayCoordinator,
+  artifacts: ArtifactRegistry,
+  artifact: ArtifactRef,
+  compilation: Awaited<ReturnType<ArtifactCompilationCoordinator["compile"]>>,
+) {
+  try {
+    const compileEntry = artifacts.resultById({
+      kind: "compile-attestation",
+      artifact,
+      resultId: compilation.compile.resultId,
+    });
+    const dryRunEntry = artifacts.resultById({
+      kind: "dry-run-attestation",
+      artifact,
+      resultId: compilation.dryRun.resultId,
+    });
+    if (compileEntry === undefined || dryRunEntry === undefined) throw new Error("compiler result is unavailable");
+    const compile = parseArtifactCompileAttestation(compileEntry.result);
+    const dryRun = parseNeutralDryRunAttestation(dryRunEntry.result);
+    return coordinator.replay({ artifact, compile, dryRun });
+  } catch {
+    throw new ArtifactPreparationServiceError("history-replay", "failed");
+  }
+}
+
+function proposalHasImportedHistory(
+  proposals: Pick<PipelineProposalPort, "withApprovedProposalAtRevision">,
+  proposalId: string,
+  proposalRevision: number,
+): boolean {
+  try {
+    return proposals.withApprovedProposalAtRevision(
+      proposalId,
+      proposalRevision,
+      (source) => isPlainObject(source.evidence)
+        && Object.prototype.hasOwnProperty.call(source.evidence, "importedHistory")
+        && source.evidence.importedHistory !== undefined,
+    );
+  } catch {
+    throw new ArtifactPreparationServiceError("history-replay", "failed");
+  }
+}
+
 function sameArtifact(left: ArtifactRef, right: ArtifactRef): boolean {
   return left.artifactId === right.artifactId
     && left.revision === right.revision
@@ -270,5 +366,15 @@ function registryPorts(registry: ArtifactRegistry) {
       recordCompile: registry.recordCompile.bind(registry),
       recordDryRun: registry.recordDryRun.bind(registry),
     },
+    historyReplay: {
+      getRevision,
+      recordHistoryReplayAttestation: registry.recordHistoryReplayAttestation.bind(registry),
+    },
   };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
