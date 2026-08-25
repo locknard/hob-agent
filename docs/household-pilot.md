@@ -195,6 +195,38 @@ The next autonomous turn reads the fixed bounded review-calibration window.
 Feedback remains preference evidence; it does not edit household files, grant
 authority, or waive current evidence and conflict checks.
 
+## 2026-08-25 M3 imported-history replay checkpoint
+
+The preparation path now treats imported recorder history as a distinct,
+reviewable evidence source. A Proposal retains exact neutral import references,
+coverage, and its requested source range. After the Artifact compiles and its
+current-world no-write dry-run passes, preparation re-reads only those exact
+retained samples, evaluates supported capability-change behavior with the
+fixed pure evaluator, and stores an independent immutable replay assessment.
+Live-evidence Proposals skip this stage. Missing, drifted, truncated, or
+unavailable samples fail the replay stage without changing compiler records or
+performing a write.
+
+This checkpoint is contract and pipeline proof, not a real-household behavior
+claim. The next M3 acceptance run uses one naturally populated recorder window
+to prepare one reviewable capability-change Proposal and verifies all of the
+following before enablement:
+
+1. the Proposal shows imported history as its actual source and retains only
+   exact neutral references;
+2. compile and current-world dry-run finish before replay;
+3. replay records a non-empty matched sample count plus honest partial coverage
+   with the retention floor still unknown;
+4. the household-facing review distinguishes current-state simulation from
+   imported-history evidence; and
+5. no result claims that the imported samples prove native execution,
+   causality, or recorder completeness.
+
+Schedule-trigger replay remains unavailable until a separately reviewed
+historical clock-event contract exists. The pilot does not substitute current
+state for missing imported samples and does not trigger devices to manufacture
+coverage.
+
 ## Stage 3 — decide from observed metrics
 
 Evaluate the pilot after several reviewed observations, not after one lucky
