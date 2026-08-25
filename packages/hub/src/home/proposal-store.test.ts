@@ -111,6 +111,32 @@ function input(overrides: Partial<CreateProposalInput> = {}): CreateProposalInpu
   };
 }
 
+const importedHistoryReference = {
+  bridgeId: "ha-main",
+  hwId: "hw-7",
+  capabilityId: "hwc-4",
+  observedAt: "2026-08-19T00:30:00.000Z",
+  source: "imported-history" as const,
+  origin: "imported" as const,
+  importId: "history-import-1",
+  historySeq: 1,
+  sourceRange: {
+    since: "2026-08-19T00:00:00.000Z",
+    until: "2026-08-19T01:00:00.000Z",
+  },
+};
+
+const importedHistoryCoverage = {
+  requestedSince: "2026-08-19T00:00:00.000Z",
+  requestedUntil: "2026-08-19T01:00:00.000Z",
+  truncated: false,
+  coverage: [{
+    bridgeId: "ha-main",
+    status: "partial" as const,
+    reasons: ["retention_floor_unknown" as const],
+  }],
+};
+
 test("persists a bounded pending proposal and append-only creation audit across restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hob-proposals-"));
   const path = join(directory, "proposals.sqlite");
@@ -130,6 +156,394 @@ test("persists a bounded pending proposal and append-only creation audit across 
   assert.deepEqual(reopened.list({ status: "pending_review" }), [proposal]);
   reopened.close();
   await rm(directory, { recursive: true, force: true });
+});
+
+test("persists additive imported-history evidence and its independent coverage across restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hob-proposals-imported-history-"));
+  const path = join(directory, "proposals.sqlite");
+  const store = new SqliteProposalStore({ path, now: () => createdAt });
+  const proposal = store.create(input({
+    idempotencyKey: "imported-history:v1",
+    evidence: {
+      ...input().evidence,
+      references: [importedHistoryReference],
+      importedHistory: importedHistoryCoverage,
+    },
+  }));
+  assert.deepEqual(proposal.evidence.references, [importedHistoryReference]);
+  assert.deepEqual(proposal.evidence.importedHistory, importedHistoryCoverage);
+  store.close();
+
+  const reopened = new SqliteProposalStore({ path });
+  assert.deepEqual(reopened.get(proposal.id), proposal);
+  reopened.close();
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("rejects imported-history references with live or provider-shaped fields", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    for (const forbidden of [
+      { epochId: "epoch-3", seq: 1 },
+      { liveCut: { epochId: "epoch-3", lastSeq: 1 } },
+      { value: "on" },
+      { nativeId: "native-1" },
+      { raw: { provider: true } },
+      { cause: { kind: "foreign_rule" } },
+    ]) {
+      assert.throws(
+        () => store.create(input({
+          idempotencyKey: `imported-history:forbidden:${Object.keys(forbidden)[0]}`,
+          evidence: {
+            ...input().evidence,
+            references: [{ ...importedHistoryReference, ...forbidden } as never],
+            importedHistory: importedHistoryCoverage,
+          },
+        })),
+        (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+      );
+    }
+    assert.throws(
+      () => store.create(input({
+        idempotencyKey: "imported-history:missing-range",
+        evidence: {
+          ...input().evidence,
+          references: [{ ...importedHistoryReference, sourceRange: undefined } as never],
+          importedHistory: importedHistoryCoverage,
+        },
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("validates imported range identity, observation bounds, and coverage pairing", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    for (const [index, invalidReference] of [
+      { ...importedHistoryReference, sourceRange: { since: "2026-08-19T01:00:00.000Z", until: "2026-08-19T00:00:00.000Z" } },
+      { ...importedHistoryReference, sourceRange: { since: "2026-08-19T00:30:00.000Z", until: "2026-08-19T00:30:00.000Z" } },
+      { ...importedHistoryReference, observedAt: "2026-08-18T23:59:59.999Z" },
+      { ...importedHistoryReference, observedAt: "2026-08-19T01:00:00.000Z" },
+      { ...importedHistoryReference, observedAt: "2026-08-19T00:30:00+00:00" },
+      { ...importedHistoryReference, historySeq: 0 },
+      { ...importedHistoryReference, historySeq: 1.5 },
+      { ...importedHistoryReference, historySeq: Number.MAX_SAFE_INTEGER + 1 },
+    ].entries()) {
+      assert.throws(
+        () => store.create(input({
+          idempotencyKey: `imported-history:range:${index}`,
+          evidence: {
+            ...input().evidence,
+            references: [invalidReference] as never,
+            importedHistory: importedHistoryCoverage,
+          },
+        })),
+        (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+      );
+    }
+    assert.throws(
+      () => store.create(input({
+        idempotencyKey: "imported-history:missing-coverage",
+        evidence: { ...input().evidence, references: [importedHistoryReference] },
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+    assert.throws(
+      () => store.create(input({
+        idempotencyKey: "imported-history:missing-bridge-coverage",
+        evidence: {
+          ...input().evidence,
+          references: [importedHistoryReference],
+          importedHistory: { ...importedHistoryCoverage, coverage: [{
+            bridgeId: "other-bridge",
+            status: "partial" as const,
+            reasons: ["history_gap" as const],
+          }] },
+        },
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+    assert.throws(
+      () => store.create(input({
+        idempotencyKey: "imported-history:unavailable-with-reference",
+        evidence: {
+          ...input().evidence,
+          references: [importedHistoryReference],
+          importedHistory: { ...importedHistoryCoverage, coverage: [{
+            bridgeId: "ha-main",
+            status: "unavailable" as const,
+            reasons: ["history_range_unavailable" as const],
+          }] },
+        },
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+    const empty = store.create(input({
+      idempotencyKey: "imported-history:empty-unavailable",
+      evidence: {
+        ...input().evidence,
+        importedHistory: { ...importedHistoryCoverage, coverage: [{
+          bridgeId: "ha-main",
+          status: "unavailable" as const,
+          reasons: ["empty_or_purged" as const],
+        }] },
+      },
+    }));
+    assert.deepEqual(empty.evidence.importedHistory?.coverage[0]?.status, "unavailable");
+    assert.deepEqual(empty.evidence.references, input().evidence.references);
+  } finally {
+    store.close();
+  }
+});
+
+test("coexists live temporal and imported-history evidence without cross-mode loss", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const liveReference = {
+      bridgeId: "ha-main",
+      hwId: "hw-7",
+      capabilityId: "hwc-4",
+      observedAt: "2026-08-19T00:31:00.000Z",
+      source: "post-baseline-event" as const,
+      epochId: "epoch-3",
+      seq: 607,
+    };
+    const liveTemporal = {
+      requestedSince: "2026-08-19T00:00:00.000Z",
+      requestedUntil: "2026-08-19T01:00:00.000Z",
+      truncated: false,
+      coverage: [{
+        bridgeId: "ha-main",
+        epochId: "epoch-3",
+        baselineSeq: 1,
+        baselineAt: "2026-08-18T23:00:00.000Z",
+        status: "partial" as const,
+        reasons: ["history_gap" as const],
+      }],
+    };
+    const first = store.create(input({
+      dedupKey: "coexisting-evidence",
+      idempotencyKey: "coexisting-evidence:live",
+      evidence: {
+        ...input().evidence,
+        references: [liveReference],
+        temporal: liveTemporal,
+      },
+    }));
+    const merged = store.createGoverned(input({
+      dedupKey: "coexisting-evidence",
+      idempotencyKey: "coexisting-evidence:imported",
+      evidence: {
+        ...input().evidence,
+        references: [importedHistoryReference],
+        importedHistory: importedHistoryCoverage,
+      },
+    }));
+    assert.equal(merged.kind, "merged");
+    if (merged.kind !== "merged") throw new Error("expected evidence merge");
+    assert.equal(merged.mergedEvidenceCount, 1);
+    assert.deepEqual(merged.proposal.evidence.references, [liveReference, importedHistoryReference]);
+    assert.deepEqual(merged.proposal.evidence.temporal, liveTemporal);
+    assert.deepEqual(merged.proposal.evidence.importedHistory, importedHistoryCoverage);
+
+    const deduped = store.createGoverned(input({
+      dedupKey: "coexisting-evidence",
+      idempotencyKey: "coexisting-evidence:imported-replay",
+      evidence: {
+        ...input().evidence,
+        references: [importedHistoryReference],
+        importedHistory: importedHistoryCoverage,
+      },
+    }));
+    assert.equal(deduped.kind, "merged");
+    if (deduped.kind !== "merged") throw new Error("expected replay merge");
+    assert.equal(deduped.mergedEvidenceCount, 0);
+    assert.equal(deduped.proposal.revision, merged.proposal.revision);
+    assert.equal(deduped.proposal.id, first.id);
+  } finally {
+    store.close();
+  }
+});
+
+test("preserves both evidence modes whichever arrives first and rejects a fifty-first reference", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const importedFirst = store.create(input({
+      dedupKey: "coexisting-evidence-reversed",
+      idempotencyKey: "coexisting-evidence-reversed:imported",
+      evidence: {
+        ...input().evidence,
+        references: [importedHistoryReference],
+        importedHistory: importedHistoryCoverage,
+      },
+    }));
+    const liveReference = {
+      bridgeId: "ha-main",
+      hwId: "hw-7",
+      capabilityId: "hwc-4",
+      observedAt: "2026-08-19T00:31:00.000Z",
+      source: "post-baseline-event" as const,
+      epochId: "epoch-3",
+      seq: 607,
+    };
+    const liveTemporal = {
+      requestedSince: "2026-08-19T00:00:00.000Z",
+      requestedUntil: "2026-08-19T01:00:00.000Z",
+      truncated: false,
+      coverage: [{
+        bridgeId: "ha-main",
+        epochId: "epoch-3",
+        baselineSeq: 1,
+        baselineAt: "2026-08-18T23:00:00.000Z",
+        status: "partial" as const,
+        reasons: ["history_gap" as const],
+      }],
+    };
+    const merged = store.createGoverned(input({
+      dedupKey: "coexisting-evidence-reversed",
+      idempotencyKey: "coexisting-evidence-reversed:live",
+      evidence: { ...input().evidence, references: [liveReference], temporal: liveTemporal },
+    }));
+    assert.equal(merged.kind, "merged");
+    if (merged.kind !== "merged") throw new Error("expected evidence merge");
+    assert.equal(merged.proposal.id, importedFirst.id);
+    assert.deepEqual(merged.proposal.evidence.references, [importedHistoryReference, liveReference]);
+    assert.deepEqual(merged.proposal.evidence.importedHistory, importedHistoryCoverage);
+    assert.deepEqual(merged.proposal.evidence.temporal, liveTemporal);
+
+    const fiftyReferences = Array.from({ length: 49 }, (_, index) => ({
+      bridgeId: "ha-main",
+      hwId: "hw-7",
+      capabilityId: "hwc-4",
+      observedAt: "2026-08-19T00:31:00.000Z",
+      source: "post-baseline-event" as const,
+      epochId: "epoch-3",
+      seq: index + 1,
+    }));
+    const capped = store.create(input({
+      dedupKey: "evidence-cap",
+      idempotencyKey: "evidence-cap:v1",
+      evidence: {
+        ...input().evidence,
+        references: [...fiftyReferences, importedHistoryReference],
+        temporal: liveTemporal,
+        importedHistory: importedHistoryCoverage,
+      },
+    }));
+    assert.equal(capped.evidence.references.length, 50);
+    assert.throws(
+      () => store.createGoverned(input({
+        dedupKey: "evidence-cap",
+        idempotencyKey: "evidence-cap:v2",
+        evidence: {
+          ...input().evidence,
+          references: [{ ...importedHistoryReference, historySeq: 2 }],
+          importedHistory: importedHistoryCoverage,
+        },
+      })),
+      (error: unknown) => error instanceof ProposalStoreError && error.code === "invalid_proposal",
+    );
+    assert.equal(store.get(capped.id)?.evidence.references.length, 50);
+  } finally {
+    store.close();
+  }
+});
+
+test("unions imported coverage windows and reasons across deterministic merges", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const first = store.create(input({
+      dedupKey: "imported-coverage-merge",
+      idempotencyKey: "imported-coverage-merge:v1",
+      evidence: {
+        ...input().evidence,
+        references: [importedHistoryReference],
+        importedHistory: importedHistoryCoverage,
+      },
+    }));
+    const merged = store.createGoverned(input({
+      dedupKey: "imported-coverage-merge",
+      idempotencyKey: "imported-coverage-merge:v2",
+      evidence: {
+        ...input().evidence,
+        references: [],
+        importedHistory: {
+          requestedSince: "2026-08-19T01:00:00.000Z",
+          requestedUntil: "2026-08-19T02:00:00.000Z",
+          truncated: true,
+          coverage: [{
+            bridgeId: "ha-main",
+            status: "unavailable" as const,
+            reasons: ["history_range_unavailable" as const],
+          }],
+        },
+      },
+    }));
+    assert.equal(merged.kind, "merged");
+    if (merged.kind !== "merged") throw new Error("expected coverage merge");
+    assert.equal(merged.proposal.id, first.id);
+    assert.deepEqual(merged.proposal.evidence.references, [importedHistoryReference]);
+    assert.deepEqual(merged.proposal.evidence.importedHistory, {
+      requestedSince: "2026-08-19T00:00:00.000Z",
+      requestedUntil: "2026-08-19T02:00:00.000Z",
+      truncated: true,
+      coverage: [{
+        bridgeId: "ha-main",
+        status: "partial",
+        reasons: ["retention_floor_unknown", "history_range_unavailable"],
+      }],
+    });
+  } finally {
+    store.close();
+  }
+});
+
+test("retention collection ignores imported references while retaining live pins", () => {
+  const store = new SqliteProposalStore({ path: ":memory:", now: () => createdAt });
+  try {
+    const liveReference = {
+      bridgeId: "ha-main",
+      hwId: "hw-7",
+      capabilityId: "hwc-4",
+      observedAt: "2026-08-19T00:31:00.000Z",
+      source: "post-baseline-event" as const,
+      epochId: "epoch-3",
+      seq: 607,
+    };
+    const proposal = store.create(input({
+      idempotencyKey: "retention-imported-mixed",
+      evidence: {
+        ...input().evidence,
+        references: [liveReference, importedHistoryReference],
+        temporal: {
+          requestedSince: "2026-08-19T00:00:00.000Z",
+          requestedUntil: "2026-08-19T01:00:00.000Z",
+          truncated: false,
+          coverage: [{
+            bridgeId: "ha-main",
+            epochId: "epoch-3",
+            baselineSeq: 1,
+            baselineAt: "2026-08-18T23:00:00.000Z",
+            status: "partial" as const,
+            reasons: ["history_gap" as const],
+          }],
+        },
+        importedHistory: importedHistoryCoverage,
+      },
+    }));
+    const references = store.withRetentionEvidence("ha-main", 100, (pins) => pins);
+    assert.deepEqual(references, [{
+      referenceId: `${proposal.id}:1:0`,
+      bridgeId: "ha-main",
+      epochId: "epoch-3",
+      seq: 607,
+    }]);
+  } finally {
+    store.close();
+  }
 });
 
 test("persists a strict review-only artifact candidate without treating it as an artifact", () => {

@@ -53,6 +53,7 @@ The live watermark vector that remains on the envelope describes the current
 Hub context only; it is not provenance for an imported record.
 
 The envelope records imported coverage separately from live temporal coverage:
+the object below is persisted as `evidence.importedHistory`.
 
 ```ts
 {
@@ -69,7 +70,10 @@ The envelope records imported coverage separately from live temporal coverage:
 
 `history@1` cannot prove a recorder retention floor or source completeness, so
 imported coverage never becomes `complete`. Empty, partial, unavailable,
-conflicted, or truncated history remains explicit. A durable history row that
+conflicted, or truncated history remains explicit; an empty or unavailable
+coverage result may therefore have no imported references. Whenever imported
+references are present, every referenced bridge appears in coverage with a
+non-`unavailable` status. A durable history row that
 predates source-range persistence has no exact range and is omitted from this
 private proposal projection; the Hub never substitutes the current query
 window.

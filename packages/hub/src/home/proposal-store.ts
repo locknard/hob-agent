@@ -37,6 +37,7 @@ export type {
 const boundedId = z.string().trim().min(1).max(200);
 const boundedText = z.string().trim().min(1).max(1_000);
 const isoTimestamp = z.iso.datetime({ offset: true });
+const utcIsoTimestamp = isoTimestamp.refine((value) => value.endsWith("Z"), "timestamp must be UTC");
 const proposalReviewLaneSchema = z.enum(["standard", "migration"]);
 const HOME_AUTOMATION_MIGRATION_PRODUCER = "home-automation-migration";
 
@@ -58,6 +59,30 @@ const evidenceCoverageReasons = [
   "selection_too_broad",
   "query_truncated",
   "merge_truncated",
+] as const;
+
+const importedHistoryCoverageReasons = [
+  "bridge_not_ready",
+  "missing_consistent_baseline",
+  "history_unavailable",
+  "journal_query_unavailable",
+  "history_gap",
+  "query_truncated",
+  "retention_floor_unknown",
+  "empty_or_purged",
+  "recorder_disabled",
+  "invalid_response",
+  "invalid_row",
+  "response_too_large",
+  "record_limit",
+  "record_too_large",
+  "timeout",
+  "cancelled",
+  "busy",
+  "resync_stale",
+  "source_conflict",
+  "imported_quota",
+  "history_range_unavailable",
 ] as const;
 
 const evidenceReferenceSchema = z.object({
@@ -84,11 +109,65 @@ const evidenceReferenceSchema = z.object({
     }
   });
 
+const importedHistoryReferenceSchema = z.object({
+  bridgeId: boundedId,
+  hwId: boundedId,
+  capabilityId: boundedId,
+  observedAt: utcIsoTimestamp,
+  source: z.literal("imported-history"),
+  origin: z.literal("imported"),
+  importId: boundedId,
+  historySeq: z.number().int().positive().refine(Number.isSafeInteger, "history sequence must be a safe integer"),
+  sourceRange: z.object({
+    since: utcIsoTimestamp,
+    until: utcIsoTimestamp,
+  }).strict(),
+}).strict().superRefine((reference, ctx) => {
+  const since = Date.parse(reference.sourceRange.since);
+  const until = Date.parse(reference.sourceRange.until);
+  const observedAt = Date.parse(reference.observedAt);
+  if (!(since < until)) {
+    ctx.addIssue({ code: "custom", path: ["sourceRange"], message: "imported source range must be ascending" });
+  }
+  if (!(since <= observedAt && observedAt < until)) {
+    ctx.addIssue({ code: "custom", path: ["observedAt"], message: "imported observation must fall within its source range" });
+  }
+});
+
+const parsedEvidenceReferenceSchema = z.union([evidenceReferenceSchema, importedHistoryReferenceSchema]);
+
+const importedHistoryCoverageSchema = z.object({
+  requestedSince: utcIsoTimestamp,
+  requestedUntil: utcIsoTimestamp,
+  truncated: z.boolean(),
+  coverage: z.array(z.object({
+    bridgeId: boundedId,
+    status: z.enum(["partial", "unavailable"]),
+    reasons: z.array(z.enum(importedHistoryCoverageReasons)).min(1).max(importedHistoryCoverageReasons.length),
+  }).strict()).max(16),
+}).strict().superRefine((coverage, ctx) => {
+  const requestedSince = Date.parse(coverage.requestedSince);
+  const requestedUntil = Date.parse(coverage.requestedUntil);
+  if (!(requestedSince < requestedUntil)) {
+    ctx.addIssue({ code: "custom", path: ["requestedUntil"], message: "imported coverage window must be ascending" });
+  }
+  const bridges = new Set<string>();
+  for (const item of coverage.coverage) {
+    if (bridges.has(item.bridgeId)) {
+      ctx.addIssue({ code: "custom", path: ["coverage"], message: "imported coverage must contain one row per bridge" });
+    }
+    bridges.add(item.bridgeId);
+    if (new Set(item.reasons).size !== item.reasons.length) {
+      ctx.addIssue({ code: "custom", path: ["coverage"], message: "imported coverage reasons must be unique" });
+    }
+  }
+});
+
 /** One bound for the runtime guard and the persisted deployment schema: what validates writes must read back. */
 const MAX_DEPLOYMENT_TARGETS = 16;
 
 const evidenceSchema = z.object({
-  references: z.array(evidenceReferenceSchema).max(50),
+  references: z.array(parsedEvidenceReferenceSchema).max(50),
   watermarks: z.array(z.object({
     bridgeId: boundedId,
     epochId: boundedId,
@@ -109,13 +188,30 @@ const evidenceSchema = z.object({
       reasons: z.array(z.enum(evidenceCoverageReasons)).max(evidenceCoverageReasons.length),
     }).strict()).max(16),
   }).strict().optional(),
+  importedHistory: importedHistoryCoverageSchema.optional(),
 }).strict().superRefine((evidence, ctx) => {
   const eventReferences = evidence.references.filter((reference) => reference.source === "post-baseline-event");
+  const importedReferences = evidence.references.filter((reference) => reference.source === "imported-history");
   if (evidence.temporal === undefined && eventReferences.length > 0) {
     ctx.addIssue({ code: "custom", message: "event references require temporal coverage" });
   }
-  if (evidence.temporal !== undefined && eventReferences.length !== evidence.references.length) {
-    ctx.addIssue({ code: "custom", message: "temporal evidence must contain only event references" });
+  if (evidence.temporal !== undefined && evidence.references.some((reference) =>
+    reference.source !== "post-baseline-event" && reference.source !== "imported-history")) {
+    ctx.addIssue({ code: "custom", message: "temporal evidence cannot contain current-state references" });
+  }
+  if (importedReferences.length > 0 && evidence.importedHistory === undefined) {
+    ctx.addIssue({ code: "custom", message: "imported-history references require imported coverage" });
+  }
+  if (evidence.importedHistory !== undefined) {
+    const coverageByBridge = new Map(evidence.importedHistory.coverage.map((item) => [item.bridgeId, item] as const));
+    for (const reference of importedReferences) {
+      const coverage = coverageByBridge.get(reference.bridgeId);
+      if (coverage === undefined) {
+        ctx.addIssue({ code: "custom", message: "imported coverage must include every imported reference bridge" });
+      } else if (coverage.status === "unavailable") {
+        ctx.addIssue({ code: "custom", message: "unavailable imported coverage cannot carry references" });
+      }
+    }
   }
 });
 
@@ -209,6 +305,7 @@ const admittedProposalInputSchema = createProposalInputSchema.superRefine((propo
 });
 
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
+type ImportedHistoryCoverage = z.infer<typeof importedHistoryCoverageSchema>;
 export type ProposalReviewLane = z.infer<typeof proposalReviewLaneSchema>;
 type PersistedProposalInput = CreateProposalInput & { readonly reviewLane: ProposalReviewLane };
 export type ProposalStatus = "pending_review" | "approved" | "rejected" | "expired";
@@ -2646,19 +2743,15 @@ function mergeProposalEvidence(
   at: string,
   id: () => string,
 ): { readonly proposal: ProposalEnvelope; readonly mergedEvidenceCount: number } {
-  const temporalMode = current.evidence.temporal !== undefined || input.evidence.temporal !== undefined
-    || current.evidence.references.some((reference) => reference.source === "post-baseline-event")
-    || input.evidence.references.some((reference) => reference.source === "post-baseline-event");
-  const references = current.evidence.references.filter((reference) => temporalMode
-    ? reference.source === "post-baseline-event"
-    : reference.source !== "post-baseline-event");
+  const references = [...current.evidence.references];
   const referenceKeys = new Set(references.map(evidenceReferenceKey));
   let mergedEvidenceCount = 0;
   for (const reference of input.evidence.references) {
-    if ((temporalMode && reference.source !== "post-baseline-event")
-      || (!temporalMode && reference.source === "post-baseline-event")) continue;
     const key = evidenceReferenceKey(reference);
-    if (referenceKeys.has(key) || references.length >= 50) continue;
+    if (referenceKeys.has(key)) continue;
+    if (references.length >= 50) {
+      throw new ProposalStoreError("invalid_proposal", "Proposal evidence reference limit is 50");
+    }
     referenceKeys.add(key);
     references.push(reference);
     mergedEvidenceCount += 1;
@@ -2671,18 +2764,30 @@ function mergeProposalEvidence(
       watermarksByBridge.set(watermark.bridgeId, watermark);
     }
   }
+  const temporal = input.evidence.temporal ?? current.evidence.temporal;
+  const importedHistory = mergeImportedHistoryCoverage(
+    current.evidence.importedHistory,
+    input.evidence.importedHistory,
+    references,
+  );
   const mergedEvidence = {
     ...current.evidence,
     references,
     watermarks: [...watermarksByBridge.values()].slice(0, 16),
-    ...(temporalMode
-      ? { temporal: input.evidence.temporal ?? current.evidence.temporal }
-      : {}),
+    ...(temporal === undefined ? {} : { temporal }),
+    ...(importedHistory === undefined ? {} : { importedHistory }),
   };
+  if (!evidenceSchema.safeParse(mergedEvidence).success) {
+    throw new ProposalStoreError("invalid_proposal", "Merged proposal evidence is inconsistent");
+  }
   // Any change to what the household would see and authorize is a plan
   // revision — a title-only or risk-only replacement never disappears.
   const revisedPlan = proposalContentHash(preparedPlanSnapshot(input)) !== proposalContentHash(preparedPlanSnapshot(current));
-  if (mergedEvidenceCount === 0 && !revisedPlan) return { proposal: current, mergedEvidenceCount: 0 };
+  const coverageChanged = JSON.stringify(temporal) !== JSON.stringify(current.evidence.temporal)
+    || importedHistoryCoverageKey(importedHistory) !== importedHistoryCoverageKey(current.evidence.importedHistory);
+  if (mergedEvidenceCount === 0 && !coverageChanged && !revisedPlan) {
+    return { proposal: current, mergedEvidenceCount: 0 };
+  }
   const revision = current.revision + 1;
   const requiresPreparationAfterMerge = current.kind === "automation-draft"
     && (revisedPlan ? input.artifactCandidate !== undefined : current.artifactCandidate !== undefined);
@@ -2728,44 +2833,17 @@ function mergeProposalEvidence(
   };
 }
 
-function mergeEvidenceData(
-  current: CreateProposalInput["evidence"],
-  input: CreateProposalInput["evidence"],
-): { readonly evidence: CreateProposalInput["evidence"]; readonly mergedEvidenceCount: number } {
-  const temporalMode = current.temporal !== undefined || input.temporal !== undefined
-    || current.references.some((reference) => reference.source === "post-baseline-event")
-    || input.references.some((reference) => reference.source === "post-baseline-event");
-  const references = current.references.filter((reference) => temporalMode
-    ? reference.source === "post-baseline-event"
-    : reference.source !== "post-baseline-event");
-  const referenceKeys = new Set(references.map(evidenceReferenceKey));
-  let mergedEvidenceCount = 0;
-  for (const reference of input.references) {
-    if ((temporalMode && reference.source !== "post-baseline-event")
-      || (!temporalMode && reference.source === "post-baseline-event")) continue;
-    const key = evidenceReferenceKey(reference);
-    if (referenceKeys.has(key) || references.length >= 50) continue;
-    referenceKeys.add(key);
-    references.push(reference);
-    mergedEvidenceCount += 1;
-  }
-  const watermarksByBridge = new Map(current.watermarks.map((item) => [item.bridgeId, item] as const));
-  for (const watermark of input.watermarks) {
-    const previous = watermarksByBridge.get(watermark.bridgeId);
-    if (previous === undefined || watermark.lastSeq >= previous.lastSeq) watermarksByBridge.set(watermark.bridgeId, watermark);
-  }
-  return {
-    evidence: {
-      ...current,
-      references,
-      watermarks: [...watermarksByBridge.values()].slice(0, 16),
-      ...(temporalMode ? { temporal: input.temporal ?? current.temporal } : {}),
-    },
-    mergedEvidenceCount,
-  };
-}
-
 function evidenceReferenceKey(reference: CreateProposalInput["evidence"]["references"][number]): string {
+  if (reference.source === "imported-history") {
+    return [
+      "imported-history",
+      reference.bridgeId,
+      reference.importId,
+      String(reference.historySeq),
+      reference.sourceRange.since,
+      reference.sourceRange.until,
+    ].join("\u0000");
+  }
   if (reference.source === "post-baseline-event") {
     return ["event", reference.bridgeId, reference.epochId ?? "", reference.seq === undefined ? "" : String(reference.seq)].join("\u0000");
   }
@@ -2779,6 +2857,76 @@ function evidenceReferenceKey(reference: CreateProposalInput["evidence"]["refere
     reference.seq === undefined ? "" : String(reference.seq),
     reference.observedAt,
   ].join("\u0000");
+}
+
+function mergeImportedHistoryCoverage(
+  current: ImportedHistoryCoverage | undefined,
+  input: ImportedHistoryCoverage | undefined,
+  references: readonly CreateProposalInput["evidence"]["references"][number][],
+): ImportedHistoryCoverage | undefined {
+  const importedReferences = references.filter((reference) => reference.source === "imported-history");
+  if (current === undefined && input === undefined) return undefined;
+  if (input === undefined) return current;
+  if (current === undefined) return input;
+
+  // Imported pages can arrive in multiple proposal merges. Keep one deterministic
+  // aggregate coverage envelope, unioning windows and closed reasons while
+  // retaining bridge rows needed by already-persisted references.
+  const currentByBridge = new Map(current.coverage.map((item) => [item.bridgeId, item] as const));
+  const inputByBridge = new Map(input.coverage.map((item) => [item.bridgeId, item] as const));
+  const bridgeIds = [...new Set([...currentByBridge.keys(), ...inputByBridge.keys()])].sort();
+  const importedByBridge = new Set(importedReferences.map((reference) => reference.bridgeId));
+  const coverage = bridgeIds.map((bridgeId) => {
+    const currentItem = currentByBridge.get(bridgeId);
+    const inputItem = inputByBridge.get(bridgeId);
+    const reasons = new Set([
+      ...(currentItem?.reasons ?? []),
+      ...(inputItem?.reasons ?? []),
+    ]);
+    const mergedReasons = importedHistoryCoverageReasons.filter((reason) => reasons.has(reason));
+    return {
+      bridgeId,
+      status: currentItem?.status === "partial"
+        || inputItem?.status === "partial"
+        || importedByBridge.has(bridgeId)
+        ? "partial" as const
+        : "unavailable" as const,
+      reasons: mergedReasons,
+    };
+  });
+  const merged: ImportedHistoryCoverage = {
+    requestedSince: Date.parse(current.requestedSince) <= Date.parse(input.requestedSince)
+      ? current.requestedSince : input.requestedSince,
+    requestedUntil: Date.parse(current.requestedUntil) >= Date.parse(input.requestedUntil)
+      ? current.requestedUntil : input.requestedUntil,
+    truncated: current.truncated || input.truncated,
+    coverage,
+  };
+  const coverageByBridge = new Map(merged.coverage.map((item) => [item.bridgeId, item] as const));
+  for (const reference of importedReferences) {
+    const item = coverageByBridge.get(reference.bridgeId);
+    if (item === undefined || item.status === "unavailable") {
+      throw new ProposalStoreError("invalid_proposal", "Imported coverage cannot describe persisted references");
+    }
+  }
+  return merged;
+}
+
+function importedHistoryCoverageKey(coverage: ImportedHistoryCoverage | undefined): string {
+  if (coverage === undefined) return "";
+  return JSON.stringify({
+    requestedSince: coverage.requestedSince,
+    requestedUntil: coverage.requestedUntil,
+    truncated: coverage.truncated,
+    coverage: [...coverage.coverage]
+      .sort((left, right) => left.bridgeId.localeCompare(right.bridgeId))
+      .map((item) => ({
+        bridgeId: item.bridgeId,
+        status: item.status,
+        reasons: [...item.reasons].sort((left, right) =>
+          importedHistoryCoverageReasons.indexOf(left) - importedHistoryCoverageReasons.indexOf(right)),
+      })),
+  });
 }
 
 function fromDedupLatchRow(row: ProposalDedupLatchRow): ProposalDedupLatch {
