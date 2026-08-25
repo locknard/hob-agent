@@ -15,6 +15,10 @@ import type {
   ArtifactCompileAttestation,
   NeutralDryRunAttestation,
 } from "../artifact/artifact-compiler-contract.js";
+import {
+  parseHistoryReplayResult,
+  type HistoryReplayResult,
+} from "../artifact/artifact-history-replay-attestation.js";
 import type { ArtifactRef } from "../artifact/neutral-artifact.js";
 
 declare module "@deepseek-ai/cordis" {
@@ -77,6 +81,18 @@ export type HomeArtifactReviewDryRun =
     }
   | Pick<NeutralDryRunAttestation, "status" | "resultId" | "inputIdentity" | "compileAttestationId" | "compileInputIdentity" | "compiler" | "checkedWatermarks" | "diff" | "conflicts" | "actionAuthorityBindings" | "writesPerformed" | "summary">;
 
+export interface HomeArtifactReviewHistoryReplay {
+  readonly status: HistoryReplayResult["status"];
+  readonly coverage: HistoryReplayResult["coverage"];
+  readonly truncated: boolean;
+  readonly counts: HistoryReplayResult["counts"];
+  readonly reasons: readonly HistoryReplayResult["reasons"][number][];
+  readonly writesPerformed: false;
+  readonly evaluator: HistoryReplayResult["evaluator"];
+  readonly resultId: string;
+  readonly inputIdentity: string;
+}
+
 /**
  * Bounded, neutral review output for one exact source proposal revision.
  * Artifact content, compiler plan, and all ecosystem/provider details stay in
@@ -91,6 +107,7 @@ export interface HomeArtifactReviewSnapshot {
   readonly evidence: HomeArtifactReviewEvidence | undefined;
   readonly compile: HomeArtifactReviewCompile;
   readonly dryRun: HomeArtifactReviewDryRun;
+  readonly historyReplay?: HomeArtifactReviewHistoryReplay;
   readonly writesPerformed: false;
 }
 
@@ -171,6 +188,8 @@ export class HomeArtifactService extends Service {
   reviewForProposal(proposalId: string, proposalRevision: number): HomeArtifactReviewSnapshot | undefined {
     const entry = this.registry.currentBySourceProposal({ proposalId, proposalRevision });
     if (entry === undefined) return undefined;
+    if (entry.artifact.sourceProposal.proposalId !== proposalId
+      || entry.artifact.sourceProposal.proposalRevision !== proposalRevision) return undefined;
 
     const artifact = {
       artifactId: entry.artifact.artifactId,
@@ -210,6 +229,13 @@ export class HomeArtifactService extends Service {
     const projectedDryRun: HomeArtifactReviewDryRun = compile !== undefined && boundDryRun !== undefined
       ? projectDryRun(boundDryRun)
       : { status: "not_run", writesPerformed: false };
+    const historyReplay = readHistoryReplay(
+      this.registry,
+      artifact,
+      entry.artifact.sourceProposal,
+      compile,
+      boundDryRun,
+    );
 
     return freezeDeep({
       artifact,
@@ -220,6 +246,7 @@ export class HomeArtifactService extends Service {
       evidence: watermarks === undefined ? undefined : { watermarks },
       compile: compile === undefined ? { status: "not_run" as const } : projectCompile(compile),
       dryRun: projectedDryRun,
+      ...(historyReplay === undefined ? {} : { historyReplay }),
       writesPerformed: false as const,
     });
   }
@@ -284,6 +311,62 @@ function isDryRunBoundToCompile(
     && JSON.stringify(dryRun.conflicts) === JSON.stringify(compile.conflicts);
 }
 
+function readHistoryReplay(
+  registry: HomeArtifactRegistryReader,
+  artifact: ArtifactRef,
+  sourceProposal: ArtifactRegistryEntry["artifact"]["sourceProposal"],
+  compile: ArtifactCompileAttestation | undefined,
+  dryRun: NeutralDryRunAttestation | undefined,
+): HomeArtifactReviewHistoryReplay | undefined {
+  if (compile === undefined || dryRun === undefined
+    || !sameArtifactRef(compile.artifact, artifact)
+    || !sameArtifactRef(dryRun.artifact, artifact)) return undefined;
+
+  let entry: ArtifactAssessmentEntry | undefined;
+  try {
+    entry = registry.latestAttestation({
+      kind: "history-replay-attestation",
+      artifact,
+    });
+  } catch {
+    return undefined;
+  }
+  if (!isPlainObject(entry) || !isPlainObject(entry.assessment)
+    || !isPlainObject(entry.artifact)
+    || entry.kind !== "history-replay-attestation"
+    || !sameArtifactRef(entry.artifact as ArtifactRef, artifact)
+    || entry.inputIdentity !== entry.assessment.inputIdentity
+    || entry.assessment.kind !== "history-replay-attestation") return undefined;
+
+  let result: HistoryReplayResult;
+  try {
+    result = parseHistoryReplayResult(entry.assessment);
+  } catch {
+    return undefined;
+  }
+  if (!sameArtifactRef(result.artifact, artifact)
+    || result.proposal.id !== sourceProposal.proposalId
+    || result.proposal.revision !== sourceProposal.proposalRevision
+    || result.compile.resultId !== compile.resultId
+    || result.compile.inputIdentity !== compile.inputIdentity
+    || result.dryRun.resultId !== dryRun.resultId
+    || result.dryRun.inputIdentity !== dryRun.inputIdentity
+    || result.resultId !== entry.recordId
+    || result.inputIdentity !== entry.inputIdentity) return undefined;
+
+  return {
+    status: result.status,
+    coverage: result.coverage,
+    truncated: result.truncated,
+    counts: result.counts,
+    reasons: result.reasons,
+    writesPerformed: false,
+    evaluator: result.evaluator,
+    resultId: result.resultId,
+    inputIdentity: result.inputIdentity,
+  };
+}
+
 function sameArtifactRef(left: ArtifactRef, right: ArtifactRef): boolean {
   return left.artifactId === right.artifactId
     && left.revision === right.revision
@@ -295,4 +378,10 @@ function freezeDeep<T>(value: T): T {
   Object.freeze(value);
   for (const child of Object.values(value as Record<string, unknown>)) freezeDeep(child);
   return value;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }

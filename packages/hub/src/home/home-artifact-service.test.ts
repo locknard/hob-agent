@@ -21,7 +21,11 @@ import {
   createNeutralDryRunAttestation,
   createNeutralWorldCut,
 } from "../artifact/artifact-compiler-contract.js";
-import { ArtifactRegistry } from "../artifact/artifact-registry.js";
+import {
+  createHistoryReplayInput,
+  createHistoryReplayResult,
+} from "../artifact/artifact-history-replay-attestation.js";
+import { ArtifactRegistry, type ArtifactAssessmentEntry } from "../artifact/artifact-registry.js";
 import { HomeArtifactService } from "./home-artifact-service.js";
 import { createArtifactRevision } from "../artifact/neutral-artifact.js";
 
@@ -158,6 +162,70 @@ function fixtureCompilerResults(artifact: ReturnType<typeof fixtureArtifact>) {
     summary: "The neutral dry-run found a review-only notification.",
   });
   return { artifactRef, evidence, authority, risk, compile, dryRun };
+}
+
+function fixtureHistoryReplay(
+  artifact: ReturnType<typeof fixtureArtifact>,
+  results: ReturnType<typeof fixtureCompilerResults>,
+  options: {
+    readonly proposal?: { readonly id: string; readonly revision: number };
+    readonly compile?: { readonly resultId: string; readonly inputIdentity: string };
+    readonly dryRun?: { readonly resultId: string; readonly inputIdentity: string };
+  } = {},
+) {
+  const reference = {
+    bridgeId: "bridge-history-service-fixture",
+    hwId: "hw-history-service-fixture",
+    capabilityId: "hwc-history-service-fixture",
+    observedAt: "2026-08-19T23:30:00.000Z",
+    source: "imported-history" as const,
+    origin: "imported" as const,
+    importId: "import-history-service-fixture",
+    historySeq: 1,
+    sourceRange: {
+      since: "2026-08-19T23:00:00.000Z",
+      until: "2026-08-20T00:00:00.000Z",
+    },
+  };
+  const input = createHistoryReplayInput({
+    artifact: results.artifactRef,
+    proposal: {
+      id: options.proposal?.id ?? artifact.sourceProposal.proposalId,
+      revision: options.proposal?.revision ?? artifact.sourceProposal.proposalRevision,
+      proposalEvidenceIdentity: `sha256:${"e".repeat(64)}`,
+    },
+    compile: {
+      resultId: options.compile?.resultId ?? results.compile.resultId,
+      inputIdentity: options.compile?.inputIdentity ?? results.compile.inputIdentity,
+    },
+    dryRun: {
+      resultId: options.dryRun?.resultId ?? results.dryRun.resultId,
+      inputIdentity: options.dryRun?.inputIdentity ?? results.dryRun.inputIdentity,
+    },
+    refs: [reference],
+    samples: [{
+      bridgeId: reference.bridgeId,
+      importId: reference.importId,
+      historySeq: reference.historySeq,
+      sourceTs: reference.observedAt,
+      sourceTsQuality: "platform" as const,
+      value: true,
+    }],
+    coverage: [{
+      bridgeId: reference.bridgeId,
+      status: "partial" as const,
+      reasons: ["retention_floor_unknown" as const],
+    }],
+    truncated: false,
+    evaluator: { id: "neutral-history-replay", version: "1.0.0" },
+  });
+  return createHistoryReplayResult(input, {
+    status: "passed",
+    matchedSampleCount: 1,
+    triggerCount: 0,
+    actionCount: 0,
+    reasons: [],
+  });
 }
 
 test("mounts a restart-safe read-only artifact boundary with no action surface", async () => {
@@ -320,6 +388,11 @@ test("projects only the exact current draft and binds the dry-run to the latest 
     });
     seed.recordCompile({ result: results.compile, idempotencyKey: "review-compile" });
     seed.recordDryRun({ result: results.dryRun, idempotencyKey: "review-dry-run" });
+    const historyReplay = fixtureHistoryReplay(artifact, results);
+    seed.recordHistoryReplayAttestation({
+      assessment: historyReplay,
+      idempotencyKey: "review-history-replay",
+    });
     seed.close();
 
     const context = new Context();
@@ -363,6 +436,17 @@ test("projects only the exact current draft and binds the dry-run to the latest 
         writesPerformed: false,
         summary: results.dryRun.summary,
       },
+      historyReplay: {
+        status: historyReplay.status,
+        coverage: historyReplay.coverage,
+        truncated: historyReplay.truncated,
+        counts: historyReplay.counts,
+        reasons: historyReplay.reasons,
+        writesPerformed: false,
+        evaluator: historyReplay.evaluator,
+        resultId: historyReplay.resultId,
+        inputIdentity: historyReplay.inputIdentity,
+      },
       writesPerformed: false,
     });
     assert.equal(Object.isFrozen(snapshot), true);
@@ -379,6 +463,82 @@ test("projects only the exact current draft and binds the dry-run to the latest 
     await context.fiber.dispose();
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("omits history-replay projection when any durable binding is wrong", async () => {
+  const cases = [
+    {
+      name: "proposal",
+      replay: (artifact: ReturnType<typeof fixtureArtifact>, results: ReturnType<typeof fixtureCompilerResults>) =>
+        fixtureHistoryReplay(artifact, results, { proposal: { id: "proposal-other", revision: 1 } }),
+    },
+    {
+      name: "compile",
+      replay: (artifact: ReturnType<typeof fixtureArtifact>, results: ReturnType<typeof fixtureCompilerResults>) =>
+        fixtureHistoryReplay(artifact, results, {
+          compile: { resultId: `sha256:${"1".repeat(64)}`, inputIdentity: `sha256:${"2".repeat(64)}` },
+        }),
+    },
+    {
+      name: "dry-run",
+      replay: (artifact: ReturnType<typeof fixtureArtifact>, results: ReturnType<typeof fixtureCompilerResults>) =>
+        fixtureHistoryReplay(artifact, results, {
+          dryRun: { resultId: `sha256:${"3".repeat(64)}`, inputIdentity: `sha256:${"4".repeat(64)}` },
+        }),
+    },
+  ] as const;
+
+  for (const item of cases) {
+    const directory = mkdtempSync(join(tmpdir(), `hob-home-artifact-replay-${item.name}-`));
+    const path = join(directory, "artifacts.sqlite");
+    const backing = new ArtifactRegistry({ path });
+    const artifact = fixtureArtifact({ artifactId: `artifact-replay-${item.name}` });
+    const results = fixtureCompilerResults(artifact);
+    backing.createDraft({ artifact, idempotencyKey: `${item.name}-artifact` });
+    backing.recordEvidenceAttestation({ assessment: results.evidence, idempotencyKey: `${item.name}-evidence` });
+    backing.recordAuthorityAssessment({ assessment: results.authority, idempotencyKey: `${item.name}-authority` });
+    backing.recordRiskAssessment({ assessment: results.risk, idempotencyKey: `${item.name}-risk` });
+    backing.recordCompile({ result: results.compile, idempotencyKey: `${item.name}-compile` });
+    backing.recordDryRun({ result: results.dryRun, idempotencyKey: `${item.name}-dry-run` });
+    const validReplay = fixtureHistoryReplay(artifact, results);
+    const mismatchedReplay = item.replay(artifact, results);
+    backing.recordHistoryReplayAttestation({
+      assessment: validReplay,
+      idempotencyKey: `${item.name}-valid-history-replay`,
+    });
+    const validEntry = backing.latestAttestation({
+      kind: "history-replay-attestation",
+      artifact: results.artifactRef,
+    });
+    assert.ok(validEntry);
+    const reader = {
+      getRevision: (...args: Parameters<ArtifactRegistry["getRevision"]>) => backing.getRevision(...args),
+      list: (...args: Parameters<ArtifactRegistry["list"]>) => backing.list(...args),
+      audit: (...args: Parameters<ArtifactRegistry["audit"]>) => backing.audit(...args),
+      listAttestations: (...args: Parameters<ArtifactRegistry["listAttestations"]>) => backing.listAttestations(...args),
+      latestAttestation: (...args: Parameters<ArtifactRegistry["latestAttestation"]>) => {
+        const result = backing.latestAttestation(...args);
+        return args[0]?.kind === "history-replay-attestation" && result !== undefined
+          ? { ...result, assessment: mismatchedReplay } as ArtifactAssessmentEntry
+          : result;
+      },
+      currentBySourceProposal: (...args: Parameters<ArtifactRegistry["currentBySourceProposal"]>) => backing.currentBySourceProposal(...args),
+      latestResult: (...args: Parameters<ArtifactRegistry["latestResult"]>) => backing.latestResult(...args),
+    };
+    const context = new Context();
+    try {
+      await context.plugin(HomeArtifactService, { registry: reader } as never);
+      const snapshot = context.homeArtifacts.reviewForProposal(
+        artifact.sourceProposal.proposalId,
+        artifact.sourceProposal.proposalRevision,
+      );
+      assert.equal(snapshot?.historyReplay, undefined, item.name);
+      await context.fiber.dispose();
+    } finally {
+      backing.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 
