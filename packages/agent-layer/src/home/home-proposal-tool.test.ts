@@ -138,6 +138,7 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
   assert.equal(draft?.dedupKey, "home:arrival-light");
   assert.deepEqual(draft?.selectedHwCapabilityIds, ["hwc-1"]);
   assert.equal(draft?.evidenceLookbackHours, 24);
+  assert.equal("evidenceSource" in (draft ?? {}), false);
   assert.deepEqual(draft?.artifactCandidate, VALID_ARTIFACT_CANDIDATE);
   assert.deepEqual(value, {
     proposalId: "proposal-1",
@@ -151,9 +152,240 @@ test("registers a review-only proposal tool and injects trusted DSH provenance",
       devicesWithoutSpace: 1,
       devicesWithMultipleSpaces: 0,
     },
-    evidenceSummary: { referenceCount: 1, coverageStatus: "partial", truncated: false },
+    evidenceSummary: { source: "live", referenceCount: 1, coverageStatus: "partial", truncated: false },
   });
   assert.equal("artifactCandidate" in value, false);
+});
+
+test("selects imported-history evidence without accepting recorder identities and projects unavailable coverage honestly", async () => {
+  let registered: ToolDefinition | undefined;
+  let draft: Record<string, unknown> | undefined;
+  const ctx = {
+    get() { return undefined; },
+    homeProposals: {
+      async createDraft(input: Record<string, unknown>) {
+        draft = input;
+        return {
+          id: "proposal-imported",
+          revision: 2,
+          status: "pending_review",
+          applicationStatus: "not_available",
+          conflictCheck: { existingAutomationCount: 0, matches: [] },
+          spaceCoverage: {
+            selectedDevices: 1,
+            devicesWithSingleSpace: 0,
+            devicesWithoutSpace: 1,
+            devicesWithMultipleSpaces: 0,
+          },
+          evidence: {
+            references: [],
+            importedHistory: {
+              truncated: true,
+              coverage: [
+                { status: "partial" },
+                { status: "unavailable" },
+              ],
+            },
+          },
+        };
+      },
+    },
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => undefined;
+      },
+    },
+  } as unknown as Context;
+  apply(ctx);
+  assert.match(registered?.description ?? "", /recorder.*what.*when|what.*when.*recorder/i);
+  assert.match(registered?.description ?? "", /cannot.*why|not.*why/i);
+  assert.match(registered?.description ?? "", /causality.*trace|trace.*causality/i);
+
+  const value = await registered!.execute({
+    ...automationArguments(VALID_ARTIFACT_CANDIDATE),
+    idempotencyKey: "arrival-light:imported:v1",
+    evidenceSource: "imported-history",
+  }, { rootCallId: "call-imported" } as never);
+
+  assert.equal(draft?.evidenceSource, "imported-history");
+  assert.deepEqual(value, {
+    proposalId: "proposal-imported",
+    status: "pending_review",
+    revision: 2,
+    applicationStatus: "not_available",
+    conflictSummary: { existingAutomationCount: 0, matchCount: 0 },
+    spaceCoverage: {
+      selectedDevices: 1,
+      devicesWithSingleSpace: 0,
+      devicesWithoutSpace: 1,
+      devicesWithMultipleSpaces: 0,
+    },
+    evidenceSummary: {
+      source: "imported-history",
+      referenceCount: 0,
+      coverageStatus: "unavailable",
+      truncated: true,
+    },
+  });
+  const serialized = JSON.stringify(value);
+  for (const forbidden of ["importId", "historySeq", "sourceRange", "bridgeId", '"coverage":']) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+});
+
+test("requires an explicit evidence source to use the complete live/imported selector pair", async () => {
+  let registered: ToolDefinition | undefined;
+  let drafts = 0;
+  const ctx = {
+    get() { return undefined; },
+    homeProposals: {
+      async createDraft() {
+        drafts += 1;
+        throw new Error("must not reach Hub");
+      },
+    },
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => undefined;
+      },
+    },
+  } as unknown as Context;
+  apply(ctx);
+  const { selectedHwCapabilityIds: _selectedForUnpaired, evidenceLookbackHours: _lookbackForUnpaired, ...unpairedArguments } =
+    automationArguments(VALID_ARTIFACT_CANDIDATE);
+  for (const evidenceSource of ["live", "imported-history"]) {
+    await assert.rejects(
+      () => registered!.execute({
+        ...unpairedArguments,
+        evidenceSource,
+      }, { rootCallId: `call-unpaired-${evidenceSource}` } as never),
+      /evidenceSource.*selectedHwCapabilityIds.*evidenceLookbackHours|evidence.*pair/i,
+    );
+  }
+  await assert.rejects(
+    () => registered!.execute({
+      ...unpairedArguments,
+      evidenceSource: "imported-history",
+      evidenceLookbackHours: 24,
+    }, { rootCallId: "call-one-sided" } as never),
+    /evidenceSource.*selectedHwCapabilityIds.*evidenceLookbackHours|evidence.*pair/i,
+  );
+  await assert.rejects(
+    () => registered!.execute({
+      ...automationArguments(VALID_ARTIFACT_CANDIDATE),
+      evidenceSource: "provider-specific" as never,
+    }, { rootCallId: "call-invalid-source" } as never),
+    /evidenceSource.*invalid|evidenceSource.*must be one of/i,
+  );
+  assert.equal(drafts, 0);
+});
+
+test("fails closed for malformed imported coverage and never forwards recorder payload fields", async () => {
+  let registered: ToolDefinition | undefined;
+  let drafts = 0;
+  const ctx = {
+    get() { return undefined; },
+    homeProposals: {
+      async createDraft(input: Record<string, unknown>) {
+        drafts += 1;
+        assert.equal("importId" in input, false);
+        assert.equal("historySeq" in input, false);
+        assert.equal("sourceRange" in input, false);
+        assert.equal("bridgeId" in input, false);
+        assert.equal("coverage" in input, false);
+        return {
+          id: "proposal-malformed-imported",
+          revision: 1,
+          status: "pending_review",
+          applicationStatus: "not_available",
+          conflictCheck: { existingAutomationCount: 0, matches: [] },
+          spaceCoverage: {
+            selectedDevices: 1,
+            devicesWithSingleSpace: 0,
+            devicesWithoutSpace: 1,
+            devicesWithMultipleSpaces: 0,
+          },
+          evidence: {
+            references: [{ provider: "must-not-be-trusted" }],
+            importedHistory: { truncated: false, coverage: [{ status: "complete" }] },
+          },
+        };
+      },
+    },
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => undefined;
+      },
+    },
+  } as unknown as Context;
+  apply(ctx);
+  await assert.rejects(
+    () => registered!.execute({
+      ...automationArguments(VALID_ARTIFACT_CANDIDATE),
+      evidenceSource: "imported-history",
+    }, { rootCallId: "call-malformed-result" } as never),
+    /Home proposal imported-history result is invalid/i,
+  );
+  assert.equal(drafts, 1);
+  await assert.rejects(
+    () => registered!.execute({
+      ...automationArguments(VALID_ARTIFACT_CANDIDATE),
+      evidenceSource: "imported-history",
+      importId: "secret-import",
+      historySeq: 3,
+      sourceRange: { since: "2026-08-24T00:00:00.000Z", until: "2026-08-25T00:00:00.000Z" },
+      bridgeId: "secret-bridge",
+      coverage: [{ status: "partial" }],
+    }, { rootCallId: "call-malformed-imported" } as never),
+    /additionalProperties|not a declared property|proposal evidence|arguments are invalid/i,
+  );
+  assert.equal(drafts, 1);
+});
+
+test("rejects mixed live and imported evidence instead of guessing the projected source", async () => {
+  let registered: ToolDefinition | undefined;
+  const ctx = {
+    get() { return undefined; },
+    homeProposals: {
+      async createDraft() {
+        return {
+          id: "proposal-mixed-evidence",
+          revision: 1,
+          status: "pending_review",
+          applicationStatus: "not_available",
+          conflictCheck: { existingAutomationCount: 0, matches: [] },
+          spaceCoverage: {
+            selectedDevices: 1,
+            devicesWithSingleSpace: 1,
+            devicesWithoutSpace: 0,
+            devicesWithMultipleSpaces: 0,
+          },
+          evidence: {
+            references: [],
+            temporal: { coverage: [{ status: "complete" }], truncated: false },
+            importedHistory: { coverage: [{ status: "partial" }], truncated: false },
+          },
+        };
+      },
+    },
+    tools: {
+      register(definition: ToolDefinition): () => void {
+        registered = definition;
+        return () => undefined;
+      },
+    },
+  } as unknown as Context;
+  apply(ctx);
+  await assert.rejects(
+    () => registered!.execute({
+      ...automationArguments(VALID_ARTIFACT_CANDIDATE),
+      evidenceSource: "live",
+    }, { rootCallId: "call-mixed-evidence" } as never),
+    /mixed sources/i,
+  );
 });
 
 test("rejects every unknown nested artifact candidate field before calling Hub", async () => {
