@@ -28,19 +28,25 @@ admitted Proposal revision (`lifecycle: preparing`)
   -> risk
   -> compile
   -> dry-run
+  -> history-replay (only when the Proposal uses imported history)
 ```
 
 The first four stages use the existing Hub-owned producer seams. `compile`
 also obtains the bounded current-conflict capture and neutral world cut needed
 by the M3c compiler; those are read-only compiler inputs, not additional public
-pipeline stages. The final result remains a neutral, durable review record.
+pipeline stages. An imported-history Proposal then re-reads its exact retained
+neutral samples and evaluates the compiled Artifact through the fixed, pure
+history evaluator. Live-evidence Proposals skip that stage. The final result
+remains a neutral, durable review record.
 There is no device write, remote rule installation, action ticket, executor,
 `actions@1`, or `artifactHost@1` in this slice.
 
 The worker records prepared Artifact, assessment, compile, and dry-run
-references on the exact Proposal revision. The Proposal Store promotes that
-revision to `ready` only after compile and dry-run persistence succeeds. Only a
-`ready` Proposal can spend household attention on a review or enablement
+references on the exact Proposal revision. Imported-history replay is stored
+as a separate immutable assessment bound to the same Artifact and compiler
+inputs. The Proposal Store promotes that revision to `ready` only after compile
+and dry-run persistence succeeds and, when imported history is present, replay
+passes. Only a `ready` Proposal can spend household attention on a review or enablement
 decision. The raw Proposal `dryRun` field is not rewritten by this promotion;
 `HomeArtifactService` reads the independent ArtifactReview attestation by
 exact `proposalId + proposalRevision`.
@@ -113,10 +119,18 @@ type ApprovedProposalPreparationJob = {
     | "authority"
     | "risk"
     | "compile"
-    | "dry-run";
+    | "dry-run"
+    | "history-replay";
   artifact?: ArtifactRef;
   error?: {
-    stage: "artifact" | "evidence" | "authority" | "risk" | "compile" | "dry-run";
+    stage:
+      | "artifact"
+      | "evidence"
+      | "authority"
+      | "risk"
+      | "compile"
+      | "dry-run"
+      | "history-replay";
     code: BoundedPreparationErrorCode;
   };
   createdAt: IsoTimestamp;
@@ -125,8 +139,9 @@ type ApprovedProposalPreparationJob = {
 ```
 
 `status` is a closed set. A job is `queued` before a worker claims it,
-`running` for one claimed attempt, `succeeded` only after both compile and
-dry-run rows have been durably recorded and cross-checked, and `failed` when a
+`running` for one claimed attempt, `succeeded` only after compile and dry-run
+rows have been durably recorded and cross-checked and any required imported
+history replay has passed, and `failed` when a
 bounded stage error prevents completion. There is no `applying`, `installed`,
 `enabled`, `executing`, or `rollback` job state in this slice.
 
@@ -158,6 +173,7 @@ the Hub-owned `ArtifactRegistry`.
 | `risk` | Re-check exact evidence and authority identities; run the fixed Hub policy and bounded conflict source | Immutable `risk-assessment` | No model risk label or missing-conflict-as-zero inference |
 | `compile` | Re-read exact dependencies, capture the current conflict cut, create a stable neutral world cut, and run the pure compiler | Immutable `compile-attestation` | No provider payload, action ticket, or remote call |
 | `dry-run` | Run the pure neutral simulator against that compile result | Immutable `dry-run-attestation` | No bridge control/events write, credential resolve, executor, or artifact host |
+| `history-replay` | For imported-history Proposals, re-read only the exact retained neutral references and evaluate the Artifact with the fixed evaluator | Immutable `history-replay-attestation` in the assessment lane | No recorder query widening, live state substitution, device write, or execution claim |
 
 The causal production order is fixed even though the compiler coordinator
 reads already persisted dependencies in its own validation order. In
@@ -167,8 +183,9 @@ read-only conflict/world inputs. Missing, stale, malformed, or mismatched
 inputs fail the job at the owning stage.
 
 `ArtifactRegistry` is the sole owner of Artifact revision, evidence,
-authority, risk, compile, and dry-run records. The preparation worker composes
-calls to that Registry; it does not maintain a shadow Artifact map, and
+authority, risk, compile, dry-run, and history-replay assessment records. The
+preparation worker composes calls to that Registry; it does not maintain a
+shadow Artifact map, and
 Proposal, Agent, Inbox, plugin, authority configuration, and bridge code do not
 write those records. `AuthorityCandidateRegistry` remains a separate
 Hub-private opaque candidate store as defined by

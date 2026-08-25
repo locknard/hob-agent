@@ -8,9 +8,10 @@ now", but it cannot establish that a behavior happened repeatedly. Treating
 the bootstrap snapshot as history would let one startup observation masquerade
 as a household habit.
 
-The next read-only slice therefore exposes recent changes that hob-agent itself
-observed after a bridge completed a verified snapshot. It does not import
-vendor history, run an automation, or grant a new authority.
+The live read-only slice exposes recent changes that hob-agent itself observed
+after a bridge completed a verified snapshot. A separate imported-history
+slice can retain bounded platform history with explicit imported provenance.
+Neither path runs an automation or grants authority.
 
 ## Evidence boundary
 
@@ -43,10 +44,29 @@ bridge is ready, there is no relevant history gap, and neither the journal
 query nor the final merge was truncated. Otherwise it is `partial` or
 `unavailable` with closed reasons.
 
-A resync creates a new epoch and therefore a new evidence baseline. Earlier
-epochs are not silently joined to the current one. Later work may add an
-explicit imported-history contract, but imported evidence must retain its
-different provenance and confidence.
+A resync creates a new epoch and therefore a new live-evidence baseline.
+Earlier epochs are not silently joined to the current one. Imported evidence
+uses its own exact import identity, source range, partial/unavailable coverage,
+and retention-floor reason; it never becomes live evidence through fallback.
+
+## Imported history replay
+
+When an approved Proposal was prepared from imported history, the Hub freezes
+its exact imported references and requested window. After compilation and the
+current-world no-write dry-run pass, the preparation pipeline asks HomeWorld
+for only those retained neutral samples. The fixed pure evaluator joins each
+sample by `bridgeId + importId + historySeq`, evaluates supported
+`capability_changed` triggers and scalar conditions in stable time order, and
+writes an immutable `history-replay-attestation` in the Artifact assessment
+lane.
+
+Missing, drifted, truncated, or unavailable references produce an honest
+unavailable assessment and fail the independent `history-replay` preparation
+stage. Schedule triggers remain unavailable because imported state samples do
+not contain a trustworthy historical clock event. A passed replay proves only
+that the compiled neutral behavior matches the selected retained samples; it
+does not prove that Home Assistant executed the automation, that the recorder
+is complete, or that observed changes were causally produced by the rule.
 
 ## Causality evidence
 
