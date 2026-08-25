@@ -23,6 +23,10 @@ import {
   type NeutralDryRunAttestation,
 } from "./artifact-compiler-contract.js";
 import {
+  parseHistoryReplayAttestation,
+  type HistoryReplayAttestation,
+} from "./artifact-history-replay-attestation.js";
+import {
   artifactRefSchema,
   parseArtifactJson,
   parseArtifactRevision,
@@ -50,7 +54,8 @@ export type ArtifactRegistryFaultPoint =
 export type ArtifactAssessmentKind =
   | "evidence-attestation"
   | "risk-assessment"
-  | "authority-assessment";
+  | "authority-assessment"
+  | "history-replay-attestation";
 
 export type ArtifactCompilerResultKind = "compile-attestation" | "dry-run-attestation";
 
@@ -59,7 +64,8 @@ export type ArtifactCompilerResult = ArtifactCompileAttestation | NeutralDryRunA
 export type ArtifactAssessment =
   | ArtifactEvidenceAttestation
   | ArtifactRiskAssessment
-  | ArtifactAuthorityAssessment;
+  | ArtifactAuthorityAssessment
+  | HistoryReplayAttestation;
 
 export interface ArtifactRegistryAudit {
   readonly id: string;
@@ -643,6 +649,14 @@ export class ArtifactRegistry {
     return this.recordAssessment("authority-assessment", assessment, input?.idempotencyKey, input?.actor);
   }
 
+  recordHistoryReplayAttestation(
+    input: RecordArtifactAssessmentInput<HistoryReplayAttestation>,
+  ): ArtifactAssessmentEntry {
+    this.ensureOpen();
+    const assessment = parseHistoryReplayAttestationForRegistry(input?.assessment);
+    return this.recordAssessment("history-replay-attestation", assessment, input?.idempotencyKey, input?.actor);
+  }
+
   recordCompile(input: RecordArtifactCompileInput): ArtifactCompilerResultEntry {
     this.ensureOpen();
     const result = parseCompileResultForRegistry(resultInput(input));
@@ -968,7 +982,7 @@ export class ArtifactRegistry {
       const byRecordId = this.findAssessmentByRecordId(recordId);
       if (byRecordId !== undefined) {
         const existing = this.assessmentEntryFromRow(byRecordId);
-        assertAssessmentSemanticMatch(existing, kind, artifact, inputIdentity, payloadJson, actor);
+        assertAssessmentSemanticMatch(existing, kind, artifact, inputIdentity, recordId, payloadJson, actor);
         this.insertAssessmentOperation({
           idempotencyKey,
           artifact,
@@ -985,7 +999,7 @@ export class ArtifactRegistry {
       const byIdentity = this.findAssessmentByIdentity(kind, artifact, inputIdentity);
       if (byIdentity !== undefined) {
         const existing = this.assessmentEntryFromRow(byIdentity);
-        assertAssessmentSemanticMatch(existing, kind, artifact, inputIdentity, undefined, actor);
+        assertAssessmentSemanticMatch(existing, kind, artifact, inputIdentity, recordId, undefined, actor);
         this.insertAssessmentOperation({
           idempotencyKey,
           artifact,
@@ -1824,6 +1838,14 @@ function parseAuthorityForRegistry(input: unknown): ArtifactAuthorityAssessment 
   }
 }
 
+function parseHistoryReplayAttestationForRegistry(input: unknown): HistoryReplayAttestation {
+  try {
+    return parseHistoryReplayAttestation(input);
+  } catch {
+    throw new ArtifactRegistryError("invalid_assessment", "History replay attestation failed validation");
+  }
+}
+
 function resultInput<T extends ArtifactCompilerResult>(input: RecordArtifactCompilerResultInput<T>): unknown {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     throw new ArtifactRegistryError("invalid_input", "Compiler result input is invalid");
@@ -1918,6 +1940,7 @@ function expectedDryRunStatusForRegistry(compile: ArtifactCompileAttestation): N
 
 function assessmentRecordId(assessment: ArtifactAssessment): string {
   if (assessment.kind === "evidence-attestation") return assessment.attestationId;
+  if (assessment.kind === "history-replay-attestation") return assessment.resultId;
   return assessment.assessmentId;
 }
 
@@ -1928,7 +1951,8 @@ function hashAssessmentPayload(payload: string): string {
 function isAssessmentKind(value: string): value is ArtifactAssessmentKind {
   return value === "evidence-attestation"
     || value === "risk-assessment"
-    || value === "authority-assessment";
+    || value === "authority-assessment"
+    || value === "history-replay-attestation";
 }
 
 function isCompilerResultKind(value: string): value is ArtifactCompilerResultKind {
@@ -2122,6 +2146,7 @@ function assertAssessmentSemanticMatch(
   kind: ArtifactAssessmentKind,
   artifact: ArtifactRef,
   inputIdentity: string,
+  recordId: string,
   payloadJson: string | undefined,
   actor: string,
 ): void {
@@ -2130,6 +2155,7 @@ function assertAssessmentSemanticMatch(
     || existing.artifact.revision !== artifact.revision
     || existing.artifact.contentHash !== artifact.contentHash
     || existing.inputIdentity !== inputIdentity
+    || (kind === "history-replay-attestation" && existing.recordId !== recordId)
     || (payloadJson !== undefined && canonicalAssessmentInput(existing.assessment) !== payloadJson)
     || existing.audit[0]?.actor !== actor) {
     throw new ArtifactRegistryError("revision_conflict", "Assessment identity conflicts with an existing row");
@@ -2186,7 +2212,8 @@ function assessmentFromRow(row: SqlRow): ArtifactAssessment {
     }
     if (kind === "evidence-attestation") return parseArtifactEvidenceAttestation(raw);
     if (kind === "risk-assessment") return parseArtifactRiskAssessment(raw);
-    return parseArtifactAuthorityAssessment(raw);
+    if (kind === "authority-assessment") return parseArtifactAuthorityAssessment(raw);
+    return parseHistoryReplayAttestation(raw);
   } catch {
     throw new ArtifactRegistryError("corrupt_record", "Artifact assessment row failed validation");
   }

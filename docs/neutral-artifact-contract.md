@@ -689,6 +689,28 @@ ArtifactRevision。
 路径、action executor、artifact host、凭证 provider 或远端 API；它只能读 Hub-owned snapshot、
 journal evidence、catalog 和已登记 conflict metadata。
 
+### 7.1a Imported-history replay attestation
+
+`history-replay-attestation` 与 current-world `dry-run-attestation` 保持独立。它绑定 exact
+`ArtifactRef`（`artifactId + revision + contentHash`）、Proposal revision 和
+`proposalEvidenceIdentity`、compile/dry-run result/input identity，以及 Hub 选出的每条
+imported reference：`bridgeId`、`hwId`、`capabilityId`、`observedAt`、`importId`、
+`historySeq` 和精确 `sourceRange`。每条 reference 必须与一个中立 scalar sample 一一对应；
+sample 使用 platform source timestamp，且时间落在该 reference 的 source range 内。
+
+输入同时绑定每个 bridge 的 `partial|unavailable` coverage、coverage reasons、truncated
+标记和 evaluator id/version。输出保留独立的 `inputIdentity`、`resultId`、bounded counts、
+`status: passed|failed|unavailable`、`coverage: partial|unavailable` 和
+`writesPerformed: false`。`history@1` 没有 recorder retention floor 或 completeness proof，
+所以 coverage 不得升级为 `complete`；只有非空、逐条匹配、未截断的 selected samples，唯一
+不确定性为 `retention_floor_unknown`，且 evaluator 返回 passed 时，replay 才能返回
+`passed + partial`。
+
+该 attestation 只证明“候选在这些已导入的中立样本上得到该次 deterministic replay 结果”。
+它不证明 HA automation 实际运行、设备实际执行、recorder 覆盖完整，也不生成 cause、trace、
+liveCut、epoch/seq、native/provider 或 raw payload 字段。gap、conflict、quota、range-unavailable、
+unavailable 或 truncated 输入只能得到 unavailable，不能产生 passed。
+
 ### 7.2 Neutral diff
 
 ```ts

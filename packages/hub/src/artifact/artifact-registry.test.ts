@@ -6,6 +6,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  canonicalAssessmentInput,
   createArtifactAuthorityAssessment,
   createArtifactEvidenceAttestation,
   createArtifactRiskAssessment,
@@ -18,6 +19,12 @@ import {
   createArtifactRevision,
   type ArtifactRevision,
 } from "./neutral-artifact.js";
+import {
+  createHistoryReplayAttestation,
+  createHistoryReplayInput,
+  type HistoryReplayAttestation,
+  type HistoryReplayEvaluation,
+} from "./artifact-history-replay-attestation.js";
 import {
   computeNeutralForeignCatalogIdentity,
   computeArtifactCompileResultIdentity,
@@ -177,6 +184,62 @@ function authorityAssessment(
     }],
     checkedWatermarks: [assessmentWatermark(lastSeq)],
   }, { hwCapabilityIds: ["hwc-cover-1"] });
+}
+
+function historyReplayAttestation(
+  ref: ReturnType<typeof artifactRef>,
+  evaluation: HistoryReplayEvaluation = {
+    status: "passed",
+    matchedSampleCount: 1,
+    triggerCount: 1,
+    actionCount: 1,
+    reasons: [],
+  },
+): HistoryReplayAttestation {
+  const observedAt = "2026-08-19T23:10:00.000Z";
+  const input = createHistoryReplayInput({
+    artifact: ref,
+    proposal: {
+      id: "proposal-fixture",
+      revision: 2,
+      proposalEvidenceIdentity: `sha256:${"b".repeat(64)}`,
+    },
+    compile: {
+      resultId: `sha256:${"c".repeat(64)}`,
+      inputIdentity: `sha256:${"d".repeat(64)}`,
+    },
+    dryRun: {
+      resultId: `sha256:${"e".repeat(64)}`,
+      inputIdentity: `sha256:${"f".repeat(64)}`,
+    },
+    refs: [{
+      bridgeId: "bridge-artifact-fixture",
+      hwId: "hw-artifact-fixture",
+      capabilityId: "cap-artifact-fixture",
+      observedAt,
+      source: "imported-history",
+      origin: "imported",
+      importId: "import-artifact-fixture",
+      historySeq: 1,
+      sourceRange: { since: "2026-08-19T23:00:00.000Z", until: "2026-08-20T00:00:00.000Z" },
+    }],
+    samples: [{
+      bridgeId: "bridge-artifact-fixture",
+      importId: "import-artifact-fixture",
+      historySeq: 1,
+      sourceTs: observedAt,
+      sourceTsQuality: "platform",
+      value: "on",
+    }],
+    coverage: [{
+      bridgeId: "bridge-artifact-fixture",
+      status: "partial",
+      reasons: ["retention_floor_unknown"],
+    }],
+    truncated: false,
+    evaluator: { id: "neutral-history-replay", version: "1.0.0" },
+  });
+  return createHistoryReplayAttestation(input, evaluation);
 }
 
 function recordRiskDependencies(
@@ -849,6 +912,130 @@ test("persists all three Hub assessments as immutable metadata-only rows", () =>
     assert.deepEqual(registry.latestAttestation({ kind: "authority-assessment", artifact: ref }), authorityRow);
     assert.equal(registry.audit({ limit: 200 }).filter((entry) => entry.action === "assessment_recorded").length, 3);
     assert.deepEqual(registry.getRevision(ref.artifactId, ref.revision)?.audit.map((entry) => entry.action), ["created"]);
+  });
+});
+
+test("persists a history replay attestation in the assessment lane", () => {
+  withRegistry("history-replay-assessment", (registry) => {
+    const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-history-replay-artifact" });
+    const ref = artifactRef(created.artifact);
+    const replay = historyReplayAttestation(ref);
+
+    const recorded = registry.recordHistoryReplayAttestation({
+      assessment: replay,
+      idempotencyKey: "idem-history-replay-assessment",
+    });
+
+    assert.equal(recorded.kind, "history-replay-attestation");
+    assert.equal(recorded.recordId, replay.resultId);
+    assert.equal(recorded.inputIdentity, replay.inputIdentity);
+    assert.deepEqual(registry.latestAttestation({ kind: "history-replay-attestation", artifact: ref }), recorded);
+    assert.equal(registry.listResults({ artifact: ref }).length, 0);
+  });
+});
+
+test("deduplicates history replay by input and result identities, then rejects a different result", () => {
+  withRegistry("history-replay-idempotency", (registry) => {
+    const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-history-replay-artifact" });
+    const ref = artifactRef(created.artifact);
+    const replay = historyReplayAttestation(ref);
+
+    const first = registry.recordHistoryReplayAttestation({
+      assessment: replay,
+      idempotencyKey: "idem-history-replay-first",
+    });
+    const semanticReplay = registry.recordHistoryReplayAttestation({
+      assessment: replay,
+      idempotencyKey: "idem-history-replay-second",
+    });
+    assert.deepEqual(semanticReplay, first);
+    assert.deepEqual(registry.recordHistoryReplayAttestation({
+      assessment: replay,
+      idempotencyKey: "idem-history-replay-first",
+    }), first);
+    assert.equal(registry.listAttestations({ kind: "history-replay-attestation", artifact: ref }).length, 1);
+
+    const differentResult = historyReplayAttestation(ref, {
+      status: "failed",
+      matchedSampleCount: 0,
+      triggerCount: 0,
+      actionCount: 0,
+      reasons: ["replay_mismatch"],
+    });
+    assert.notEqual(differentResult.resultId, replay.resultId);
+    assert.equal(differentResult.inputIdentity, replay.inputIdentity);
+    assert.throws(
+      () => registry.recordHistoryReplayAttestation({
+        assessment: differentResult,
+        idempotencyKey: "idem-history-replay-conflict",
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "revision_conflict",
+    );
+    assert.equal(registry.listAttestations({ kind: "history-replay-attestation", artifact: ref }).length, 1);
+  });
+});
+
+test("restarts with a frozen history replay row and fails closed on a tampered result identity", () => {
+  const temporary = temporaryPath("history-replay-restart");
+  try {
+    const first = openRegistry(temporary.path);
+    const created = first.createDraft({ artifact: artifact(), idempotencyKey: "idem-history-replay-artifact" });
+    const ref = artifactRef(created.artifact);
+    const replay = historyReplayAttestation(ref);
+    const recorded = first.recordHistoryReplayAttestation({
+      assessment: replay,
+      idempotencyKey: "idem-history-replay-restart",
+    });
+    first.close();
+
+    const second = openRegistry(temporary.path);
+    try {
+      const restored = second.latestAttestation({ kind: "history-replay-attestation", artifact: ref });
+      assert.deepEqual(restored, recorded);
+      assert.equal(Object.isFrozen(restored?.assessment), true);
+      assert.equal(Object.isFrozen(restored?.assessment.counts), true);
+      assert.equal(second.listResults({ artifact: ref }).length, 0);
+    } finally {
+      second.close();
+    }
+
+    const tamper = new DatabaseSync(temporary.path);
+    try {
+      const tampered = { ...replay, resultId: `sha256:${"0".repeat(64)}` };
+      tamper.prepare("UPDATE artifact_assessments SET payload_json = ? WHERE record_id = ?")
+        .run(canonicalAssessmentInput(tampered), recorded.recordId);
+    } finally {
+      tamper.close();
+    }
+    const corrupted = openRegistry(temporary.path);
+    try {
+      assert.throws(
+        () => corrupted.latestAttestation({ kind: "history-replay-attestation", artifact: ref }),
+        (error: unknown) => error instanceof ArtifactRegistryError && error.code === "corrupt_record",
+      );
+    } finally {
+      corrupted.close();
+    }
+  } finally {
+    temporary.cleanup();
+  }
+});
+
+test("rejects a history replay payload with an invalid result identity before writing", () => {
+  withRegistry("history-replay-invalid", (registry) => {
+    const created = registry.createDraft({ artifact: artifact(), idempotencyKey: "idem-history-replay-artifact" });
+    const ref = artifactRef(created.artifact);
+    const replay = historyReplayAttestation(ref);
+    const invalid = { ...replay, resultId: `sha256:${"0".repeat(64)}` };
+
+    assert.throws(
+      () => registry.recordHistoryReplayAttestation({
+        assessment: invalid,
+        idempotencyKey: "idem-history-replay-invalid",
+      }),
+      (error: unknown) => error instanceof ArtifactRegistryError && error.code === "invalid_assessment",
+    );
+    assert.equal(registry.listAttestations({ kind: "history-replay-attestation", artifact: ref }).length, 0);
   });
 });
 
