@@ -28,6 +28,8 @@ import {
 } from "./proposal-store.js";
 import type {
   HomeWorldArtifactPlanPreflightResult,
+  HomeWorldImportedHistoryCoverageReason,
+  HomeWorldImportedHistoryProposalResult,
   HomeWorldService,
 } from "../world/home-world-service.js";
 import { householdCapabilityLabel } from "../world/home-world-service.js";
@@ -232,6 +234,10 @@ export class HomeProposalService extends Service {
     migrationSourceRuleRef?: string,
   ): Promise<ProposalCreationResult> {
     const artifactCandidate = validateDraftInput(input);
+    const evidenceSource = input.evidenceSource ?? "live";
+    const selectedEvidenceCapabilityIds = input.selectedHwCapabilityIds === undefined
+      ? undefined
+      : [...input.selectedHwCapabilityIds];
     const world = this.ctx.get("homeWorld") as HomeWorldService | undefined;
     if (world === undefined) {
       throw new Error("HomeWorld is required to create a proposal draft");
@@ -370,18 +376,63 @@ export class HomeProposalService extends Service {
     if (candidateCapabilityIds.some((id) => !candidateCurrentIds.has(id))) {
       throw new TypeError("home proposal artifact candidate lacks current capability evidence");
     }
-    const temporalEvidence = input.selectedHwCapabilityIds === undefined ? undefined : (() => {
-      const selectedCapabilities = new Set(selectedDevices
+    let temporalEvidence: ReturnType<HomeWorldService["queryRecentEvidence"]> | undefined;
+    let importedHistoryEvidence: HomeWorldImportedHistoryProposalResult | undefined;
+    if (selectedEvidenceCapabilityIds !== undefined) {
+      const selectedCapabilityIds = new Set(selectedDevices
         .flatMap((device) => device.capabilities.map((capability) => capability.hwCapabilityId)));
-      if (input.selectedHwCapabilityIds.some((id) => !selectedCapabilities.has(id))) {
+      if (selectedEvidenceCapabilityIds.some((id) => !selectedCapabilityIds.has(id))) {
         throw new TypeError("home proposal evidence capabilities must belong to selected devices");
       }
-      return world.queryRecentEvidence({
-        hwCapabilityIds: input.selectedHwCapabilityIds,
+      const evidenceQuery = {
+        hwCapabilityIds: selectedEvidenceCapabilityIds,
         lookbackHours: input.evidenceLookbackHours!,
         limit: 50,
-      });
-    })();
+      };
+      if (evidenceSource === "imported-history") {
+        const imported = await world.queryImportedHistory(evidenceQuery);
+        if (imported.coverage.reasons.includes("cancelled")) {
+          throw new Error("home proposal imported history read was cancelled");
+        }
+        importedHistoryEvidence = world.queryImportedHistoryForProposal(evidenceQuery, {
+          requestedSince: imported.requestedSince,
+          requestedUntil: imported.requestedUntil,
+        });
+        if (importedHistoryEvidence.requestedSince !== imported.requestedSince
+          || importedHistoryEvidence.requestedUntil !== imported.requestedUntil) {
+          throw new Error("home proposal imported history window changed before projection");
+        }
+        const publicReasons = new Set<HomeWorldImportedHistoryCoverageReason>(imported.coverage.reasons);
+        if (imported.truncated) publicReasons.add("query_truncated");
+        if (publicReasons.size === 0) publicReasons.add("history_unavailable");
+        const relevantImportedBridgeIds = new Set(selectedEvidenceCapabilityIds.flatMap((id) => {
+          const capability = selectedCapabilities.get(id);
+          return capability?.bindings.map((binding) => binding.bridgeId) ?? [];
+        }));
+        const privateCoverageByBridge = new Map(importedHistoryEvidence.coverage.map((item) => [item.bridgeId, item] as const));
+        const coverageBridgeIds = [...new Set([
+          ...relevantImportedBridgeIds,
+          ...privateCoverageByBridge.keys(),
+        ])].sort((left, right) => left.localeCompare(right));
+        importedHistoryEvidence = {
+          ...importedHistoryEvidence,
+          truncated: importedHistoryEvidence.truncated || imported.truncated,
+          coverage: coverageBridgeIds.map((bridgeId) => {
+            const privateCoverage = privateCoverageByBridge.get(bridgeId);
+            return {
+              bridgeId,
+              status: privateCoverage?.status ?? "unavailable",
+              reasons: [...new Set([
+                ...publicReasons,
+                ...(privateCoverage?.reasons ?? []),
+              ])],
+            };
+          }),
+        };
+      } else {
+        temporalEvidence = world.queryRecentEvidence(evidenceQuery);
+      }
+    }
     const temporalReferences = temporalEvidence?.events.map((event) => ({
         bridgeId: event.provenance.bridgeId,
         hwId: event.hwId,
@@ -391,17 +442,35 @@ export class HomeProposalService extends Service {
         epochId: event.provenance.epochId,
         seq: event.provenance.seq,
       })) ?? [];
-    const temporalCandidateIds = new Set(temporalReferences.flatMap((reference) =>
-      candidateCapabilityIdSet.has(reference.capabilityId) ? [reference.capabilityId] : []));
-    const missingTemporalCandidateReferences = candidateCurrentReferences.filter((reference) =>
-      reference.capabilityId !== undefined && !temporalCandidateIds.has(reference.capabilityId));
-    const referenceCandidates = temporalEvidence === undefined
+    const selectedEvidenceReferences = temporalEvidence === undefined
+      ? importedHistoryEvidence?.references.map((reference) => ({ ...reference })) ?? []
+      : temporalReferences;
+    const selectedEvidenceCandidateIds = new Set(selectedEvidenceReferences.flatMap((reference) =>
+      reference.capabilityId !== undefined && candidateCapabilityIdSet.has(reference.capabilityId)
+        ? [reference.capabilityId]
+        : []));
+    const missingSelectedCandidateReferences = candidateCurrentReferences.filter((reference) =>
+      reference.capabilityId !== undefined && !selectedEvidenceCandidateIds.has(reference.capabilityId));
+    const referenceCandidates = temporalEvidence === undefined && importedHistoryEvidence === undefined
       ? [
           ...candidateCurrentReferences,
           ...currentReferenceCandidates.filter((reference) =>
             reference.capabilityId === undefined || !candidateCapabilityIdSet.has(reference.capabilityId)),
         ]
-      : [...missingTemporalCandidateReferences, ...temporalReferences];
+      : [...missingSelectedCandidateReferences, ...selectedEvidenceReferences];
+    if (importedHistoryEvidence !== undefined && referenceCandidates.length > 50) {
+      importedHistoryEvidence = {
+        ...importedHistoryEvidence,
+        truncated: true,
+        coverage: importedHistoryEvidence.coverage.map((item) => ({
+          ...item,
+          reasons: [
+            "query_truncated",
+            ...item.reasons.filter((reason) => reason !== "query_truncated"),
+          ],
+        })),
+      };
+    }
     const references = referenceCandidates.slice(0, 50);
     const watermarks = snapshot.bridgeWatermarks.map((watermark) => {
       const diagnostic = diagnostics.get(watermark.bridgeId);
@@ -438,6 +507,14 @@ export class HomeProposalService extends Service {
             requestedUntil: temporalEvidence.requestedUntil,
             truncated: temporalEvidence.truncated,
             coverage: temporalEvidence.coverage.map((item) => ({ ...item, reasons: [...item.reasons] })),
+          },
+        }),
+        ...(importedHistoryEvidence === undefined ? {} : {
+          importedHistory: {
+            requestedSince: importedHistoryEvidence.requestedSince,
+            requestedUntil: importedHistoryEvidence.requestedUntil,
+            truncated: importedHistoryEvidence.truncated,
+            coverage: importedHistoryEvidence.coverage.map((item) => ({ ...item, reasons: [...item.reasons] })),
           },
         }),
       },
@@ -1111,6 +1188,7 @@ export interface CreateHomeProposalDraftInput {
   readonly selectedHwIds: readonly string[];
   readonly selectedHwCapabilityIds?: readonly string[];
   readonly evidenceLookbackHours?: number;
+  readonly evidenceSource?: "live" | "imported-history";
   readonly risk: Omit<CreateProposalInput["risk"], "requiresHumanApproval">;
   readonly intent: CreateProposalInput["intent"];
   readonly artifactCandidate?: NonNullable<CreateProposalInput["artifactCandidate"]>;
@@ -1128,6 +1206,15 @@ function validateDraftInput(
   input: CreateHomeProposalDraftInput,
 ): NonNullable<CreateProposalInput["artifactCandidate"]> | undefined {
   if (!input || typeof input !== "object") throw new TypeError("home proposal draft is required");
+  if (["importId", "historySeq", "sourceRange", "coverage"].some((key) =>
+    Object.prototype.hasOwnProperty.call(input, key))) {
+    throw new TypeError("Imported evidence is selected and projected by the Hub-owned World boundary");
+  }
+  if (input.evidenceSource !== undefined
+    && input.evidenceSource !== "live"
+    && input.evidenceSource !== "imported-history") {
+    throw new TypeError("home proposal evidence source is invalid");
+  }
   if (input.kind === "automation-draft" && input.artifactCandidate === undefined) {
     throw new TypeError("home proposal automation draft requires an artifact candidate");
   }
@@ -1173,6 +1260,9 @@ function validateDraftInput(
       || input.evidenceLookbackHours! < 1
       || input.evidenceLookbackHours! > 168))) {
     throw new TypeError("home proposal temporal evidence selection is invalid or unbounded");
+  }
+  if (input.evidenceSource !== undefined && (!hasCapabilities || !hasLookback)) {
+    throw new TypeError("home proposal evidence source requires a bounded capability selection and lookback");
   }
   return artifactCandidate;
 }

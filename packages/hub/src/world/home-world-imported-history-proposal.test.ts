@@ -306,6 +306,49 @@ test("projects exact imported refs for proposal evidence without live or native 
   }
 });
 
+test("uses the explicit import window without taking a second projection clock read", async () => {
+  const { service, fiber } = await createService();
+  try {
+    const runtime = service.runtime(BRIDGE_ID);
+    assert.ok(runtime);
+    runtime.importedHistoryJournal.commitPage({
+      bridgeId: BRIDGE_ID,
+      page: historyPage(),
+      expectedLiveCut: { epochId: EPOCH_ID, lastSeq: 4 },
+    });
+    let query: { readonly since: string; readonly until: string } | undefined;
+    const originalQuery = runtime.importedHistoryJournal.queryImportedEvidence.bind(runtime.importedHistoryJournal);
+    runtime.importedHistoryJournal.queryImportedEvidence = (input) => {
+      query = input;
+      return originalQuery(input);
+    };
+    const originalClock = (service as unknown as { clock: () => string }).clock.bind(service);
+    let clockReads = 0;
+    (service as unknown as { clock: () => string }).clock = () => {
+      clockReads += 1;
+      return originalClock();
+    };
+    const requestedSince = "2026-08-24T23:00:00.000Z";
+    const requestedUntil = CLOCK;
+    const result = service.queryImportedHistoryForProposal(
+      { hwCapabilityIds: [CAPABILITY_ID], lookbackHours: 1, limit: 10 },
+      { requestedSince, requestedUntil },
+    );
+    assert.equal(result.requestedSince, requestedSince);
+    assert.equal(result.requestedUntil, requestedUntil);
+    assert.deepEqual(query, {
+      bridgeId: BRIDGE_ID,
+      since: requestedSince,
+      until: requestedUntil,
+      bindings: [{ nativeId: "native-proposal-light", nativeInstanceId: "native-proposal-light:main" }],
+      limit: 10,
+    });
+    assert.equal(clockReads, 1);
+  } finally {
+    await fiber.dispose();
+  }
+});
+
 test("keeps legacy rows out of proposal refs and reports range-unavailable partial coverage", async () => {
   const { service, fiber } = await createService();
   try {

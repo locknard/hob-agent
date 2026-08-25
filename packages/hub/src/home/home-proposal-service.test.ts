@@ -102,6 +102,23 @@ const candidate: CreateProposalInput = {
 
 class StubHomeWorld extends Service {
   evidenceQueries: unknown[] = [];
+  importedHistoryCalls: unknown[] = [];
+  importedHistoryMode: "result" | "throw" = "result";
+  importedHistoryProjectionMode: "result" | "throw" = "result";
+  importedHistoryResult: unknown = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    events: [],
+    coverage: { status: "partial", reasons: ["empty_or_purged"] },
+    truncated: false,
+  };
+  importedHistoryProposalResult: unknown = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    references: [],
+    coverage: [{ bridgeId: "bridge-a", status: "partial", reasons: ["empty_or_purged"] }],
+    truncated: false,
+  };
   includeUnavailableBridge = false;
   includeUnavailableDevice = false;
   bridgeConnectionState: "ready" | "degraded" = "ready";
@@ -223,6 +240,18 @@ class StubHomeWorld extends Service {
       }],
       truncated: false,
     };
+  }
+
+  async queryImportedHistory(input: unknown) {
+    this.importedHistoryCalls.push({ kind: "import", input });
+    if (this.importedHistoryMode === "throw") throw new Error("import failed");
+    return this.importedHistoryResult;
+  }
+
+  queryImportedHistoryForProposal(input: unknown, window?: unknown) {
+    this.importedHistoryCalls.push({ kind: "projection", input, window });
+    if (this.importedHistoryProjectionMode === "throw") throw new Error("projection failed");
+    return this.importedHistoryProposalResult;
   }
 }
 
@@ -870,6 +899,362 @@ test("creates evidence and conflict findings from the hub instead of trusting mo
   }]);
   assert.equal(currentStateProposal.evidence.temporal, undefined);
 
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("imports history once, projects exact refs, and keeps imported evidence separate from live temporal evidence", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  const sourceRange = {
+    since: `2026-08-18T01:00:00.${"0".repeat(43)}Z`,
+    until: `2026-08-19T01:00:00.${"0".repeat(42)}1Z`,
+  };
+  const requestedSince = "2026-08-18T01:00:00.000Z";
+  const requestedUntil = "2026-08-19T01:00:00.000Z";
+  world.importedHistoryResult = {
+    requestedSince,
+    requestedUntil,
+    events: [{
+      hwId: "hw-1",
+      hwCapabilityId: "hwc-1",
+      value: "secret provider value",
+      observedAt: "2026-08-18T12:00:00.000Z",
+      sourceTs: "2026-08-18T12:00:00.000Z",
+      sourceTsQuality: "platform",
+      origin: "imported",
+    }],
+    coverage: { status: "partial", reasons: ["history_unavailable"] },
+    truncated: false,
+  };
+  world.importedHistoryProposalResult = {
+    requestedSince,
+    requestedUntil,
+    references: [{
+      bridgeId: "bridge-a",
+      hwId: "hw-1",
+      capabilityId: "hwc-1",
+      observedAt: "2026-08-18T12:00:00.000Z",
+      source: "imported-history",
+      origin: "imported",
+      importId: "import-1",
+      historySeq: 7,
+      sourceRange,
+    }],
+    coverage: [{ bridgeId: "bridge-a", status: "partial", reasons: ["retention_floor_unknown"] }],
+    truncated: false,
+  };
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+
+  const proposal = await ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Review imported light history",
+    summary: "A bounded recorder observation is available for review.",
+    idempotencyKey: "imported-history:success:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "imported-history",
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Review imported history.", rollback: "Reject the proposal." },
+  });
+
+  assert.deepEqual(world.importedHistoryCalls, [
+    {
+      kind: "import",
+      input: { hwCapabilityIds: ["hwc-1"], lookbackHours: 24, limit: 50 },
+    },
+    {
+      kind: "projection",
+      input: { hwCapabilityIds: ["hwc-1"], lookbackHours: 24, limit: 50 },
+      window: { requestedSince, requestedUntil },
+    },
+  ]);
+  assert.deepEqual(world.evidenceQueries, []);
+  assert.equal(proposal.evidence.temporal, undefined);
+  assert.deepEqual(proposal.evidence.references, [{
+    bridgeId: "bridge-a",
+    hwId: "hw-1",
+    capabilityId: "hwc-1",
+    observedAt: "2026-08-18T12:00:00.000Z",
+    source: "imported-history",
+    origin: "imported",
+    importId: "import-1",
+    historySeq: 7,
+    sourceRange,
+  }]);
+  assert.deepEqual(proposal.evidence.importedHistory, {
+    requestedSince,
+    requestedUntil,
+    truncated: false,
+    coverage: [{
+      bridgeId: "bridge-a",
+      status: "partial",
+      reasons: ["history_unavailable", "retention_floor_unknown"],
+    }],
+  });
+  assert.equal(JSON.stringify(proposal.evidence).includes("secret provider value"), false);
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("keeps an artifact's current-state ref when imported history is empty", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.importedHistoryResult = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    events: [],
+    coverage: { status: "partial", reasons: ["empty_or_purged"] },
+    truncated: false,
+  };
+  world.importedHistoryProposalResult = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    references: [],
+    coverage: [{ bridgeId: "bridge-a", status: "unavailable", reasons: ["empty_or_purged"] }],
+    truncated: false,
+  };
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const proposal = await ctx.homeProposals.createDraft({
+    kind: "automation-draft",
+    title: "Review an imported history candidate",
+    summary: "The current capability remains the review anchor when history is empty.",
+    idempotencyKey: "imported-history:empty:candidate:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "imported-history",
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "automation-draft", description: "Review a bounded candidate.", rollback: "Restore the previous state." },
+    artifactCandidate: automationCandidate,
+  });
+  assert.deepEqual(proposal.evidence.references, [{
+    bridgeId: "bridge-a",
+    hwId: "hw-1",
+    capabilityId: "hwc-1",
+    observedAt: "2026-08-19T00:59:00.000Z",
+    source: "current-state",
+  }]);
+  assert.equal(proposal.evidence.temporal, undefined);
+  assert.equal(proposal.evidence.importedHistory?.coverage[0]?.status, "unavailable");
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("marks imported evidence truncated when an artifact fallback consumes the reference budget", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.extraCapabilities = 1;
+  const requestedSince = "2026-08-18T01:00:00.000Z";
+  const requestedUntil = "2026-08-19T01:00:00.000Z";
+  world.importedHistoryResult = {
+    requestedSince,
+    requestedUntil,
+    events: [],
+    coverage: { status: "partial", reasons: ["retention_floor_unknown"] },
+    truncated: false,
+  };
+  world.importedHistoryProposalResult = {
+    requestedSince,
+    requestedUntil,
+    references: Array.from({ length: 50 }, (_, index) => ({
+      bridgeId: "bridge-a",
+      hwId: "hw-1",
+      capabilityId: "hwc-2",
+      observedAt: `2026-08-18T12:00:${String(index).padStart(2, "0")}.000Z`,
+      source: "imported-history",
+      origin: "imported",
+      importId: "import-budget",
+      historySeq: index + 1,
+      sourceRange: { since: requestedSince, until: requestedUntil },
+    })),
+    coverage: [{ bridgeId: "bridge-a", status: "partial", reasons: ["retention_floor_unknown"] }],
+    truncated: false,
+  };
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const proposal = await ctx.homeProposals.createDraft({
+    kind: "automation-draft",
+    title: "Review a bounded imported history candidate",
+    summary: "The proposal records local reference truncation honestly.",
+    idempotencyKey: "imported-history:reference-budget:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1", "hwc-2"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "imported-history",
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "automation-draft", description: "Review a bounded candidate.", rollback: "Restore the previous state." },
+    artifactCandidate: automationCandidate,
+  });
+
+  assert.equal(proposal.evidence.references.length, 50);
+  assert.equal(proposal.evidence.references[0]?.source, "current-state");
+  assert.equal(proposal.evidence.references.filter((item) => item.source === "imported-history").length, 49);
+  assert.equal(proposal.evidence.importedHistory?.truncated, true);
+  assert.deepEqual(proposal.evidence.importedHistory?.coverage[0]?.reasons, [
+    "query_truncated",
+    "retention_floor_unknown",
+  ]);
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("persists unavailable imported coverage and fails closed on cancellation or import errors", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const world = ctx.homeWorld as unknown as StubHomeWorld;
+  world.importedHistoryResult = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    events: [],
+    coverage: { status: "unavailable", reasons: ["history_unavailable"] },
+    truncated: false,
+  };
+  world.importedHistoryProposalResult = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    references: [],
+    coverage: [{ bridgeId: "bridge-a", status: "unavailable", reasons: ["history_unavailable"] }],
+    truncated: false,
+  };
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const unavailable = await ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Review unavailable imported history",
+    summary: "The history source is unavailable and needs household review.",
+    idempotencyKey: "imported-history:unavailable:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "imported-history",
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Review unavailable history.", rollback: "Reject the proposal." },
+  });
+  assert.equal(unavailable.evidence.importedHistory?.coverage[0]?.status, "unavailable");
+  assert.deepEqual(unavailable.evidence.references, []);
+
+  world.importedHistoryResult = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    events: [],
+    coverage: { status: "unavailable", reasons: ["cancelled"] },
+    truncated: false,
+  };
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Cancelled imported history",
+    summary: "This read must not create a proposal.",
+    idempotencyKey: "imported-history:cancelled:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "imported-history",
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Cancelled.", rollback: "Reject the proposal." },
+  }), /cancelled|unavailable/i);
+  assert.equal(serviceStore(ctx.homeProposals).list().some((item) => item.idempotencyKey === "imported-history:cancelled:v1"), false);
+
+  world.importedHistoryMode = "throw";
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Failed imported history",
+    summary: "This read must not create a proposal.",
+    idempotencyKey: "imported-history:throw:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "imported-history",
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Failed.", rollback: "Reject the proposal." },
+  }), /import failed/);
+  assert.equal(serviceStore(ctx.homeProposals).list().some((item) => item.idempotencyKey === "imported-history:throw:v1"), false);
+
+  world.importedHistoryMode = "result";
+  world.importedHistoryProjectionMode = "throw";
+  world.importedHistoryResult = {
+    requestedSince: "2026-08-18T01:00:00.000Z",
+    requestedUntil: "2026-08-19T01:00:00.000Z",
+    events: [],
+    coverage: { status: "partial", reasons: ["empty_or_purged"] },
+    truncated: false,
+  };
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    kind: "household-insight",
+    title: "Failed imported projection",
+    summary: "This projection must not create a proposal.",
+    idempotencyKey: "imported-history:projection-throw:v1",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "imported-history",
+    rationale,
+    risk: { level: "low", reasons: [] },
+    intent: { type: "household-insight", description: "Failed projection.", rollback: "Reject the proposal." },
+  }), /projection failed/);
+  assert.equal(serviceStore(ctx.homeProposals).list().some((item) => item.idempotencyKey === "imported-history:projection-throw:v1"), false);
+  await fiber.dispose();
+  await ctx.fiber.dispose();
+});
+
+test("requires an explicit bounded selection for evidence source and rejects caller-owned imported refs", async () => {
+  const ctx = new Context();
+  await ctx.plugin(StubHomeWorld);
+  const fiber = await ctx.plugin(HomeProposalService, { path: ":memory:" });
+  const base = {
+    kind: "household-insight" as const,
+    title: "Review bounded imported history",
+    summary: "The Hub owns the imported evidence selection.",
+    idempotencyKey: "imported-history:strict-source:base",
+    provenance: { producer: "dsh-home-agent" },
+    selectedHwIds: ["hw-1"],
+    rationale,
+    risk: { level: "low" as const, reasons: [] },
+    intent: { type: "household-insight", description: "Review it.", rollback: "Reject it." },
+  };
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    ...base,
+    idempotencyKey: "imported-history:strict-source:no-selection",
+    evidenceSource: "imported-history",
+  } as never), /temporal evidence selection|evidence source/i);
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    ...base,
+    idempotencyKey: "imported-history:strict-source:missing-lookback",
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceSource: "imported-history",
+  } as never), /temporal evidence selection/i);
+  await assert.rejects(() => ctx.homeProposals.createDraft({
+    ...base,
+    idempotencyKey: "imported-history:strict-source:invalid-source",
+    selectedHwCapabilityIds: ["hwc-1"],
+    evidenceLookbackHours: 24,
+    evidenceSource: "provider" as never,
+  } as never), /evidence source/i);
+  for (const [index, key] of ["importId", "historySeq", "sourceRange", "coverage"].entries()) {
+    await assert.rejects(() => ctx.homeProposals.createDraft({
+      ...base,
+      idempotencyKey: `imported-history:strict-source:forbidden-${index}`,
+      selectedHwCapabilityIds: ["hwc-1"],
+      evidenceLookbackHours: 24,
+      evidenceSource: "imported-history",
+      [key]: "caller-supplied",
+    } as never), /Hub-owned|imported evidence|evidence/i);
+  }
   await fiber.dispose();
   await ctx.fiber.dispose();
 });

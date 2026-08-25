@@ -391,6 +391,12 @@ export interface HomeWorldImportedHistoryQuery {
   readonly limit?: number;
 }
 
+/** A provider-read window frozen by the preceding explicit import. */
+export interface HomeWorldImportedHistoryWindow {
+  readonly requestedSince: string;
+  readonly requestedUntil: string;
+}
+
 export interface HomeWorldImportedHistoryEvent {
   readonly hwId: string;
   readonly hwCapabilityId: string;
@@ -1294,12 +1300,21 @@ export class HomeWorldService extends Service {
    */
   queryImportedHistoryForProposal(
     input: HomeWorldImportedHistoryQuery,
+    importedWindow?: HomeWorldImportedHistoryWindow,
   ): HomeWorldImportedHistoryProposalResult {
     const limit = validateImportedHistoryProposalQuery(input);
-    const requestedUntil = this.clock();
-    const requestedSince = new Date(
-      Date.parse(requestedUntil) - input.lookbackHours * 60 * 60 * 1_000,
-    ).toISOString();
+    const window = importedWindow === undefined
+      ? (() => {
+        const requestedUntil = this.clock();
+        return {
+          requestedSince: new Date(
+            Date.parse(requestedUntil) - input.lookbackHours * 60 * 60 * 1_000,
+          ).toISOString(),
+          requestedUntil,
+        };
+      })()
+      : validateImportedHistoryWindow(importedWindow, input.lookbackHours);
+    const { requestedSince, requestedUntil } = window;
     const snapshot = this.snapshot();
     const capabilities = new Map(snapshot.devices
       .flatMap((device) => device.capabilities)
@@ -3662,6 +3677,23 @@ function validateImportedHistoryProposalQuery(input: HomeWorldImportedHistoryQue
     throw new TypeError("home history query is invalid or unbounded");
   }
   return limit;
+}
+
+function validateImportedHistoryWindow(
+  input: HomeWorldImportedHistoryWindow,
+  lookbackHours: number,
+): HomeWorldImportedHistoryWindow {
+  if (!input || typeof input !== "object") {
+    throw new TypeError("home imported history window is invalid");
+  }
+  const requestedSince = canonicalProposalHistoryTimestamp(input.requestedSince);
+  const requestedUntil = canonicalProposalHistoryTimestamp(input.requestedUntil);
+  if (requestedSince === undefined || requestedUntil === undefined
+    || !(Date.parse(requestedSince) < Date.parse(requestedUntil))
+    || Date.parse(requestedUntil) - Date.parse(requestedSince) !== lookbackHours * 60 * 60 * 1_000) {
+    throw new TypeError("home imported history window is invalid");
+  }
+  return { requestedSince, requestedUntil };
 }
 
 function importedHistoryCommitFailureReason(
