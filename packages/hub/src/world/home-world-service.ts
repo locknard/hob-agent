@@ -26,9 +26,11 @@ import {
   type AutomationTraceReason,
   type AutomationTraceRun,
   HISTORY_EXTENSION_KEY,
+  HistoryRangeSchema,
   historyPageSchema,
   type HistoryHandle,
   type HistoryPage,
+  type HistoryRange,
 } from "@hob/bridge-contract";
 import { orgHintPayloadSchema } from "@hob/bridge-contract";
 import {
@@ -380,6 +382,7 @@ export type HomeWorldImportedHistoryCoverageReason =
   | "resync_stale"
   | "source_conflict"
   | "imported_quota"
+  | "history_range_unavailable"
   | "query_truncated";
 
 export interface HomeWorldImportedHistoryQuery {
@@ -409,6 +412,33 @@ export interface HomeWorldImportedHistoryResult {
   readonly requestedUntil: string;
   readonly events: readonly HomeWorldImportedHistoryEvent[];
   readonly coverage: HomeWorldImportedHistoryCoverage;
+  readonly truncated: boolean;
+}
+
+/** Private, proposal-only projection of one imported history row. */
+export interface HomeWorldImportedHistoryProposalReference {
+  readonly bridgeId: string;
+  readonly hwId: string;
+  readonly capabilityId: string;
+  readonly observedAt: string;
+  readonly source: "imported-history";
+  readonly origin: "imported";
+  readonly importId: string;
+  readonly historySeq: number;
+  readonly sourceRange: HistoryRange;
+}
+
+export interface HomeWorldImportedHistoryProposalCoverage {
+  readonly bridgeId: string;
+  readonly status: "partial" | "unavailable";
+  readonly reasons: readonly HomeWorldImportedHistoryCoverageReason[];
+}
+
+export interface HomeWorldImportedHistoryProposalResult {
+  readonly requestedSince: string;
+  readonly requestedUntil: string;
+  readonly references: readonly HomeWorldImportedHistoryProposalReference[];
+  readonly coverage: readonly HomeWorldImportedHistoryProposalCoverage[];
   readonly truncated: boolean;
 }
 
@@ -1253,6 +1283,163 @@ export class HomeWorldService extends Service {
       run,
       steps: steps.map((step) => ({ ...step })),
       reasons: result.status === "partial" ? [...result.reasons] : [],
+      truncated,
+    };
+  }
+
+  /**
+   * Projects only durable imported-history rows into the private proposal
+   * evidence shape. This path never calls a provider; an explicit history
+   * import must have completed before this projection is requested.
+   */
+  queryImportedHistoryForProposal(
+    input: HomeWorldImportedHistoryQuery,
+  ): HomeWorldImportedHistoryProposalResult {
+    const limit = validateImportedHistoryProposalQuery(input);
+    const requestedUntil = this.clock();
+    const requestedSince = new Date(
+      Date.parse(requestedUntil) - input.lookbackHours * 60 * 60 * 1_000,
+    ).toISOString();
+    const snapshot = this.snapshot();
+    const capabilities = new Map(snapshot.devices
+      .flatMap((device) => device.capabilities)
+      .map((capability) => [capability.hwCapabilityId, capability] as const));
+    const selectedIds = [...new Set(input.hwCapabilityIds)];
+    const selected = selectedIds.map((id) => capabilities.get(id));
+    if (selected.some((capability) => capability === undefined)) {
+      throw new TypeError("home history selection contains an unavailable capability");
+    }
+    if ((selected as HomeWorldCapabilitySnapshot[]).some((capability) => capability.bindings.length === 0)) {
+      throw new TypeError("home history selection contains no current binding");
+    }
+
+    const groups = new Map<string, {
+      readonly bindings: HomeWorldBinding[];
+      readonly capabilitiesByBinding: Map<string, HomeWorldCapabilitySnapshot>;
+    }>();
+    for (const capability of selected as HomeWorldCapabilitySnapshot[]) {
+      for (const binding of capability.bindings) {
+        const group = groups.get(binding.bridgeId) ?? {
+          bindings: [],
+          capabilitiesByBinding: new Map<string, HomeWorldCapabilitySnapshot>(),
+        };
+        const key = evidenceBindingKey(binding.nativeId, binding.nativeInstanceId);
+        if (!group.capabilitiesByBinding.has(key)) group.bindings.push(binding);
+        group.capabilitiesByBinding.set(key, capability);
+        groups.set(binding.bridgeId, group);
+      }
+    }
+
+    const references: HomeWorldImportedHistoryProposalReference[] = [];
+    const coverage: HomeWorldImportedHistoryProposalCoverage[] = [];
+    let truncated = false;
+    for (const bridgeId of [...groups.keys()].sort((left, right) => left.localeCompare(right))) {
+      const group = groups.get(bridgeId)!;
+      const reasons: HomeWorldImportedHistoryCoverageReason[] = [];
+      const addReason = (reason: HomeWorldImportedHistoryCoverageReason): void => {
+        if (!reasons.includes(reason)) reasons.push(reason);
+      };
+      const runtime = this.runtimesById.get(bridgeId);
+      if (runtime === undefined || runtime.importedHistoryJournal === undefined) {
+        coverage.push({ bridgeId, status: "unavailable", reasons: ["history_unavailable"] });
+        continue;
+      }
+      if (group.bindings.length > 20) {
+        coverage.push({ bridgeId, status: "unavailable", reasons: ["history_unavailable"] });
+        continue;
+      }
+
+      let imported: ReturnType<ImportedHistoryJournal["queryImportedEvidence"]>;
+      try {
+        imported = runtime.importedHistoryJournal.queryImportedEvidence({
+          bridgeId,
+          since: requestedSince,
+          until: requestedUntil,
+          bindings: group.bindings.map(({ nativeId, nativeInstanceId }) => ({ nativeId, nativeInstanceId })),
+          limit,
+        });
+      } catch {
+        coverage.push({ bridgeId, status: "unavailable", reasons: ["journal_query_unavailable"] });
+        continue;
+      }
+      if (imported.truncated) {
+        truncated = true;
+        addReason("query_truncated");
+      }
+      for (const gap of imported.gaps) addReason(gap.reason);
+      for (const record of imported.records) {
+        if (record.bridgeId !== bridgeId || record.state.origin !== "imported") {
+          addReason("invalid_row");
+          continue;
+        }
+        const capability = group.capabilitiesByBinding.get(evidenceBindingKey(
+          record.state.nativeId,
+          record.state.nativeInstanceId,
+        ));
+        if (capability === undefined) {
+          addReason("invalid_row");
+          continue;
+        }
+        const sourceRange = canonicalProposalHistoryRange(record.sourceRange);
+        if (sourceRange === undefined) {
+          addReason("history_range_unavailable");
+          continue;
+        }
+        const observedAt = record.state.time.sourceTs;
+        if (observedAt === undefined || record.state.time.sourceTsQuality !== "platform") {
+          addReason("invalid_row");
+          continue;
+        }
+        const observedAtMs = Date.parse(observedAt);
+        if (!Number.isFinite(observedAtMs)
+          || observedAtMs < Date.parse(sourceRange.since)
+          || observedAtMs >= Date.parse(sourceRange.until)) {
+          addReason("invalid_row");
+          continue;
+        }
+        references.push({
+          bridgeId,
+          hwId: capability.hwId,
+          capabilityId: capability.hwCapabilityId,
+          observedAt,
+          source: "imported-history",
+          origin: "imported",
+          importId: record.importId,
+          historySeq: record.historySeq,
+          sourceRange: {
+            since: sourceRange.since,
+            until: sourceRange.until,
+          },
+        });
+      }
+      if (reasons.length === 0) addReason("retention_floor_unknown");
+      coverage.push({ bridgeId, status: "partial", reasons });
+    }
+
+    references.sort((left, right) => left.observedAt.localeCompare(right.observedAt)
+      || left.bridgeId.localeCompare(right.bridgeId)
+      || left.capabilityId.localeCompare(right.capabilityId)
+      || left.sourceRange.since.localeCompare(right.sourceRange.since)
+      || left.sourceRange.until.localeCompare(right.sourceRange.until)
+      || left.importId.localeCompare(right.importId)
+      || left.historySeq - right.historySeq);
+    if (references.length > limit) {
+      references.splice(limit);
+      truncated = true;
+      coverage.splice(0, coverage.length, ...coverage.map((item) => (
+        item.status !== "partial" || item.reasons.includes("query_truncated")
+          ? item
+          : {
+            ...item,
+            reasons: [...item.reasons, "query_truncated" as HomeWorldImportedHistoryCoverageReason],
+          }
+      )));
+    }
+    return {
+      requestedSince,
+      requestedUntil,
+      references,
+      coverage,
       truncated,
     };
   }
@@ -3431,6 +3618,47 @@ function validateImportedHistoryQuery(input: HomeWorldImportedHistoryQuery): num
     || !Number.isSafeInteger(limit)
     || limit < 1
     || limit > 200) {
+    throw new TypeError("home history query is invalid or unbounded");
+  }
+  return limit;
+}
+
+function canonicalProposalHistoryRange(value: unknown): HistoryRange | undefined {
+  const parsed = HistoryRangeSchema.safeParse(value);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const since = canonicalProposalHistoryTimestamp(parsed.data.since);
+  const until = canonicalProposalHistoryTimestamp(parsed.data.until);
+  if (since === undefined || until === undefined) return undefined;
+  return { since, until };
+}
+
+function canonicalProposalHistoryTimestamp(value: string): string | undefined {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  const canonical = new Date(parsed).toISOString();
+  if (canonical === value) return value;
+  // ImportedHistoryJournal canonically retains 43 fractional digits so
+  // sub-millisecond source identity remains exact and lexically sortable.
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{43}Z$/.test(value)
+    ? value
+    : undefined;
+}
+
+function validateImportedHistoryProposalQuery(input: HomeWorldImportedHistoryQuery): number {
+  const limit = input?.limit === undefined ? 50 : input.limit;
+  if (!input || typeof input !== "object"
+    || !Array.isArray(input.hwCapabilityIds)
+    || input.hwCapabilityIds.length < 1
+    || input.hwCapabilityIds.length > 20
+    || input.hwCapabilityIds.some((id) => typeof id !== "string" || id.length === 0 || id.length > 200)
+    || !Number.isSafeInteger(input.lookbackHours)
+    || input.lookbackHours < 1
+    || input.lookbackHours > 168
+    || !Number.isSafeInteger(limit)
+    || limit < 1
+    || limit > 50) {
     throw new TypeError("home history query is invalid or unbounded");
   }
   return limit;
